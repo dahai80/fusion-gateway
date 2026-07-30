@@ -1,0 +1,121 @@
+server:
+    host: "0.0.0.0"
+    port: 8100
+
+auth:
+    enabled: true
+    api_keys:
+        - "fg-demo-key-change-me"
+
+route:
+    enable_hardware_judge: true
+    token_threshold: 8000
+    local_max_memory_ratio: 0.9
+    local_max_mlx_memory_ratio: 0.7
+    local_max_concurrent: 8
+    swap_page_rate_threshold: 100
+    gpu_memory_ratio_threshold: 0.9
+    fallback:
+        cloud_default: "openai"
+    negotiation:
+        route_header: "X-Fusion-Route"
+        route_header_value: "gateway-decision"
+    circuit_breaker:
+        memory_overload: true
+        swap_triggered: true
+        model_offline: true
+        failure_threshold: 5
+        timeout: 30s
+        half_open_max_requests: 3
+        success_threshold: 3
+
+backends:
+    fusion-mlx:
+        type: "fusion-mlx"
+        base_url: "http://127.0.0.1:11434"
+        timeout: 120s
+        enabled: true
+        gc:
+            enabled: true
+            min_idle_since_last_gc: 5m
+    openai:
+        type: "openai-compatible"
+        base_url: "https://api.openai.com/v1"
+        api_key: "sk-your-openai-key"
+        timeout: 60s
+        enabled: true
+    qianfan:
+        type: "openai-compatible"
+        base_url: "https://qianfan.baidubce.com/v2"
+        api_key: "your-qianfan-key"
+        timeout: 60s
+        enabled: false
+
+hardware:
+    interval: 5
+    enable_iokit: false
+    enable_mlx_metrics: true
+    mlx_metrics_url: "http://127.0.0.1:11434/metrics"
+
+tokenizer:
+    type: "whitespace"
+    calibration:
+        enabled: true
+        sample_interval: 1000
+        deviation_threshold: 0.02
+        auto_switch_threshold: 0.05
+
+observability:
+    metrics_enabled: true
+    metrics_path: "/metrics"
+    namespace: "fusion_gateway"
+
+cors:
+    allowed_origins:
+        - "*"
+    allowed_methods:
+        - "GET"
+        - "POST"
+        - "OPTIONS"
+    allowed_headers:
+        - "Content-Type"
+        - "Authorization"
+        - "X-Request-ID"
+        - "X-Api-Key"
+
+hot_reload:
+    enabled: true
+    debounce: 500ms
+
+cluster:
+    enabled: false
+    mode: "standalone"                   # standalone | master
+    nodes: []
+    # nodes:
+    #     - id: "mac-mini-m2"
+    #       address: "http://192.168.1.100:8100"
+    #       gpu: "M2"
+    #       memory_gb: 16
+    #     - id: "mac-studio-ultra"
+    #       address: "http://192.168.1.101:8100"
+    #       gpu: "M2Ultra"
+    #       memory_gb: 128
+    master:
+        address: "http://127.0.0.1:9753"  # fusion-multi-node Master address
+        shared_token: ""                   # authentication token
+    load_balancer: "least-connections"   # least-connections | hardware-aware | round-robin
+    health_check_interval: 10s
+    failure_threshold: 3
+    recovery_interval: 30s
+
+# Rerank model routing:
+# - If a local rerank model is available (name contains "rerank"/"reranker"), route locally
+# - Otherwise route to cluster or cloud
+# Embedding model routing:
+# - Local-first when available, cluster sharding for batch (>32 inputs), cloud fallback
+
+realtime:
+    enabled: false
+    backend_url: "wss://api.openai.com/v1/realtime"
+    api_key: ""                        # API key for the realtime backend
+    max_message_mb: 1                  # Max WebSocket message size in MB

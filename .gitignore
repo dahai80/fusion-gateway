@@ -1,0 +1,25 @@
+# Binary
+fusion-gateway
+
+# Local only
+CLAUDE.md
+.claude/
+.remember/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+config.yaml
+
+# Test/build artifacts
+*.test
+*.out
+coverage.html
