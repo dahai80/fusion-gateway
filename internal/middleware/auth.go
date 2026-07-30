@@ -1,6 +1,7 @@
 package middleware
 
 import (
+    "crypto/subtle"
     "log/slog"
     "net/http"
     "strings"
@@ -32,7 +33,7 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
 
             matched := false
             for _, allowed := range cfg.APIKeys {
-                if allowed.Key == key {
+                if subtle.ConstantTimeCompare([]byte(allowed.Key), []byte(key)) == 1 {
                     matched = true
                     break
                 }

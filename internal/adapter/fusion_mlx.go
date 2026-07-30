@@ -306,8 +306,16 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
 }
 
 func (p *FusionMLXProvider) Cancel(requestID string) {
-    // Close HTTP connection approach, not fake /v1/requests/{id}/cancel endpoint
-    p.inFlightCounter.Add(-1)
+    for {
+        current := p.inFlightCounter.Load()
+        if current <= 0 {
+            slog.Warn("cancel called but in-flight counter already zero", "request_id", requestID)
+            return
+        }
+        if p.inFlightCounter.CompareAndSwap(current, current-1) {
+            break
+        }
+    }
 
     // Optional: safe GC when in-flight reaches zero
     if p.inFlightCounter.Load() == 0 && p.cfg.Enabled {
@@ -330,7 +338,8 @@ func (p *FusionMLXProvider) SafeGC() {
     }
 
     if !p.gcPending.CompareAndSwap(true, false) {
-        // already consumed
+        // gcPending was not set — direct SafeGC call (e.g. from idle timer)
+        // or already consumed by another goroutine. Proceed only if flag was consumed.
     }
 
     slog.Info("triggering safe gc on fusion-mlx")

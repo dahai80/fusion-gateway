@@ -26,6 +26,15 @@ type FieldChange struct {
     New   interface{} `json:"new"`
 }
 
+var sensitiveFields = map[string]bool{
+    "APIKey":   true,
+    "Key":      true,
+    "ApiKey":   true,
+    "SharedToken": true,
+    "Password": true,
+    "Secret":   true,
+}
+
 func AuditConfigChange(old, newSnap *ConfigSnapshot) {
     if !newSnap.Config.Observability.ConfigAuditLog {
         return
@@ -35,6 +44,14 @@ func AuditConfigChange(old, newSnap *ConfigSnapshot) {
     if len(changes) == 0 {
         slog.Debug("config reload: no field-level changes detected")
         return
+    }
+
+    // Redact sensitive field values
+    for i := range changes {
+        if sensitiveFields[changes[i].Field] || isSensitivePath(changes[i].Field) {
+            changes[i].Old = "***REDACTED***"
+            changes[i].New = "***REDACTED***"
+        }
     }
 
     entry := AuditEntry{
@@ -64,7 +81,7 @@ func AuditConfigChange(old, newSnap *ConfigSnapshot) {
         return
     }
 
-    f, err := os.OpenFile(auditFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    f, err := os.OpenFile(auditFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
     if err != nil {
         slog.Error("audit log open failed", "file", auditFile, "error", err)
         return
@@ -74,6 +91,16 @@ func AuditConfigChange(old, newSnap *ConfigSnapshot) {
     if _, err := f.Write(append(data, '\n')); err != nil {
         slog.Error("audit log write failed", "file", auditFile, "error", err)
     }
+}
+
+func isSensitivePath(field string) bool {
+    suffixes := []string{"APIKey", "Key", "ApiKey", "SharedToken", "Password", "Secret"}
+    for _, s := range suffixes {
+        if len(field) >= len(s) && field[len(field)-len(s):] == s {
+            return true
+        }
+    }
+    return false
 }
 
 func diffConfigs(old, new Config, prefix string) []FieldChange {

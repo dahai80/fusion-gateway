@@ -3,6 +3,8 @@ package router
 import (
     "context"
     "log/slog"
+    "strings"
+    "sync"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -46,6 +48,7 @@ type ClusterSelector interface {
 }
 
 type Engine struct {
+    mu            sync.RWMutex
     cfg           *config.ConfigSnapshot
     hwCollector   *hardware.Collector
     breakers      map[string]*CircuitBreaker
@@ -73,11 +76,15 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
 }
 
 func (e *Engine) SetClusterSelector(cs ClusterSelector) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
     e.cluster = cs
     slog.Info("cluster selector wired to router engine")
 }
 
 func (e *Engine) UpdateConfig(cfg *config.ConfigSnapshot) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
     e.cfg = cfg
     slog.Info("router engine config updated", "version", cfg.Version)
 }
@@ -103,10 +110,14 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     }
 
     // Phase 2: Apply - update config reference and rebuild breakers
+    e.mu.Lock()
     e.cfg = cfg
-    e.breakers["local"] = NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
-    e.breakers["cloud"] = NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
-    e.breakers["cluster"] = NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
+    e.breakers = map[string]*CircuitBreaker{
+        "local":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
+        "cloud":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
+        "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
+    }
+    e.mu.Unlock()
     slog.Info("config applied: circuit breakers rebuilt", "version", cfg.Version)
 
     // Phase 3: Warmup - set local breaker to half_open for gradual recovery
@@ -114,23 +125,33 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     if warmupSuccess <= 0 {
         warmupSuccess = 3
     }
+    e.mu.RLock()
     e.breakers["local"].ResetToHalfOpen()
+    e.mu.RUnlock()
     slog.Info("warmup started: local breaker set to half_open", "warmup_success_target", warmupSuccess)
 }
 
 func (e *Engine) SetLocalReady(ready bool) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
     e.localReady = ready
 }
 
 func (e *Engine) SetLocalInFlight(fn func() int64) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
     e.localInFlight = fn
 }
 
 func (e *Engine) SetLocalModels(fn func() map[string]bool) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
     e.localModels = fn
 }
 
 func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
     if b, ok := e.breakers[backend]; ok {
         return b.State()
     }
@@ -138,18 +159,24 @@ func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
 }
 
 func (e *Engine) RecordSuccess(backend string) {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
     if b, ok := e.breakers[backend]; ok {
         b.RecordSuccess()
     }
 }
 
 func (e *Engine) RecordFailure(backend string) {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
     if b, ok := e.breakers[backend]; ok {
         b.RecordFailure()
     }
 }
 
 func (e *Engine) Trip(backend, reason string) {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
     if b, ok := e.breakers[backend]; ok {
         b.Trip(reason)
     }
@@ -159,18 +186,20 @@ func (e *Engine) Trip(backend, reason string) {
 func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     cfg := config.SnapshotFromContext(ctx)
 
+    e.mu.RLock()
+    defer e.mu.RUnlock()
+
     // Fast path: embedding/rerank request type routing
     switch req.Type {
     case RequestTypeEmbedding:
-        return e.decideEmbedding(ctx, cfg)
+        return e.decideEmbeddingLocked(ctx, cfg)
     case RequestTypeRerank:
-        return e.decideRerank(ctx, cfg)
+        return e.decideRerankLocked(ctx, cfg)
     }
 
     // P0: Circuit breaker check — local
     if e.breakers["local"].State() == StateOpen {
-        // Try cluster before cloud
-        if decision := e.tryCluster(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "circuit_breaker_open"}
@@ -181,7 +210,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     if hwMetrics.CollectionError != nil && cfg.Config.Hardware.CollectionErrorProtection {
         slog.Error("hardware metrics collection error, refusing local routing",
             "error", hwMetrics.CollectionError)
-        if decision := e.tryCluster(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "metrics_collection_error"}
@@ -189,8 +218,9 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
 
     // P1: System memory overload
     if hwMetrics.MemoryUsedRatio > cfg.Config.Routing.LocalPriority.MaxSystemMemoryRatio {
-        e.Trip("local", "memory_overload")
-        if decision := e.tryCluster(cfg); decision != nil {
+        e.breakers["local"].Trip("memory_overload")
+        slog.Warn("circuit breaker tripped", "backend", "local", "reason", "memory_overload")
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "memory_overload"}
@@ -200,7 +230,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     if hwMetrics.MLXActiveMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         mlxRatio := float64(hwMetrics.MLXActiveMemory) / float64(hwMetrics.GPUInUseMemory)
         if mlxRatio > cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio {
-            if decision := e.tryCluster(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "mlx_memory_overload"}
@@ -210,8 +240,9 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     // P2: Swap page rate
     swapThreshold := cfg.Config.Routing.LocalPriority.SwapPageRateThreshold
     if hwMetrics.SwapPageInRate > swapThreshold || hwMetrics.SwapPageOutRate > swapThreshold {
-        e.Trip("local", "swap_thrashing")
-        if decision := e.tryCluster(cfg); decision != nil {
+        e.breakers["local"].Trip("swap_thrashing")
+        slog.Warn("circuit breaker tripped", "backend", "local", "reason", "swap_thrashing")
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "swap_thrashing"}
@@ -221,7 +252,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     if hwMetrics.GPUAllocMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         gpuAvail := hwMetrics.GPUAllocMemory - hwMetrics.GPUInUseMemory
         if gpuAvail < uint64(float64(hwMetrics.GPUAllocMemory)*0.2) {
-            if decision := e.tryCluster(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "gpu_memory_low"}
@@ -230,7 +261,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
 
     // P3: Local not ready
     if !e.localReady {
-        if decision := e.tryCluster(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"}
@@ -250,7 +281,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     // P5: Concurrent limit
     maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
     if maxConcurrent > 0 && e.localInFlight() >= int64(maxConcurrent) {
-        if decision := e.tryCluster(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "concurrent_limit"}
@@ -259,7 +290,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     // P6: Model availability check
     if e.localModels() != nil {
         if !e.localModels()[req.Model] {
-            if decision := e.tryCluster(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "model_not_available_locally"}
@@ -270,10 +301,10 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     return &RouteDecision{Backend: LocalBackend, Reason: "local_priority"}
 }
 
-func (e *Engine) decideEmbedding(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
     // Embedding: local-first if breaker closed + local ready
     if e.breakers["local"].State() == StateOpen || !e.localReady {
-        if decision := e.tryCluster(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "embedding_local_unavailable"}
@@ -281,7 +312,7 @@ func (e *Engine) decideEmbedding(ctx context.Context, cfg *config.ConfigSnapshot
     return &RouteDecision{Backend: LocalBackend, Reason: "embedding_local_priority"}
 }
 
-func (e *Engine) decideRerank(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
     // Rerank: typically cloud-only unless local model available
     if e.localReady && e.localModels() != nil {
         for model := range e.localModels() {
@@ -293,30 +324,22 @@ func (e *Engine) decideRerank(ctx context.Context, cfg *config.ConfigSnapshot) *
         }
     }
 
-    if decision := e.tryCluster(cfg); decision != nil {
+    if decision := e.tryClusterLocked(cfg); decision != nil {
         return decision
     }
     return &RouteDecision{Backend: CloudBackend, Reason: "rerank_cloud_default"}
 }
 
 func isRerankModel(model string) bool {
-    return containsAny(model, "rerank", "reranker", "bge-rerank", "cohere-rerank")
-}
-
-func containsAny(s string, substrs ...string) bool {
-    for _, sub := range substrs {
-        if len(s) >= len(sub) {
-            for i := 0; i <= len(s)-len(sub); i++ {
-                if s[i:i+len(sub)] == sub {
-                    return true
-                }
-            }
+    for _, sub := range []string{"rerank", "reranker", "bge-rerank", "cohere-rerank"} {
+        if strings.Contains(model, sub) {
+            return true
         }
     }
     return false
 }
 
-func (e *Engine) tryCluster(cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot) *RouteDecision {
     if e.cluster == nil || !cfg.Config.Cluster.Enabled {
         return nil
     }

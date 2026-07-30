@@ -75,7 +75,7 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
     mux.HandleFunc("/v1/embeddings", s.withMiddleware(s.handleEmbeddings))
     mux.HandleFunc("/v1/rerank", s.withMiddleware(s.handleRerank))
-    mux.HandleFunc("/v1/realtime", s.handleRealtime)
+    mux.HandleFunc("/v1/realtime", s.withMiddleware(s.handleRealtime))
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
 
     mux.HandleFunc("/health", s.handleHealth)
@@ -89,22 +89,23 @@ func (s *Server) Start() error {
     mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
     mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
 
-    // pprof endpoints for profiling
-    mux.HandleFunc("/debug/pprof/", pprof.Index)
-    mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-    mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-    mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-    mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+    // pprof endpoints for profiling — protected by auth
+    mux.HandleFunc("/debug/pprof/", s.withMiddleware(pprof.Index))
+    mux.HandleFunc("/debug/pprof/cmdline", s.withMiddleware(pprof.Cmdline))
+    mux.HandleFunc("/debug/pprof/profile", s.withMiddleware(pprof.Profile))
+    mux.HandleFunc("/debug/pprof/symbol", s.withMiddleware(pprof.Symbol))
+    mux.HandleFunc("/debug/pprof/trace", s.withMiddleware(pprof.Trace))
 
     addr := fmt.Sprintf("%s:%d", s.cfg.Config.Server.Host, s.cfg.Config.Server.Port)
     slog.Info("server starting", "addr", addr)
 
     s.httpServer = &http.Server{
-        Addr:         addr,
-        Handler:      mux,
-        ReadTimeout:  30 * time.Second,
-        WriteTimeout: 120 * time.Second,
-        IdleTimeout:  120 * time.Second,
+        Addr:              addr,
+        Handler:           mux,
+        ReadTimeout:       30 * time.Second,
+        ReadHeaderTimeout: 10 * time.Second,
+        WriteTimeout:      120 * time.Second,
+        IdleTimeout:       120 * time.Second,
     }
 
     return s.httpServer.ListenAndServe()
@@ -141,7 +142,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    body, err := io.ReadAll(r.Body)
+    maxBodySize := int64(s.cfg.Config.Server.MaxRequestBodySize)
+    if maxBodySize <= 0 {
+        maxBodySize = 5 << 20 // default 5MB
+    }
+    body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
     if err != nil {
         http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
         return
@@ -150,7 +155,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     var req adapter.ChatRequest
     if err := json.Unmarshal(body, &req); err != nil {
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"Invalid JSON: %s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
+        slog.Error("invalid json in chat request", "error", err)
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
         return
     }
 
@@ -267,7 +273,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         slog.Error("stream chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"Stream chat failed: %s","type":"server_error"}}`, err.Error()), http.StatusBadGateway)
+        http.Error(w, `{"error":{"message":"Stream chat failed","type":"server_error"}}`, http.StatusBadGateway)
         return
     }
 
@@ -366,7 +372,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         slog.Error("chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"Chat failed: %s","type":"server_error"}}`, err.Error()), http.StatusBadGateway)
+        http.Error(w, `{"error":{"message":"Chat failed","type":"server_error"}}`, http.StatusBadGateway)
         return
     }
 
@@ -450,8 +456,12 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
             }
         }
         if provider == nil {
-            p, err := s.pool.GetByBackend("fusion-mlx")
-            if err != nil {
+            cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
+            if cloudBackend == "" {
+                cloudBackend = "openai"
+            }
+            p, ok := s.pool.Get(cloudBackend)
+            if !ok {
                 http.Error(w, `{"error":{"message":"Embedding backend not available"}}`, http.StatusServiceUnavailable)
                 return
             }
@@ -475,7 +485,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     if err != nil {
         slog.Error("embedding failed", "provider", provider.Name(), "error", err)
         s.router.RecordFailure(string(decision.Backend))
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"Embedding failed: %s"}}`, err.Error()), http.StatusBadGateway)
+        http.Error(w, `{"error":{"message":"Embedding failed"}}`, http.StatusBadGateway)
         return
     }
 
@@ -560,7 +570,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         slog.Error("rerank failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"Rerank failed: %s"}}`, err.Error()), http.StatusBadGateway)
+        http.Error(w, `{"error":{"message":"Rerank failed"}}`, http.StatusBadGateway)
         return
     }
 
