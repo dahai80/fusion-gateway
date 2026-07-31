@@ -211,6 +211,10 @@ type ObservabilityConfig struct {
     AuditLogEnabled       bool   `mapstructure:"audit_log_enabled"`
     ConfigAuditLog        bool   `mapstructure:"config_audit_log"`
     ConfigAuditFile       string `mapstructure:"config_audit_file"`
+    OtelEnabled           bool   `mapstructure:"otel_enabled"`
+    OtelEndpoint          string `mapstructure:"otel_endpoint"`
+    OtelProtocol          string `mapstructure:"otel_protocol"`
+    OtelServiceName       string `mapstructure:"otel_service_name"`
 }
 
 type CORSConfig struct {

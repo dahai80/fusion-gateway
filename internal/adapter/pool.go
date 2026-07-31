@@ -98,6 +98,21 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         case "openai-compatible":
             provider := NewOpenAICompatibleProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered openai-compatible provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "anthropic":
+            provider := NewAnthropicProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered anthropic provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "volcengine":
+            provider := NewVolcengineProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered volcengine provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "qianfan":
+            provider := NewQianfanProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered qianfan provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "deepseek":
+            provider := NewDeepSeekProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered deepseek provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "openrouter":
+            provider := NewOpenRouterProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered openrouter provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
             slog.Warn("unknown backend type", "name", name, "type", backendCfg.Type)
         }

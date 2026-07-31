@@ -1,267 +1,279 @@
-# Fusion-Gateway v0.2.0 — 补齐 LiteLLM 差距实施计划
+# Fusion-Gateway v0.3.0 / v0.4.0 / v0.5.0 实施计划
 
-> 目标: 在保持 Go 单二进制 + 硬件感知 + 本地优先核心优势的前提下, 分 4 个 Phase 补齐与 LiteLLM 的关键功能差距
-> 版本: v0.2.0
-> 日期: 2026-07-31
->
-> 用户原始指令: "你的目标就是取代litellm，你做一个补齐所有和litellm对比差距的计划，马上落地实施"
-> 受影响调用方: server.go (所有 handler), auth.go (认证链), engine.go (路由决策), provider.go (接口), metrics.go (指标)
-> 数据模式变更: AuthKeyConfig 增加 ExpiresAt/Metadata/BudgetLimit; 新增 RateLimitConfig/CacheConfig/CostConfig/PIIConfig/RetryConfig/CloudRoutingConfig
+## 总览
 
----
+三期版本，逐步补齐与 LiteLLM 的所有差距：
 
-## Phase 1: 安全基础设施 (P0) — 预计 3 天
-
-目标: 补齐最关键的安全和访问控制缺口, 让网关不再"裸奔"。
-
-### 1.1 RPM/TPM 限流中间件
-- **新建** `internal/middleware/ratelimit.go`
-- 滑动窗口算法 (纯内存, 无 Redis 依赖)
-- 按 Key RPM/TPM 限流, 读取 `AuthKeyConfig.RPM` / `AuthKeyConfig.TPM`
-- 全局 RPM/TPM 限流 (可配置)
-- 配置结构: `RateLimitConfig` 加入 `RoutingConfig`
-- 429 响应 + `Retry-After` header + `X-RateLimit-Remaining` headers
-- **修改**: `internal/config/config.go` — 增加 `RateLimitConfig`
-- **修改**: `internal/middleware/auth.go` — 认证成功后将 key config 存入 context
-- **修改**: `internal/server/server.go` — 在 middleware chain 注入限流中间件
-
-### 1.2 Key 级模型白名单实施
-- **修改**: `internal/middleware/auth.go` — 认证成功后检查 `AllowedBackends`
-- **修改**: `internal/server/server.go` — handleChatCompletions 中根据 key 的 AllowedBackends 过滤路由目标
-- 非法模型请求返回 403 + 明确错误信息
-- 通配符支持: `["*"]` = 全部允许
-
-### 1.3 Key 过期时间 + Metadata
-- **修改**: `internal/config/config.go` — `AuthKeyConfig` 增加 `ExpiresAt`, `Metadata`, `BudgetLimit`
-- **修改**: `internal/middleware/auth.go` — 检查 Key 过期时间
-- 通过 context 传递完整的 `AuthKeyConfig` 给下游 handler
-
-### 1.4 Master Key 支持
-- **修改**: `internal/config/config.go` — `AuthConfig` 增加 `MasterKey`
-- **修改**: `internal/middleware/auth.go` — Master Key 跳过白名单/限流检查
+| 版本 | 核心目标 | 新增特性数 |
+|------|---------|-----------|
+| v0.3.0 | GUI + 核心补齐 | Admin Dashboard + StreamOptions + Budget阻断 + 自定义定价 + /v1/images + 请求日志管道 |
+| v0.4.0 | 多模态 + Anthropic | /v1/audio/* + /v1/messages + Anthropic适配器 + OpenTelemetry + 更多原生适配器 |
+| v0.5.0 | 企业级 | OIDC/SSO + Team/RBAC + 语义缓存 + Prompt Injection + K8s + Cost Markup |
 
 ---
 
-## Phase 2: 可靠性与效率 (P1) — 预计 3 天
+## v0.3.0 — GUI + 核心补齐
 
-目标: 补齐缓存、成本追踪、重试 — 提升网关实用价值。
+### 3.1 Store 接口 + 内存实现（internal/store/）
 
-### 2.1 内存缓存
-- **新建** `internal/cache/cache.go` — LRU 缓存, sha256(request_body) 作为 key
-- 可配置 TTL, 最大条目数, 最大内存
-- 仅缓存非流式请求
-- 缓存命中返回 `X-Cache: HIT` header
-- **新建** `internal/cache/cache_test.go`
-- **修改**: `internal/config/config.go` — 增加 `CacheConfig`
-- **修改**: `internal/server/server.go` — 在 handleNonStreamChat 中加入缓存检查
-- **修改**: `internal/observability/metrics.go` — 增加缓存命中/未命中指标
+**新建**：
+- `internal/store/store.go` — Store 接口定义（Keys/Channels/Logs/Analytics/Dashboard）
+- `internal/store/memory/keys.go` — Key CRUD（内存 map，增删改同步写回 YAML config）
+- `internal/store/memory/channels.go` — Channel CRUD
+- `internal/store/memory/logs.go` — RequestLog 环形缓冲区（10000条），支持查询/筛选/导出
+- `internal/store/memory/analytics.go` — 统计聚合（Token/Cost/Model/Latency/Error）
+- `internal/store/memory/dashboard.go` — Dashboard 数据聚合
+- `internal/store/memory/quota.go` — 额度管理（原子操作，budget 检查/扣减）
 
-### 2.2 成本追踪
-- **新建** `internal/cost/tracker.go` — 按 Key/Backend/Model 统计 token 消耗和成本
-- 内置模型定价表 (可热重载覆盖)
-- 每次 Chat/Embedding 完成后异步记录
-- 暴露 `/v1/cost` API 查询花费
-- 按日/按 Key/按 Model 聚合
-- **新建** `internal/cost/pricing.go` — 模型定价数据 (OpenAI/Anthropic/DeepSeek 主流模型)
-- **修改**: `internal/config/config.go` — 增加 `CostConfig`
-- **修改**: `internal/server/server.go` — 在 handleNonStreamChat/handleStreamChat 完成后调用 cost tracker
-- **修改**: `internal/observability/metrics.go` — 增加成本指标
+**数据模型**：
+- `RequestLog`：request_id, key_name, model, channel, route_reason, input_tokens, output_tokens, cost, latency, status_code, timestamp
+- `APIKeyEntry`：name, key_prefix, status, quota_type, quota_limit, quota_used, allowed_models, rpm, tpm, expires_at
+- `ChannelEntry`：name, type, provider, base_url, status, priority, weight, models
 
-### 2.3 重试 + 指数退避
-- **新建** `internal/middleware/retry.go` — 重试中间件/包装器
-- 可配置: max_retries, initial_backoff, max_backoff, retryable_errors
-- 仅对 5xx / timeout / connection refused 重试
-- 流式请求不重试 (仅非流式)
-- **修改**: `internal/config/config.go` — `RoutingConfig` 增加 `RetryConfig`
-- **修改**: `internal/server/server.go` — 在 provider.Chat 调用外包重试逻辑
+### 3.2 Admin API 后端（internal/admin/）
 
-### 2.4 上下文窗口 Fallback
-- **修改**: `internal/router/engine.go` — P6 模型不可用时, 查找 context_window_fallback_dict
-- **修改**: `internal/config/config.go` — `FallbackConfig` 增加 `ContextWindowFallback map[string]string`
+**新建**：
+- `internal/admin/router.go` — Admin 路由注册 + SPA fallback
+- `internal/admin/middleware/auth.go` — JWT session + Admin token 认证
+- `internal/admin/handler/auth.go` — login/logout/session
+- `internal/admin/handler/dashboard.go` — overview/stats/hardware
+- `internal/admin/handler/keys.go` — Key CRUD + usage
+- `internal/admin/handler/channels.go` — Channel CRUD + test
+- `internal/admin/handler/logs.go` — list/detail/export
+- `internal/admin/handler/analytics.go` — tokens/cost/models/latency/errors
+- `internal/admin/handler/routing.go` — rules/circuit-breakers
+- `internal/admin/handler/models.go` — pricing
+- `internal/admin/handler/settings.go` — config
+
+**认证方案**：
+- Admin token 配置 `admin.token`（首次启动自动生成，打印到日志）
+- JWT session（HS256，24h 过期），Cookie: `fg_admin_session`
+- Admin 中间件校验 JWT 或 Admin Token Bearer header
+
+**Admin API 端点**（/admin/api/）：
+- Auth: POST /auth/login, /auth/logout, GET /auth/session
+- Dashboard: GET /dashboard/overview, /dashboard/stats, /dashboard/hardware
+- Keys: GET/POST /keys, PUT/DELETE /keys/:name, GET /keys/:name/usage
+- Channels: GET/POST /channels, PUT/DELETE /channels/:name, POST /channels/:name/test
+- Logs: GET /logs, /logs/:id, /logs/export
+- Analytics: GET /analytics/tokens, /analytics/cost, /analytics/models, /analytics/latency, /analytics/errors
+- Routing: GET /routing/rules, PUT /routing/rules, GET /routing/circuit-breakers, POST /routing/circuit-breakers/:id/reset
+- Models: GET /models/pricing, PUT /models/pricing/:model
+- Settings: GET/PUT /settings
+
+### 3.3 请求日志管道
+
+**改动**：`internal/server/server.go`
+
+- 所有 handler 请求完成后追加 RequestLog 到 store
+- 新增 `appendRequestLog(...)` 辅助方法
+- Stream 模式：遍历 SSE chunk 累计 output_tokens，stream 结束时写入日志
+- 非 Stream 模式：直接从 resp.Usage 获取 output_tokens
+- 日志内容包含：key_name, model, backend, route_reason, input/output tokens, cost, latency, status
+
+### 3.4 Budget 阻断修复
+
+**改动**：`internal/middleware/auth.go`
+
+- APIKeyAuth 中间件增加 budget 检查：
+  - 获取 key config 的 BudgetLimit
+  - 如果 `BudgetLimit > 0`，查询 costTracker 该 key 的累计费用
+  - 超限返回 429 `budget_exceeded`
+- 需要 auth 中间件能访问 costTracker（通过 Server 传入闭包）
+- 额度扣减在 handler 完成后由 store.Quota 执行
+
+### 3.5 自定义定价文件
+
+**改动**：`internal/cost/pricing.go`, `cmd/gateway/main.go`
+
+- pricing.go 新增 `LoadFromFile(path string)` — 从 YAML/JSON 文件加载自定义价格
+- 合并策略：自定义价格覆盖内置价格
+- config.go 的 `CostConfig.PricingFile` 已有字段，启用它
+- main.go 启动时如果 PricingFile != "" 则调用 LoadFromFile
+- 热重载时也重新加载定价文件
+
+### 3.6 /v1/images/generations 端点
+
+**新增**：
+- `internal/adapter/images.go` — ImagesRequest/ImagesResponse 类型
+- Provider 接口扩展：新增可选方法 Images()
+- OpenAICompatibleProvider 实现：POST /v1/images/generations
+- FusionMLXProvider 返回 ErrNotSupported
+- server.go 新增 handleImages handler
+- 路由：仅走 cloud provider
+
+### 3.7 StreamOptions 支持
+
+**改动**：`internal/adapter/provider.go`, `internal/server/server.go`
+
+- ChatRequest 新增 StreamOptions 字段
+- StreamOptionsRequest：IncludeUsage bool
+- handleStreamChat 中：如果 IncludeUsage，在遍历 chunk 时累计 output_tokens
+- 在 stream 结束后发送包含 usage 的最终 chunk
+
+### 3.8 Admin Dashboard 前端（web/）
+
+**技术栈**：React 18 + TypeScript + Ant Design 5 + Vite 5 + @ant-design/charts
+
+**新建**：
+- `web/` — 完整前端项目
+- `web/package.json`, `web/vite.config.ts`, `web/tsconfig.json`, `web/index.html`
+- `web/src/main.tsx` — 入口
+- `web/src/App.tsx` — React Router 路由
+- `web/src/layouts/AdminLayout.tsx` — 侧边栏+顶栏+内容区
+- `web/src/pages/` — 9个页面模块（Dashboard/Keys/Channels/Logs/Analytics/Routing/Models/Settings/Login）
+- `web/src/components/` — StatCard/TrendChart/StatusBadge/JsonViewer
+- `web/src/hooks/` — useFetch/useSSE
+- `web/src/services/api.ts` — API 调用封装
+- `web/src/stores/auth.ts` — Zustand 认证状态
+- `web/src/utils/` — format/pricing 工具
+
+**嵌入方式**：
+- `internal/web/embed.go` — go:embed dist/
+- server.go 注册 /admin/ 路由，SPA fallback 到 index.html
+- 开发模式：Vite dev server 代理 :5173 → :8100
+
+### 3.9 配置扩展
+
+**改动**：`internal/config/config.go`
+
+新增配置结构：
+- `AdminConfig`：token, session_secret, session_ttl
+- `LogsConfig`：enabled, max_entries, retention_days, log_prompt（是否记录 prompt 内容）
+- Config 顶层新增 admin/logs 字段
 
 ---
 
-## Phase 3: 云路由策略增强 (P2) — 预计 2 天
+## v0.4.0 — 多模态 + Anthropic + OTel
 
-目标: 补齐云到云路由能力, 让云端请求也能智能分配。
+### 4.1 Anthropic 原生适配器（internal/adapter/anthropic.go）
 
-### 3.1 云路由策略引擎
-- **新建** `internal/router/cloud_strategy.go` — 云端路由策略
-- 策略类型:
-  - `latency` — 延迟优先, 选择历史 P95 最低的 backend
-  - `cost` — 成本优先, 选择最便宜的 backend
-  - `weight` — 权重分配, 按配置比例分发
-  - `round-robin` — 轮询
-  - `least-busy` — 最少忙碌 (in-flight)
-- **修改**: `internal/config/config.go` — 增加 `CloudRoutingConfig`
-- **修改**: `internal/router/engine.go` — resolveCloudByTier 升级为支持策略
-- **修改**: `internal/server/server.go` — resolveCloudProvider 使用策略引擎
+- AnthropicProvider — 原生 Messages API
+- 支持：thinking/extended_thinking, tool_use, tool_result, image blocks
+- 请求：messages + system + max_tokens + tools + thinking
+- SSE 流：message_start, content_block_start, content_block_delta, message_delta, message_stop
+- 内部转换：Anthropic 格式 ↔ OpenAI 格式
 
-### 3.2 延迟追踪
-- **新建** `internal/router/latency_tracker.go` — 滑动窗口记录各 backend 延迟
-- **修改**: `internal/server/server.go` — 记录每次请求延迟到 tracker
+### 4.2 /v1/messages 端点
 
-### 3.3 PII 脱敏 (轻量级)
-- **新建** `internal/middleware/pii.go` — 正则表达式 PII 检测
-- 覆盖: 邮箱/电话/信用卡/SSN/IP 地址
-- 可配置: 开关 + 正则列表 + 替换策略 (mask/deny/log)
-- **修改**: `internal/config/config.go` — 增加 `PIIConfig`
-- **修改**: `internal/server/server.go` — 注入 PII 中间件
+- server.go 新增 handleAnthropicMessages handler
+- 接收 Anthropic 格式请求 → 路由 → 调用 AnthropicProvider → 返回 Anthropic 格式响应
+- 如果路由到非 Anthropic provider，自动转换格式
 
----
+### 4.3 /v1/audio/transcriptions
 
-## Phase 4: 功能广度扩展 (P3) — 预计 4 天
+- TranscriptionRequest/Response 类型
+- Provider 接口新增 Transcription()
+- OpenAICompatibleProvider 实现（multipart form）
+- handleTranscriptions handler
 
-目标: 扩展 API 端点和 Provider 覆盖, 提升竞争力。
+### 4.4 /v1/audio/speech（TTS）
 
-### 4.1 多模态端点
-- **新建** `internal/adapter/multimodal.go` — 图片/音频请求/响应结构体
-- **修改**: `internal/adapter/provider.go` — Provider 接口增加 `ImageGeneration`, `AudioTranscription`, `AudioSpeech`
-- **修改**: `internal/server/server.go` — 增加 `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/moderations` 端点
-- openai-compatible adapter 实现: 透传到 OpenAI/兼容 API
+- SpeechRequest 类型，返回 audio stream
+- Provider 接口新增 Speech()
+- OpenAICompatibleProvider 实现
+- handleSpeech handler — 流式返回音频
 
-### 4.2 更多 Provider 原生适配
-- **新建** `internal/adapter/anthropic.go` — Anthropic 原生 Messages API 适配器
-- **新建** `internal/adapter/vertex.go` — Google Vertex AI 适配器 (via openai-compatible)
-- **新建** `internal/adapter/bedrock.go` — AWS Bedrock 适配器 (via openai-compatible)
-- 预配置: 内置主流 Provider 的 base_url / auth_header / 模型列表
+### 4.5 /v1/moderations
 
-### 4.3 /v1/completions (Legacy)
-- **修改**: `internal/server/server.go` — 增加 `/v1/completions` 端点
-- 转换为 chat 格式后路由
+- ModerationRequest/Response 类型
+- Provider 接口新增 Moderation()
+- handleModeration handler
 
-### 4.4 Batch API
-- **修改**: `internal/server/server.go` — 增加 `/v1/batches` 端点
-- 异步处理: 接收 batch → 写入本地文件 → 后台逐个处理 → 返回结果
-- 状态查询: `/v1/batches/{id}`
+### 4.6 原生云适配器
 
-### 4.5 Stream Options (usage)
-- **修改**: `internal/adapter/provider.go` — `ChatRequest` 增加 `StreamOptions`
-- **修改**: `internal/server/server.go` — 流式结束时发送 usage chunk
+- `internal/adapter/volcengine.go` — 火山引擎（Doubao，签名认证）
+- `internal/adapter/qianfan.go` — 百度千帆（ERNIE，access_token 认证）
+- `internal/adapter/deepseek.go` — DeepSeek（openai-compatible + 特殊参数）
+- `internal/adapter/openrouter.go` — OpenRouter（openai-compatible + provider routing）
+- pool.go 新增类型识别
 
-### 4.6 可观测性增强
-- **修改**: `internal/observability/metrics.go` — 增加 Key 维度指标, 成本指标, 缓存指标
-- **新建** `internal/observability/callback.go` — 回调钩子框架 (类似 LiteLLM callback 但更轻量)
-- 支持自定义 Webhook 回调 (请求完成时 POST 到指定 URL)
+### 4.7 OpenTelemetry
+
+- `internal/observability/otel.go` — OTel Tracer Provider
+- Span：每个请求标注 model/backend/latency/tokens
+- 配置：observability.otel.enabled, endpoint, service_name
 
 ---
 
-## 配置结构变更汇总
+## v0.5.0 — 企业级
 
-```yaml
-# Phase 1 新增
-auth:
-  master_key: "fg-master-xxx"
-  api_keys:
-    - key: "fg-xxx"
-      name: "user1"
-      allowed_backends: ["fusion-mlx", "openai"]
-      rpm: 60
-      tpm: 100000
-      expires_at: "2027-01-01T00:00:00Z"
-      budget_limit: 100.0
-      metadata:
-        team: "engineering"
+### 5.1 OIDC/SSO
 
-routing:
-  rate_limit:
-    enabled: true
-    global_rpm: 1000
-    global_tpm: 10000000
-    key_enforcement: true
+- `internal/middleware/oidc.go` — OIDC discovery + token 验证
+- 支持 Keycloak/Auth0/Okta/Azure AD
+- Admin 登录支持 OIDC 回调
 
-# Phase 2 新增
-cache:
-  enabled: true
-  max_entries: 10000
-  ttl: 300s
-  max_memory_mb: 256
+### 5.2 Team/Org/RBAC
 
-cost:
-  enabled: true
-  pricing_file: ""
-  budget_alert_threshold: 0.8
+- `internal/store/memory/teams.go` — Team/Org CRUD
+- RBAC：admin/viewer/editor 角色
+- Admin API 扩展：/teams, /orgs
+- Key 关联 Team，费用按 Team 聚合
 
-routing:
-  retry:
-    max_retries: 2
-    initial_backoff: 1s
-    max_backoff: 30s
-    retryable_status_codes: [429, 500, 502, 503]
-  fallback:
-    context_window_fallback:
-      "gpt-4": "gpt-4-32k"
-      "claude-3": "claude-3-200k"
+### 5.3 语义缓存
 
-# Phase 3 新增
-routing:
-  cloud_strategy: "latency"
-  cloud_weights:
-    openai: 60
-    anthropic: 40
-pii:
-  enabled: true
-  action: "mask"
-  patterns:
-    - name: "email"
-      regex: "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
-    - name: "phone_cn"
-      regex: "1[3-9]\\d{9}"
+- `internal/cache/semantic.go` — SemanticCache 接口
+- 本地向量存储或 Qdrant gRPC
+- 相似度阈值可配
+
+### 5.4 Prompt Injection 检测
+
+- `internal/middleware/prompt_injection.go` — 正则 + 可选 Lakera API
+- 动作：deny/log/tag
+
+### 5.5 K8s/Helm 部署
+
+- `deploy/kubernetes/` — Deployment + Service + ConfigMap + Ingress
+- `deploy/helm/` — Chart + values + templates
+- `deploy/terraform/` — 基础模块
+
+### 5.6 Cost Markup
+
+- Key 级/全局 markup 百分比
+- 费用计算：base_cost * (1 + markup/100)
+- Admin 展示 base_cost vs billed_cost
+
+### 5.7 /v1/batches
+
+- BatchCreate/BatchGet/BatchCancel 接口
+- 异步处理 + 状态轮询
+
+---
+
+## v0.3.0 实施顺序
+
 ```
+Phase 1: Store 接口 + 内存实现 + 请求日志管道
+  → internal/store/store.go
+  → internal/store/memory/*.go
+  → server.go 追加请求日志调用
+  → 测试
 
----
+Phase 2: Admin API 后端
+  → internal/admin/middleware/auth.go + JWT
+  → internal/admin/handler/*.go (所有 CRUD)
+  → internal/admin/router.go
+  → server.go 注册 /admin/api/* 路由
+  → 测试
 
-## 文件变更清单
+Phase 3: 核心功能补齐
+  → StreamOptions
+  → Budget 阻断
+  → 自定义定价文件
+  → /v1/images/generations
+  → 测试
 
-### 新建文件 (~15)
-| 文件 | Phase | 说明 |
-|------|:--:|------|
-| `internal/middleware/ratelimit.go` | 1 | 限流中间件 |
-| `internal/middleware/ratelimit_test.go` | 1 | 限流测试 |
-| `internal/middleware/pii.go` | 3 | PII 脱敏中间件 |
-| `internal/middleware/pii_test.go` | 3 | PII 测试 |
-| `internal/middleware/retry.go` | 2 | 重试逻辑 |
-| `internal/middleware/retry_test.go` | 2 | 重试测试 |
-| `internal/cache/cache.go` | 2 | LRU 缓存 |
-| `internal/cache/cache_test.go` | 2 | 缓存测试 |
-| `internal/cost/tracker.go` | 2 | 成本追踪器 |
-| `internal/cost/pricing.go` | 2 | 模型定价数据 |
-| `internal/cost/tracker_test.go` | 2 | 成本测试 |
-| `internal/router/cloud_strategy.go` | 3 | 云路由策略 |
-| `internal/router/latency_tracker.go` | 3 | 延迟追踪 |
-| `internal/adapter/anthropic.go` | 4 | Anthropic 适配器 |
-| `internal/adapter/multimodal.go` | 4 | 多模态结构体 |
+Phase 4: 前端
+  → web/ 项目脚手架
+  → 所有 9 个页面模块
+  → go:embed 集成
+  → 端到端测试
 
-### 修改文件 (~8)
-| 文件 | Phase | 变更 |
-|------|:--:|------|
-| `internal/config/config.go` | 1-3 | 增加 RateLimit/Cache/Cost/PII/Retry/CloudStrategy 配置 |
-| `internal/middleware/auth.go` | 1 | Key 白名单/过期/MasterKey/context 传递 |
-| `internal/server/server.go` | 1-4 | 新端点 + 中间件注入 + 缓存/成本/重试集成 |
-| `internal/router/engine.go` | 2-3 | Context fallback + 云策略集成 |
-| `internal/observability/metrics.go` | 2-4 | 新指标 (缓存/成本/Key维度) |
-| `internal/adapter/provider.go` | 4 | 多模态接口 + StreamOptions |
-| `internal/adapter/openai_compatible.go` | 4 | 多模态方法实现 |
-| `go.mod` | 1-4 | 可能增加依赖 |
-
----
-
-## 不做的事 (保持架构优势)
-
-1. **不引入 Redis/PostgreSQL** — 保持单二进制零依赖
-2. **不做语义缓存** — 需要向量数据库, 与零依赖冲突
-3. **不做完整 RBAC/SSO** — 过度工程, 留给 P5
-4. **不做 Admin UI** — 已有独立规划, 不在此版本
-5. **不做 K8s/Helm** — 单机设计是核心优势
-6. **不做 30+ Guardrail 集成** — 仅做轻量 PII, 完整框架留给 P5
-
----
-
-## 验收标准
-
-- [ ] 所有现有 73 个测试通过
-- [ ] 新增测试覆盖率 > 80%
-- [ ] golangci-lint 全绿
-- [ ] `config.yaml.example` 更新包含所有新配置
-- [ ] README.md 更新新功能说明
-- [ ] 版本升级到 v0.2.0
+Phase 5: 收尾
+  → 集成测试
+  → README.md 更新
+  → config.example.yaml 更新
+  → golangci-lint
+  → git tag v0.3.0
+```

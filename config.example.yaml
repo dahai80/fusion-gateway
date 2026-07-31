@@ -119,6 +119,30 @@ backends:
         api_key: "your-qianfan-key"
         timeout: 60s
         enabled: false
+    anthropic:
+        type: "anthropic"
+        base_url: "https://api.anthropic.com"
+        api_key: "sk-ant-your-key"
+        timeout: 60s
+        enabled: false
+    volcengine:
+        type: "volcengine"
+        base_url: "https://ark.cn-beijing.volces.com/api/v3"
+        api_key: "your-volcengine-key"
+        timeout: 60s
+        enabled: false
+    deepseek:
+        type: "deepseek"
+        base_url: "https://api.deepseek.com"
+        api_key: "your-deepseek-key"
+        timeout: 60s
+        enabled: false
+    openrouter:
+        type: "openrouter"
+        base_url: "https://openrouter.ai/api/v1"
+        api_key: "your-openrouter-key"
+        timeout: 60s
+        enabled: false
 
 hardware:
     interval: 5
@@ -138,6 +162,10 @@ observability:
     metrics_enabled: true
     metrics_path: "/metrics"
     namespace: "fusion_gateway"
+    otel_enabled: false                   # Enable OpenTelemetry tracing
+    otel_endpoint: "localhost:4317"       # OTel collector endpoint
+    otel_protocol: "grpc"                 # grpc | http
+    otel_service_name: "fusion-gateway"   # Service name in traces
 
 cors:
     allowed_origins:

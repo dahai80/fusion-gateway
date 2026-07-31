@@ -20,7 +20,7 @@ Fusion-Gateway :8100
 Heterogeneous Inference Pool
 |- Local: fusion-mlx (:11434) / llama.cpp
 |- Private: vLLM-ascend / vLLM-cuda
-|- Cloud: Volcengine / Qianfan / Claude / OpenAI
+|- Cloud: Volcengine / Qianfan / Claude / OpenAI / DeepSeek / OpenRouter
 ```
 
 ## Quick Start
@@ -68,6 +68,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `admin.log_max_len` | 10000 | Max request log entries (ring buffer) |
 | `admin.jwt_secret` | "" | JWT signing secret for admin auth |
 | `cost.pricing_file` | "" | Custom pricing YAML with hot reload |
+| `observability.otel_enabled` | false | Enable OpenTelemetry tracing |
+| `observability.otel_endpoint` | localhost:4317 | OTel collector endpoint |
+| `observability.otel_protocol` | grpc | OTel export protocol: grpc or http |
+| `observability.otel_service_name` | fusion-gateway | Service name in OTel traces |
 
 ## API Endpoints
 
@@ -87,6 +91,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/status` | GET | Detailed status (hardware, circuit breakers, stats) |
 | `/metrics` | GET | Prometheus metrics |
 | `/v1/images/generations` | POST | Image generation (cloud-only, OpenAI-compatible) |
+| `/v1/messages` | POST | Anthropic Messages API (native format + auto-convert to OpenAI) |
+| `/v1/audio/transcriptions` | POST | Audio transcription (Whisper-compatible, cloud-only) |
+| `/v1/audio/speech` | POST | Text-to-speech synthesis (cloud-only) |
+| `/v1/moderations` | POST | Content moderation (cloud-only) |
 | `/admin/gc` | POST | Trigger safe GC on fusion-mlx (only when in-flight = 0) |
 | `/admin/config/reload` | POST | Config reload notification |
 
@@ -228,6 +236,41 @@ Full OpenAI `stream_options` support for chat completions:
 - `stream_include_usage`: Accumulates output token count during SSE streaming
 - Final SSE chunk includes complete `usage` object with prompt + completion tokens
 - Ensures accurate token counting and cost tracking for streaming requests
+
+## Anthropic Messages API
+
+`/v1/messages` supports the Anthropic Messages API natively:
+
+- **Native path**: Requests routed to an Anthropic backend are forwarded in native format (no conversion overhead)
+- **Auto-convert path**: Requests routed to non-Anthropic backends are automatically converted: AnthropicRequest → ChatRequest → ChatResponse → AnthropicResponse
+- **Bidirectional conversion**: System message extraction, tool format translation (OpenAI functions ↔ Anthropic tools), content block mapping
+- **Streaming**: Native Anthropic SSE events (`message_start`, `content_block_delta`, `message_delta`, `message_stop`)
+- **Thinking**: Supports `thinking` parameter with `budget_tokens` for extended thinking
+
+## Audio & Moderation
+
+- `/v1/audio/transcriptions`: Multipart form upload, delegates to provider's `Transcription()` method (cloud-only)
+- `/v1/audio/speech`: JSON body, returns audio binary stream from provider's `Speech()` method (cloud-only)
+- `/v1/moderations`: JSON body, delegates to provider's `Moderation()` method (cloud-only)
+
+These endpoints use interface assertion — providers that don't implement the method return a clear error.
+
+## OpenTelemetry Tracing
+
+Optional distributed tracing via OTel (disabled by default):
+
+```yaml
+observability:
+    otel_enabled: true
+    otel_endpoint: "localhost:4317"
+    otel_protocol: "grpc"       # grpc | http
+    otel_service_name: "fusion-gateway"
+```
+
+- Automatic HTTP span creation on every request via `HTTPMiddleware`
+- 10% sampling rate by default (`TraceIDRatioBased(0.1)`)
+- Graceful shutdown flushes pending spans
+- Propagates trace context via W3C TraceContext headers
 
 ## Admin Dashboard
 
@@ -377,7 +420,7 @@ internal/
   store/memory/       In-memory store implementation (ring buffer logs, CRUD, analytics aggregation)
   admin/              Admin API handlers + JWT auth + login
   admin/ui/           go:embed frontend assets (React SPA)
-  observability/      Prometheus metrics
+  observability/      Prometheus metrics + OpenTelemetry tracing
   server/             HTTP server + route registration + SSE forwarding + stream options
 web/admin/            Admin dashboard frontend (React + Ant Design + Vite)
 config.example.yaml   Example configuration

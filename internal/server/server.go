@@ -44,6 +44,7 @@ type Server struct {
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
     store           store.Store
+    otelShutdown    func(context.Context) error
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
@@ -86,6 +87,16 @@ func New(
     memStore := memorystore.NewMemoryStore(logMaxLen)
     slog.Info("request log store initialized", "max_len", logMaxLen)
 
+    otelShutdown, err := observability.InitTracing(context.Background(), observability.OTelConfig{
+        Enabled:     cfg.Config.Observability.OtelEnabled,
+        Endpoint:    cfg.Config.Observability.OtelEndpoint,
+        Protocol:    cfg.Config.Observability.OtelProtocol,
+        ServiceName: cfg.Config.Observability.OtelServiceName,
+    })
+    if err != nil {
+        slog.Warn("otel tracing init failed, continuing without tracing", "error", err)
+    }
+
     return &Server{
         cfg:            cfg,
         hwCollector:    hwCollector,
@@ -101,6 +112,7 @@ func New(
         cloudStrategy:  cs,
         latencyTracker: lt,
         store:          memStore,
+        otelShutdown:   otelShutdown,
     }
 }
 
@@ -115,6 +127,10 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
+    mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))
+    mux.HandleFunc("/v1/audio/transcriptions", s.withMiddleware(s.handleTranscriptions))
+    mux.HandleFunc("/v1/audio/speech", s.withMiddleware(s.handleSpeech))
+    mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -160,6 +176,11 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
     slog.Info("server shutting down")
+    if s.otelShutdown != nil {
+        if err := s.otelShutdown(ctx); err != nil {
+            slog.Warn("otel shutdown error", "error", err)
+        }
+    }
     return s.httpServer.Shutdown(ctx)
 }
 
@@ -169,6 +190,7 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 
         chain := []func(http.Handler) http.Handler{
             middleware.RequestID,
+            observability.HTTPMiddleware,
             middleware.CORS(&snap.Config.CORS),
             middleware.ConfigSnapshot(snap),
             middleware.APIKeyAuth(&snap.Config.Auth),
@@ -1301,4 +1323,216 @@ func errorString(err error) string {
         return ""
     }
     return err.Error()
+}
+
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    var antReq adapter.AnthropicRequest
+    if err := json.Unmarshal(body, &antReq); err != nil {
+        slog.Error("invalid json in anthropic messages request", "error", err)
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+
+    ctx := r.Context()
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Stream: antReq.Stream})
+    slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason)
+
+    var provider adapter.Provider
+    if decision.Backend == router.LocalBackend {
+        provider, _ = s.pool.Get("fusion-mlx")
+    } else {
+        provider = s.resolveCloudProvider(decision, nil, w)
+        if provider == nil { return }
+    }
+    if provider == nil {
+        http.Error(w, `{"error":{"message":"No provider available","type":"server_error"}}`, http.StatusServiceUnavailable)
+        return
+    }
+
+    if antProv, ok := provider.(*adapter.AnthropicProvider); ok {
+        if antReq.Stream {
+            s.handleStreamAnthropicMessages(ctx, w, antProv, &antReq)
+        } else {
+            s.handleNonStreamAnthropicMessages(ctx, w, antProv, &antReq)
+        }
+    } else {
+        chatReq := adapter.AnthropicToOpenAIChatRequest(&antReq)
+        chatReq.Stream = antReq.Stream
+        start := time.Now()
+        budget := tokenizer.TokenBudget{InputTokens: 0, TotalBudget: antReq.MaxTokens}
+        if antReq.Stream {
+            s.handleStreamChat(ctx, w, provider, chatReq, decision, budget, start)
+        } else {
+            s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start)
+        }
+    }
+}
+
+func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p *adapter.AnthropicProvider, req *adapter.AnthropicRequest) {
+    resp, err := p.Messages(ctx, req)
+    if err != nil {
+        slog.Error("anthropic messages failed", "error", err)
+        http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+        return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p *adapter.AnthropicProvider, req *adapter.AnthropicRequest) {
+    ch, err := p.StreamMessages(ctx, req)
+    if err != nil {
+        slog.Error("anthropic stream messages failed", "error", err)
+        http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+        return
+    }
+
+    w.Header().Set("Content-Type", "text/event-stream")
+    w.Header().Set("Cache-Control", "no-cache")
+    w.Header().Set("Connection", "keep-alive")
+    w.Header().Set("X-Accel-Buffering", "no")
+    flusher, _ := w.(http.Flusher)
+
+    for event := range ch {
+        data, _ := json.Marshal(event)
+        fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+        if flusher != nil { flusher.Flush() }
+    }
+    fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+    if flusher != nil { flusher.Flush() }
+}
+
+func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    if err := r.ParseMultipartForm(32 << 20); err != nil {
+        slog.Error("failed to parse multipart form", "error", err)
+        http.Error(w, `{"error":{"message":"Failed to parse multipart form","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    defer r.MultipartForm.RemoveAll()
+
+    model := r.FormValue("model")
+    if model == "" { model = "whisper-1" }
+
+    ctx := r.Context()
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: model})
+    provider := s.resolveCloudProvider(decision, nil, w)
+    if provider == nil { return }
+
+    type TranscriptionProvider interface {
+        Transcription(ctx context.Context, r *http.Request) (json.RawMessage, error)
+    }
+    if tp, ok := provider.(TranscriptionProvider); ok {
+        result, err := tp.Transcription(ctx, r)
+        if err != nil {
+            slog.Error("transcription failed", "error", err)
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.Write(result)
+        return
+    }
+    http.Error(w, `{"error":{"message":"Provider does not support transcription","type":"invalid_request"}}`, http.StatusBadRequest)
+}
+
+func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    var req struct {
+        Model string `json:"model"`
+        Input string `json:"input"`
+        Voice string `json:"voice"`
+    }
+    if err := json.Unmarshal(body, &req); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+
+    ctx := r.Context()
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+    provider := s.resolveCloudProvider(decision, nil, w)
+    if provider == nil { return }
+
+    type SpeechProvider interface {
+        Speech(ctx context.Context, reqBody []byte) ([]byte, string, error)
+    }
+    if sp, ok := provider.(SpeechProvider); ok {
+        audioData, contentType, err := sp.Speech(ctx, body)
+        if err != nil {
+            slog.Error("speech synthesis failed", "error", err)
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+            return
+        }
+        w.Header().Set("Content-Type", contentType)
+        w.Write(audioData)
+        return
+    }
+    http.Error(w, `{"error":{"message":"Provider does not support speech","type":"invalid_request"}}`, http.StatusBadRequest)
+}
+
+func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    var req struct {
+        Model string      `json:"model,omitempty"`
+        Input interface{} `json:"input"`
+    }
+    if err := json.Unmarshal(body, &req); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+
+    ctx := r.Context()
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+    provider := s.resolveCloudProvider(decision, nil, w)
+    if provider == nil { return }
+
+    type ModerationProvider interface {
+        Moderation(ctx context.Context, reqBody []byte) (json.RawMessage, error)
+    }
+    if mp, ok := provider.(ModerationProvider); ok {
+        result, err := mp.Moderation(ctx, body)
+        if err != nil {
+            slog.Error("moderation failed", "error", err)
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.Write(result)
+        return
+    }
+    http.Error(w, `{"error":{"message":"Provider does not support moderation","type":"invalid_request"}}`, http.StatusBadRequest)
 }
