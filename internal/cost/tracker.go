@@ -20,10 +20,12 @@ type UsageRecord struct {
 }
 
 type Tracker struct {
-    mu         sync.RWMutex
-    records    []UsageRecord
-    maxRecords int
-    totalCost  float64
+    mu          sync.RWMutex
+    records     []UsageRecord
+    maxRecords  int
+    totalCost   float64
+    markup      float64
+    keyMarkups map[string]float64
 }
 
 func NewTracker(maxRecords int) *Tracker {
@@ -31,13 +33,15 @@ func NewTracker(maxRecords int) *Tracker {
         maxRecords = 10000
     }
     return &Tracker{
-        records:    make([]UsageRecord, 0, maxRecords),
-        maxRecords: maxRecords,
+        records:     make([]UsageRecord, 0, maxRecords),
+        maxRecords:  maxRecords,
+        keyMarkups:  make(map[string]float64),
     }
 }
 
 func (t *Tracker) Record(keyName, backend, model string, promptTokens, completionTokens int) {
-    cost := CalculateCost(model, promptTokens, completionTokens)
+    baseCost := CalculateCost(model, promptTokens, completionTokens)
+    billedCost := t.applyMarkup(keyName, baseCost)
     rec := UsageRecord{
         Timestamp:        time.Now(),
         KeyName:          keyName,
@@ -46,13 +50,13 @@ func (t *Tracker) Record(keyName, backend, model string, promptTokens, completio
         PromptTokens:     promptTokens,
         CompletionTokens: completionTokens,
         TotalTokens:      promptTokens + completionTokens,
-        CostUSD:          cost,
+        CostUSD:          billedCost,
     }
 
     t.mu.Lock()
     defer t.mu.Unlock()
 
-    t.totalCost += cost
+    t.totalCost += billedCost
     t.records = append(t.records, rec)
     if len(t.records) > t.maxRecords {
         t.records = t.records[len(t.records)-t.maxRecords:]
@@ -62,9 +66,43 @@ func (t *Tracker) Record(keyName, backend, model string, promptTokens, completio
         "key", keyName,
         "backend", backend,
         "model", model,
-        "cost_usd", cost,
+        "base_cost", baseCost,
+        "billed_cost", billedCost,
         "total_cost_usd", t.totalCost,
     )
+}
+
+func (t *Tracker) applyMarkup(keyName string, baseCost float64) float64 {
+    t.mu.RLock()
+    defer t.mu.RUnlock()
+    multiplier := 1.0 + t.markup
+    if km, ok := t.keyMarkups[keyName]; ok {
+        multiplier = 1.0 + km
+    }
+    return baseCost * multiplier
+}
+
+func (t *Tracker) SetGlobalMarkup(markup float64) {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    t.markup = markup
+    slog.Info("global cost markup set", "markup", markup)
+}
+
+func (t *Tracker) SetKeyMarkup(keyName string, markup float64) {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    t.keyMarkups[keyName] = markup
+    slog.Info("key cost markup set", "key", keyName, "markup", markup)
+}
+
+func (t *Tracker) GetMarkup(keyName string) float64 {
+    t.mu.RLock()
+    defer t.mu.RUnlock()
+    if km, ok := t.keyMarkups[keyName]; ok {
+        return km
+    }
+    return t.markup
 }
 
 type CostSummary struct {

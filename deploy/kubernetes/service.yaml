@@ -1,0 +1,17 @@
+# K8s service for v0.5.0 Task #72.
+# User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "deploy/kubernetes/".
+# Used by: kubectl apply -f deploy/kubernetes/
+apiVersion: v1
+kind: Service
+metadata:
+  name: fusion-gateway
+  labels:
+    app: fusion-gateway
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8100
+      targetPort: 8100
+      protocol: TCP
+  selector:
+    app: fusion-gateway

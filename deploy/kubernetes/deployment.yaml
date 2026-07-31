@@ -1,0 +1,53 @@
+# K8s deployment for v0.5.0 Task #72.
+# User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "deploy/kubernetes/".
+# Used by: kubectl apply -f deploy/kubernetes/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fusion-gateway
+  labels:
+    app: fusion-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fusion-gateway
+  template:
+    metadata:
+      labels:
+        app: fusion-gateway
+    spec:
+      containers:
+        - name: fusion-gateway
+          image: fusion-gateway:latest
+          ports:
+            - containerPort: 8100
+          env:
+            - name: CONFIG_PATH
+              value: /etc/fusion-gateway/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fusion-gateway
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8100
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: fusion-gateway-config

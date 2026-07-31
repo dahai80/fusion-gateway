@@ -72,6 +72,19 @@ See `config.example.yaml` for full reference. Key settings:
 | `observability.otel_endpoint` | localhost:4317 | OTel collector endpoint |
 | `observability.otel_protocol` | grpc | OTel export protocol: grpc or http |
 | `observability.otel_service_name` | fusion-gateway | Service name in OTel traces |
+| `rbac.enabled` | false | Enable RBAC role-based access control |
+| `rbac.default_role` | viewer | Default role when no OIDC claims: admin, editor, viewer |
+| `team.enabled` | false | Enable team/org management |
+| `team.default_team` | default | Default team for unassigned keys |
+| `semantic_cache.enabled` | false | Enable semantic cache (similarity-based hit) |
+| `semantic_cache.similarity_threshold` | 0.92 | Cosine similarity threshold for cache hit |
+| `semantic_cache.max_entries` | 5000 | Max entries in semantic cache |
+| `prompt_injection.enabled` | false | Enable prompt injection detection |
+| `prompt_injection.action` | log | Action on detection: log or block |
+| `cost_markup.enabled` | false | Enable cost markup (billing margin) |
+| `cost_markup.global_markup` | 0 | Global markup ratio (0.2 = 20% surcharge) |
+| `batch.enabled` | false | Enable /v1/batches API |
+| `batch.max_batch_size` | 100 | Max requests per batch |
 
 ## API Endpoints
 
@@ -97,6 +110,13 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/moderations` | POST | Content moderation (cloud-only) |
 | `/admin/gc` | POST | Trigger safe GC on fusion-mlx (only when in-flight = 0) |
 | `/admin/config/reload` | POST | Config reload notification |
+| `/admin/teams` | GET/POST | List/create teams (admin-only) |
+| `/admin/teams/{id}` | GET/PUT/DELETE | Team CRUD (admin-only) |
+| `/admin/orgs` | GET/POST | List/create organizations (admin-only) |
+| `/admin/orgs/{id}` | GET/DELETE | Organization CRUD (admin-only) |
+| `/v1/batches` | POST/GET | Create/list batches |
+| `/v1/batches/{id}` | GET | Get batch status |
+| `/v1/batches/{id}/cancel` | POST | Cancel a running batch |
 
 ## Routing Logic
 
@@ -272,6 +292,107 @@ observability:
 - Graceful shutdown flushes pending spans
 - Propagates trace context via W3C TraceContext headers
 
+## RBAC & Team Management
+
+Role-based access control with three roles: **admin** (full access), **editor** (read + write), **viewer** (read-only). Mutations (POST/PUT/PATCH/DELETE) are blocked for viewers.
+
+```yaml
+rbac:
+    enabled: true
+    default_role: "viewer"    # fallback when no OIDC claims
+team:
+    enabled: true
+    default_team: "default"   # team assigned when no OIDC team claim
+```
+
+- OIDC claims `role`, `groups`, `team` automatically mapped to RBAC roles
+- Master API key always gets admin role
+- Team cost aggregation via `/admin/teams` — quota tracking per team
+- Key-to-team binding: `BindKeyToTeam(apiKey, teamID)` in TeamsStore
+
+## Semantic Cache
+
+Similarity-based caching using cosine similarity on prompt embeddings. Avoids re-computing identical or near-identical requests.
+
+```yaml
+semantic_cache:
+    enabled: true
+    similarity_threshold: 0.92   # cosine similarity for cache hit
+    max_entries: 5000
+```
+
+- Default embedding: deterministic hash-based 128-dim vectors (no model dependency)
+- Pluggable `EmbedFunc` — swap to any embedding API for better similarity
+- 30-minute TTL, automatic expiry eviction
+
+## Prompt Injection Detection
+
+Regex-based detection of common injection patterns with configurable action.
+
+```yaml
+prompt_injection:
+    enabled: true
+    action: "log"    # log | block
+```
+
+- 14 built-in patterns (ignore previous, jailbreak, system prompt leak, etc.)
+- Severity scoring: medium (1-2 matches), high (3+ matches)
+- Block mode returns HTTP 400 with `content_filter` error type
+
+## Cost Markup
+
+Billing margin layer — apply markup on top of base cost per-key or globally.
+
+```yaml
+cost_markup:
+    enabled: true
+    global_markup: 0.2    # 20% surcharge on all requests
+```
+
+- `SetKeyMarkup(keyName, markup)` for per-key overrides
+- `applyMarkup()` in Tracker automatically applies before recording
+- `base_cost` vs `billed_cost` separation in logs
+
+## Batch API
+
+OpenAI-compatible `/v1/batches` endpoint for asynchronous bulk processing.
+
+```yaml
+batch:
+    enabled: true
+    max_batch_size: 100
+```
+
+- `POST /v1/batches` — create batch, returns immediately, processes in background
+- `GET /v1/batches/{id}` — check status (pending/running/completed/failed/cancelled)
+- `POST /v1/batches/{id}/cancel` — cancel a running batch
+- Pluggable `ProcessFn` for custom batch processing logic
+
+## Kubernetes & Helm Deployment
+
+Deploy manifests included:
+
+```
+deploy/
+├── Dockerfile                    # Multi-stage build (Go builder + Alpine runtime)
+├── kubernetes/
+│   ├── deployment.yaml           # K8s Deployment with liveness/readiness probes
+│   ├── service.yaml              # ClusterIP Service on :8100
+│   └── configmap.yaml            # Default config mounted at /etc/fusion-gateway
+└── helm/fusion-gateway/
+    ├── Chart.yaml                # Helm chart v0.5.0
+    ├── values.yaml               # Default values
+    └── templates/                # Deployment, Service, ConfigMap templates
+```
+
+```bash
+# K8s
+kubectl apply -f deploy/kubernetes/
+
+# Helm
+helm install fusion-gateway deploy/helm/fusion-gateway/
+```
+
 ## Admin Dashboard
 
 Built-in web admin dashboard at `/admin`, served from the single binary via Go `embed`.
@@ -417,7 +538,8 @@ internal/
   cache/              LRU in-memory cache with TTL for non-streaming responses
   cost/               Cost tracking with built-in model pricing table + custom pricing hot reload
   store/              Store interface (logs, keys, channels, analytics, dashboard, quota)
-  store/memory/       In-memory store implementation (ring buffer logs, CRUD, analytics aggregation)
+  store/memory/       In-memory store implementation (ring buffer logs, CRUD, analytics, teams/orgs)
+batch/              Batch API store + async processing
   admin/              Admin API handlers + JWT auth + login
   admin/ui/           go:embed frontend assets (React SPA)
   observability/      Prometheus metrics + OpenTelemetry tracing

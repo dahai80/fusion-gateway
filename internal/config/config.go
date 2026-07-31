@@ -280,6 +280,53 @@ type AdminConfig struct {
     JWTSecret string `mapstructure:"jwt_secret"`
 }
 
+type OIDCConfig struct {
+    Enabled       bool   `mapstructure:"enabled"`
+    Issuer        string `mapstructure:"issuer"`
+    ClientID      string `mapstructure:"client_id"`
+    Audiences     string `mapstructure:"audiences"`
+    Scopes        string `mapstructure:"scopes"`
+    ClaimMappings string `mapstructure:"claim_mappings"`
+}
+
+type RBACConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    DefaultRole string `mapstructure:"default_role"`
+}
+
+type TeamConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    DefaultTeam string `mapstructure:"default_team"`
+}
+
+type SemanticCacheConfig struct {
+    Enabled           bool    `mapstructure:"enabled"`
+    SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
+    MaxEntries        int     `mapstructure:"max_entries"`
+    Provider          string  `mapstructure:"provider"`
+    Endpoint          string  `mapstructure:"endpoint"`
+}
+
+type PromptInjectionConfig struct {
+    Enabled    bool   `mapstructure:"enabled"`
+    Action     string `mapstructure:"action"`
+    Provider   string `mapstructure:"provider"`
+    APIKey     string `mapstructure:"api_key"`
+    Threshold  float64 `mapstructure:"threshold"`
+}
+
+type CostMarkupConfig struct {
+    Enabled      bool    `mapstructure:"enabled"`
+    GlobalMarkup float64 `mapstructure:"global_markup"`
+}
+
+type BatchConfig struct {
+    Enabled       bool          `mapstructure:"enabled"`
+    MaxBatchSize  int           `mapstructure:"max_batch_size"`
+    PollInterval  time.Duration `mapstructure:"poll_interval"`
+    Timeout       time.Duration `mapstructure:"timeout"`
+}
+
 type Config struct {
     Server        ServerConfig             `mapstructure:"server"`
     Auth          AuthConfig               `mapstructure:"auth"`
@@ -298,6 +345,13 @@ type Config struct {
     PII           PIIConfig                `mapstructure:"pii"`
     CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
     Admin         *AdminConfig             `mapstructure:"admin"`
+    OIDC          OIDCConfig               `mapstructure:"oidc"`
+    RBAC          RBACConfig               `mapstructure:"rbac"`
+    Team          TeamConfig               `mapstructure:"team"`
+    SemanticCache SemanticCacheConfig      `mapstructure:"semantic_cache"`
+    PromptInjection PromptInjectionConfig  `mapstructure:"prompt_injection"`
+    CostMarkup    CostMarkupConfig         `mapstructure:"cost_markup"`
+    Batch         BatchConfig              `mapstructure:"batch"`
 }
 
 type ConfigSnapshot struct {

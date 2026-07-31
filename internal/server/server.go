@@ -13,6 +13,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
+    "github.com/fusion-gateway/fusion-gateway/internal/batch"
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
@@ -44,6 +45,9 @@ type Server struct {
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
     store           store.Store
+    teamsStore      *memorystore.TeamsStore
+    semanticCache   *cache.SemanticCache
+    batchStore      *batch.Store
     otelShutdown    func(context.Context) error
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
@@ -112,6 +116,9 @@ func New(
         cloudStrategy:  cs,
         latencyTracker: lt,
         store:          memStore,
+        teamsStore:     memorystore.NewTeamsStore(),
+        semanticCache:  cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
+        batchStore:     batch.NewStore(cfg.Config.Batch, nil),
         otelShutdown:   otelShutdown,
     }
 }
@@ -131,6 +138,8 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/audio/transcriptions", s.withMiddleware(s.handleTranscriptions))
     mux.HandleFunc("/v1/audio/speech", s.withMiddleware(s.handleSpeech))
     mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
+    mux.HandleFunc("/v1/batches", s.withMiddleware(s.handleBatches))
+    mux.HandleFunc("/v1/batches/", s.withMiddleware(s.handleBatchCRUD))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -142,6 +151,10 @@ func (s *Server) Start() error {
 
     mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
     mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
+    mux.HandleFunc("/admin/teams", s.withAdminOnly(s.handleAdminTeams))
+    mux.HandleFunc("/admin/teams/", s.withAdminOnly(s.handleAdminTeamsCRUD))
+    mux.HandleFunc("/admin/orgs", s.withAdminOnly(s.handleAdminOrgs))
+    mux.HandleFunc("/admin/orgs/", s.withAdminOnly(s.handleAdminOrgsCRUD))
 
     // Admin API + Dashboard UI
     if s.cfg.Config.Admin != nil && s.cfg.Config.Admin.Enabled {
@@ -194,6 +207,9 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             middleware.CORS(&snap.Config.CORS),
             middleware.ConfigSnapshot(snap),
             middleware.APIKeyAuth(&snap.Config.Auth),
+            middleware.OIDCAuth(&snap.Config.Auth),
+            middleware.RBACAuth(&snap.Config.RBAC, &snap.Config.Team),
+            middleware.PromptInjectionMiddleware(snap.Config.PromptInjection),
             middleware.BudgetBlock(s.store),
             middleware.RateLimit(&snap.Config.Routing.RateLimit, s.rateLimiter, nil),
         }
@@ -1535,4 +1551,190 @@ func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
         return
     }
     http.Error(w, `{"error":{"message":"Provider does not support moderation","type":"invalid_request"}}`, http.StatusBadRequest)
+}
+
+func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if !middleware.IsAdmin(r.Context()) {
+            http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error"}}`, http.StatusForbidden)
+            return
+        }
+        s.withMiddleware(handler)(w, r)
+    }
+}
+
+func (s *Server) handleAdminTeams(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodGet:
+        teams := s.teamsStore.ListTeams()
+        writeJSON(w, http.StatusOK, teams)
+    case http.MethodPost:
+        var team memorystore.Team
+        if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+            http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        if team.ID == "" {
+            http.Error(w, `{"error":{"message":"Team ID is required","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        if err := s.teamsStore.CreateTeam(&team); err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusConflict)
+            return
+        }
+        writeJSON(w, http.StatusCreated, team)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleAdminTeamsCRUD(w http.ResponseWriter, r *http.Request) {
+    id := strings.TrimPrefix(r.URL.Path, "/admin/teams/")
+    if id == "" {
+        http.Error(w, `{"error":{"message":"Team ID required","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    switch r.Method {
+    case http.MethodGet:
+        team, err := s.teamsStore.GetTeam(id)
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
+            return
+        }
+        writeJSON(w, http.StatusOK, team)
+    case http.MethodPut:
+        var team memorystore.Team
+        if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+            http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        team.ID = id
+        if err := s.teamsStore.UpdateTeam(&team); err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
+            return
+        }
+        writeJSON(w, http.StatusOK, team)
+    case http.MethodDelete:
+        if err := s.teamsStore.DeleteTeam(id); err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
+            return
+        }
+        w.WriteHeader(http.StatusNoContent)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodGet:
+        orgs := s.teamsStore.ListOrgs()
+        writeJSON(w, http.StatusOK, orgs)
+    case http.MethodPost:
+        var org memorystore.Organization
+        if err := json.NewDecoder(r.Body).Decode(&org); err != nil {
+            http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        if org.ID == "" {
+            http.Error(w, `{"error":{"message":"Organization ID is required","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        if err := s.teamsStore.CreateOrg(&org); err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusConflict)
+            return
+        }
+        writeJSON(w, http.StatusCreated, org)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleAdminOrgsCRUD(w http.ResponseWriter, r *http.Request) {
+    id := strings.TrimPrefix(r.URL.Path, "/admin/orgs/")
+    if id == "" {
+        http.Error(w, `{"error":{"message":"Organization ID required","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    switch r.Method {
+    case http.MethodGet:
+        org, err := s.teamsStore.GetOrg(id)
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
+            return
+        }
+        writeJSON(w, http.StatusOK, org)
+    case http.MethodDelete:
+        if err := s.teamsStore.DeleteOrg(id); err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
+            return
+        }
+        w.WriteHeader(http.StatusNoContent)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    if err := json.NewEncoder(w).Encode(v); err != nil {
+        slog.Error("failed to encode json response", "error", err)
+    }
+}
+
+func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodPost:
+        var req struct {
+            Requests         []batch.BatchRequest `json:"requests"`
+            Endpoint         string               `json:"endpoint"`
+            CompletionWindow string               `json:"completion_window"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        b, err := s.batchStore.Create(req.Requests, req.Endpoint, req.CompletionWindow)
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
+            return
+        }
+        writeJSON(w, http.StatusOK, b)
+    case http.MethodGet:
+        batches := s.batchStore.List()
+        writeJSON(w, http.StatusOK, batches)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleBatchCRUD(w http.ResponseWriter, r *http.Request) {
+    id := strings.TrimPrefix(r.URL.Path, "/v1/batches/")
+    if id == "" {
+        http.Error(w, `{"error":{"message":"Batch ID required","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    switch r.Method {
+    case http.MethodGet:
+        b, err := s.batchStore.Get(id)
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
+            return
+        }
+        writeJSON(w, http.StatusOK, b)
+    case http.MethodPost:
+        if strings.HasSuffix(r.URL.Path, "/cancel") {
+            b, err := s.batchStore.Cancel(id)
+            if err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
+                return
+            }
+            writeJSON(w, http.StatusOK, b)
+            return
+        }
+        http.Error(w, `{"error":{"message":"Unknown action","type":"invalid_request"}}`, http.StatusBadRequest)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
 }
