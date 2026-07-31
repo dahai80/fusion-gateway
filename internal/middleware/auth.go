@@ -1,7 +1,6 @@
 package middleware
 
 import (
-    "context"
     "crypto/subtle"
     "log/slog"
     "net/http"
@@ -14,8 +13,11 @@ import (
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // 硬伤1 fix: populate Principal instead of scattered context keys
+            ctx, p := EnsurePrincipal(r.Context())
+
             if !cfg.Enabled || cfg.Passthrough {
-                next.ServeHTTP(w, r)
+                next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
 
@@ -26,14 +28,14 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
                 return
             }
 
-            // MasterKey check
             if cfg.MasterKey != "" && subtle.ConstantTimeCompare([]byte(cfg.MasterKey), []byte(key)) == 1 {
                 slog.Info("master key authenticated", "path", r.URL.Path)
-                ctx := context.WithValue(r.Context(), IsMasterKeyKey, true)
-                ctx = context.WithValue(ctx, AuthKeyConfigKey, &config.AuthKeyConfig{
+                p.AuthMethod = "apikey"
+                p.IsMaster = true
+                p.KeyConfig = &config.AuthKeyConfig{
                     Key:  cfg.MasterKey,
                     Name: "master",
-                })
+                }
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
@@ -52,7 +54,6 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
                 return
             }
 
-            // Expiry check
             if matchedKey.ExpiresAt != "" {
                 expiresAt, err := time.Parse(time.RFC3339, matchedKey.ExpiresAt)
                 if err != nil {
@@ -64,29 +65,29 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
                 }
             }
 
-            ctx := context.WithValue(r.Context(), AuthKeyConfigKey, matchedKey)
-            ctx = context.WithValue(ctx, IsMasterKeyKey, false)
+            p.AuthMethod = "apikey"
+            p.IsMaster = false
+            p.KeyConfig = matchedKey
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
 }
 
 func CheckModelAllowlist(r *http.Request, model string) bool {
-    isMaster, _ := r.Context().Value(IsMasterKeyKey).(bool)
-    if isMaster {
+    p := PrincipalFromContext(r.Context())
+    if p != nil && p.IsMaster {
         return true
     }
 
-    keyCfg, _ := r.Context().Value(AuthKeyConfigKey).(*config.AuthKeyConfig)
-    if keyCfg == nil {
+    if p == nil || p.KeyConfig == nil {
         return true
     }
 
-    if len(keyCfg.AllowedModels) == 0 {
+    if len(p.KeyConfig.AllowedModels) == 0 {
         return true
     }
 
-    for _, allowed := range keyCfg.AllowedModels {
+    for _, allowed := range p.KeyConfig.AllowedModels {
         if allowed == "*" || allowed == model {
             return true
         }
@@ -96,16 +97,6 @@ func CheckModelAllowlist(r *http.Request, model string) bool {
     }
 
     return false
-}
-
-func GetAuthKeyConfig(ctx context.Context) *config.AuthKeyConfig {
-    cfg, _ := ctx.Value(AuthKeyConfigKey).(*config.AuthKeyConfig)
-    return cfg
-}
-
-func IsMasterKey(ctx context.Context) bool {
-    v, _ := ctx.Value(IsMasterKeyKey).(bool)
-    return v
 }
 
 func extractAPIKey(r *http.Request) string {

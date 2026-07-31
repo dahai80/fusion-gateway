@@ -12,7 +12,6 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-    Token    string `json:"token"`
     Username string `json:"username"`
     Role     string `json:"role"`
 }
@@ -70,8 +69,8 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
         SameSite: http.SameSiteStrictMode,
     })
 
+    // L8 fix: do not return token in response body, use HttpOnly cookie only
     writeJSON(w, http.StatusOK, LoginResponse{
-        Token:    token,
         Username: req.Username,
         Role:     "admin",
     })

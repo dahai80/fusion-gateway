@@ -1,7 +1,6 @@
 package middleware
 
 import (
-    "context"
     "crypto/rsa"
     "encoding/base64"
     "encoding/binary"
@@ -56,13 +55,6 @@ type OIDCProvider struct {
     fetchedAt  time.Time
     httpClient *http.Client
 }
-
-type oidcContextKey string
-
-const (
-    OIDCClaimsKey oidcContextKey = "oidc_claims"
-    OIDCTokenKey  oidcContextKey = "oidc_token"
-)
 
 var oidcProvider *OIDCProvider
 
@@ -243,29 +235,31 @@ func (p *OIDCProvider) validateToken(tokenStr string) (jwt.MapClaims, error) {
 func OIDCAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // 硬伤1 fix: populate Principal instead of separate context keys
+            ctx, p := EnsurePrincipal(r.Context())
+
             if oidcProvider == nil || !oidcProvider.cfg.Enabled {
-                next.ServeHTTP(w, r)
+                next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
 
             auth := r.Header.Get("Authorization")
             if !strings.HasPrefix(auth, "Bearer ") {
-                next.ServeHTTP(w, r)
+                next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
 
             tokenStr := strings.TrimPrefix(auth, "Bearer ")
 
-            // Try existing API key auth first
             if cfg.Enabled && !cfg.Passthrough {
                 for i := range cfg.APIKeys {
                     if cfg.APIKeys[i].Key == tokenStr {
-                        next.ServeHTTP(w, r)
+                        next.ServeHTTP(w, r.WithContext(ctx))
                         return
                     }
                 }
                 if cfg.MasterKey != "" && cfg.MasterKey == tokenStr {
-                    next.ServeHTTP(w, r)
+                    next.ServeHTTP(w, r.WithContext(ctx))
                     return
                 }
             }
@@ -278,26 +272,10 @@ func OIDCAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
             }
 
             slog.Debug("oidc token validated", "sub", claims["sub"], "path", r.URL.Path)
-            ctx := context.WithValue(r.Context(), OIDCClaimsKey, claims)
-            ctx = context.WithValue(ctx, OIDCTokenKey, tokenStr)
+            p.AuthMethod = "oidc"
+            p.OIDCClaims = claims
+            p.OIDCToken = tokenStr
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
-}
-
-func GetOIDCClaims(ctx context.Context) jwt.MapClaims {
-    claims, _ := ctx.Value(OIDCClaimsKey).(jwt.MapClaims)
-    return claims
-}
-
-func GetOIDCSubject(ctx context.Context) string {
-    claims := GetOIDCClaims(ctx)
-    if claims == nil { return "" }
-    sub, _ := claims["sub"].(string)
-    return sub
-}
-
-func GetOIDCToken(ctx context.Context) string {
-    token, _ := ctx.Value(OIDCTokenKey).(string)
-    return token
 }

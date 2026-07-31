@@ -187,8 +187,21 @@ func (e *Engine) Trip(backend, reason string) {
 func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     cfg := config.SnapshotFromContext(ctx)
 
+    // L1 fix: collect trip reasons during RLock, apply Trip after unlock
+    var trips []string
     e.mu.RLock()
-    defer e.mu.RUnlock()
+    decision := e.decideLocked(ctx, cfg, req, &trips)
+    e.mu.RUnlock()
+
+    // Apply deferred trip calls outside read lock
+    for _, reason := range trips {
+        e.breakers["local"].Trip(reason)
+        slog.Warn("circuit breaker tripped", "backend", "local", "reason", reason)
+    }
+    return decision
+}
+
+func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string) *RouteDecision {
 
     // Fast path: embedding/rerank request type routing
     switch req.Type {
@@ -219,8 +232,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
 
     // P1: System memory overload
     if hwMetrics.MemoryUsedRatio > cfg.Config.Routing.LocalPriority.MaxSystemMemoryRatio {
-        e.breakers["local"].Trip("memory_overload")
-        slog.Warn("circuit breaker tripped", "backend", "local", "reason", "memory_overload")
+        *trips = append(*trips, "memory_overload")
         if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }
@@ -241,8 +253,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     // P2: Swap page rate
     swapThreshold := cfg.Config.Routing.LocalPriority.SwapPageRateThreshold
     if hwMetrics.SwapPageInRate > swapThreshold || hwMetrics.SwapPageOutRate > swapThreshold {
-        e.breakers["local"].Trip("swap_thrashing")
-        slog.Warn("circuit breaker tripped", "backend", "local", "reason", "swap_thrashing")
+        *trips = append(*trips, "swap_thrashing")
         if decision := e.tryClusterLocked(cfg); decision != nil {
             return decision
         }

@@ -31,7 +31,7 @@ func TestProxy_UpgradeAndProxy_Bidirectional(t *testing.T) {
     defer backend.Close()
 
     backendWSURL := "ws" + strings.TrimPrefix(backend.URL, "http") + "/v1/realtime"
-    proxy := NewProxy("X-Fusion-Route", "gateway-decision")
+    proxy := NewProxy("X-Fusion-Route", "gateway-decision", 4)
 
     gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         proxy.UpgradeAndProxy(w, r, backendWSURL, "test-key")
@@ -69,7 +69,7 @@ func TestProxy_UpgradeAndProxy_Bidirectional(t *testing.T) {
 }
 
 func TestProxy_BackendUnavailable(t *testing.T) {
-    proxy := NewProxy("", "")
+    proxy := NewProxy("", "", 4)
 
     gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         proxy.UpgradeAndProxy(w, r, "ws://127.0.0.1:1/invalid", "")
@@ -103,7 +103,7 @@ func TestProxy_AuthHeader(t *testing.T) {
     defer backend.Close()
 
     backendWSURL := "ws" + strings.TrimPrefix(backend.URL, "http") + "/"
-    proxy := NewProxy("X-Route", "test-value")
+    proxy := NewProxy("X-Route", "test-value", 4)
 
     gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         proxy.UpgradeAndProxy(w, r, backendWSURL, "my-secret-key")

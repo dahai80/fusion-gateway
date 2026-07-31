@@ -179,7 +179,7 @@ func TestRateLimitMiddleware(t *testing.T) {
 
         for i := 0; i < 5; i++ {
             req := httptest.NewRequest(http.MethodGet, "/test", nil)
-            ctx := context.WithValue(req.Context(), IsMasterKeyKey, true)
+            ctx := ContextWithPrincipal(req.Context(), &Principal{IsMaster: true})
             req = req.WithContext(ctx)
             rec := httptest.NewRecorder()
             middleware(okHandler).ServeHTTP(rec, req)
@@ -239,7 +239,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec := httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -265,7 +265,7 @@ func TestRateLimitMiddleware(t *testing.T) {
 
         for i := 0; i < 2; i++ {
             req := httptest.NewRequest(http.MethodGet, "/test", nil)
-            ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+            ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
             req = req.WithContext(ctx)
             rec := httptest.NewRecorder()
             middleware(okHandler).ServeHTTP(rec, req)
@@ -275,7 +275,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec := httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -307,7 +307,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec := httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -316,7 +316,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req = httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx = context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx = ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec = httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -357,7 +357,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec := httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -384,7 +384,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec := httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)
@@ -393,7 +393,7 @@ func TestRateLimitMiddleware(t *testing.T) {
         }
 
         req = httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx = context.WithValue(req.Context(), AuthKeyConfigKey, keyCfg)
+        ctx = ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
         req = req.WithContext(ctx)
         rec = httptest.NewRecorder()
         middleware(okHandler).ServeHTTP(rec, req)

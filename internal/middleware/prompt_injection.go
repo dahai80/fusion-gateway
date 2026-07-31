@@ -140,8 +140,28 @@ func extractPromptText(messages []struct {
                             sb.WriteString(t)
                             sb.WriteString(" ")
                         }
-                    case "image_url", "input_audio", "image":
-                        slog.Debug("skipping non-text content in prompt injection check", "type", contentType)
+                    case "image_url":
+                        // L7 fix: check URL data URIs for injection payloads
+                        if urlObj, ok := obj["image_url"].(map[string]interface{}); ok {
+                            if u, ok := urlObj["url"].(string); ok {
+                                sb.WriteString(u)
+                                sb.WriteString(" ")
+                            }
+                        }
+                    case "input_audio":
+                        if audioObj, ok := obj["input_audio"].(map[string]interface{}); ok {
+                            if d, ok := audioObj["data"].(string); ok {
+                                sb.WriteString(d)
+                                sb.WriteString(" ")
+                            }
+                        }
+                    case "image":
+                        if urlObj, ok := obj["image"].(map[string]interface{}); ok {
+                            if u, ok := urlObj["url"].(string); ok {
+                                sb.WriteString(u)
+                                sb.WriteString(" ")
+                            }
+                        }
                     default:
                         // unknown content type, try to extract text field if present
                         if t, ok := obj["text"].(string); ok {
@@ -154,8 +174,16 @@ func extractPromptText(messages []struct {
         }
     }
     if prompt != nil {
-        if s, ok := prompt.(string); ok {
-            sb.WriteString(s)
+        switch v := prompt.(type) {
+        case string:
+            sb.WriteString(v)
+        case []interface{}:
+            for _, item := range v {
+                if s, ok := item.(string); ok {
+                    sb.WriteString(s)
+                    sb.WriteString(" ")
+                }
+            }
         }
     }
     return sb.String()

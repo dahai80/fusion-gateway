@@ -9,6 +9,7 @@ import (
     "net/http"
     "net/http/pprof"
     "strings"
+    "sync"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
@@ -49,6 +50,9 @@ type Server struct {
     semanticCache   *cache.SemanticCache
     batchStore      *batch.Store
     otelShutdown    func(context.Context) error
+    // M1 fix: middleware chain constructed once, rebuilt on reload
+    middlewareChainMu sync.RWMutex
+    middlewareChain   func(http.Handler) http.Handler
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
@@ -66,6 +70,10 @@ func (s *Server) GetStore() store.Store {
     return s.store
 }
 
+func (s *Server) Cache() *cache.Cache {
+    return s.cache
+}
+
 func New(
     cfg *config.ConfigSnapshot,
     hwCollector *hardware.Collector,
@@ -78,6 +86,7 @@ func New(
         rp = realtime.NewProxy(
             cfg.Config.Routing.Negotiation.RouteHeader,
             cfg.Config.Routing.Negotiation.RouteHeaderValue,
+            cfg.Config.Realtime.MaxMessageMB,
         )
         slog.Info("realtime proxy enabled", "backend_url", cfg.Config.Realtime.BackendURL)
     }
@@ -124,6 +133,9 @@ func New(
 }
 
 func (s *Server) Start() error {
+    // M1 fix: build middleware chain once at startup
+    s.buildMiddlewareChain()
+
     mux := http.NewServeMux()
 
     mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
@@ -204,30 +216,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
-        snap := config.GetSnapshot()
-
-        chain := []func(http.Handler) http.Handler{
-            middleware.RequestID,
-            observability.HTTPMiddleware,
-            middleware.CORS(&snap.Config.CORS),
-            middleware.ConfigSnapshot(snap),
-            middleware.APIKeyAuth(&snap.Config.Auth),
-            middleware.OIDCAuth(&snap.Config.Auth),
-            middleware.RBACAuth(&snap.Config.RBAC, &snap.Config.Team),
-            middleware.PromptInjectionMiddleware(snap.Config.PromptInjection),
-            middleware.BudgetBlock(s.store),
-            middleware.RateLimit(&snap.Config.Routing.RateLimit, s.rateLimiter, nil),
-        }
-
-        var final http.Handler = handler
-        for i := len(chain) - 1; i >= 0; i-- {
-            final = chain[i](final)
-        }
+        // M1 fix: use cached middleware chain, rebuild on reload
+        s.middlewareChainMu.RLock()
+        chain := s.middlewareChain
+        s.middlewareChainMu.RUnlock()
 
         start := time.Now()
         entry := middleware.InitRequestLog(r)
         r = middleware.WithRequestLogContext(r, entry)
         rec := middleware.NewResponseRecorder(w)
+
+        // Per-request: inject fresh config snapshot, then run cached chain
+        snap := config.GetSnapshot()
+        snapMiddleware := middleware.ConfigSnapshot(snap)
+
+        var final http.Handler = snapMiddleware(chain(handler))
 
         final.ServeHTTP(rec, r)
 
@@ -239,6 +242,47 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         entry.StatusCode = rec.StatusCode
         middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
     }
+}
+
+// buildMiddlewareChain constructs the static middleware chain (everything except ConfigSnapshot)
+func (s *Server) buildMiddlewareChain() {
+    chain := []func(http.Handler) http.Handler{
+        middleware.RequestID,
+        observability.HTTPMiddleware,
+        middleware.CORS(&s.cfg.Config.CORS),
+        middleware.APIKeyAuth(&s.cfg.Config.Auth),
+        middleware.OIDCAuth(&s.cfg.Config.Auth),
+        middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
+        middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
+        middleware.BudgetBlock(s.store),
+        middleware.RateLimit(&s.cfg.Config.Routing.RateLimit, s.rateLimiter, nil),
+    }
+
+    s.middlewareChainMu.Lock()
+    var combined func(http.Handler) http.Handler
+    for i := len(chain) - 1; i >= 0; i-- {
+        if combined == nil {
+            combined = chain[i]
+        } else {
+            prev := combined
+            mw := chain[i]
+            combined = func(next http.Handler) http.Handler {
+                return mw(prev(next))
+            }
+        }
+    }
+    if combined == nil {
+        combined = func(next http.Handler) http.Handler { return next }
+    }
+    s.middlewareChain = combined
+    s.middlewareChainMu.Unlock()
+}
+
+// RebuildMiddlewareChain rebuilds the middleware chain on config reload
+func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
+    s.cfg = newCfg
+    s.buildMiddlewareChain()
+    slog.Info("middleware chain rebuilt on config reload")
 }
 
 // withMasterKey wraps handler to require master_key authentication
@@ -479,8 +523,11 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 flusher.Flush()
             }
 
+            // L5 fix: deep copy request to avoid shared slice race
             nonStreamReq := *req
             nonStreamReq.Stream = false
+            nonStreamReq.Messages = make([]adapter.ChatMessage, len(req.Messages))
+            copy(nonStreamReq.Messages, req.Messages)
             resp, fallbackErr := provider.Chat(ctx, &nonStreamReq)
             if fallbackErr != nil {
                 slog.Error("non-streaming fallback failed", "error", fallbackErr)
@@ -618,6 +665,63 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         slog.Error("chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
+
+        // A4 fix: runtime backend switch fallback — if local fails, try cloud
+        if decision.Backend == router.LocalBackend || decision.Backend == router.ClusterBackend {
+            fallbackProvider := s.resolveCloudProvider(nil, req, nil)
+            if fallbackProvider != nil {
+                slog.Info("A4 fallback: switching to cloud after local/cluster failure",
+                    "original_backend", string(decision.Backend),
+                    "fallback_provider", fallbackProvider.Name(),
+                )
+                fallbackResp, fallbackErr := fallbackProvider.Chat(ctx, req)
+                if fallbackErr == nil {
+                    duration := time.Since(start)
+                    observability.RecordRequest("cloud", req.Model, "success")
+                    observability.RecordDuration("cloud", req.Model, duration.Seconds())
+                    observability.RecordTokens("input", "cloud", budget.InputTokens)
+                    if fallbackResp.Usage.CompletionTokens > 0 {
+                        observability.RecordTokens("output", "cloud", fallbackResp.Usage.CompletionTokens)
+                    }
+                    s.router.RecordSuccess("cloud")
+
+                    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                        logEntry.Model = req.Model
+                        logEntry.ChannelName = fallbackProvider.Name()
+                        logEntry.ChannelType = "cloud"
+                        logEntry.InputTokens = budget.InputTokens
+                        logEntry.OutputTokens = fallbackResp.Usage.CompletionTokens
+                        logEntry.TotalTokens = budget.InputTokens + fallbackResp.Usage.CompletionTokens
+                    }
+                    if s.latencyTracker != nil {
+                        s.latencyTracker.Record(fallbackProvider.Name(), duration)
+                    }
+                    if s.costTracker != nil {
+                        keyCfg := middleware.GetAuthKeyConfig(ctx)
+                        keyName := "anonymous"
+                        if keyCfg != nil && keyCfg.Name != "" {
+                            keyName = keyCfg.Name
+                        }
+                        s.costTracker.Record(keyName, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
+                    }
+                    if s.cache != nil && cacheKey != "" {
+                        if respData, marshalErr := json.Marshal(fallbackResp); marshalErr == nil {
+                            s.cache.Set(cacheKey, respData)
+                        }
+                    }
+                    w.Header().Set("Content-Type", "application/json")
+                    w.Header().Set("X-Route-Decision", fmt.Sprintf("cloud:fallback_from_%s", decision.Backend))
+                    w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+                    if s.cache != nil {
+                        w.Header().Set("X-Cache", "MISS")
+                    }
+                    _ = json.NewEncoder(w).Encode(fallbackResp)
+                    return
+                }
+                slog.Error("A4 fallback: cloud also failed", "error", fallbackErr)
+            }
+        }
+
         http.Error(w, `{"error":{"message":"Chat failed","type":"server_error"}}`, http.StatusBadGateway)
         return
     }

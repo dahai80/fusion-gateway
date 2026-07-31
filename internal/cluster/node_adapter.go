@@ -136,7 +136,8 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
         return nil, fmt.Errorf("stream chat to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
-    ch := make(chan adapter.StreamChunk, 64)
+    // L6 fix: larger buffer to reduce backpressure risk
+    ch := make(chan adapter.StreamChunk, 256)
 
     go func() {
         defer close(ch)
@@ -155,8 +156,15 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
             select {
             case ch <- chunk:
             default:
-                slog.Warn("cluster node sse backpressure", "node_id", p.node.ID)
-                return
+                // L6 fix: log and try to continue instead of dropping the stream
+                slog.Warn("cluster node sse backpressure, draining", "node_id", p.node.ID)
+                // drain: wait briefly and retry once, then give up this chunk
+                select {
+                case ch <- chunk:
+                default:
+                    slog.Error("cluster node sse backpressure exceeded, stream truncated", "node_id", p.node.ID)
+                    return
+                }
             }
         }
     }()

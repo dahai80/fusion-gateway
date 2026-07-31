@@ -30,7 +30,7 @@ func (s CircuitBreakerState) String() string {
 }
 
 type CircuitBreaker struct {
-    mu               sync.Mutex
+    mu               sync.RWMutex
     state            CircuitBreakerState
     cfg              config.CircuitBreakerConfig
     failureCount     int
@@ -47,11 +47,17 @@ func NewCircuitBreaker(cfg config.CircuitBreakerConfig) *CircuitBreaker {
 }
 
 func (cb *CircuitBreaker) State() CircuitBreakerState {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
+    // P4 fix: use RLock for hot-path state query
+    cb.mu.RLock()
+    currentState := cb.state
+    lastFail := cb.lastFailureTime
+    cb.mu.RUnlock()
 
-    if cb.state == StateOpen {
-        if time.Since(cb.lastFailureTime) > cb.cfg.Timeout {
+    // Only upgrade to write lock if transition is needed
+    if currentState == StateOpen && time.Since(lastFail) > cb.cfg.Timeout {
+        cb.mu.Lock()
+        // double-check after acquiring write lock
+        if cb.state == StateOpen && time.Since(cb.lastFailureTime) > cb.cfg.Timeout {
             cb.state = StateHalfOpen
             cb.successCount = 0
             slog.Info("circuit breaker transitioned to half_open",
@@ -59,9 +65,11 @@ func (cb *CircuitBreaker) State() CircuitBreakerState {
                 "reason", cb.tripReason,
             )
         }
+        currentState = cb.state
+        cb.mu.Unlock()
     }
 
-    return cb.state
+    return currentState
 }
 
 func (cb *CircuitBreaker) RecordSuccess() {

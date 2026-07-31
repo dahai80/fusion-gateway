@@ -10,6 +10,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type entry struct {
@@ -59,7 +60,8 @@ func New(cfg config.CacheConfig) *Cache {
         maxBytes:   maxBytes,
     }
 
-    go c.evictExpired()
+    // M2 fix: use safeGo for panic recovery on background goroutines
+    safego.Go("cache_evict_expired", c.evictExpired)
     return c
 }
 
@@ -161,23 +163,31 @@ func (c *Cache) evictExpired() {
     defer ticker.Stop()
 
     for range ticker.C {
-        c.mu.Lock()
+        // P1 fix: collect expired keys under RLock (fast), then delete under Lock (short)
+        c.mu.RLock()
         now := time.Now()
-        var toRemove []*list.Element
-        for _, elem := range c.items {
+        var toRemove []string
+        for key, elem := range c.items {
             e := elem.Value.(*entry)
             if now.After(e.expiresAt) {
-                toRemove = append(toRemove, elem)
+                toRemove = append(toRemove, key)
             }
         }
-        for _, elem := range toRemove {
-            c.removeElement(elem)
+        c.mu.RUnlock()
+
+        if len(toRemove) == 0 {
+            continue
+        }
+
+        c.mu.Lock()
+        for _, key := range toRemove {
+            if elem, ok := c.items[key]; ok {
+                c.removeElement(elem)
+            }
         }
         c.mu.Unlock()
 
-        if len(toRemove) > 0 {
-            slog.Debug("cache expired entries evicted", "count", len(toRemove))
-        }
+        slog.Debug("cache expired entries evicted", "count", len(toRemove))
     }
 }
 
@@ -188,6 +198,46 @@ func (c *Cache) Stats() (hits, misses int64, size int) {
     c.mu.RLock()
     defer c.mu.RUnlock()
     return c.hits, c.misses, len(c.items)
+}
+
+// UpdateConfig updates cache configuration at runtime (硬伤2 fix)
+func (c *Cache) UpdateConfig(cfg config.CacheConfig) {
+    if c == nil {
+        return
+    }
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
+    if cfg.MaxEntries > 0 {
+        c.maxEntries = cfg.MaxEntries
+        // Evict excess entries immediately
+        for len(c.items) > c.maxEntries {
+            oldest := c.order.Back()
+            if oldest == nil {
+                break
+            }
+            c.removeElement(oldest)
+        }
+        slog.Info("cache maxEntries updated", "max_entries", c.maxEntries, "current_size", len(c.items))
+    }
+
+    if cfg.TTL > 0 {
+        c.ttl = cfg.TTL
+        slog.Info("cache TTL updated", "ttl", c.ttl)
+    }
+
+    if cfg.MaxMemoryMB > 0 {
+        c.maxBytes = int64(cfg.MaxMemoryMB) * 1024 * 1024
+        // Evict entries exceeding new memory limit
+        for c.maxBytes > 0 && c.usedBytes > c.maxBytes {
+            oldest := c.order.Back()
+            if oldest == nil {
+                break
+            }
+            c.removeElement(oldest)
+        }
+        slog.Info("cache maxBytes updated", "max_bytes", c.maxBytes, "used_bytes", c.usedBytes)
+    }
 }
 
 func (c *Cache) Delete(key string) {

@@ -19,18 +19,20 @@ var upgrader = websocket.Upgrader{
 }
 
 type Proxy struct {
-    dialer          *websocket.Dialer
-    routeHeader     string
+    dialer           *websocket.Dialer
+    routeHeader      string
     routeHeaderValue string
+    maxMsgMB         int
 }
 
-func NewProxy(routeHeader, routeHeaderValue string) *Proxy {
+func NewProxy(routeHeader, routeHeaderValue string, maxMsgMB int) *Proxy {
     return &Proxy{
         dialer: &websocket.Dialer{
             HandshakeTimeout: 10 * time.Second,
         },
         routeHeader:      routeHeader,
         routeHeaderValue: routeHeaderValue,
+        maxMsgMB:         maxMsgMB,
     }
 }
 
@@ -99,7 +101,12 @@ func (p *Proxy) UpgradeAndProxy(w http.ResponseWriter, r *http.Request, backendU
 func (p *Proxy) relay(ctx context.Context, direction string, src *websocket.Conn, dst *websocket.Conn, onClose func()) {
     defer onClose()
 
-    src.SetReadLimit(1 << 20)
+    // R1 fix: configurable read limit, default 4MB
+    readLimit := int64(4) << 20 // 4MB default
+    if p.maxMsgMB > 0 {
+        readLimit = int64(p.maxMsgMB) << 20
+    }
+    src.SetReadLimit(readLimit)
 
     for {
         select {

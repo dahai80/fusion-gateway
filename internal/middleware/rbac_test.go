@@ -68,7 +68,7 @@ func TestRBACAuth_MasterKeyGetsAdmin(t *testing.T) {
         called = true
     }))
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-    ctx := context.WithValue(req.Context(), IsMasterKeyKey, true)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{IsMaster: true})
     req = req.WithContext(ctx)
     handler.ServeHTTP(httptest.NewRecorder(), req)
     if !called {
@@ -77,7 +77,7 @@ func TestRBACAuth_MasterKeyGetsAdmin(t *testing.T) {
 }
 
 func TestGetRBACRole(t *testing.T) {
-    ctx := context.WithValue(context.Background(), RBACRoleKey, RoleAdmin)
+    ctx := ContextWithPrincipal(context.Background(), &Principal{Role: RoleAdmin})
     if GetRBACRole(ctx) != RoleAdmin {
         t.Fatal("expected admin role")
     }
@@ -87,24 +87,24 @@ func TestGetRBACRole(t *testing.T) {
 }
 
 func TestIsAdmin(t *testing.T) {
-    ctx := context.WithValue(context.Background(), RBACRoleKey, RoleAdmin)
+    ctx := ContextWithPrincipal(context.Background(), &Principal{Role: RoleAdmin})
     if !IsAdmin(ctx) {
         t.Fatal("should be admin")
     }
-    ctx2 := context.WithValue(context.Background(), RBACRoleKey, RoleViewer)
+    ctx2 := ContextWithPrincipal(context.Background(), &Principal{Role: RoleViewer})
     if IsAdmin(ctx2) {
         t.Fatal("should not be admin")
     }
 }
 
 func TestCanWrite(t *testing.T) {
-    if !CanWrite(context.WithValue(context.Background(), RBACRoleKey, RoleAdmin)) {
+    if !CanWrite(ContextWithPrincipal(context.Background(), &Principal{Role: RoleAdmin})) {
         t.Fatal("admin can write")
     }
-    if !CanWrite(context.WithValue(context.Background(), RBACRoleKey, RoleEditor)) {
+    if !CanWrite(ContextWithPrincipal(context.Background(), &Principal{Role: RoleEditor})) {
         t.Fatal("editor can write")
     }
-    if CanWrite(context.WithValue(context.Background(), RBACRoleKey, RoleViewer)) {
+    if CanWrite(ContextWithPrincipal(context.Background(), &Principal{Role: RoleViewer})) {
         t.Fatal("viewer cannot write")
     }
 }

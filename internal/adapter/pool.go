@@ -139,8 +139,8 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
             provider := NewYiProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered yi provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
-            slog.Warn("unknown backend type, skipping", "name", name, "type", backendCfg.Type)
-            continue
+            // M3 fix: fail-fast on unknown backend type instead of silent skip
+            return fmt.Errorf("unknown backend type: %s for backend %q", backendCfg.Type, name)
         }
 
         p.backends[name] = backendCfg

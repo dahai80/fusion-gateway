@@ -9,7 +9,6 @@ package middleware
 // API: RBACAuth middleware, context helpers GetRBACRole/GetRBACTeam/IsAdmin/CanWrite.
 
 import (
-    "context"
     "log/slog"
     "net/http"
     "strings"
@@ -34,18 +33,14 @@ type TeamInfo struct {
     AllowedModels []string `json:"allowed_models,omitempty"`
 }
 
-type rbacContextKey string
-
-const (
-    RBACRoleKey rbacContextKey = "rbac_role"
-    RBACTeamKey rbacContextKey = "rbac_team"
-)
-
 func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // 硬伤1 fix: populate Principal instead of separate context keys
+            ctx, p := EnsurePrincipal(r.Context())
+
             if !cfg.Enabled {
-                next.ServeHTTP(w, r)
+                next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
 
@@ -78,11 +73,11 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
                 }
             }
 
-            if IsMasterKey(r.Context()) {
+            if p.IsMaster {
                 role = RoleAdmin
             }
 
-            ctx := context.WithValue(r.Context(), RBACRoleKey, role)
+            p.Role = role
 
             if teamCfg != nil && teamCfg.Enabled {
                 teamID := teamCfg.DefaultTeam
@@ -97,7 +92,7 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
                         Name: teamID,
                         Role: role,
                     }
-                    ctx = context.WithValue(ctx, RBACTeamKey, team)
+                    p.Team = team
                     slog.Debug("rbac team assigned", "team", teamID, "role", string(role))
                 }
             }
@@ -117,26 +112,4 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
 func isMutationMethod(method string) bool {
     return method == http.MethodPost || method == http.MethodPut ||
         method == http.MethodPatch || method == http.MethodDelete
-}
-
-func GetRBACRole(ctx context.Context) Role {
-    role, _ := ctx.Value(RBACRoleKey).(Role)
-    if role == "" {
-        return RoleViewer
-    }
-    return role
-}
-
-func GetRBACTeam(ctx context.Context) *TeamInfo {
-    team, _ := ctx.Value(RBACTeamKey).(*TeamInfo)
-    return team
-}
-
-func IsAdmin(ctx context.Context) bool {
-    return GetRBACRole(ctx) == RoleAdmin
-}
-
-func CanWrite(ctx context.Context) bool {
-    role := GetRBACRole(ctx)
-    return role == RoleAdmin || role == RoleEditor
 }

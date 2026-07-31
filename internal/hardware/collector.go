@@ -7,6 +7,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -36,7 +37,7 @@ func (c *Collector) Start(ctx context.Context) {
     childCtx, cancel := context.WithCancel(ctx)
     c.cancel = cancel
 
-    go c.collectLoop(childCtx)
+    safego.Go("hardware_collect_loop", func() { c.collectLoop(childCtx) })
     slog.Info("hardware collector started", "interval", c.cfg.CollectInterval)
 }
 

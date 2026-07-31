@@ -8,19 +8,22 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type contextKey string
 
-const (
-    AuthKeyConfigKey contextKey = "auth_key_config"
-    IsMasterKeyKey   contextKey = "is_master_key"
-    RequestIDKey     contextKey = "request_id"
-)
+const RequestIDKey contextKey = "request_id"
 
+// L2 fix: per-key mutex via sync.Map, avoiding global lock contention
 type RateLimiter struct {
-    mu       sync.Mutex
-    counters map[string]*slidingWindow
+    counters sync.Map // map[string]*keyState
+}
+
+type keyState struct {
+    mu         sync.Mutex
+    sw         slidingWindow
+    lastAccess time.Time
 }
 
 type slidingWindow struct {
@@ -30,40 +33,46 @@ type slidingWindow struct {
 }
 
 func NewRateLimiter() *RateLimiter {
-    return &RateLimiter{
-        counters: make(map[string]*slidingWindow),
+    rl := &RateLimiter{}
+    safego.Go("ratelimit_cleanup_idle", rl.cleanupIdle)
+    return rl
+}
+
+func (rl *RateLimiter) getOrCreate(key string) *keyState {
+    if v, ok := rl.counters.Load(key); ok {
+        ks := v.(*keyState)
+        ks.lastAccess = time.Now()
+        return ks
     }
+    ks := &keyState{lastAccess: time.Now()}
+    actual, _ := rl.counters.LoadOrStore(key, ks)
+    return actual.(*keyState)
 }
 
 func (rl *RateLimiter) AllowRPM(key string, rpm int) bool {
     if rpm <= 0 {
         return true
     }
-    rl.mu.Lock()
-    defer rl.mu.Unlock()
+    ks := rl.getOrCreate(key + ":rpm")
+    ks.mu.Lock()
+    defer ks.mu.Unlock()
 
     now := time.Now()
     windowStart := now.Add(-time.Minute)
 
-    sw, exists := rl.counters[key+":rpm"]
-    if !exists {
-        sw = &slidingWindow{}
-        rl.counters[key+":rpm"] = sw
-    }
-
-    filtered := sw.timestamps[:0]
-    for _, t := range sw.timestamps {
+    filtered := ks.sw.timestamps[:0]
+    for _, t := range ks.sw.timestamps {
         if t.After(windowStart) {
             filtered = append(filtered, t)
         }
     }
-    sw.timestamps = filtered
+    ks.sw.timestamps = filtered
 
-    if len(sw.timestamps) >= rpm {
+    if len(ks.sw.timestamps) >= rpm {
         return false
     }
 
-    sw.timestamps = append(sw.timestamps, now)
+    ks.sw.timestamps = append(ks.sw.timestamps, now)
     return true
 }
 
@@ -71,40 +80,34 @@ func (rl *RateLimiter) AllowTPM(key string, tpm int, tokenCount int) bool {
     if tpm <= 0 {
         return true
     }
-    rl.mu.Lock()
-    defer rl.mu.Unlock()
+    ks := rl.getOrCreate(key + ":tpm")
+    ks.mu.Lock()
+    defer ks.mu.Unlock()
 
     now := time.Now()
     windowStart := now.Add(-time.Minute)
 
-    mapKey := key + ":tpm"
-    sw, exists := rl.counters[mapKey]
-    if !exists {
-        sw = &slidingWindow{}
-        rl.counters[mapKey] = sw
-    }
-
-    filteredTs := sw.timestamps[:0]
-    filteredTok := sw.tokens[:0]
+    filteredTs := ks.sw.timestamps[:0]
+    filteredTok := ks.sw.tokens[:0]
     totalTokens := 0
-    for i, t := range sw.timestamps {
+    for i, t := range ks.sw.timestamps {
         if t.After(windowStart) {
             filteredTs = append(filteredTs, t)
-            filteredTok = append(filteredTok, sw.tokens[i])
-            totalTokens += sw.tokens[i]
+            filteredTok = append(filteredTok, ks.sw.tokens[i])
+            totalTokens += ks.sw.tokens[i]
         }
     }
-    sw.timestamps = filteredTs
-    sw.tokens = filteredTok
-    sw.totalTokens = totalTokens
+    ks.sw.timestamps = filteredTs
+    ks.sw.tokens = filteredTok
+    ks.sw.totalTokens = totalTokens
 
-    if sw.totalTokens+tokenCount > tpm {
+    if ks.sw.totalTokens+tokenCount > tpm {
         return false
     }
 
-    sw.timestamps = append(sw.timestamps, now)
-    sw.tokens = append(sw.tokens, tokenCount)
-    sw.totalTokens += tokenCount
+    ks.sw.timestamps = append(ks.sw.timestamps, now)
+    ks.sw.tokens = append(ks.sw.tokens, tokenCount)
+    ks.sw.totalTokens += tokenCount
     return true
 }
 
@@ -112,19 +115,15 @@ func (rl *RateLimiter) RemainingRPM(key string, rpm int) int {
     if rpm <= 0 {
         return -1
     }
-    rl.mu.Lock()
-    defer rl.mu.Unlock()
+    ks := rl.getOrCreate(key + ":rpm")
+    ks.mu.Lock()
+    defer ks.mu.Unlock()
 
     now := time.Now()
     windowStart := now.Add(-time.Minute)
 
-    sw, exists := rl.counters[key+":rpm"]
-    if !exists {
-        return rpm
-    }
-
     count := 0
-    for _, t := range sw.timestamps {
+    for _, t := range ks.sw.timestamps {
         if t.After(windowStart) {
             count++
         }
@@ -136,6 +135,25 @@ func (rl *RateLimiter) RemainingRPM(key string, rpm int) int {
     return remaining
 }
 
+// cleanupIdle removes idle key states to prevent memory leak
+func (rl *RateLimiter) cleanupIdle() {
+    ticker := time.NewTicker(5 * time.Minute)
+    defer ticker.Stop()
+    for range ticker.C {
+        now := time.Now()
+        rl.counters.Range(func(key, value interface{}) bool {
+            ks := value.(*keyState)
+            ks.mu.Lock()
+            idle := now.Sub(ks.lastAccess) > 10*time.Minute
+            ks.mu.Unlock()
+            if idle {
+                rl.counters.Delete(key)
+            }
+            return true
+        })
+    }
+}
+
 func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx context.Context) int) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,13 +162,17 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
                 return
             }
 
-            isMaster, _ := r.Context().Value(IsMasterKeyKey).(bool)
-            if isMaster {
+            // 硬伤1 fix: read from Principal instead of scattered context keys
+            p := PrincipalFromContext(r.Context())
+            if p != nil && p.IsMaster {
                 next.ServeHTTP(w, r)
                 return
             }
 
-            keyCfg, _ := r.Context().Value(AuthKeyConfigKey).(*config.AuthKeyConfig)
+            var keyCfg *config.AuthKeyConfig
+            if p != nil {
+                keyCfg = p.KeyConfig
+            }
             if keyCfg == nil {
                 if cfg.KeyEnforcement {
                     slog.Warn("rate limit: no key config in context, denying", "path", r.URL.Path)

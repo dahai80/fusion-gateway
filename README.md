@@ -106,7 +106,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `/readyz` | GET | Readiness probe (circuit breaker + health + GPU memory + queue depth + success rate) |
 | `/livez` | GET | Liveness probe |
 | `/v1/status` | GET | Detailed status (hardware, circuit breakers, stats) |
-| `/metrics` | GET | Prometheus metrics |
+| `/metrics` | GET | Prometheus metrics (requires `master_key` auth) |
 | `/v1/images/generations` | POST | Image generation (cloud-only, OpenAI-compatible) |
 | `/v1/messages` | POST | Anthropic Messages API (native format + auto-convert to OpenAI) |
 | `/v1/audio/transcriptions` | POST | Audio transcription (Whisper-compatible, cloud-only) |
@@ -325,8 +325,8 @@ semantic_cache:
     max_entries: 5000
 ```
 
-- Default embedding: deterministic hash-based 128-dim vectors (no model dependency)
-- Pluggable `EmbedFunc` — swap to any embedding API for better similarity
+- Requires `EmbedFunc` to be set — disabled when no embedding function provided (no pseudo-embedding fallback)
+- Pluggable `EmbedFunc` — swap to any embedding API for similarity
 - 30-minute TTL, automatic expiry eviction
 
 ## Prompt Injection Detection
@@ -406,7 +406,7 @@ deploy/
 │   ├── ingress.yaml                   # Nginx Ingress + TLS
 │   └── networkpolicy.yaml             # Deny-all + allow intra-namespace
 ├── helm/fusion-gateway/
-│   ├── Chart.yaml                     # Helm chart v0.6.0
+│   ├── Chart.yaml                     # Helm chart v0.6.2
 │   ├── values.yaml                    # Full values with HPA/PDB/Ingress/SA/Secret
 │   └── templates/                     # All resource templates
 └── terraform/
@@ -581,9 +581,9 @@ Config changes are also audited when `observability.config_audit_log: true` — 
 |----------|--------|-------------|
 | `/admin/gc` | POST | Trigger GC on fusion-mlx. Queues if in-flight > 0 (returns 202). Executes immediately if idle (returns 200). |
 | `/admin/config/reload` | POST | Trigger config reload |
-| `/debug/pprof/` | GET | Go pprof profiling index |
-| `/debug/pprof/profile` | GET | CPU profile |
-| `/debug/pprof/trace` | GET | Execution trace |
+| `/debug/pprof/` | GET | Go pprof profiling index (requires `enable_pprof` + `master_key`) |
+| `/debug/pprof/profile` | GET | CPU profile (requires `enable_pprof` + `master_key`) |
+| `/debug/pprof/trace` | GET | Execution trace (requires `enable_pprof` + `master_key`) |
 
 ## Safe GC
 
@@ -656,6 +656,59 @@ config.example.yaml   Example configuration
 | Analytics | Token usage trends, cost tracking, model distribution, latency/error stats |
 
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
+
+## Audit Fixes
+
+### v0.6.2 — Architecture & Robustness
+
+v0.6.2 addresses architecture, concurrency, and maintainability findings from the full audit:
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Unified Principal auth model** (硬伤1) | Three separate auth context systems (APIKey, OIDC, RBAC) unified into a single `Principal` struct with one context key. `EnsurePrincipal` pattern — lazy-create on first middleware access, subsequent middlewares populate fields. All accessor functions maintain backward-compatible signatures. |
+| 2 | **Cache runtime config update** (硬伤2) | Cache `UpdateConfig()` method for hot-reload of TTL, maxEntries, maxBytes without restart. |
+| 3 | **Middleware chain built once** (M1) | Middleware chain constructed once at startup as `func(http.Handler) http.Handler` composition, rebuilt on reload — eliminates per-request re-composition overhead and closure variable capture bugs. |
+| 4 | **safeGo panic recovery** (M2) | All background goroutines (cache eviction, hardware collection, rate limiter cleanup, model refresh) use `safego.Go()` with `recover()` + structured logging — prevents silent goroutine crashes. |
+| 5 | **Unknown backend fail-fast** (M3) | `BuildProviders` returns error on unknown backend type instead of silent `slog.Warn + continue`. Prevents misconfigured backends from being silently skipped. |
+| 6 | **Multimodal prompt injection** (L7) | Prompt injection detection extracts text from `image_url`, `input_audio`, `image` multimodal content objects and handles `[]interface{}` prompt fields. |
+| 7 | **Per-key mutex for rate limiter** (L2) | `sync.Map` with per-key mutex eliminates global lock contention under high-concurrency rate limiting. |
+| 8 | **P95 result caching** (P3) | LatencyTracker caches P95 result with TTL — avoids re-computing quickselect on every request when window hasn't changed. |
+| 9 | **Runtime backend switch fallback** (A4) | Local backend failure triggers cloud fallback at runtime — resilient degradation without manual intervention. |
+
+#### Remaining (P2 — Architectural)
+
+| # | Finding | Scope |
+|---|---------|-------|
+| A1 | Global singleton → dependency injection | oidcProvider, jwtSecret — requires DI framework or wire-up refactor |
+| A2 | Server god object splitting | Break server.go into per-domain files |
+| A3 | Persistent storage (Redis/Postgres) | Replace in-memory stores for multi-instance deployments |
+
+### v0.6.1 — Security & Correctness
+
+v0.6.1 addresses security and correctness issues identified in a full audit:
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | Admin auth requires JWT secret + users map | `admin.jwt_secret` (min 32 chars) and `admin.users` map are now required when `admin.enabled=true`. Hard-coded credentials removed. |
+| 2 | Cluster shared_token required | Cluster nodes must authenticate via `cluster.shared_token`. Unauthenticated node requests are rejected. |
+| 3 | Semantic cache disabled without embedding function | No more deterministic hash-based pseudo-embedding fallback. Semantic cache is skipped when no `EmbedFunc` is configured, preventing false similarity matches. |
+| 4 | Config reload has rollback semantics | Hot-reload handlers run before the config snapshot is committed. If any handler fails, the old config is retained — no partial application. |
+| 5 | /metrics requires master_key | The `/metrics` endpoint now enforces `master_key` authentication. Unauthenticated access returns 401. |
+| 6 | pprof disabled by default | `/debug/pprof/*` endpoints are off unless `enable_pprof: true` is set in config. Even when enabled, `master_key` auth is required. |
+| 7 | Cache.Get uses RLock | Fast-path cache reads use `sync.RWMutex` RLock instead of full Lock, eliminating read contention under high QPS. |
+| 8 | Admin password validation | Admin passwords must be at least 8 characters. Shorter passwords are rejected at login and in config validation. |
+| 9 | Unknown backend types skip registration | Backends with unrecognized `type` are logged as warnings and skipped during pool initialization, rather than causing a crash. |
+| 10 | Empty prompts route to local | Requests with empty prompt content route to local backend instead of consuming cloud quota. |
+| 11 | Batch.Get returns deep copy | `Batch.Get()` returns a deep copy of the batch record to prevent data races when concurrent goroutines access the same entry. |
+| 12 | Multimodal content in injection detection | Prompt injection detection now properly extracts text from multimodal content arrays (image+text), not just plain string prompts. |
+
+### Breaking Changes (v0.6.1)
+
+- `admin.jwt_secret` is now **required** (min 32 chars) when admin is enabled
+- `admin.users` map is now **required** when admin is enabled — the hard-coded `admin/admin` credential is removed
+- `/metrics` endpoint requires `master_key` query parameter or header
+- `/debug/pprof/*` requires explicit `enable_pprof: true` in config
+- Semantic cache will not activate unless an `EmbedFunc` is provided
 
 ## Fusion Ecosystem
 

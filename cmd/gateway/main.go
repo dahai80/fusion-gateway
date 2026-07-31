@@ -6,6 +6,7 @@ import (
     "log/slog"
     "os"
     "os/signal"
+    "runtime/debug"
     "syscall"
     "time"
 
@@ -18,6 +19,22 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/server"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
+
+// safeGo launches a goroutine with panic recovery to prevent process crash
+func safeGo(name string, fn func()) {
+    go func() {
+        defer func() {
+            if r := recover(); r != nil {
+                slog.Error("goroutine panic recovered",
+                    "goroutine", name,
+                    "panic", r,
+                    "stack", string(debug.Stack()),
+                )
+            }
+        }()
+        fn()
+    }()
+}
 
 func main() {
     configPath := flag.String("config", "config.yaml", "path to config file")
@@ -67,7 +84,8 @@ func main() {
 
         modelCtx, modelCancel := context.WithCancel(context.Background())
         defer modelCancel()
-        go func() {
+        // M2 fix: use safeGo for panic recovery on background goroutines
+        safeGo("refresh_model_set", func() {
             mlxProvider.RefreshModelSet(modelCtx)
             ticker := time.NewTicker(60 * time.Second)
             defer ticker.Stop()
@@ -79,7 +97,7 @@ func main() {
                     return
                 }
             }
-        }()
+        })
 
         mlxProvider.StartIdleGCTimer(stopCh)
     }
@@ -116,19 +134,26 @@ func main() {
         if discovery != nil && newSnap.Config.Cluster.Enabled {
             discovery.UpdateConfig(newSnap.Config.Cluster)
         }
+        // 硬伤2 fix: update cache config on reload
+        if srv.Cache() != nil {
+            srv.Cache().UpdateConfig(newSnap.Config.Cache)
+        }
+        // M1 fix: rebuild middleware chain on reload
+        srv.RebuildMiddlewareChain(newSnap)
     })
 
-    go config.WatchAndReload(*configPath)
+    safeGo("config_watch_reload", func() { config.WatchAndReload(*configPath) })
 
     quit := make(chan os.Signal, 1)
     signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-    go func() {
+    // M2 fix: use safeGo for server goroutine
+    safeGo("server_start", func() {
         if err := srv.Start(); err != nil {
             slog.Error("server error", "error", err)
             quit <- syscall.SIGTERM
         }
-    }()
+    })
 
     sig := <-quit
     slog.Info("shutting down", "signal", sig.String())

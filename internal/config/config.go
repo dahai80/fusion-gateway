@@ -2,6 +2,7 @@ package config
 
 import (
     "fmt"
+	"strings"
     "sync"
     "sync/atomic"
     "time"
@@ -517,6 +518,24 @@ func validate(cfg *Config) error {
             if len(password) < 8 {
                 return fmt.Errorf("admin user %q password must be at least 8 characters, got %d", username, len(password))
             }
+        }
+    }
+
+    // V2 fix: validate routing config
+    if cfg.Routing.LocalPriority.MaxConcurrent < 0 {
+        return fmt.Errorf("max_concurrent must be non-negative, got %d", cfg.Routing.LocalPriority.MaxConcurrent)
+    }
+    if cfg.Cache.MaxMemoryMB < 0 {
+        return fmt.Errorf("cache.max_memory_mb must be non-negative, got %d", cfg.Cache.MaxMemoryMB)
+    }
+    if cfg.Cache.MaxEntries < 0 {
+        return fmt.Errorf("cache.max_entries must be non-negative, got %d", cfg.Cache.MaxEntries)
+    }
+
+    // V2 fix: validate cluster node addresses
+    for _, node := range cfg.Cluster.Nodes {
+        if node.Address != "" && !strings.HasPrefix(node.Address, "http://") && !strings.HasPrefix(node.Address, "https://") {
+            return fmt.Errorf("cluster node %q address must start with http:// or https://, got %q", node.ID, node.Address)
         }
     }
 

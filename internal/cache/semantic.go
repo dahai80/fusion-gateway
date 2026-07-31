@@ -133,8 +133,11 @@ func (sc *SemanticCache) Store(prompt string, model string, response json.RawMes
     }
     sc.mu.Lock()
     defer sc.mu.Unlock()
+    // P2 fix: evict oldest entries without slice head-delete memory leak
     for len(sc.entries) >= sc.maxEntries {
-        sc.entries = sc.entries[1:]
+        copy(sc.entries, sc.entries[1:])
+        sc.entries[len(sc.entries)-1] = nil
+        sc.entries = sc.entries[:len(sc.entries)-1]
     }
     entry := &SemanticEntry{
         ID:        ComputeCacheKey(model, prompt, nil, nil, nil),

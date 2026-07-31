@@ -82,12 +82,30 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusBadRequest, "invalid JSON")
             return
         }
+        // V1 fix: validate key fields
         if key.Name == "" {
             writeError(w, http.StatusBadRequest, "name is required")
             return
         }
+        if key.QuotaLimit < 0 {
+            writeError(w, http.StatusBadRequest, "quota_limit must be non-negative")
+            return
+        }
+        if key.RPM < 0 {
+            writeError(w, http.StatusBadRequest, "rpm must be non-negative")
+            return
+        }
+        if key.TPM < 0 {
+            writeError(w, http.StatusBadRequest, "tpm must be non-negative")
+            return
+        }
+        if key.BudgetLimit < 0 {
+            writeError(w, http.StatusBadRequest, "budget_limit must be non-negative")
+            return
+        }
         if err := h.store.CreateKey(&key); err != nil {
-            writeError(w, http.StatusConflict, err.Error())
+            slog.Error("failed to create key", "error", err)
+            writeError(w, http.StatusConflict, "key creation failed")
             return
         }
         writeJSON(w, http.StatusCreated, key)
