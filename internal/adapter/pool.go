@@ -113,6 +113,31 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         case "openrouter":
             provider := NewOpenRouterProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered openrouter provider", "name", name, "base_url", backendCfg.BaseURL)
+        // Chinese LLM providers - user instruction: "这部分适配工作，要马上启动落地"
+        case "dashscope":
+            provider := NewDashScopeProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered dashscope provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "moonshot":
+            provider := NewMoonshotProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered moonshot provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "zhipu":
+            provider := NewZhipuProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered zhipu provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "minimax":
+            provider := NewMinimaxProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered minimax provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "baichuan":
+            provider := NewBaichuanProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered baichuan provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "hunyuan":
+            provider := NewHunyuanProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered hunyuan provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "stepfun":
+            provider := NewStepFunProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered stepfun provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "yi":
+            provider := NewYiProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered yi provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
             slog.Warn("unknown backend type", "name", name, "type", backendCfg.Type)
         }

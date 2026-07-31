@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fusion-gateway
+  namespace: fusion-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fusion-gateway

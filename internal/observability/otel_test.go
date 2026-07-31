@@ -13,7 +13,7 @@ func TestInitTracing_Disabled(t *testing.T) {
     if shutdown == nil {
         t.Error("expected shutdown function")
     }
-    shutdown(context.Background())
+    _ = shutdown(context.Background())
 }
 
 func TestInitTracing_InvalidProtocol(t *testing.T) {

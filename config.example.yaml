@@ -77,6 +77,13 @@ cache:
     max_entries: 10000                     # Max cached responses
     ttl: 5m                               # Cache TTL
     max_memory_mb: 256                     # Max memory for cache (0 = unlimited)
+    backend: "local"                       # local | redis
+    redis:                                 # Redis config (only when backend=redis)
+        addr: "localhost:6379"
+        password: ""
+        db: 0
+        pool_size: 10
+    warmup_file: ""                        # JSON file to preload cache at startup
 
 cost:
     enabled: true
@@ -141,6 +148,54 @@ backends:
         type: "openrouter"
         base_url: "https://openrouter.ai/api/v1"
         api_key: "your-openrouter-key"
+        timeout: 60s
+        enabled: false
+    dashscope:
+        type: "dashscope"
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        api_key: "your-dashscope-key"
+        timeout: 60s
+        enabled: false
+    moonshot:
+        type: "moonshot"
+        base_url: "https://api.moonshot.cn/v1"
+        api_key: "your-moonshot-key"
+        timeout: 60s
+        enabled: false
+    zhipu:
+        type: "zhipu"
+        base_url: "https://open.bigmodel.cn/api/paas/v4"
+        api_key: "your-zhipu-key"
+        timeout: 60s
+        enabled: false
+    minimax:
+        type: "minimax"
+        base_url: "https://api.minimax.chat/v1"
+        api_key: "your-minimax-key"
+        timeout: 60s
+        enabled: false
+    baichuan:
+        type: "baichuan"
+        base_url: "https://api.baichuan-ai.com/v1"
+        api_key: "your-baichuan-key"
+        timeout: 60s
+        enabled: false
+    hunyuan:
+        type: "hunyuan"
+        base_url: "https://api.hunyuan.cloud.tencent.com/v1"
+        api_key: "your-hunyuan-key"
+        timeout: 60s
+        enabled: false
+    stepfun:
+        type: "stepfun"
+        base_url: "https://api.stepfun.com/v1"
+        api_key: "your-stepfun-key"
+        timeout: 60s
+        enabled: false
+    yi:
+        type: "yi"
+        base_url: "https://api.lingyiwanwu.com/v1"
+        api_key: "your-yi-key"
         timeout: 60s
         enabled: false
 

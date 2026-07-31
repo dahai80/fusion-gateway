@@ -428,7 +428,7 @@ func OpenAIToAnthropic(req *ChatRequest) *AnthropicRequest {
             Role:    msg.Role,
             Content: convertContentToBlocks(msg.Content),
         }
-        if msg.Role == "assistant" && (antMsg.Content == nil || len(antMsg.Content) == 0) {
+        if msg.Role == "assistant" && len(antMsg.Content) == 0 {
             antMsg.Content = []AnthropicContentBlock{{Type: "text", Text: contentToString(msg.Content)}}
         }
         messages = append(messages, antMsg)
@@ -591,7 +591,7 @@ func anthropicBlocksToContent(blocks []AnthropicContentBlock) interface{} {
         default:
             part, _ := json.Marshal(b)
             var raw interface{}
-            json.Unmarshal(part, &raw)
+            _ = json.Unmarshal(part, &raw)
             parts = append(parts, raw)
         }
     }

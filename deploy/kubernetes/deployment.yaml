@@ -1,14 +1,12 @@
-# K8s deployment for v0.5.0 Task #72.
-# User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "deploy/kubernetes/".
-# Used by: kubectl apply -f deploy/kubernetes/
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fusion-gateway
+  namespace: fusion-gateway
   labels:
     app: fusion-gateway
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: fusion-gateway
@@ -16,7 +14,25 @@ spec:
     metadata:
       labels:
         app: fusion-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8100"
+        prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: fusion-gateway
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: fusion-gateway
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: fusion-gateway
       containers:
         - name: fusion-gateway
           image: fusion-gateway:latest
@@ -25,6 +41,12 @@ spec:
           env:
             - name: CONFIG_PATH
               value: /etc/fusion-gateway/config.yaml
+            - name: FG_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fusion-gateway-secrets
+                  key: master_key
+                  optional: true
           volumeMounts:
             - name: config
               mountPath: /etc/fusion-gateway

@@ -21,6 +21,7 @@ Heterogeneous Inference Pool
 |- Local: fusion-mlx (:11434) / llama.cpp
 |- Private: vLLM-ascend / vLLM-cuda
 |- Cloud: Volcengine / Qianfan / Claude / OpenAI / DeepSeek / OpenRouter
+|- Cloud (China): DashScope / Moonshot / Zhipu / Minimax / Baichuan / Hunyuan / StepFun / Yi
 ```
 
 ## Quick Start
@@ -54,6 +55,9 @@ See `config.example.yaml` for full reference. Key settings:
 | `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests |
 | `route.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
 | `cache.enabled` | true | Enable LRU response cache for non-streaming |
+| `cache.backend` | local | Cache backend: local (LRU) or redis |
+| `cache.redis.addr` | localhost:6379 | Redis address (when backend=redis) |
+| `cache.warmup_file` | "" | JSON file to preload cache at startup |
 | `cache.ttl` | 5m | Cache entry TTL |
 | `cost.enabled` | true | Enable cost tracking with built-in pricing |
 | `pii.enabled` | false | Enable PII detection on request content |
@@ -370,28 +374,121 @@ batch:
 
 ## Kubernetes & Helm Deployment
 
-Deploy manifests included:
+### Infrastructure Resources
+
+| Resource | Manifest | Helm | Description |
+|----------|----------|------|-------------|
+| Deployment | ✅ | ✅ | 2 replicas, topology spread, probes |
+| Service | ✅ | ✅ | ClusterIP :8100 |
+| ConfigMap | ✅ | ✅ | Non-sensitive config |
+| Secret | ✅ | ✅ | master_key, api_keys |
+| ServiceAccount + RBAC | ✅ | ✅ | Config reader role |
+| HPA | ✅ | ✅ | CPU 70% / Memory 80%, 2–10 replicas |
+| PDB | ✅ | ✅ | minAvailable: 1 |
+| Ingress | ✅ | ✅ | Nginx + TLS (cert-manager optional) |
+| NetworkPolicy | ✅ | ✅ | Deny-all + allow intra-namespace |
+| Namespace | ✅ | — | Dedicated namespace |
+
+### Directory Structure
 
 ```
 deploy/
-├── Dockerfile                    # Multi-stage build (Go builder + Alpine runtime)
+├── Dockerfile                         # Multi-stage build (Go builder + Alpine runtime)
 ├── kubernetes/
-│   ├── deployment.yaml           # K8s Deployment with liveness/readiness probes
-│   ├── service.yaml              # ClusterIP Service on :8100
-│   └── configmap.yaml            # Default config mounted at /etc/fusion-gateway
-└── helm/fusion-gateway/
-    ├── Chart.yaml                # Helm chart v0.5.0
-    ├── values.yaml               # Default values
-    └── templates/                # Deployment, Service, ConfigMap templates
+│   ├── namespace.yaml                 # Namespace: fusion-gateway
+│   ├── serviceaccount.yaml            # SA + Role + RoleBinding
+│   ├── secret.yaml                    # Sensitive keys (master_key, api_keys)
+│   ├── deployment.yaml                # 2 replicas, topology spread, SA, secretRef
+│   ├── service.yaml                   # ClusterIP :8100
+│   ├── configmap.yaml                 # Non-sensitive config
+│   ├── hpa.yaml                       # HPA: CPU 70% / Memory 80%
+│   ├── pdb.yaml                       # PDB: minAvailable 1
+│   ├── ingress.yaml                   # Nginx Ingress + TLS
+│   └── networkpolicy.yaml             # Deny-all + allow intra-namespace
+├── helm/fusion-gateway/
+│   ├── Chart.yaml                     # Helm chart v0.6.0
+│   ├── values.yaml                    # Full values with HPA/PDB/Ingress/SA/Secret
+│   └── templates/                     # All resource templates
+└── terraform/
+    ├── versions.tf                    # Terraform >= 1.5, providers
+    ├── variables.tf                   # Common variables
+    ├── outputs.tf                     # Endpoint outputs
+    ├── aws/                           # AWS EKS (VPC + EKS + IRSA)
+    │   ├── main.tf                    # VPC module
+    │   ├── eks.tf                     # EKS module + K8s/Helm providers
+    │   ├── irsa.tf                    # IAM Role for ServiceAccount
+    │   ├── variables.tf
+    │   └── outputs.tf
+    ├── gcp/                           # GCP GKE Autopilot
+    │   ├── main.tf                    # GKE Autopilot module + providers
+    │   ├── variables.tf
+    │   └── outputs.tf
+    └── modules/helm-release/          # Reusable Helm release module
+        ├── main.tf
+        ├── variables.tf
+        └── outputs.tf
 ```
+
+### Quick Deploy
 
 ```bash
-# K8s
+# Raw K8s manifests
 kubectl apply -f deploy/kubernetes/
 
-# Helm
+# Helm (minimal)
 helm install fusion-gateway deploy/helm/fusion-gateway/
+
+# Helm (with HPA, Ingress, PDB enabled)
+helm install fusion-gateway deploy/helm/fusion-gateway/ \
+  --set hpa.enabled=true \
+  --set pdb.enabled=true \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=gw.example.com \
+  --set secrets.master_key=your-secure-key
 ```
+
+### Terraform Deployment
+
+```bash
+# AWS EKS
+cd deploy/terraform/aws
+terraform init
+terraform apply -var="master_key=your-secure-key"
+
+# GCP GKE Autopilot
+cd deploy/terraform/gcp
+terraform init
+terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
+```
+
+### HPA Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `hpa.enabled` | false | Enable HorizontalPodAutoscaler |
+| `hpa.minReplicas` | 2 | Minimum replica count |
+| `hpa.maxReplicas` | 10 | Maximum replica count |
+| `hpa.targetCPUUtilizationPercentage` | 70 | CPU threshold for scale-up |
+| `hpa.targetMemoryUtilizationPercentage` | 80 | Memory threshold for scale-up |
+
+For custom metrics (QPS, latency), add Prometheus Adapter and extend HPA with `metrics` blocks.
+
+### PDB Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pdb.enabled` | false | Enable PodDisruptionBudget |
+| `pdb.minAvailable` | 1 | Minimum available pods during disruption |
+
+### Ingress Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ingress.enabled` | false | Enable Ingress |
+| `ingress.className` | nginx | Ingress class |
+| `ingress.tls` | [] | TLS configuration |
+
+Add cert-manager annotation for automatic TLS: `cert-manager.io/cluster-issuer: letsencrypt-prod`
 
 ## Admin Dashboard
 

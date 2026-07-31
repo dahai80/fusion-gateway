@@ -107,6 +107,16 @@ type CacheConfig struct {
     MaxEntries   int           `mapstructure:"max_entries"`
     TTL          time.Duration `mapstructure:"ttl"`
     MaxMemoryMB  int           `mapstructure:"max_memory_mb"`
+    Backend      string        `mapstructure:"backend"`
+    Redis        RedisConfig   `mapstructure:"redis"`
+    WarmupFile   string        `mapstructure:"warmup_file"`
+}
+
+type RedisConfig struct {
+    Addr     string `mapstructure:"addr"`
+    Password string `mapstructure:"password"`
+    DB       int    `mapstructure:"db"`
+    PoolSize int    `mapstructure:"pool_size"`
 }
 
 type CostConfig struct {

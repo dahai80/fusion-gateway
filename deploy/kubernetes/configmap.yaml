@@ -1,17 +1,15 @@
-# K8s configmap for v0.5.0 Task #72.
-# User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "deploy/kubernetes/".
-# Used by: kubectl apply -f deploy/kubernetes/
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: fusion-gateway-config
+  namespace: fusion-gateway
 data:
   config.yaml: |
     server:
       host: "0.0.0.0"
       port: 8100
     auth:
-      master_key: "CHANGE_ME"
+      master_key: "${FG_MASTER_KEY}"
     route:
       enable_hardware_judge: false
       token_threshold: 50

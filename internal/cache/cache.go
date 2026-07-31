@@ -178,6 +178,17 @@ func (c *Cache) Stats() (hits, misses int64, size int) {
     return c.hits, c.misses, len(c.items)
 }
 
+func (c *Cache) Delete(key string) {
+    if c == nil {
+        return
+    }
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if elem, ok := c.items[key]; ok {
+        c.removeElement(elem)
+    }
+}
+
 func ComputeCacheKey(model string, messages interface{}, temperature *float64, maxTokens *int, topP *float64) string {
     return cacheKey(model, messages, map[string]interface{}{
         "temperature": temperature,

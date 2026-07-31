@@ -1403,7 +1403,7 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         return
     }
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(resp)
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p *adapter.AnthropicProvider, req *adapter.AnthropicRequest) {
@@ -1439,7 +1439,7 @@ func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Failed to parse multipart form","type":"invalid_request"}}`, http.StatusBadRequest)
         return
     }
-    defer r.MultipartForm.RemoveAll()
+    defer func() { _ = r.MultipartForm.RemoveAll() }()
 
     model := r.FormValue("model")
     if model == "" { model = "whisper-1" }
@@ -1460,7 +1460,7 @@ func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
             return
         }
         w.Header().Set("Content-Type", "application/json")
-        w.Write(result)
+        _, _ = w.Write(result)
         return
     }
     http.Error(w, `{"error":{"message":"Provider does not support transcription","type":"invalid_request"}}`, http.StatusBadRequest)
@@ -1504,7 +1504,7 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
             return
         }
         w.Header().Set("Content-Type", contentType)
-        w.Write(audioData)
+        _, _ = w.Write(audioData)
         return
     }
     http.Error(w, `{"error":{"message":"Provider does not support speech","type":"invalid_request"}}`, http.StatusBadRequest)
@@ -1547,7 +1547,7 @@ func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
             return
         }
         w.Header().Set("Content-Type", "application/json")
-        w.Write(result)
+        _, _ = w.Write(result)
         return
     }
     http.Error(w, `{"error":{"message":"Provider does not support moderation","type":"invalid_request"}}`, http.StatusBadRequest)

@@ -11,8 +11,12 @@ import (
 func TestLogStore_AppendAndQuery(t *testing.T) {
     ls := NewLogStore(100)
 
-    ls.Append(&store.RequestLog{Model: "gpt-4", InputTokens: 100, OutputTokens: 50, TotalTokens: 150})
-    ls.Append(&store.RequestLog{Model: "claude-3", InputTokens: 200, OutputTokens: 100, TotalTokens: 300})
+    if err := ls.Append(&store.RequestLog{Model: "gpt-4", InputTokens: 100, OutputTokens: 50, TotalTokens: 150}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
+    if err := ls.Append(&store.RequestLog{Model: "claude-3", InputTokens: 200, OutputTokens: 100, TotalTokens: 300}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
 
     filter := store.LogFilter{Page: 1, PageSize: 10}
     logs, total, err := ls.Query(filter)
@@ -31,7 +35,9 @@ func TestLogStore_RingBuffer(t *testing.T) {
     ls := NewLogStore(5)
 
     for i := 0; i < 10; i++ {
-        ls.Append(&store.RequestLog{Model: "test", InputTokens: i})
+        if err := ls.Append(&store.RequestLog{Model: "test", InputTokens: i}); err != nil {
+            t.Fatalf("Append failed: %v", err)
+        }
     }
 
     filter := store.LogFilter{Page: 1, PageSize: 10}
@@ -44,8 +50,12 @@ func TestLogStore_RingBuffer(t *testing.T) {
 func TestLogStore_Filter(t *testing.T) {
     ls := NewLogStore(100)
 
-    ls.Append(&store.RequestLog{Model: "gpt-4", ChannelType: "cloud", IsSuccess: true})
-    ls.Append(&store.RequestLog{Model: "claude-3", ChannelType: "local", IsSuccess: false, StatusCode: 500})
+    if err := ls.Append(&store.RequestLog{Model: "gpt-4", ChannelType: "cloud", IsSuccess: true}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
+    if err := ls.Append(&store.RequestLog{Model: "claude-3", ChannelType: "local", IsSuccess: false, StatusCode: 500}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
 
     filter := store.LogFilter{Model: "gpt-4", Page: 1, PageSize: 10}
     logs, total, _ := ls.Query(filter)
@@ -59,7 +69,9 @@ func TestLogStore_Filter(t *testing.T) {
 
 func TestLogStore_Export(t *testing.T) {
     ls := NewLogStore(100)
-    ls.Append(&store.RequestLog{Model: "gpt-4", InputTokens: 100})
+    if err := ls.Append(&store.RequestLog{Model: "gpt-4", InputTokens: 100}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
 
     filter := store.LogFilter{Page: 1, PageSize: 10}
 
@@ -143,7 +155,7 @@ func TestAnalyticsStore(t *testing.T) {
     as := NewAnalyticsStore(ls)
 
     now := time.Now()
-    ls.Append(&store.RequestLog{
+    if err := ls.Append(&store.RequestLog{
         Model:        "gpt-4",
         ChannelType:  "cloud",
         InputTokens:  100,
@@ -153,8 +165,10 @@ func TestAnalyticsStore(t *testing.T) {
         Latency:      1.5,
         IsSuccess:    true,
         Timestamp:    now,
-    })
-    ls.Append(&store.RequestLog{
+    }); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
+    if err := ls.Append(&store.RequestLog{
         Model:        "gpt-4",
         ChannelType:  "cloud",
         InputTokens:  200,
@@ -164,7 +178,9 @@ func TestAnalyticsStore(t *testing.T) {
         Latency:      2.5,
         IsSuccess:    true,
         Timestamp:    now,
-    })
+    }); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
 
     from := now.Add(-time.Hour)
     to := now.Add(time.Hour)
@@ -201,8 +217,12 @@ func TestDashboardStore(t *testing.T) {
     ls := NewLogStore(100)
     ds := NewDashboardStore(ls)
 
-    ls.Append(&store.RequestLog{ChannelType: "local", TotalTokens: 100, Cost: 0.01})
-    ls.Append(&store.RequestLog{ChannelType: "cloud", TotalTokens: 200, Cost: 0.02})
+    if err := ls.Append(&store.RequestLog{ChannelType: "local", TotalTokens: 100, Cost: 0.01}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
+    if err := ls.Append(&store.RequestLog{ChannelType: "cloud", TotalTokens: 200, Cost: 0.02}); err != nil {
+        t.Fatalf("Append failed: %v", err)
+    }
 
     overview, err := ds.Overview()
     if err != nil {
@@ -220,7 +240,9 @@ func TestQuotaStore(t *testing.T) {
     ks := NewKeyStore()
     qs := NewQuotaStore(ks)
 
-    ks.Create(&store.APIKeyEntry{Name: "test-key", BudgetLimit: 100})
+    if err := ks.Create(&store.APIKeyEntry{Name: "test-key", BudgetLimit: 100}); err != nil {
+        t.Fatalf("Create failed: %v", err)
+    }
 
     used, limit, exceeded, err := qs.Check("test-key")
     if err != nil {
@@ -242,7 +264,9 @@ func TestQuotaStore(t *testing.T) {
         t.Fatal("should not be exceeded yet")
     }
 
-    qs.Deduct("test-key", 60)
+    if err := qs.Deduct("test-key", 60); err != nil {
+        t.Fatalf("Deduct failed: %v", err)
+    }
     _, _, exceeded, _ = qs.Check("test-key")
     if !exceeded {
         t.Fatal("should be exceeded now")
@@ -252,7 +276,9 @@ func TestQuotaStore(t *testing.T) {
 func TestMemoryStore_FullIntegration(t *testing.T) {
     ms := NewMemoryStore(100)
 
-    ms.AppendLog(&store.RequestLog{Model: "gpt-4", InputTokens: 100, OutputTokens: 50, TotalTokens: 150})
+    if err := ms.AppendLog(&store.RequestLog{Model: "gpt-4", InputTokens: 100, OutputTokens: 50, TotalTokens: 150}); err != nil {
+        t.Fatalf("AppendLog failed: %v", err)
+    }
 
     filter := store.LogFilter{Page: 1, PageSize: 10}
     _, total, _ := ms.QueryLogs(filter)
@@ -260,13 +286,17 @@ func TestMemoryStore_FullIntegration(t *testing.T) {
         t.Fatalf("expected 1, got %d", total)
     }
 
-    ms.CreateKey(&store.APIKeyEntry{Name: "key1"})
+    if err := ms.CreateKey(&store.APIKeyEntry{Name: "key1"}); err != nil {
+        t.Fatalf("CreateKey failed: %v", err)
+    }
     keys, _ := ms.ListKeys()
     if len(keys) != 1 {
         t.Fatalf("expected 1 key, got %d", len(keys))
     }
 
-    ms.CreateChannel(&store.ChannelEntry{Name: "ch1"})
+    if err := ms.CreateChannel(&store.ChannelEntry{Name: "ch1"}); err != nil {
+        t.Fatalf("CreateChannel failed: %v", err)
+    }
     channels, _ := ms.ListChannels()
     if len(channels) != 1 {
         t.Fatalf("expected 1 channel, got %d", len(channels))

@@ -260,7 +260,7 @@ func (h *Handler) handleLogsExport(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
         w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
     }
-    w.Write(data)
+    _, _ = w.Write(data)
 }
 
 func (h *Handler) handleTokenStats(w http.ResponseWriter, r *http.Request) {
@@ -436,14 +436,14 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(status)
     if data != nil {
-        json.NewEncoder(w).Encode(data)
+        _ = json.NewEncoder(w).Encode(data)
     }
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(status)
-    json.NewEncoder(w).Encode(map[string]interface{}{
+    _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "error": map[string]string{
             "message": msg,
             "type":    fmt.Sprintf("http_%d", status),
