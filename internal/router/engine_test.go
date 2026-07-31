@@ -389,3 +389,153 @@ func TestIsRerankModel(t *testing.T) {
         }
     }
 }
+
+func TestResolveCloudByTier(t *testing.T) {
+    tests := []struct {
+        name   string
+        budget tokenizer.TokenBudget
+        metric string
+        rules  []config.TokenTierRule
+        want   string
+    }{
+        {
+            name:   "total_metric_first_rule_match",
+            budget: tokenizer.TokenBudget{InputTokens: 500, PredictOutputTokens: 200, TotalBudget: 700},
+            metric: "total",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 1000, Backend: "qianfan"},
+                {MaxTokens: 4000, Backend: "openai"},
+                {MaxTokens: 0, Backend: "claude"},
+            },
+            want: "qianfan",
+        },
+        {
+            name:   "total_metric_second_rule_match",
+            budget: tokenizer.TokenBudget{InputTokens: 2000, PredictOutputTokens: 1500, TotalBudget: 3500},
+            metric: "total",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 1000, Backend: "qianfan"},
+                {MaxTokens: 4000, Backend: "openai"},
+                {MaxTokens: 0, Backend: "claude"},
+            },
+            want: "openai",
+        },
+        {
+            name:   "total_metric_catch_all",
+            budget: tokenizer.TokenBudget{InputTokens: 5000, PredictOutputTokens: 3000, TotalBudget: 8000},
+            metric: "total",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 1000, Backend: "qianfan"},
+                {MaxTokens: 4000, Backend: "openai"},
+                {MaxTokens: 0, Backend: "claude"},
+            },
+            want: "claude",
+        },
+        {
+            name:   "input_metric",
+            budget: tokenizer.TokenBudget{InputTokens: 300, PredictOutputTokens: 2000, TotalBudget: 2300},
+            metric: "input",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 500, Backend: "qianfan"},
+                {MaxTokens: 0, Backend: "openai"},
+            },
+            want: "qianfan",
+        },
+        {
+            name:   "output_metric",
+            budget: tokenizer.TokenBudget{InputTokens: 100, PredictOutputTokens: 2000, TotalBudget: 2100},
+            metric: "output",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 500, Backend: "qianfan"},
+                {MaxTokens: 0, Backend: "openai"},
+            },
+            want: "openai",
+        },
+        {
+            name:   "no_match",
+            budget: tokenizer.TokenBudget{InputTokens: 100, TotalBudget: 200},
+            metric: "total",
+            rules: []config.TokenTierRule{
+                {MaxTokens: 50, Backend: "qianfan"},
+            },
+            want: "",
+        },
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            tier := config.TokenTierConfig{
+                Enabled: true,
+                Metric:  tt.metric,
+                Rules:   tt.rules,
+            }
+            got := resolveCloudByTier(tt.budget, tier)
+            if got != tt.want {
+                t.Errorf("resolveCloudByTier() = %q, want %q", got, tt.want)
+            }
+        })
+    }
+}
+
+func TestDecide_TokenTierRouting(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    cfg.Config.Routing.TokenTiers = config.TokenTierConfig{
+        Enabled: true,
+        Metric:  "total",
+        Rules: []config.TokenTierRule{
+            {MaxTokens: 2000, Backend: "qianfan"},
+            {MaxTokens: 0, Backend: "openai"},
+        },
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    t.Run("tier_matches_small_budget", func(t *testing.T) {
+        budget := tokenizer.TokenBudget{InputTokens: 500, TotalBudget: 800}
+        ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+        ctx = config.WithSnapshot(ctx, cfg)
+        req := &RouteRequest{Model: "test-model"}
+        dec := e.Decide(ctx, req)
+        if dec.Backend != CloudBackend {
+            t.Fatalf("expected cloud, got %s", dec.Backend)
+        }
+        if dec.CloudTarget != "qianfan" {
+            t.Errorf("expected cloud_target=qianfan, got %q", dec.CloudTarget)
+        }
+    })
+
+    t.Run("tier_matches_large_budget", func(t *testing.T) {
+        budget := tokenizer.TokenBudget{InputTokens: 3000, TotalBudget: 5000}
+        ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+        ctx = config.WithSnapshot(ctx, cfg)
+        req := &RouteRequest{Model: "test-model"}
+        dec := e.Decide(ctx, req)
+        if dec.Backend != CloudBackend {
+            t.Fatalf("expected cloud, got %s", dec.Backend)
+        }
+        if dec.CloudTarget != "openai" {
+            t.Errorf("expected cloud_target=openai, got %q", dec.CloudTarget)
+        }
+    })
+
+    t.Run("tiers_disabled_uses_default", func(t *testing.T) {
+        cfg2 := defaultTestSnapshot()
+        cfg2.Config.Routing.TokenThreshold = 100
+        cfg2.Config.Routing.TokenTiers = config.TokenTierConfig{Enabled: false}
+        e2 := NewEngine(cfg2, hw)
+        e2.SetLocalReady(true)
+
+        budget := tokenizer.TokenBudget{InputTokens: 500, TotalBudget: 800}
+        ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+        ctx = config.WithSnapshot(ctx, cfg2)
+        req := &RouteRequest{Model: "test-model"}
+        dec := e2.Decide(ctx, req)
+        if dec.Backend != CloudBackend {
+            t.Fatalf("expected cloud, got %s", dec.Backend)
+        }
+        if dec.CloudTarget != "" {
+            t.Errorf("expected empty cloud_target when tiers disabled, got %q", dec.CloudTarget)
+        }
+    })
+}

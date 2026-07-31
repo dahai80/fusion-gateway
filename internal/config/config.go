@@ -60,8 +60,20 @@ type NegotiationConfig struct {
     RouteHeaderValue        string `mapstructure:"route_header_value"`
 }
 
+type TokenTierRule struct {
+    MaxTokens int    `mapstructure:"max_tokens"`
+    Backend   string `mapstructure:"backend"`
+}
+
+type TokenTierConfig struct {
+    Enabled bool            `mapstructure:"enabled"`
+    Metric  string          `mapstructure:"metric"`
+    Rules   []TokenTierRule `mapstructure:"rules"`
+}
+
 type RoutingConfig struct {
     TokenThreshold int                  `mapstructure:"token_threshold"`
+    TokenTiers     TokenTierConfig      `mapstructure:"token_tiers"`
     LocalPriority  LocalPriorityConfig  `mapstructure:"local_priority"`
     CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
     Fallback       FallbackConfig       `mapstructure:"fallback"`
@@ -374,6 +386,10 @@ func DefaultConfig() Config {
         },
         Routing: RoutingConfig{
             TokenThreshold: 8000,
+            TokenTiers: TokenTierConfig{
+                Enabled: false,
+                Metric:  "total",
+            },
             LocalPriority: LocalPriorityConfig{
                 Enabled:               true,
                 MaxSystemMemoryRatio:  0.9,

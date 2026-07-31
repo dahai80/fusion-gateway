@@ -202,7 +202,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
             slog.Warn("cluster backend selected but no discovery or nodeID, falling back to cloud",
                 "node_id", decision.NodeID,
             )
-            provider = s.resolveCloudProvider(&req, w)
+            provider = s.resolveCloudProvider(decision, &req, w)
             if provider == nil {
                 return
             }
@@ -212,7 +212,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
                 slog.Warn("cluster node not found, falling back to cloud",
                     "node_id", decision.NodeID,
                 )
-                provider = s.resolveCloudProvider(&req, w)
+                provider = s.resolveCloudProvider(decision, &req, w)
                 if provider == nil {
                     return
                 }
@@ -227,7 +227,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
 
     default:
-        provider = s.resolveCloudProvider(&req, w)
+        provider = s.resolveCloudProvider(decision, &req, w)
         if provider == nil {
             return
         }
@@ -242,13 +242,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-func (s *Server) resolveCloudProvider(req *adapter.ChatRequest, w http.ResponseWriter) adapter.Provider {
-    cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
+func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapter.ChatRequest, w http.ResponseWriter) adapter.Provider {
+    cloudBackend := ""
+    if decision != nil && decision.CloudTarget != "" {
+        cloudBackend = decision.CloudTarget
+        slog.Info("using token tier cloud target", "cloud_target", cloudBackend)
+    }
+    if cloudBackend == "" {
+        cloudBackend = s.cfg.Config.Routing.Fallback.CloudDefault
+    }
     if cloudBackend == "" {
         cloudBackend = "openai"
     }
 
-    if s.cfg.Config.Routing.Fallback.Enabled && s.cfg.Config.Routing.Fallback.ModelMapping != nil {
+    if req != nil && s.cfg.Config.Routing.Fallback.Enabled && s.cfg.Config.Routing.Fallback.ModelMapping != nil {
         if mapped, ok := s.cfg.Config.Routing.Fallback.ModelMapping[req.Model]; ok {
             slog.Info("model mapped for cloud routing",
                 "local_model", req.Model,
@@ -456,26 +463,16 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
             }
         }
         if provider == nil {
-            cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
-            if cloudBackend == "" {
-                cloudBackend = "openai"
-            }
-            p, ok := s.pool.Get(cloudBackend)
-            if !ok {
-                http.Error(w, `{"error":{"message":"Embedding backend not available"}}`, http.StatusServiceUnavailable)
+            p := s.resolveCloudProvider(decision, nil, w)
+            if p == nil {
                 return
             }
             provider = p
         }
 
     default:
-        cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
-        if cloudBackend == "" {
-            cloudBackend = "openai"
-        }
-        p, ok := s.pool.Get(cloudBackend)
-        if !ok {
-            http.Error(w, `{"error":{"message":"Cloud embedding backend not available"}}`, http.StatusServiceUnavailable)
+        p := s.resolveCloudProvider(decision, nil, w)
+        if p == nil {
             return
         }
         provider = p
@@ -539,26 +536,16 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
             }
         }
         if provider == nil {
-            cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
-            if cloudBackend == "" {
-                cloudBackend = "openai"
-            }
-            p, ok := s.pool.Get(cloudBackend)
-            if !ok {
-                http.Error(w, `{"error":{"message":"Rerank backend not available"}}`, http.StatusServiceUnavailable)
+            p := s.resolveCloudProvider(decision, nil, w)
+            if p == nil {
                 return
             }
             provider = p
         }
 
     default:
-        cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
-        if cloudBackend == "" {
-            cloudBackend = "openai"
-        }
-        p, ok := s.pool.Get(cloudBackend)
-        if !ok {
-            http.Error(w, `{"error":{"message":"Cloud rerank backend not available"}}`, http.StatusServiceUnavailable)
+        p := s.resolveCloudProvider(decision, nil, w)
+        if p == nil {
             return
         }
         provider = p

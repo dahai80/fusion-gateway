@@ -15,6 +15,16 @@ route:
     local_max_concurrent: 8
     swap_page_rate_threshold: 100
     gpu_memory_ratio_threshold: 0.9
+    token_tiers:
+        enabled: false
+        metric: "total"              # input | output | total
+        rules:                       # evaluated top-to-bottom, first match wins
+            # - max_tokens: 2000
+            #   backend: "qianfan"
+            # - max_tokens: 8000
+            #   backend: "openai"
+            # - max_tokens: 0        # 0 = no upper bound (catch-all)
+            #   backend: "openai"
     fallback:
         cloud_default: "openai"
     negotiation:

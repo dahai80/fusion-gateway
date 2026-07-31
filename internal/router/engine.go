@@ -29,9 +29,10 @@ const (
 )
 
 type RouteDecision struct {
-    Backend Backend
-    Reason  string
-    NodeID  string
+    Backend     Backend
+    Reason      string
+    NodeID      string
+    CloudTarget string
 }
 
 type RouteRequest struct {
@@ -275,7 +276,19 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     }
 
     if budget.InputTokens > cfg.Config.Routing.TokenThreshold {
-        return &RouteDecision{Backend: CloudBackend, Reason: "token_budget_exceeded"}
+        decision := &RouteDecision{Backend: CloudBackend, Reason: "token_budget_exceeded"}
+        if cfg.Config.Routing.TokenTiers.Enabled {
+            decision.CloudTarget = resolveCloudByTier(budget, cfg.Config.Routing.TokenTiers)
+            if decision.CloudTarget != "" {
+                decision.Reason = "token_budget_exceeded:tier:" + decision.CloudTarget
+                slog.Info("token tier matched",
+                    "cloud_target", decision.CloudTarget,
+                    "input_tokens", budget.InputTokens,
+                    "total_budget", budget.TotalBudget,
+                )
+            }
+        }
+        return decision
     }
 
     // P5: Concurrent limit
@@ -367,4 +380,36 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot) *RouteDecision {
 
     slog.Info("routing to cluster node", "node_id", nodeID, "strategy", strategy)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
+}
+
+func resolveCloudByTier(budget tokenizer.TokenBudget, tier config.TokenTierConfig) string {
+    var tokenValue int
+    switch tier.Metric {
+    case "input":
+        tokenValue = budget.InputTokens
+    case "output":
+        tokenValue = budget.PredictOutputTokens
+    default:
+        tokenValue = budget.TotalBudget
+    }
+
+    slog.Debug("resolving cloud by token tier",
+        "metric", tier.Metric,
+        "token_value", tokenValue,
+        "rules_count", len(tier.Rules),
+    )
+
+    for _, rule := range tier.Rules {
+        if rule.MaxTokens == 0 || tokenValue <= rule.MaxTokens {
+            slog.Debug("token tier rule matched",
+                "max_tokens", rule.MaxTokens,
+                "backend", rule.Backend,
+                "token_value", tokenValue,
+            )
+            return rule.Backend
+        }
+    }
+
+    slog.Debug("no token tier rule matched", "token_value", tokenValue)
+    return ""
 }
