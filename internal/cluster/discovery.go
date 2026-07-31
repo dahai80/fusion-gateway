@@ -383,7 +383,7 @@ func (d *Discovery) checkNode(node *Node) {
         return
     }
     // R2 fix: drain body to allow connection reuse
-    io.Copy(io.Discard, resp.Body)
+    _, _ = io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
 
     if resp.StatusCode == http.StatusOK {
@@ -415,7 +415,7 @@ func (d *Discovery) fetchRemoteMetrics(node *Node) {
 
     if resp.StatusCode != http.StatusOK {
         // R2 fix: drain body to allow connection reuse
-        io.Copy(io.Discard, resp.Body)
+        _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster metrics: non-200 status", "node_id", node.ID, "status", resp.StatusCode)
         return
     }
@@ -432,7 +432,7 @@ func (d *Discovery) fetchRemoteMetrics(node *Node) {
     }
     if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
         // R2 fix: drain remaining body to allow connection reuse
-        io.Copy(io.Discard, resp.Body)
+        _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster metrics decode failed", "node_id", node.ID, "error", err)
         return
     }

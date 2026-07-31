@@ -75,10 +75,13 @@ func (r *RedisStore) QueryLogs(filter store.LogFilter) ([]*store.RequestLog, int
     if filter.EndTime != nil {
         max = strconv.FormatInt(filter.EndTime.Unix(), 10)
     }
-    ids, err := r.client.ZRangeByScore(r.ctx, logPrefix+"index", &redis.ZRangeBy{
-        Min: min, Max: max,
-        Offset: int64(filter.Page * filter.PageSize),
-        Count:  int64(filter.PageSize),
+    ids, err := r.client.ZRangeArgs(r.ctx, redis.ZRangeArgs{
+        Key:     logPrefix + "index",
+        Start:   min,
+        Stop:    max,
+        ByScore: true,
+        Offset:  int64(filter.Page * filter.PageSize),
+        Count:   int64(filter.PageSize),
     }).Result()
     if err != nil {
         return nil, 0, err
