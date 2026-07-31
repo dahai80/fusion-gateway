@@ -182,3 +182,12 @@ realtime:
     backend_url: "wss://api.openai.com/v1/realtime"
     api_key: ""                        # API key for the realtime backend
     max_message_mb: 1                  # Max WebSocket message size in MB
+
+admin:
+    enabled: true                      # Enable admin dashboard and API
+    listen: ""                         # Optional separate listen address (default: same as server)
+    log_max_len: 10000                 # Max request log entries (ring buffer)
+    jwt_secret: "change-me-to-a-random-secret"  # JWT signing secret for admin auth
+    credentials:                       # Admin login credentials
+        - username: "admin"
+          password: "admin"

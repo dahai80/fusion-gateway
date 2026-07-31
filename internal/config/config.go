@@ -269,6 +269,13 @@ type RealtimeConfig struct {
     MaxMessageMB  int    `mapstructure:"max_message_mb"`
 }
 
+type AdminConfig struct {
+    Enabled   bool   `mapstructure:"enabled"`
+    Listen    string `mapstructure:"listen"`
+    LogMaxLen int    `mapstructure:"log_max_len"`
+    JWTSecret string `mapstructure:"jwt_secret"`
+}
+
 type Config struct {
     Server        ServerConfig             `mapstructure:"server"`
     Auth          AuthConfig               `mapstructure:"auth"`
@@ -286,6 +293,7 @@ type Config struct {
     Cost          CostConfig               `mapstructure:"cost"`
     PII           PIIConfig                `mapstructure:"pii"`
     CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
+    Admin         *AdminConfig             `mapstructure:"admin"`
 }
 
 type ConfigSnapshot struct {
@@ -491,6 +499,10 @@ func DefaultConfig() Config {
                 DeviationThreshold:  0.02,
                 AutoSwitchThreshold: 0.05,
             },
+        },
+        Admin: &AdminConfig{
+            Enabled:   true,
+            LogMaxLen: 10000,
         },
     }
 }

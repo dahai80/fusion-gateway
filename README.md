@@ -64,6 +64,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `hot_reload.enabled` | true | Enable config file hot reload |
 | `hot_reload.breaker_drain_timeout` | 10s | Wait time for in-flight drain before applying config |
 | `hot_reload.breaker_warmup_success` | 3 | Success count to close breaker after warmup |
+| `admin.enabled` | true | Enable admin dashboard and API |
+| `admin.log_max_len` | 10000 | Max request log entries (ring buffer) |
+| `admin.jwt_secret` | "" | JWT signing secret for admin auth |
+| `cost.pricing_file` | "" | Custom pricing YAML with hot reload |
 
 ## API Endpoints
 
@@ -82,6 +86,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `/livez` | GET | Liveness probe |
 | `/v1/status` | GET | Detailed status (hardware, circuit breakers, stats) |
 | `/metrics` | GET | Prometheus metrics |
+| `/v1/images/generations` | POST | Image generation (cloud-only, OpenAI-compatible) |
 | `/admin/gc` | POST | Trigger safe GC on fusion-mlx (only when in-flight = 0) |
 | `/admin/config/reload` | POST | Config reload notification |
 
@@ -214,6 +219,48 @@ Built-in cost tracking with per-model pricing:
 - `/v1/cost` endpoint for aggregated summaries (by key, backend, model)
 - Per-key cost breakdown with `?key=<name>` filter
 - JSON export via `Tracker.ExportJSON()`
+- **Custom pricing file**: YAML-based model pricing overrides with hot reload (`cost.pricing_file`)
+- **Budget blocking**: Per-key monthly spend limits (`budget_limit`) enforced before request execution
+
+## Stream Options
+
+Full OpenAI `stream_options` support for chat completions:
+- `stream_include_usage`: Accumulates output token count during SSE streaming
+- Final SSE chunk includes complete `usage` object with prompt + completion tokens
+- Ensures accurate token counting and cost tracking for streaming requests
+
+## Admin Dashboard
+
+Built-in web admin dashboard at `/admin`, served from the single binary via Go `embed`.
+
+**Authentication**: JWT (HS256) with HttpOnly cookie session. Login via `POST /admin/api/login`.
+
+**Admin API** (`/admin/api/*`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/api/login` | POST | Login with admin credentials, get JWT cookie |
+| `/admin/api/keys` | GET/POST | List / Create API keys |
+| `/admin/api/keys/:name` | GET/PUT/DELETE | Read / Update / Delete API key |
+| `/admin/api/channels` | GET/POST | List / Create channels |
+| `/admin/api/channels/:name` | GET/PUT/DELETE | Read / Update / Delete channel |
+| `/admin/api/logs` | GET | Query request logs with filters |
+| `/admin/api/logs/:id` | GET | Get single request log |
+| `/admin/api/analytics/tokens` | GET | Token usage statistics |
+| `/admin/api/analytics/cost` | GET | Cost statistics |
+| `/admin/api/analytics/models` | GET | Model distribution statistics |
+| `/admin/api/analytics/latency` | GET | Latency statistics |
+| `/admin/api/analytics/errors` | GET | Error statistics |
+| `/admin/api/dashboard/overview` | GET | Dashboard overview (QPS, tokens, cost, local hit rate) |
+| `/admin/api/quota/:key` | GET/PUT | Get / Set key quota usage |
+
+**Request Log Pipeline**: Every request is automatically logged with full metadata:
+- Request ID, model, channel, route reason, token counts, cost, latency, TTFT
+- Ring buffer storage with configurable max length
+- Filterable by time range, key, model, channel, status, token/cost thresholds
+- Exportable to JSON
+
+**Frontend**: React + Ant Design + Vite SPA embedded in Go binary.
 
 ## Retry & Backoff
 
@@ -323,36 +370,30 @@ internal/
   router/             Routing decision engine + per-backend circuit breaker + cloud strategy + latency tracker
   adapter/            Provider interface + fusion-mlx + openai-compatible adapters + pool
   cluster/            Cluster node discovery, health check, load balancing, node adapter
-  middleware/         Auth (MasterKey + key expiry + model allowlist), Rate limiting (RPM/TPM), PII detection, Retry
+  middleware/         Auth (MasterKey + key expiry + model allowlist + budget blocking), Rate limiting (RPM/TPM), PII detection, Retry, Request logging
   cache/              LRU in-memory cache with TTL for non-streaming responses
-  cost/               Cost tracking with built-in model pricing table
+  cost/               Cost tracking with built-in model pricing table + custom pricing hot reload
+  store/              Store interface (logs, keys, channels, analytics, dashboard, quota)
+  store/memory/       In-memory store implementation (ring buffer logs, CRUD, analytics aggregation)
+  admin/              Admin API handlers + JWT auth + login
+  admin/ui/           go:embed frontend assets (React SPA)
   observability/      Prometheus metrics
-  server/             HTTP server + route registration + SSE forwarding
+  server/             HTTP server + route registration + SSE forwarding + stream options
+web/admin/            Admin dashboard frontend (React + Ant Design + Vite)
 config.example.yaml   Example configuration
 ```
 
-## Admin Dashboard (Planned)
-
-Fusion-Gateway will include a built-in web admin dashboard at `/admin`, served from the same single binary via Go `embed`.
-
-**Tech stack**: React + Ant Design + Vite → Go embed SPA
-
-**Key pages**:
+## Admin Dashboard Pages
 
 | Page | Description |
 |------|-------------|
-| Dashboard | Real-time overview: QPS, token usage, cost, local hit rate, hardware status |
-| API Keys | CRUD + quota management + rate limiting + per-key usage analytics |
+| Dashboard | Real-time overview: QPS, token usage, cost, local hit rate, route distribution |
+| API Keys | CRUD + quota management + budget limits + per-key usage analytics |
 | Channels | Backend provider management + health check + connectivity test |
-| Request Logs | Full request/response logs with routing reason, token counts, cost |
+| Request Logs | Full request logs with routing reason, token counts, cost, latency |
 | Analytics | Token usage trends, cost tracking, model distribution, latency/error stats |
-| Routing | Visual rule editor + circuit breaker status + manual reset |
-| Model Pricing | Built-in price table + custom overrides + local savings display |
-| Settings | Web-based config management with hot reload |
 
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
-
-See [docs/GUI-DESIGN.md](docs/GUI-DESIGN.md) for the full design specification.
 
 ## Fusion Ecosystem
 

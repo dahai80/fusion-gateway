@@ -12,6 +12,8 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/admin"
+    adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -21,6 +23,8 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
+    memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
@@ -39,6 +43,7 @@ type Server struct {
     piiMiddleware   *middleware.PIIMiddleware
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
+    store           store.Store
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
@@ -50,6 +55,10 @@ func (s *Server) SetClusterDiscovery(d interface {
     GetNode(id string) (*cluster.Node, bool)
 }) {
     s.clusterDiscovery = d
+}
+
+func (s *Server) GetStore() store.Store {
+    return s.store
 }
 
 func New(
@@ -70,6 +79,13 @@ func New(
     lt := router.NewLatencyTracker(1000)
     cs := router.NewCloudStrategy(cfg.Config.CloudRouting, lt)
 
+    logMaxLen := 10000
+    if cfg.Config.Admin != nil && cfg.Config.Admin.LogMaxLen > 0 {
+        logMaxLen = cfg.Config.Admin.LogMaxLen
+    }
+    memStore := memorystore.NewMemoryStore(logMaxLen)
+    slog.Info("request log store initialized", "max_len", logMaxLen)
+
     return &Server{
         cfg:            cfg,
         hwCollector:    hwCollector,
@@ -84,6 +100,7 @@ func New(
         piiMiddleware:  middleware.NewPIIMiddleware(cfg.Config.PII),
         cloudStrategy:  cs,
         latencyTracker: lt,
+        store:          memStore,
     }
 }
 
@@ -97,6 +114,7 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/realtime", s.withMiddleware(s.handleRealtime))
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
+    mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -108,6 +126,15 @@ func (s *Server) Start() error {
 
     mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
     mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
+
+    // Admin API + Dashboard UI
+    if s.cfg.Config.Admin != nil && s.cfg.Config.Admin.Enabled {
+        admin.SetJWTSecret(s.cfg.Config.Admin.JWTSecret)
+        adminHandler := admin.NewHandler(s.store)
+        adminHandler.RegisterRoutes(mux)
+        mux.HandleFunc("/admin/api/login", admin.HandleLogin)
+        mux.Handle("/admin/", http.StripPrefix("/admin/", adminui.Handler()))
+    }
 
     // pprof endpoints for profiling — protected by auth
     mux.HandleFunc("/debug/pprof/", s.withMiddleware(pprof.Index))
@@ -145,6 +172,7 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             middleware.CORS(&snap.Config.CORS),
             middleware.ConfigSnapshot(snap),
             middleware.APIKeyAuth(&snap.Config.Auth),
+            middleware.BudgetBlock(s.store),
             middleware.RateLimit(&snap.Config.Routing.RateLimit, s.rateLimiter, nil),
         }
 
@@ -153,7 +181,20 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             final = chain[i](final)
         }
 
-        final.ServeHTTP(w, r)
+        start := time.Now()
+        entry := middleware.InitRequestLog(r)
+        r = middleware.WithRequestLogContext(r, entry)
+        rec := middleware.NewResponseRecorder(w)
+
+        final.ServeHTTP(rec, r)
+
+        keyCfg := middleware.GetAuthKeyConfig(r.Context())
+        keyName := "anonymous"
+        if keyCfg != nil && keyCfg.Name != "" {
+            keyName = keyCfg.Name
+        }
+        entry.StatusCode = rec.StatusCode
+        middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
     }
 }
 
@@ -350,8 +391,20 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
 
     flusher, canFlush := w.(http.Flusher)
     var degraded bool
+    var outputTokens int
+    includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+    var lastChunkID string
+    var lastChunkModel string
+    var lastChunkCreated int64
 
     for chunk := range ch {
+        if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+            outputTokens += chunk.Usage.CompletionTokens
+        }
+        lastChunkID = chunk.ID
+        lastChunkModel = chunk.Model
+        lastChunkCreated = chunk.Created
+
         if chunk.Degraded {
             degraded = true //nolint:ineffassign
             w.Header().Set("X-Fusion-Degraded", "true")
@@ -414,6 +467,27 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         }
     }
 
+    // Send usage chunk if stream_options.include_usage was requested
+    if includeUsage {
+        usageChunk := adapter.StreamChunk{
+            ID:      lastChunkID,
+            Object:  "chat.completion.chunk",
+            Created: lastChunkCreated,
+            Model:   lastChunkModel,
+            Choices: []adapter.ChoiceDelta{},
+            Usage: &adapter.UsageResponse{
+                PromptTokens:     budget.InputTokens,
+                CompletionTokens: outputTokens,
+                TotalTokens:      budget.InputTokens + outputTokens,
+            },
+        }
+        usageData, _ := json.Marshal(usageChunk)
+        fmt.Fprintf(w, "data: %s\n\n", usageData)
+        if canFlush {
+            flusher.Flush()
+        }
+    }
+
     fmt.Fprintf(w, "data: [DONE]\n\n")
     if canFlush {
         flusher.Flush()
@@ -429,6 +503,16 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     observability.RecordTokens("input", string(decision.Backend), budget.InputTokens)
     s.router.RecordSuccess(string(decision.Backend))
 
+    // Update request log with model/channel/token details
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = req.Model
+        logEntry.ChannelName = provider.Name()
+        logEntry.ChannelType = string(decision.Backend)
+        logEntry.InputTokens = budget.InputTokens
+        logEntry.OutputTokens = outputTokens
+        logEntry.TotalTokens = budget.InputTokens + outputTokens
+    }
+
     // Latency tracking for stream
     if s.latencyTracker != nil {
         s.latencyTracker.Record(provider.Name(), time.Duration(duration*float64(time.Second)))
@@ -441,7 +525,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         if keyCfg != nil && keyCfg.Name != "" {
             keyName = keyCfg.Name
         }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, 0)
+        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, outputTokens)
     }
 }
 
@@ -484,6 +568,16 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         observability.RecordTokens("output", string(decision.Backend), resp.Usage.CompletionTokens)
     }
     s.router.RecordSuccess(string(decision.Backend))
+
+    // Update request log with model/channel/token details
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = req.Model
+        logEntry.ChannelName = provider.Name()
+        logEntry.ChannelType = string(decision.Backend)
+        logEntry.InputTokens = budget.InputTokens
+        logEntry.OutputTokens = resp.Usage.CompletionTokens
+        logEntry.TotalTokens = budget.InputTokens + resp.Usage.CompletionTokens
+    }
 
     // Latency tracking
     if s.latencyTracker != nil {
@@ -778,6 +872,78 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
         "object": "list",
         "data":   models,
     })
+}
+
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+
+    maxBodySize := int64(s.cfg.Config.Server.MaxRequestBodySize)
+    if maxBodySize <= 0 {
+        maxBodySize = 5 << 20
+    }
+    body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+    if err != nil {
+        http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    var req adapter.ImageRequest
+    if err := json.Unmarshal(body, &req); err != nil {
+        slog.Error("invalid json in image request", "error", err)
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+
+    if req.N <= 0 {
+        req.N = 1
+    }
+
+    cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault
+    if cloudBackend == "" {
+        cloudBackend = "openai"
+    }
+
+    provider, ok := s.pool.Get(cloudBackend)
+    if !ok {
+        http.Error(w, `{"error":{"message":"Image generation backend not available","type":"server_error"}}`, http.StatusServiceUnavailable)
+        return
+    }
+
+    imgProvider, ok := provider.(interface {
+        Images(ctx context.Context, req *adapter.ImageRequest) (*adapter.ImageResponse, error)
+    })
+    if !ok {
+        http.Error(w, `{"error":{"message":"Selected backend does not support image generation","type":"server_error"}}`, http.StatusBadRequest)
+        return
+    }
+
+    start := time.Now()
+    resp, err := imgProvider.Images(r.Context(), &req)
+    if err != nil {
+        slog.Error("image generation failed", "provider", provider.Name(), "error", err)
+        http.Error(w, `{"error":{"message":"Image generation failed","type":"server_error"}}`, http.StatusBadGateway)
+        return
+    }
+
+    if logEntry := middleware.GetRequestLog(r.Context()); logEntry != nil {
+        logEntry.Model = req.Model
+        logEntry.ChannelName = provider.Name()
+        logEntry.ChannelType = "cloud"
+        logEntry.StatusCode = http.StatusOK
+    }
+
+    slog.Info("image generation completed",
+        "model", req.Model,
+        "provider", provider.Name(),
+        "latency_ms", time.Since(start).Milliseconds(),
+    )
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

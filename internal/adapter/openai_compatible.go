@@ -234,6 +234,39 @@ func (p *OpenAICompatibleProvider) ListModels(ctx context.Context) ([]ModelInfo,
     return listResp.Data, nil
 }
 
+func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest) (*ImageResponse, error) {
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal image request: %w", err)
+    }
+
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/images/generations", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("create image request: %w", err)
+    }
+    httpReq.Header.Set("Content-Type", "application/json")
+    if p.apiKey != "" {
+        httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+    }
+
+    resp, err := p.httpClient.Do(httpReq)
+    if err != nil {
+        return nil, fmt.Errorf("image request failed: %w", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        respBody, _ := io.ReadAll(resp.Body)
+        return nil, fmt.Errorf("image request returned status %d: %s", resp.StatusCode, string(respBody))
+    }
+
+    var imgResp ImageResponse
+    if err := json.NewDecoder(resp.Body).Decode(&imgResp); err != nil {
+        return nil, fmt.Errorf("decode image response: %w", err)
+    }
+    return &imgResp, nil
+}
+
 func (p *OpenAICompatibleProvider) parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
     decoder := json.NewDecoder(body)
     for {

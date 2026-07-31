@@ -37,6 +37,13 @@ func CalculateCost(model string, promptTokens, completionTokens int) float64 {
 }
 
 func lookupPricing(model string) (ModelPricing, bool) {
+    // Custom pricing takes priority
+    if globalCustomPricing != nil {
+        if p, ok := globalCustomPricing.Lookup(model); ok {
+            return p, true
+        }
+    }
+
     if p, ok := defaultPricing[model]; ok {
         return p, true
     }

@@ -23,3 +23,6 @@ config.yaml
 *.test
 *.out
 coverage.html
+
+# Frontend
+web/admin/node_modules/

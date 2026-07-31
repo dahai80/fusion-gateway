@@ -10,15 +10,20 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-    Model       string        `json:"model"`
-    Messages    []ChatMessage `json:"messages"`
-    Temperature *float64      `json:"temperature,omitempty"`
-    MaxTokens   *int          `json:"max_tokens,omitempty"`
-    Stream      bool          `json:"stream"`
-    Stop        []string      `json:"stop,omitempty"`
-    TopP        *float64      `json:"top_p,omitempty"`
-    Tools       interface{}   `json:"tools,omitempty"`
-    ToolChoice  interface{}   `json:"tool_choice,omitempty"`
+    Model         string         `json:"model"`
+    Messages      []ChatMessage  `json:"messages"`
+    Temperature   *float64       `json:"temperature,omitempty"`
+    MaxTokens     *int           `json:"max_tokens,omitempty"`
+    Stream        bool           `json:"stream"`
+    StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+    Stop          []string       `json:"stop,omitempty"`
+    TopP          *float64       `json:"top_p,omitempty"`
+    Tools         interface{}    `json:"tools,omitempty"`
+    ToolChoice    interface{}    `json:"tool_choice,omitempty"`
+}
+
+type StreamOptions struct {
+    IncludeUsage bool `json:"include_usage"`
 }
 
 type StreamChunk struct {
@@ -102,6 +107,24 @@ type ModelInfo struct {
     Object           string   `json:"object"`
     OwnedBy          string   `json:"owned_by"`
     AvailableBackends []string `json:"available_backends,omitempty"`
+}
+
+type ImageRequest struct {
+    Model  string `json:"model"`
+    Prompt string `json:"prompt"`
+    N      int    `json:"n,omitempty"`
+    Size   string `json:"size,omitempty"`
+}
+
+type ImageResponse struct {
+    Created int64       `json:"created"`
+    Data    []ImageData `json:"data"`
+}
+
+type ImageData struct {
+    URL           string `json:"url,omitempty"`
+    B64JSON       string `json:"b64_json,omitempty"`
+    RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
 type Provider interface {
