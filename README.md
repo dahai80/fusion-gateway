@@ -229,6 +229,29 @@ internal/
 config.example.yaml   Example configuration
 ```
 
+## Admin Dashboard (Planned)
+
+Fusion-Gateway will include a built-in web admin dashboard at `/admin`, served from the same single binary via Go `embed`.
+
+**Tech stack**: React + Ant Design + Vite → Go embed SPA
+
+**Key pages**:
+
+| Page | Description |
+|------|-------------|
+| Dashboard | Real-time overview: QPS, token usage, cost, local hit rate, hardware status |
+| API Keys | CRUD + quota management + rate limiting + per-key usage analytics |
+| Channels | Backend provider management + health check + connectivity test |
+| Request Logs | Full request/response logs with routing reason, token counts, cost |
+| Analytics | Token usage trends, cost tracking, model distribution, latency/error stats |
+| Routing | Visual rule editor + circuit breaker status + manual reset |
+| Model Pricing | Built-in price table + custom overrides + local savings display |
+| Settings | Web-based config management with hot reload |
+
+**Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
+
+See [docs/GUI-DESIGN.md](docs/GUI-DESIGN.md) for the full design specification.
+
 ## Fusion Ecosystem
 
 | Project | Role |
