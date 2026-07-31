@@ -39,8 +39,6 @@ type Engine struct {
 
 type calibrationState struct {
     samplesSinceLastCalib int
-    totalDeviation        float64
-    sampleCount           int
     lastDeviation         float64
 }
 

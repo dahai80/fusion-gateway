@@ -26,7 +26,7 @@ func TestMasterClient_ListNodes(t *testing.T) {
                 {NodeID: "node-2", Address: "http://10.0.0.2:8100", GPU: "M2Ultra", MemoryGB: 128, Status: "online"},
             },
         }
-        json.NewEncoder(w).Encode(resp)
+        _ = json.NewEncoder(w).Encode(resp)
     }))
     defer srv.Close()
 
@@ -50,7 +50,7 @@ func TestMasterClient_ListNodes(t *testing.T) {
 func TestMasterClient_HealthCheck(t *testing.T) {
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
-        json.NewEncoder(w).Encode(MasterNodesResponse{Total: 0, Online: 0})
+        _ = json.NewEncoder(w).Encode(MasterNodesResponse{Total: 0, Online: 0})
     }))
     defer srv.Close()
 
@@ -81,7 +81,7 @@ func TestDiscovery_MasterMode_Sync(t *testing.T) {
                 {NodeID: "worker-1", Address: "http://10.0.0.1:8100", GPU: "M2", MemoryGB: 32, Status: "online", MemoryUsed: 0.3, QueueDepth: 2},
             },
         }
-        json.NewEncoder(w).Encode(resp)
+        _ = json.NewEncoder(w).Encode(resp)
     }))
     defer srv.Close()
 
@@ -132,7 +132,7 @@ func TestDiscovery_MasterMode_SelectNode(t *testing.T) {
                 {NodeID: "worker-2", Address: "http://10.0.0.2:8100", GPU: "M2Ultra", MemoryGB: 128, Status: "online"},
             },
         }
-        json.NewEncoder(w).Encode(resp)
+        _ = json.NewEncoder(w).Encode(resp)
     }))
     defer srv.Close()
 

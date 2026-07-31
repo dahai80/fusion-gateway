@@ -14,7 +14,7 @@ import (
 
 var (
     iokitOnce    sync.Once
-    iokitInitErr error
+    iokitInitErr error //nolint:unused
     iokitReady   bool
 
     // IOKit function pointers

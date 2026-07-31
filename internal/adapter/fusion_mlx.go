@@ -338,8 +338,8 @@ func (p *FusionMLXProvider) SafeGC() {
     }
 
     if !p.gcPending.CompareAndSwap(true, false) {
-        // gcPending was not set — direct SafeGC call (e.g. from idle timer)
-        // or already consumed by another goroutine. Proceed only if flag was consumed.
+        slog.Debug("skip gc: gcPending flag not set or already consumed")
+        return
     }
 
     slog.Info("triggering safe gc on fusion-mlx")

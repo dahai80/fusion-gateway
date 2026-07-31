@@ -1,6 +1,7 @@
 package tokenizer
 
 import (
+    "context"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -12,7 +13,7 @@ func TestCountTokens_Whitespace(t *testing.T) {
     }
     e := NewEngine(cfg, "")
 
-    count, err := e.CountTokens(nil, "hello world foo bar")
+    count, err := e.CountTokens(context.TODO(), "hello world foo bar")
     if err != nil {
         t.Fatal(err)
     }

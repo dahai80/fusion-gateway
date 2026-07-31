@@ -25,7 +25,7 @@ func TestProxy_UpgradeAndProxy_Bidirectional(t *testing.T) {
                 return
             }
             backendMsgs <- string(msg)
-            conn.WriteMessage(websocket.TextMessage, []byte("echo:"+string(msg)))
+            _ = conn.WriteMessage(websocket.TextMessage, []byte("echo:"+string(msg)))
         }
     }))
     defer backend.Close()
@@ -84,7 +84,7 @@ func TestProxy_BackendUnavailable(t *testing.T) {
     }
     defer conn.Close()
 
-    conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+    _ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
     _, _, err = conn.ReadMessage()
     if err == nil {
         t.Error("expected error when backend unavailable")

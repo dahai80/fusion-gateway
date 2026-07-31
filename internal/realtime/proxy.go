@@ -69,7 +69,7 @@ func (p *Proxy) UpgradeAndProxy(w http.ResponseWriter, r *http.Request, backendU
                 "type":  "error",
                 "error": map[string]string{"message": "backend connection failed"},
             }
-            clientConn.WriteJSON(errMsg)
+            _ = clientConn.WriteJSON(errMsg)
         }
         return
     }

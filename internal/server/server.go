@@ -292,11 +292,11 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     w.Header().Set("X-Fusion-Degraded", "false")
 
     flusher, canFlush := w.(http.Flusher)
-    degraded := false
+    var degraded bool
 
     for chunk := range ch {
         if chunk.Degraded {
-            degraded = true
+            degraded = true //nolint:ineffassign
             w.Header().Set("X-Fusion-Degraded", "true")
             slog.Warn("stream degraded: backpressure triggered, falling back to non-streaming")
 
@@ -395,7 +395,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
     w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
-    json.NewEncoder(w).Encode(resp)
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +435,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
             if err == nil {
                 w.Header().Set("Content-Type", "application/json")
                 w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
-                json.NewEncoder(w).Encode(resp)
+                _ = json.NewEncoder(w).Encode(resp)
                 return
             }
             slog.Warn("cluster embedding sharding failed, falling back to single node",
@@ -489,7 +489,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     s.router.RecordSuccess(string(decision.Backend))
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
-    json.NewEncoder(w).Encode(resp)
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +568,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
-    json.NewEncoder(w).Encode(resp)
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
@@ -615,7 +615,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     }
 
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
+    _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",
         "data":   models,
     })
@@ -633,7 +633,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
+    _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "status":   healthStatus(allHealthy),
         "backends": results,
     })
@@ -701,7 +701,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
     if !localReady && !cloudReady {
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusServiceUnavailable)
-        json.NewEncoder(w).Encode(map[string]interface{}{
+        _ = json.NewEncoder(w).Encode(map[string]interface{}{
             "status":        "not_ready",
             "local_reasons": localReasons,
         })
@@ -715,7 +715,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(map[string]interface{}{
+    _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "status":        "ready",
         "mode":          mode,
         "local_reasons": localReasons,
@@ -760,7 +760,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
     }
 
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(status)
+    _ = json.NewEncoder(w).Encode(status)
 }
 
 func (s *Server) handleAdminGC(w http.ResponseWriter, r *http.Request) {
