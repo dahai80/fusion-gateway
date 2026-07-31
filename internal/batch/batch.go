@@ -162,7 +162,13 @@ func (s *Store) Get(id string) (*Batch, error) {
     if !ok {
         return nil, fmt.Errorf("batch %s not found", id)
     }
-    return b, nil
+    // R3 fix: return deep copy to prevent data race with process goroutine
+    cp := *b
+    cp.Results = make([]BatchResult, len(b.Results))
+    copy(cp.Results, b.Results)
+    cp.Requests = make([]BatchRequest, len(b.Requests))
+    copy(cp.Requests, b.Requests)
+    return &cp, nil
 }
 
 func (s *Store) Cancel(id string) (*Batch, error) {

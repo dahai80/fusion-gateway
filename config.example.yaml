@@ -1,6 +1,7 @@
 server:
     host: "0.0.0.0"
     port: 8100
+    enable_pprof: false                # Enable pprof debug endpoints (requires master_key auth)
 
 auth:
     enabled: true
@@ -270,7 +271,7 @@ admin:
     enabled: true                      # Enable admin dashboard and API
     listen: ""                         # Optional separate listen address (default: same as server)
     log_max_len: 10000                 # Max request log entries (ring buffer)
-    jwt_secret: "change-me-to-a-random-secret"  # JWT signing secret for admin auth
-    credentials:                       # Admin login credentials
-        - username: "admin"
-          password: "admin"
+    jwt_secret: "change-me-at-least-32-chars-long-random-secret"  # JWT signing secret (min 32 chars)
+    users:                             # Admin login credentials (passwords min 8 chars)
+        admin: "change-me-secure-password"
+    enable_pprof: false                # Enable pprof profiling endpoints (requires master_key)

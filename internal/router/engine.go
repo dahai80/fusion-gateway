@@ -270,9 +270,14 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
 
     // P4: Token budget exceeded
     budget, ok := tokenizer.BudgetFromContext(ctx)
-    if !ok || budget.InputTokens == 0 {
+    if !ok {
         slog.Warn("token budget not found in context, defaulting to cloud")
         return &RouteDecision{Backend: CloudBackend, Reason: "token_budget_missing"}
+    }
+    // L4 fix: zero-token (empty prompt) should route local, not waste cloud quota
+    if budget.InputTokens == 0 {
+        slog.Debug("empty prompt, routing to local")
+        return &RouteDecision{Backend: LocalBackend, Reason: "empty_prompt_local"}
     }
 
     if budget.InputTokens > cfg.Config.Routing.TokenThreshold {

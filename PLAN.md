@@ -1,81 +1,51 @@
-# Plan: K8s Infrastructure Gap Fill (HPA / PDB / Ingress / Terraform)
+# Audit Fix Plan — P0 + P1 from atom-gateway-audit-report.md
 
-## Gap Analysis
+## P0 (Must Fix Before Production) — 6 items
 
-| Capability | Current | Target |
-|-----------|---------|--------|
-| HPA | ❌ None | ✅ CPU/Memory + custom metrics |
-| PDB | ❌ None | ✅ MinAvailable 1 (or percentage) |
-| Ingress | ❌ None | ✅ Nginx Ingress with TLS |
-| Secret | ❌ master_key in ConfigMap | ✅ K8s Secret for sensitive config |
-| ServiceAccount | ❌ None | ✅ Dedicated SA with minimal RBAC |
-| Terraform | ❌ None | ✅ AWS (EKS) + GCP (GKE) modules |
-| NetworkPolicy | ❌ None | ✅ Deny-all + allow intra-namespace |
+### C1: Hard-coded admin credentials + default JWT secret
+- Files: internal/admin/login.go, internal/admin/auth.go, internal/config/config.go, internal/server/server.go
+- Fix:
+  1. Delete adminCredentials hard-coded map → config-driven AdminConfig.Users map[string]string
+  2. Delete jwtSecret default value → SetJWTSecret("") disables admin, panics if admin enabled without secret
+  3. Validate len(JWTSecret) >= 32 when admin enabled
+  4. HandleLogin reads credentials from injected AdminConfig, not package-level var
 
-## File Plan
+### C2: ClusterNodeProvider missing sharedToken
+- Files: internal/cluster/node_adapter.go, internal/server/server.go, internal/cluster/shard.go
+- Fix:
+  1. Add sharedToken param to NewClusterNodeProvider, wire to apiKey field
+  2. Update 5 call sites to pass clusterCfg.Master.SharedToken
 
-### 1. K8s Raw Manifests (`deploy/kubernetes/`)
+### C3: Semantic cache pseudo-embedding fallback
+- Files: internal/cache/semantic.go, internal/server/server.go
+- Fix:
+  1. Remove defaultEmbedFn/simpleHashEmbedding — no fallback
+  2. NewSemanticCache: embedFn==nil → log error + return nil (disabled)
 
-| File | Content |
-|------|---------|
-| `namespace.yaml` | Namespace `fusion-gateway` |
-| `serviceaccount.yaml` | SA + RBAC (get/list/watch ConfigMaps for hot reload) |
-| `secret.yaml` | Sensitive config keys (master_key, api_keys) |
-| `hpa.yaml` | HPA: minReplicas=2, maxReplicas=10, CPU 70% / Memory 80% targets |
-| `pdb.yaml` | PDB: minAvailable 1 (or 50%) |
-| `ingress.yaml` | Nginx Ingress with TLS, path `/` → Service :8100 |
-| `networkpolicy.yaml` | Deny all ingress except within namespace + from ingress controller |
-| Update `deployment.yaml` | Add SA, secretRef, topologySpreadConstraints |
-| Update `configmap.yaml` | Remove sensitive keys (moved to Secret) |
+### C4: BuildProviders doesn't remove stale providers on reload
+- File: internal/adapter/pool.go
+- Fix: Diff current keys vs new config, delete removed/disabled entries
 
-### 2. Helm Chart (`deploy/helm/fusion-gateway/`)
+### C5: Config reload commits snapshot before handlers succeed
+- File: internal/config/config.go
+- Fix: Run handlers first, commit snapshot only if all succeed, rollback on failure
 
-| File | Content |
-|------|---------|
-| Update `values.yaml` | Add HPA, PDB, Ingress, Secret, ServiceAccount, NetworkPolicy blocks |
-| `templates/hpa.yaml` | Conditionally rendered HPA |
-| `templates/pdb.yaml` | Conditionally rendered PDB |
-| `templates/ingress.yaml` | Conditionally rendered Ingress |
-| `templates/secret.yaml` | Conditionally rendered Secret |
-| `templates/serviceaccount.yaml` | SA + RBAC |
-| `templates/networkpolicy.yaml` | Conditionally rendered NetworkPolicy |
-| Update `templates/deployment.yaml` | SA, secretRef, topologySpread, annotations |
-| Update `Chart.yaml` | Bump version to 0.6.0 |
-| Update `_helpers.tpl` | Add common labels, selector labels |
+### 硬伤3+4: /metrics unauthenticated + pprof relies on auth chain
+- File: internal/server/server.go
+- Fix: /metrics add master-key middleware; pprof default off, flag to enable + master-key guard
 
-### 3. Terraform (`deploy/terraform/`)
+## P1 (First Iteration) — 8 items
 
-| File | Content |
-|------|---------|
-| `versions.tf` | Terraform >= 1.5, providers (aws, google, kubernetes, helm) |
-| `variables.tf` | Common variables (cluster_name, region, namespace, image, replicas) |
-| `outputs.tf` | Endpoint URLs, Helm release status |
-| `aws/main.tf` | EKS cluster (existing or create), VPC, IAM, NodeGroup |
-| `aws/eks.tf` | EKS module + managed node group (m-series for Apple Silicon inference) |
-| `aws/irsa.tf` | IAM Role for ServiceAccount (IRSA) |
-| `gcp/main.tf` | GKE Autopilot cluster |
-| `gcp/gke.tf` | GKE module + node pool |
-| `modules/helm-release/main.tf` | Helm release using fusion-gateway chart |
-| `modules/helm-release/variables.tf` | Chart values as variables |
-
-### 4. README Update
-
-Add K8s Infrastructure section documenting HPA, PDB, Ingress, Terraform usage.
-
-## Key Design Decisions
-
-1. **HPA custom metrics**: Use standard CPU/Memory as baseline. Custom metrics (request latency, QPS) require Prometheus Adapter — documented as optional.
-2. **PDB strategy**: `minAvailable: 1` for small clusters, percentage for large. Configurable via Helm values.
-3. **Ingress**: Nginx Ingress as default (most common). TLS via cert-manager annotation as option.
-4. **Secret vs ConfigMap**: Only `master_key` and `api_keys` go to Secret. Rest stays ConfigMap (hot reload friendly).
-5. **Terraform**: Focus on EKS (AWS) and GKE (GCP) as the two major cloud K8s providers. No Azure for now. Both reuse the Helm chart via `helm_release`.
-6. **No DB Migration**: Fusion-Gateway is stateless (no DB), so no migration Job needed. Read Replica N/A.
-7. **Topology spread**: Add `topologySpreadConstraints` to Deployment for even pod distribution across zones.
+### L4: Empty prompt routed to cloud → split !ok vs InputTokens==0
+### L7: Prompt injection skips multimodal → recursive extractPromptText
+### L2: Single-lock rate limiter → sync.Map + idle cleanup
+### L3: Cache.Get write lock → RLock read path, lazy deletion
+### R3: Batch.Get mutable pointer → deep copy
+### V1: Admin key no validation → validate Name/QuotaLimit/Key
+### V2: Config validate 4 fields → extend to all security fields
+### M3: Unknown backend type only warns → continue (skip backends registration)
 
 ## Execution Order
-
-1. K8s raw manifests (HPA + PDB + Ingress + Secret + SA + NetworkPolicy)
-2. Helm chart updates (all templates + values.yaml + Chart.yaml bump)
-3. Terraform modules (AWS + GCP + Helm release)
-4. README update
-5. Verify: `helm lint` + `helm template` rendering
+1. C1 → C2 → C3 → C4 → C5 → 硬伤3+4
+2. L4 → L7 → L2 → L3 → R3 → V1 → V2 → M3
+3. Lint + test + commit

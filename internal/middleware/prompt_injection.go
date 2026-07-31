@@ -133,9 +133,21 @@ func extractPromptText(messages []struct {
         case []interface{}:
             for _, item := range v {
                 if obj, ok := item.(map[string]interface{}); ok {
-                    if t, ok := obj["text"].(string); ok {
-                        sb.WriteString(t)
-                        sb.WriteString(" ")
+                    contentType, _ := obj["type"].(string)
+                    switch contentType {
+                    case "text":
+                        if t, ok := obj["text"].(string); ok {
+                            sb.WriteString(t)
+                            sb.WriteString(" ")
+                        }
+                    case "image_url", "input_audio", "image":
+                        slog.Debug("skipping non-text content in prompt injection check", "type", contentType)
+                    default:
+                        // unknown content type, try to extract text field if present
+                        if t, ok := obj["text"].(string); ok {
+                            sb.WriteString(t)
+                            sb.WriteString(" ")
+                        }
                     }
                 }
             }

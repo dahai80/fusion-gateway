@@ -81,25 +81,37 @@ func (c *Cache) Get(key string) ([]byte, bool) {
         return nil, false
     }
 
-    c.mu.Lock()
-    defer c.mu.Unlock()
-
+    // L3 fix: RLock fast path for cache miss
+    c.mu.RLock()
     elem, ok := c.items[key]
     if !ok {
+        c.mu.RUnlock()
+        c.mu.Lock()
         c.misses++
+        c.mu.Unlock()
         return nil, false
     }
 
     e := elem.Value.(*entry)
     if time.Now().After(e.expiresAt) {
+        c.mu.RUnlock()
+        c.mu.Lock()
         c.removeElement(elem)
         c.misses++
+        c.mu.Unlock()
         return nil, false
     }
 
+    value := e.value
+    c.mu.RUnlock()
+
+    // Upgrade to write lock for LRU move-to-front + hit counter
+    c.mu.Lock()
     c.order.MoveToFront(elem)
     c.hits++
-    return e.value, true
+    c.mu.Unlock()
+
+    return value, true
 }
 
 func (c *Cache) Set(key string, value []byte) {

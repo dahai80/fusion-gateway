@@ -67,7 +67,7 @@ func TestShardEmbedding_NoHealthy(t *testing.T) {
         Model: "test-embed",
         Input: []string{"a", "b", "c"},
     }
-    _, err := ShardEmbedding(context.TODO(), d, req, defaultRoutingCfg())
+    _, err := ShardEmbedding(context.TODO(), d, req, defaultRoutingCfg(), "")
     if err == nil {
         t.Fatal("expected error with no healthy nodes")
     }
@@ -80,7 +80,7 @@ func TestShardEmbedding_EmptyInput(t *testing.T) {
     d.loadNodesFromConfig()
 
     req := &adapter.EmbeddingRequest{Model: "test", Input: []string{}}
-    _, err := ShardEmbedding(context.TODO(), d, req, defaultRoutingCfg())
+    _, err := ShardEmbedding(context.TODO(), d, req, defaultRoutingCfg(), "")
     if err == nil {
         t.Fatal("expected error with empty input")
     }

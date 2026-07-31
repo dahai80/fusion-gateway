@@ -139,10 +139,21 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
             provider := NewYiProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered yi provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
-            slog.Warn("unknown backend type", "name", name, "type", backendCfg.Type)
+            slog.Warn("unknown backend type, skipping", "name", name, "type", backendCfg.Type)
+            continue
         }
 
         p.backends[name] = backendCfg
+    }
+
+    // C4 fix: remove stale providers that are no longer in config or disabled
+    for name := range p.providers {
+        cfgBackend, exists := cfg.Config.Backends[name]
+        if !exists || !cfgBackend.Enabled {
+            slog.Info("removing stale provider on reload", "name", name)
+            delete(p.providers, name)
+            delete(p.backends, name)
+        }
     }
 
     return nil

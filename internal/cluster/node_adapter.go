@@ -27,10 +27,11 @@ type ClusterNodeProvider struct {
     routeHeaderValue string
 }
 
-func NewClusterNodeProvider(node *Node, routingCfg config.RoutingConfig) *ClusterNodeProvider {
+func NewClusterNodeProvider(node *Node, routingCfg config.RoutingConfig, sharedToken string) *ClusterNodeProvider {
     return &ClusterNodeProvider{
         node:             node,
         httpClient:       &http.Client{Timeout: 120 * time.Second},
+        apiKey:           sharedToken,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
         routeHeaderValue: routingCfg.Negotiation.RouteHeaderValue,
     }

@@ -24,7 +24,7 @@ type shardResult struct {
     err    error
 }
 
-func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.EmbeddingRequest, routingCfg config.RoutingConfig) (*adapter.EmbeddingResponse, error) {
+func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.EmbeddingRequest, routingCfg config.RoutingConfig, sharedToken string) (*adapter.EmbeddingResponse, error) {
     inputLen := len(req.Input)
     if inputLen == 0 {
         return nil, fmt.Errorf("empty input")
@@ -41,7 +41,7 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
         if err != nil {
             return nil, err
         }
-        provider := NewClusterNodeProvider(node, routingCfg)
+        provider := NewClusterNodeProvider(node, routingCfg, sharedToken)
         return provider.Embedding(ctx, req)
     }
 
@@ -71,7 +71,7 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
                 }
 
                 node := healthyNodes[workerID%len(healthyNodes)]
-                provider := NewClusterNodeProvider(node, routingCfg)
+                provider := NewClusterNodeProvider(node, routingCfg, sharedToken)
 
                 shardReq := &adapter.EmbeddingRequest{
                     Model: req.Model,

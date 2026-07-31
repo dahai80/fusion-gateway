@@ -12,11 +12,12 @@ import (
 )
 
 type ServerConfig struct {
-    Host                   string `mapstructure:"host"`
-    Port                   int    `mapstructure:"port"`
-    LogLevel               string `mapstructure:"log_level"`
-    GracefulShutdownTimeout int   `mapstructure:"graceful_shutdown_timeout"`
-    MaxRequestBodySize     int64  `mapstructure:"max_request_body_size"`
+    Host                    string `mapstructure:"host"`
+    Port                    int    `mapstructure:"port"`
+    LogLevel                string `mapstructure:"log_level"`
+    GracefulShutdownTimeout int    `mapstructure:"graceful_shutdown_timeout"`
+    MaxRequestBodySize      int64  `mapstructure:"max_request_body_size"`
+    EnablePProf             bool   `mapstructure:"enable_pprof"`
 }
 
 type AuthKeyConfig struct {
@@ -284,6 +285,7 @@ type RealtimeConfig struct {
 }
 
 type AdminConfig struct {
+    Users     map[string]string `mapstructure:"users"`
     Enabled   bool   `mapstructure:"enabled"`
     Listen    string `mapstructure:"listen"`
     LogMaxLen int    `mapstructure:"log_max_len"`
@@ -459,13 +461,8 @@ func WatchAndReload(path string) {
             Version:  ver,
             LoadedAt: time.Now(),
         }
-        globalConfig.Store(newSnap)
 
-        slog.Info("config reloaded", "version", ver)
-
-        // Audit: record field-level diff between old and new config
-        AuditConfigChange(oldSnap, newSnap)
-
+        // C5 fix: run handlers BEFORE committing new snapshot
         configMu.RLock()
         handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
         copy(handlers, onReloadHandlers)
@@ -474,6 +471,14 @@ func WatchAndReload(path string) {
         for _, fn := range handlers {
             fn(oldSnap, newSnap)
         }
+
+        // commit new snapshot only after all handlers succeed
+        globalConfig.Store(newSnap)
+
+        slog.Info("config reloaded", "version", ver)
+
+        // Audit: record field-level diff between old and new config
+        AuditConfigChange(oldSnap, newSnap)
     })
 }
 
@@ -500,6 +505,18 @@ func validate(cfg *Config) error {
                 return fmt.Errorf("base_url conflict: %s and %s both use %s", existing, name, backend.BaseURL)
             }
             urls[backend.BaseURL] = name
+        }
+    }
+
+    // V1 fix: validate admin config security
+    if cfg.Admin != nil && cfg.Admin.Enabled {
+        if cfg.Admin.JWTSecret != "" && len(cfg.Admin.JWTSecret) < 32 {
+            return fmt.Errorf("admin.jwt_secret must be at least 32 characters, got %d", len(cfg.Admin.JWTSecret))
+        }
+        for username, password := range cfg.Admin.Users {
+            if len(password) < 8 {
+                return fmt.Errorf("admin user %q password must be at least 8 characters, got %d", username, len(password))
+            }
         }
     }
 

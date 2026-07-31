@@ -147,7 +147,8 @@ func (s *Server) Start() error {
     mux.HandleFunc("/livez", s.handleLivez)
     mux.HandleFunc("/v1/status", s.withMiddleware(s.handleStatus))
 
-    mux.HandleFunc("/metrics", observability.Handler().ServeHTTP)
+    // Audit fix: /metrics requires master-key auth
+    mux.HandleFunc("/metrics", s.withMasterKey(observability.Handler().ServeHTTP))
 
     mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
     mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
@@ -159,18 +160,22 @@ func (s *Server) Start() error {
     // Admin API + Dashboard UI
     if s.cfg.Config.Admin != nil && s.cfg.Config.Admin.Enabled {
         admin.SetJWTSecret(s.cfg.Config.Admin.JWTSecret)
+	admin.SetAdminUsers(s.cfg.Config.Admin.Users)
         adminHandler := admin.NewHandler(s.store)
         adminHandler.RegisterRoutes(mux)
         mux.HandleFunc("/admin/api/login", admin.HandleLogin)
         mux.Handle("/admin/", http.StripPrefix("/admin/", adminui.Handler()))
     }
 
-    // pprof endpoints for profiling — protected by auth
-    mux.HandleFunc("/debug/pprof/", s.withMiddleware(pprof.Index))
-    mux.HandleFunc("/debug/pprof/cmdline", s.withMiddleware(pprof.Cmdline))
-    mux.HandleFunc("/debug/pprof/profile", s.withMiddleware(pprof.Profile))
-    mux.HandleFunc("/debug/pprof/symbol", s.withMiddleware(pprof.Symbol))
-    mux.HandleFunc("/debug/pprof/trace", s.withMiddleware(pprof.Trace))
+    // pprof endpoints — disabled by default, enable via server.enable_pprof
+    if s.cfg.Config.Server.EnablePProf {
+        mux.HandleFunc("/debug/pprof/", s.withMasterKey(pprof.Index))
+        mux.HandleFunc("/debug/pprof/cmdline", s.withMasterKey(pprof.Cmdline))
+        mux.HandleFunc("/debug/pprof/profile", s.withMasterKey(pprof.Profile))
+        mux.HandleFunc("/debug/pprof/symbol", s.withMasterKey(pprof.Symbol))
+        mux.HandleFunc("/debug/pprof/trace", s.withMasterKey(pprof.Trace))
+        slog.Warn("pprof endpoints enabled — access requires master_key")
+    }
 
     addr := fmt.Sprintf("%s:%d", s.cfg.Config.Server.Host, s.cfg.Config.Server.Port)
     slog.Info("server starting", "addr", addr)
@@ -233,6 +238,25 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         }
         entry.StatusCode = rec.StatusCode
         middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
+    }
+}
+
+// withMasterKey wraps handler to require master_key authentication
+func (s *Server) withMasterKey(handler http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        masterKey := s.cfg.Config.Auth.MasterKey
+        if masterKey == "" {
+            slog.Warn("master_key not configured, denying access to protected endpoint", "path", r.URL.Path)
+            http.Error(w, `{"error":{"message":"Unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
+            return
+        }
+        apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+        if apiKey != masterKey {
+            slog.Warn("invalid master_key for protected endpoint", "path", r.URL.Path, "remote", r.RemoteAddr)
+            http.Error(w, `{"error":{"message":"Unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
+            return
+        }
+        handler(w, r)
     }
 }
 
@@ -339,7 +363,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
                     "node_addr", node.Address,
                     "strategy", decision.Reason,
                 )
-                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing)
+                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing, s.cfg.Config.Cluster.Master.SharedToken)
             }
         }
 
@@ -687,7 +711,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     // Try cluster sharding for large batch + cluster route
     if decision.Backend == router.ClusterBackend && inputLen > 32 && s.clusterDiscovery != nil {
         if d, ok := s.clusterDiscovery.(*cluster.Discovery); ok {
-            resp, err := cluster.ShardEmbedding(ctx, d, &req, s.cfg.Config.Routing)
+            resp, err := cluster.ShardEmbedding(ctx, d, &req, s.cfg.Config.Routing, s.cfg.Config.Cluster.Master.SharedToken)
             if err == nil {
                 w.Header().Set("Content-Type", "application/json")
                 w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -715,7 +739,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     case router.ClusterBackend:
         if s.clusterDiscovery != nil && decision.NodeID != "" {
             if node, ok := s.clusterDiscovery.GetNode(decision.NodeID); ok {
-                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing)
+                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing, s.cfg.Config.Cluster.Master.SharedToken)
             }
         }
         if provider == nil {
@@ -810,7 +834,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     case router.ClusterBackend:
         if s.clusterDiscovery != nil && decision.NodeID != "" {
             if node, ok := s.clusterDiscovery.GetNode(decision.NodeID); ok {
-                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing)
+                provider = cluster.NewClusterNodeProvider(node, s.cfg.Config.Routing, s.cfg.Config.Cluster.Master.SharedToken)
             }
         }
         if provider == nil {

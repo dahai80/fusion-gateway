@@ -51,7 +51,8 @@ func NewSemanticCache(cfg config.SemanticCacheConfig, embedFn EmbedFunc) *Semant
         maxEntries = 5000
     }
     if embedFn == nil {
-        embedFn = defaultEmbedFn
+        slog.Error("semantic cache requires embedding function but none provided, disabling semantic cache")
+        return nil
     }
     sc := &SemanticCache{
         entries:    make([]*SemanticEntry, 0),
@@ -65,28 +66,7 @@ func NewSemanticCache(cfg config.SemanticCacheConfig, embedFn EmbedFunc) *Semant
     return sc
 }
 
-func defaultEmbedFn(text string) ([]float64, error) {
-    return simpleHashEmbedding(text, 128), nil
-}
 
-func simpleHashEmbedding(text string, dims int) []float64 {
-    vec := make([]float64, dims)
-    for i, ch := range text {
-        idx := i % dims
-        vec[idx] += float64(ch) * float64((i+1)%7+1)
-    }
-    norm := 0.0
-    for _, v := range vec {
-        norm += v * v
-    }
-    norm = math.Sqrt(norm)
-    if norm > 0 {
-        for i := range vec {
-            vec[i] /= norm
-        }
-    }
-    return vec
-}
 
 func cosineSimilarity(a, b []float64) float64 {
     if len(a) != len(b) {

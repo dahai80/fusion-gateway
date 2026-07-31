@@ -17,13 +17,27 @@ type LoginResponse struct {
     Role     string `json:"role"`
 }
 
-var adminCredentials = map[string]string{
-    "admin": "fusion-admin",
+var adminUsers map[string]string
+
+func SetAdminUsers(users map[string]string) {
+    adminUsers = users
 }
 
 func HandleLogin(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+
+    if !JWTSecretSet() {
+        slog.Error("admin login attempt but JWT secret not configured")
+        writeError(w, http.StatusServiceUnavailable, "admin module not configured")
+        return
+    }
+
+    if len(adminUsers) == 0 {
+        slog.Error("admin login attempt but no admin users configured")
+        writeError(w, http.StatusServiceUnavailable, "admin module not configured")
         return
     }
 
@@ -33,7 +47,7 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    password, ok := adminCredentials[req.Username]
+    password, ok := adminUsers[req.Username]
     if !ok || password != req.Password {
         slog.Warn("admin login failed", "username", req.Username)
         writeError(w, http.StatusUnauthorized, "invalid credentials")
