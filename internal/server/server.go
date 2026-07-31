@@ -8,11 +8,14 @@ import (
     "log/slog"
     "net/http"
     "net/http/pprof"
+    "strings"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
@@ -30,6 +33,12 @@ type Server struct {
     httpServer      *http.Server
     startTime       time.Time
     realtimeProxy   *realtime.Proxy
+    rateLimiter     *middleware.RateLimiter
+    cache           *cache.Cache
+    costTracker     *cost.Tracker
+    piiMiddleware   *middleware.PIIMiddleware
+    cloudStrategy   *router.CloudStrategy
+    latencyTracker  *router.LatencyTracker
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
@@ -58,14 +67,23 @@ func New(
         )
         slog.Info("realtime proxy enabled", "backend_url", cfg.Config.Realtime.BackendURL)
     }
+    lt := router.NewLatencyTracker(1000)
+    cs := router.NewCloudStrategy(cfg.Config.CloudRouting, lt)
+
     return &Server{
-        cfg:           cfg,
-        hwCollector:   hwCollector,
-        router:        routerEngine,
-        pool:          pool,
-        tokEngine:     tokEngine,
-        startTime:     time.Now(),
-        realtimeProxy: rp,
+        cfg:            cfg,
+        hwCollector:    hwCollector,
+        router:         routerEngine,
+        pool:           pool,
+        tokEngine:      tokEngine,
+        startTime:      time.Now(),
+        realtimeProxy:  rp,
+        rateLimiter:    middleware.NewRateLimiter(),
+        cache:          cache.New(cfg.Config.Cache),
+        costTracker:    cost.NewTracker(10000),
+        piiMiddleware:  middleware.NewPIIMiddleware(cfg.Config.PII),
+        cloudStrategy:  cs,
+        latencyTracker: lt,
     }
 }
 
@@ -73,10 +91,12 @@ func (s *Server) Start() error {
     mux := http.NewServeMux()
 
     mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
+    mux.HandleFunc("/v1/completions", s.withMiddleware(s.handleCompletions))
     mux.HandleFunc("/v1/embeddings", s.withMiddleware(s.handleEmbeddings))
     mux.HandleFunc("/v1/rerank", s.withMiddleware(s.handleRerank))
     mux.HandleFunc("/v1/realtime", s.withMiddleware(s.handleRealtime))
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
+    mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -125,6 +145,7 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             middleware.CORS(&snap.Config.CORS),
             middleware.ConfigSnapshot(snap),
             middleware.APIKeyAuth(&snap.Config.Auth),
+            middleware.RateLimit(&snap.Config.Routing.RateLimit, s.rateLimiter, nil),
         }
 
         var final http.Handler = handler
@@ -162,7 +183,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     ctx := r.Context()
 
+    if !middleware.CheckModelAllowlist(r, req.Model) {
+        slog.Warn("model not allowed for this key", "model", req.Model)
+        http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
+
     textContent := extractTextContent(req.Messages)
+
+    // PII scanning
+    if s.piiMiddleware != nil {
+        deny, detected := s.piiMiddleware.ScanText(textContent)
+        if deny {
+            slog.Warn("request denied: PII detected", "types", detected, "model", req.Model)
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"Request contains PII (%s)","type":"pii_error"}}`, strings.Join(detected, ",")), http.StatusBadRequest)
+            return
+        }
+    }
+
     inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
     if err != nil {
         slog.Error("token counting failed", "error", err)
@@ -253,6 +291,25 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
     }
     if cloudBackend == "" {
         cloudBackend = "openai"
+    }
+
+    // Cloud strategy: if multiple cloud backends available, let strategy decide
+    if s.cloudStrategy != nil && cloudBackend == s.cfg.Config.Routing.Fallback.CloudDefault {
+        var availableBackends []string
+        for _, name := range s.pool.ListProviders() {
+            if p, ok := s.pool.Get(name); ok {
+                if p.Name() != "fusion-mlx" {
+                    availableBackends = append(availableBackends, name)
+                }
+            }
+        }
+        if len(availableBackends) > 1 {
+            selected := s.cloudStrategy.Select(availableBackends)
+            if selected != "" {
+                slog.Info("cloud strategy selected backend", "strategy", s.cfg.Config.CloudRouting.Strategy, "backend", selected)
+                cloudBackend = selected
+            }
+        }
     }
 
     if req != nil && s.cfg.Config.Routing.Fallback.Enabled && s.cfg.Config.Routing.Fallback.ModelMapping != nil {
@@ -371,10 +428,46 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     observability.RecordDuration(string(decision.Backend), req.Model, duration)
     observability.RecordTokens("input", string(decision.Backend), budget.InputTokens)
     s.router.RecordSuccess(string(decision.Backend))
+
+    // Latency tracking for stream
+    if s.latencyTracker != nil {
+        s.latencyTracker.Record(provider.Name(), time.Duration(duration*float64(time.Second)))
+    }
+
+    // Cost tracking for stream
+    if s.costTracker != nil {
+        keyCfg := middleware.GetAuthKeyConfig(ctx)
+        keyName := "anonymous"
+        if keyCfg != nil && keyCfg.Name != "" {
+            keyName = keyCfg.Name
+        }
+        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, 0)
+    }
 }
 
 func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
-    resp, err := provider.Chat(ctx, req)
+    // Cache lookup
+    var cacheKey string
+    if s.cache != nil {
+        cacheKey = cache.ComputeCacheKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, req.TopP)
+        if cached, ok := s.cache.Get(cacheKey); ok {
+            slog.Debug("cache hit for non-stream chat", "model", req.Model)
+            w.Header().Set("Content-Type", "application/json")
+            w.Header().Set("X-Cache", "HIT")
+            w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
+            w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+            _, _ = w.Write(cached)
+            return
+        }
+    }
+
+    // Retry wrapper
+    chatFn := func(ctx context.Context, r *adapter.ChatRequest) (*adapter.ChatResponse, error) {
+        return provider.Chat(ctx, r)
+    }
+    chatFn = middleware.RetryChat(s.cfg.Config.Routing.Retry, chatFn)
+
+    resp, err := chatFn(ctx, req)
     if err != nil {
         slog.Error("chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
@@ -383,18 +476,43 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         return
     }
 
-    duration := time.Since(start).Seconds()
+    duration := time.Since(start)
     observability.RecordRequest(string(decision.Backend), req.Model, "success")
-    observability.RecordDuration(string(decision.Backend), req.Model, duration)
+    observability.RecordDuration(string(decision.Backend), req.Model, duration.Seconds())
     observability.RecordTokens("input", string(decision.Backend), budget.InputTokens)
     if resp.Usage.CompletionTokens > 0 {
         observability.RecordTokens("output", string(decision.Backend), resp.Usage.CompletionTokens)
     }
     s.router.RecordSuccess(string(decision.Backend))
 
+    // Latency tracking
+    if s.latencyTracker != nil {
+        s.latencyTracker.Record(provider.Name(), duration)
+    }
+
+    // Cost tracking
+    if s.costTracker != nil {
+        keyCfg := middleware.GetAuthKeyConfig(ctx)
+        keyName := "anonymous"
+        if keyCfg != nil && keyCfg.Name != "" {
+            keyName = keyCfg.Name
+        }
+        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, resp.Usage.CompletionTokens)
+    }
+
+    // Cache store
+    if s.cache != nil && cacheKey != "" {
+        if respData, marshalErr := json.Marshal(resp); marshalErr == nil {
+            s.cache.Set(cacheKey, respData)
+        }
+    }
+
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
     w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+    if s.cache != nil {
+        w.Header().Set("X-Cache", "MISS")
+    }
     _ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -412,6 +530,12 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 
     ctx := r.Context()
     inputLen := len(req.Input)
+
+    if !middleware.CheckModelAllowlist(r, req.Model) {
+        slog.Warn("model not allowed for this key", "model", req.Model)
+        http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
 
     // Route through router engine for embedding request type
     routeReq := &router.RouteRequest{
@@ -478,6 +602,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         provider = p
     }
 
+    embStart := time.Now()
     resp, err := provider.Embedding(ctx, &req)
     if err != nil {
         slog.Error("embedding failed", "provider", provider.Name(), "error", err)
@@ -486,7 +611,22 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    embDuration := time.Since(embStart)
     s.router.RecordSuccess(string(decision.Backend))
+
+    // Latency + cost tracking for embedding
+    if s.latencyTracker != nil {
+        s.latencyTracker.Record(provider.Name(), embDuration)
+    }
+    if s.costTracker != nil {
+        keyCfg := middleware.GetAuthKeyConfig(ctx)
+        keyName := "anonymous"
+        if keyCfg != nil && keyCfg.Name != "" {
+            keyName = keyCfg.Name
+        }
+        s.costTracker.Record(keyName, string(decision.Backend), req.Model, inputLen, 0)
+    }
+
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
     _ = json.NewEncoder(w).Encode(resp)
@@ -505,6 +645,12 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     }
 
     ctx := r.Context()
+
+    if !middleware.CheckModelAllowlist(r, req.Model) {
+        slog.Warn("model not allowed for this key", "model", req.Model)
+        http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
 
     routeReq := &router.RouteRequest{
         Model: req.Model,
@@ -561,10 +707,23 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    duration := time.Since(start).Seconds()
+    duration := time.Since(start)
     observability.RecordRequest(string(decision.Backend), req.Model, "success")
-    observability.RecordDuration(string(decision.Backend), req.Model, duration)
+    observability.RecordDuration(string(decision.Backend), req.Model, duration.Seconds())
     s.router.RecordSuccess(string(decision.Backend))
+
+    // Latency + cost tracking for rerank
+    if s.latencyTracker != nil {
+        s.latencyTracker.Record(provider.Name(), duration)
+    }
+    if s.costTracker != nil {
+        keyCfg := middleware.GetAuthKeyConfig(ctx)
+        keyName := "anonymous"
+        if keyCfg != nil && keyCfg.Name != "" {
+            keyName = keyCfg.Name
+        }
+        s.costTracker.Record(keyName, string(decision.Backend), req.Model, len(req.Documents), 0)
+    }
 
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -834,6 +993,123 @@ func (s *Server) buildHardwareStatus(m hardware.HardwareMetrics) map[string]inte
         "mlx_active_memory_bytes": m.MLXActiveMemory,
         "swap_page_in_rate":       m.SwapPageInRate,
         "collection_error":        errorString(m.CollectionError),
+    }
+}
+
+func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+
+    if s.costTracker == nil {
+        http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
+        return
+    }
+
+    keyName := r.URL.Query().Get("key")
+    var summary *cost.CostSummary
+    if keyName != "" {
+        summary = s.costTracker.SummaryByKey(keyName)
+    } else {
+        summary = s.costTracker.Summary()
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(summary)
+}
+
+func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Legacy /v1/completions: convert to chat format and re-use chat handler
+    var legacyReq struct {
+        Model       string   `json:"model"`
+        Prompt      string   `json:"prompt"`
+        Temperature *float64 `json:"temperature,omitempty"`
+        MaxTokens   *int     `json:"max_tokens,omitempty"`
+        Stream      bool     `json:"stream"`
+        Stop        []string `json:"stop,omitempty"`
+        TopP        *float64 `json:"top_p,omitempty"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&legacyReq); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
+
+    slog.Info("legacy completions request, converting to chat format", "model", legacyReq.Model)
+
+    // Convert prompt to single user message
+    chatReq := adapter.ChatRequest{
+        Model: legacyReq.Model,
+        Messages: []adapter.ChatMessage{
+            {Role: "user", Content: legacyReq.Prompt},
+        },
+        Temperature: legacyReq.Temperature,
+        MaxTokens:   legacyReq.MaxTokens,
+        Stream:      legacyReq.Stream,
+        Stop:        legacyReq.Stop,
+        TopP:        legacyReq.TopP,
+    }
+
+    // Re-encode and forward to chat completions handler via internal call
+    ctx := r.Context()
+
+    if !middleware.CheckModelAllowlist(r, chatReq.Model) {
+        slog.Warn("model not allowed for this key", "model", chatReq.Model)
+        http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
+
+    textContent := legacyReq.Prompt
+    inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
+    if err != nil {
+        slog.Error("token counting failed", "error", err)
+        inputTokens = len(textContent) / 4
+    }
+
+    budget := s.tokEngine.EstimateBudget(inputTokens, chatReq.MaxTokens, chatReq.Model, chatReq.Tools != nil, chatReq.Stream)
+    ctx = tokenizer.WithTokenBudget(ctx, budget)
+
+    routeReq := &router.RouteRequest{
+        Model:  chatReq.Model,
+        Stream: chatReq.Stream,
+    }
+    decision := s.router.Decide(ctx, routeReq)
+    observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
+
+    slog.Info("route decision (completions)",
+        "model", chatReq.Model,
+        "backend", string(decision.Backend),
+        "reason", decision.Reason,
+        "input_tokens", budget.InputTokens,
+    )
+
+    var provider adapter.Provider
+    switch decision.Backend {
+    case router.LocalBackend:
+        p, ok := s.pool.Get("fusion-mlx")
+        if !ok {
+            http.Error(w, `{"error":{"message":"Local backend not available","type":"server_error"}}`, http.StatusServiceUnavailable)
+            return
+        }
+        provider = p
+    default:
+        provider = s.resolveCloudProvider(decision, &chatReq, w)
+        if provider == nil {
+            return
+        }
+    }
+
+    start := time.Now()
+
+    if chatReq.Stream {
+        s.handleStreamChat(ctx, w, provider, &chatReq, decision, budget, start)
+    } else {
+        s.handleNonStreamChat(ctx, w, provider, &chatReq, decision, budget, start)
     }
 }
 

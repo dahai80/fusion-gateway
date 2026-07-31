@@ -303,6 +303,16 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     // P6: Model availability check
     if e.localModels() != nil {
         if !e.localModels()[req.Model] {
+            // P6.5: Context window fallback — check if a larger model can serve this
+            if fallback, ok := cfg.Config.Routing.Fallback.ContextWindowFallback[req.Model]; ok {
+                if e.localModels()[fallback] {
+                    slog.Info("context window fallback: using larger model",
+                        "original", req.Model,
+                        "fallback", fallback,
+                    )
+                    return &RouteDecision{Backend: LocalBackend, Reason: "context_window_fallback:" + fallback}
+                }
+            }
             if decision := e.tryClusterLocked(cfg); decision != nil {
                 return decision
             }

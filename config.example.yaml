@@ -4,8 +4,24 @@ server:
 
 auth:
     enabled: true
+    master_key: "fg-master-key-change-me"     # Bypasses rate limits and model allowlists
     api_keys:
-        - "fg-demo-key-change-me"
+        - key: "fg-demo-key-change-me"
+          name: "demo"
+          rpm: 60                              # Requests per minute per key
+          tpm: 100000                          # Tokens per minute per key
+          allowed_models:                      # Model allowlist (supports wildcards)
+              - "gpt-4o*"
+              - "claude-3*"
+              - "qwen*"
+          expires_at: ""                       # RFC3339 expiry, e.g. "2025-12-31T23:59:59Z"
+          budget_limit: 0                      # Monthly budget in USD (0 = unlimited)
+        - key: "fg-admin-key"
+          name: "admin"
+          rpm: 0                               # 0 = unlimited
+          tpm: 0
+          allowed_models:
+              - "*"                            # Wildcard: all models allowed
 
 route:
     enable_hardware_judge: true
@@ -27,6 +43,9 @@ route:
             #   backend: "openai"
     fallback:
         cloud_default: "openai"
+        context_window_fallback:     # When model exceeds local context, try larger model
+            qwen2.5-0.5b: "qwen2.5-3b"
+            qwen2.5-3b: "qwen2.5-7b"
     negotiation:
         route_header: "X-Fusion-Route"
         route_header_value: "gateway-decision"
@@ -38,6 +57,46 @@ route:
         timeout: 30s
         half_open_max_requests: 3
         success_threshold: 3
+    rate_limit:
+        enabled: true
+        global_rpm: 1000                   # Global RPM cap across all keys
+        global_tpm: 10000000               # Global TPM cap across all keys
+        key_enforcement: true              # Deny requests without key config when true
+    retry:
+        max_retries: 2                     # Max retry attempts for non-streaming
+        initial_backoff: 500ms             # First retry backoff
+        max_backoff: 10s                   # Max backoff cap
+        retryable_status_codes:            # HTTP status codes that trigger retry
+            - 429
+            - 500
+            - 502
+            - 503
+
+cache:
+    enabled: true
+    max_entries: 10000                     # Max cached responses
+    ttl: 5m                               # Cache TTL
+    max_memory_mb: 256                     # Max memory for cache (0 = unlimited)
+
+cost:
+    enabled: true
+    pricing_file: ""                       # Optional: custom pricing YAML file
+    budget_alert_threshold: 0.8            # Alert when 80% of key budget used
+
+pii:
+    enabled: false
+    action: "log"                          # log | mask | deny
+    patterns: []                           # Custom PII patterns
+    # patterns:
+    #     - name: "employee_id"
+    #       regex: "EMP\\d{6}"
+
+cloud_routing:
+    strategy: "round-robin"                # latency | cost | weight | least-busy | round-robin
+    cloud_weights:                         # Weights for weight-based strategy
+        openai: 3
+        deepseek: 1
+        qianfan: 2
 
 backends:
     fusion-mlx:
@@ -117,12 +176,6 @@ cluster:
     health_check_interval: 10s
     failure_threshold: 3
     recovery_interval: 30s
-
-# Rerank model routing:
-# - If a local rerank model is available (name contains "rerank"/"reranker"), route locally
-# - Otherwise route to cluster or cloud
-# Embedding model routing:
-# - Local-first when available, cluster sharding for batch (>32 inputs), cloud fallback
 
 realtime:
     enabled: false

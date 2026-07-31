@@ -44,11 +44,21 @@ See `config.example.yaml` for full reference. Key settings:
 |-----|---------|-------------|
 | `server.port` | 8100 | Gateway listen port |
 | `auth.enabled` | true | Enable API key authentication |
+| `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `route.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
 | `route.enable_hardware_judge` | true | Enable hardware-aware routing |
 | `route.local_max_memory_ratio` | 0.9 | Max system memory ratio before forcing cloud |
 | `route.local_max_mlx_memory_ratio` | 0.7 | Max MLX/GPU memory ratio before forcing cloud |
 | `route.circuit_breaker.failure_threshold` | 5 | Consecutive failures before circuit opens |
+| `route.rate_limit.enabled` | true | Enable per-key RPM/TPM rate limiting |
+| `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests |
+| `route.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
+| `cache.enabled` | true | Enable LRU response cache for non-streaming |
+| `cache.ttl` | 5m | Cache entry TTL |
+| `cost.enabled` | true | Enable cost tracking with built-in pricing |
+| `pii.enabled` | false | Enable PII detection on request content |
+| `pii.action` | log | PII action: log, mask, or deny |
+| `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, round-robin |
 | `hardware.collect_interval` | 2s | Hardware metrics collection interval |
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
 | `hot_reload.enabled` | true | Enable config file hot reload |
@@ -60,8 +70,10 @@ See `config.example.yaml` for full reference. Key settings:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | OpenAI-compatible chat completions (stream + non-stream) |
+| `/v1/completions` | POST | Legacy completions (auto-converted to chat format) |
 | `/v1/embeddings` | POST | Text embeddings (local-first, cluster sharding for batch) |
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
+| `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
 | `/v1/models` | GET | List available models |
 | `/health` | GET | Full health check with backend status |
@@ -90,7 +102,8 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 | P3 | Local not ready | Backend health check failed | Try cluster → cloud |
 | P4 | Token budget | Input tokens > threshold | Cloud |
 | P5 | Concurrent limit | In-flight > max concurrent | Try cluster → cloud |
-| P6 | Model availability | Model not found locally | Try cluster → cloud |
+| P6 | Model availability | Model not found locally | Context window fallback → cluster → cloud |
+| P6.5 | Context window fallback | Model not local but larger variant is | Route to larger local model |
 | P7 | Local priority | All checks passed | Route to local |
 
 ### Cluster Load Balancing
@@ -157,6 +170,93 @@ When the downstream SSE channel is full (slow client), the gateway:
 
 If the non-streaming fallback also fails, an `error` SSE event is emitted.
 
+## Key-Level Security & Rate Limiting
+
+### API Key Management
+
+Each API key supports fine-grained access control:
+
+| Field | Description |
+|-------|-------------|
+| `key` | API key string |
+| `name` | Human-readable key identifier |
+| `rpm` | Requests per minute (0 = unlimited) |
+| `tpm` | Tokens per minute (0 = unlimited) |
+| `allowed_models` | Model allowlist with wildcard support (e.g., `gpt-4o*`, `*`) |
+| `expires_at` | RFC3339 expiry timestamp |
+| `budget_limit` | Monthly spend limit in USD (0 = unlimited) |
+
+### MasterKey
+
+The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.
+
+### Sliding Window Rate Limiting
+
+Per-key RPM/TPM enforcement using a sliding window algorithm (no Redis dependency):
+- **RPM**: Tracks request timestamps within a 1-minute window
+- **TPM**: Tracks token counts within a 1-minute window
+- Returns `429` with `Retry-After` and `X-RateLimit-Remaining` headers
+- Master key requests bypass rate limits entirely
+
+## Response Caching
+
+LRU in-memory cache for non-streaming chat completions:
+- Cache key: SHA256(model + messages + temperature + max_tokens + top_p)
+- Configurable TTL, max entries, and max memory
+- `X-Cache: HIT` / `X-Cache: MISS` response headers
+- Background eviction of expired entries every 30s
+
+## Cost Tracking
+
+Built-in cost tracking with per-model pricing:
+- **15 models** pre-configured (GPT-4/4o/3.5, Claude-3/3.5, DeepSeek, embeddings)
+- Automatic cost calculation per request (prompt + completion tokens × model rate)
+- `/v1/cost` endpoint for aggregated summaries (by key, backend, model)
+- Per-key cost breakdown with `?key=<name>` filter
+- JSON export via `Tracker.ExportJSON()`
+
+## Retry & Backoff
+
+Exponential backoff retry for non-streaming requests:
+- Configurable `max_retries`, `initial_backoff`, `max_backoff`
+- Default retryable status codes: 429, 500, 502, 503
+- Connection refused / timeout errors are also retryable
+- Respects context cancellation between retry attempts
+
+## PII Detection
+
+Regex-based PII scanning on request text content:
+
+| Built-in Pattern | Description |
+|-----------------|-------------|
+| `email` | Email addresses |
+| `phone_cn` | Chinese mobile numbers |
+| `phone_us` | US phone numbers |
+| `credit_card` | Credit card numbers |
+| `ssn` | US Social Security numbers |
+| `ip_v4` | IPv4 addresses |
+
+Three actions:
+- `log` (default): Log detection, allow request
+- `mask`: Log detection with masking intent, allow request
+- `deny`: Block request with 400 error listing detected PII types
+
+Custom patterns supported via `pii.patterns` config.
+
+## Cloud Routing Strategies
+
+When multiple cloud backends are available, select a strategy via `cloud_routing.strategy`:
+
+| Strategy | Description |
+|----------|-------------|
+| `round-robin` | Cycle through backends sequentially (default) |
+| `latency` | Route to backend with lowest P95 latency |
+| `cost` | Route to cheapest backend (DeepSeek < Qianfan/Volcengine < OpenAI/Anthropic) |
+| `weight` | Weighted random selection via `cloud_weights` config |
+| `least-busy` | Route to backend with fewest tracked samples |
+
+Latency tracking uses quickselect algorithm for efficient P95 calculation (configurable window size, default 1000 samples).
+
 ## Config Hot-Update (Drain/Apply/Warmup)
 
 On config file change, the gateway performs a three-phase reload:
@@ -220,10 +320,12 @@ internal/
   config/             Config loading, versioned snapshots, hot reload, audit log
   hardware/           Hardware metrics collector (gopsutil + IOKit + MLX)
   tokenizer/          Token counting + budget estimation + calibration
-  router/             Routing decision engine + per-backend circuit breaker
+  router/             Routing decision engine + per-backend circuit breaker + cloud strategy + latency tracker
   adapter/            Provider interface + fusion-mlx + openai-compatible adapters + pool
   cluster/            Cluster node discovery, health check, load balancing, node adapter
-  middleware/         Auth, RequestID, CORS, config snapshot injection
+  middleware/         Auth (MasterKey + key expiry + model allowlist), Rate limiting (RPM/TPM), PII detection, Retry
+  cache/              LRU in-memory cache with TTL for non-streaming responses
+  cost/               Cost tracking with built-in model pricing table
   observability/      Prometheus metrics
   server/             HTTP server + route registration + SSE forwarding
 config.example.yaml   Example configuration

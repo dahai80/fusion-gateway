@@ -20,17 +20,29 @@ type ServerConfig struct {
 }
 
 type AuthKeyConfig struct {
-    Key             string   `mapstructure:"key"`
-    Name            string   `mapstructure:"name"`
-    AllowedBackends []string `mapstructure:"allowed_backends"`
-    RPM             int      `mapstructure:"rpm"`
-    TPM             int      `mapstructure:"tpm"`
+    Key             string            `mapstructure:"key"`
+    Name            string            `mapstructure:"name"`
+    AllowedBackends []string          `mapstructure:"allowed_backends"`
+    AllowedModels   []string          `mapstructure:"allowed_models"`
+    RPM             int               `mapstructure:"rpm"`
+    TPM             int               `mapstructure:"tpm"`
+    ExpiresAt       string            `mapstructure:"expires_at"`
+    BudgetLimit     float64           `mapstructure:"budget_limit"`
+    Metadata        map[string]string `mapstructure:"metadata"`
 }
 
 type AuthConfig struct {
     Enabled     bool            `mapstructure:"enabled"`
     APIKeys     []AuthKeyConfig `mapstructure:"api_keys"`
     Passthrough bool            `mapstructure:"passthrough"`
+    MasterKey   string          `mapstructure:"master_key"`
+}
+
+type RateLimitConfig struct {
+    Enabled        bool `mapstructure:"enabled"`
+    GlobalRPM      int  `mapstructure:"global_rpm"`
+    GlobalTPM      int  `mapstructure:"global_tpm"`
+    KeyEnforcement bool `mapstructure:"key_enforcement"`
 }
 
 type LocalPriorityConfig struct {
@@ -49,9 +61,10 @@ type CircuitBreakerConfig struct {
 }
 
 type FallbackConfig struct {
-    Enabled      bool              `mapstructure:"enabled"`
-    CloudDefault string            `mapstructure:"cloud_default"`
-    ModelMapping map[string]string `mapstructure:"model_mapping"`
+    Enabled               bool              `mapstructure:"enabled"`
+    CloudDefault          string            `mapstructure:"cloud_default"`
+    ModelMapping          map[string]string `mapstructure:"model_mapping"`
+    ContextWindowFallback map[string]string `mapstructure:"context_window_fallback"`
 }
 
 type NegotiationConfig struct {
@@ -78,6 +91,44 @@ type RoutingConfig struct {
     CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
     Fallback       FallbackConfig       `mapstructure:"fallback"`
     Negotiation    NegotiationConfig    `mapstructure:"negotiation"`
+    RateLimit      RateLimitConfig      `mapstructure:"rate_limit"`
+    Retry          RetryConfig          `mapstructure:"retry"`
+}
+
+type RetryConfig struct {
+    MaxRetries           int           `mapstructure:"max_retries"`
+    InitialBackoff       time.Duration `mapstructure:"initial_backoff"`
+    MaxBackoff           time.Duration `mapstructure:"max_backoff"`
+    RetryableStatusCodes []int         `mapstructure:"retryable_status_codes"`
+}
+
+type CacheConfig struct {
+    Enabled      bool          `mapstructure:"enabled"`
+    MaxEntries   int           `mapstructure:"max_entries"`
+    TTL          time.Duration `mapstructure:"ttl"`
+    MaxMemoryMB  int           `mapstructure:"max_memory_mb"`
+}
+
+type CostConfig struct {
+    Enabled              bool    `mapstructure:"enabled"`
+    PricingFile          string  `mapstructure:"pricing_file"`
+    BudgetAlertThreshold float64 `mapstructure:"budget_alert_threshold"`
+}
+
+type PIIConfig struct {
+    Enabled  bool           `mapstructure:"enabled"`
+    Action   string         `mapstructure:"action"`
+    Patterns []PIIPattern   `mapstructure:"patterns"`
+}
+
+type PIIPattern struct {
+    Name  string `mapstructure:"name"`
+    Regex string `mapstructure:"regex"`
+}
+
+type CloudRoutingConfig struct {
+    Strategy     string         `mapstructure:"strategy"`
+    CloudWeights map[string]int `mapstructure:"cloud_weights"`
 }
 
 type GCConfig struct {
@@ -231,6 +282,10 @@ type Config struct {
     HotReload     HotReloadConfig          `mapstructure:"hot_reload"`
     Cluster       ClusterConfig            `mapstructure:"cluster"`
     Realtime      RealtimeConfig           `mapstructure:"realtime"`
+    Cache         CacheConfig              `mapstructure:"cache"`
+    Cost          CostConfig               `mapstructure:"cost"`
+    PII           PIIConfig                `mapstructure:"pii"`
+    CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
 }
 
 type ConfigSnapshot struct {
