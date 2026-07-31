@@ -17,6 +17,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type ClusterNodeProvider struct {
@@ -139,7 +140,7 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
     // L6 fix: larger buffer to reduce backpressure risk
     ch := make(chan adapter.StreamChunk, 256)
 
-    go func() {
+    safego.Go("cluster_node_stream", func() {
         defer close(ch)
         defer p.node.DecrInFlight()
         defer resp.Body.Close()
@@ -156,9 +157,7 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
             select {
             case ch <- chunk:
             default:
-                // L6 fix: log and try to continue instead of dropping the stream
                 slog.Warn("cluster node sse backpressure, draining", "node_id", p.node.ID)
-                // drain: wait briefly and retry once, then give up this chunk
                 select {
                 case ch <- chunk:
                 default:
@@ -167,7 +166,7 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
                 }
             }
         }
-    }()
+    })
 
     return ch, nil
 }

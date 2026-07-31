@@ -307,3 +307,25 @@ func TestMemoryStore_FullIntegration(t *testing.T) {
         t.Fatalf("expected 1 request, got %d", overview.TotalRequests)
     }
 }
+
+func TestCSVSanitize(t *testing.T) {
+    cases := []struct {
+        input    string
+        expected string
+    }{
+        {"=CMD()", "'=CMD()"},
+        {"+CMD()", "'+CMD()"},
+        {"-CMD()", "'-CMD()"},
+        {"@SUM()", "'@SUM()"},
+        {"normal", "normal"},
+        {"", ""},
+        {"=1+1", "'=1+1"},
+        {"hello=world", "hello=world"},
+    }
+    for _, c := range cases {
+        got := csvSanitize(c.input)
+        if got != c.expected {
+            t.Errorf("csvSanitize(%q) = %q, want %q", c.input, got, c.expected)
+        }
+    }
+}

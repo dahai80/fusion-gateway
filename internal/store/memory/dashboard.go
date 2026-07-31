@@ -16,6 +16,10 @@ func (d *DashboardStore) Overview() (*store.DashboardOverview, error) {
     logs := d.logStore.AllLogs()
 
     overview := &store.DashboardOverview{
+        RequestsTrend:     make([]store.TokenStat, 0),
+        TokensTrend:       make([]store.TokenStat, 0),
+        CostTrend:         make([]store.CostTrendItem, 0),
+        ModelDistribution: make([]store.ModelDistItem, 0),
         RouteDistribution: make(map[string]float64),
     }
 

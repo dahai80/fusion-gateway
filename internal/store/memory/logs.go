@@ -169,6 +169,19 @@ func matchFilter(l *store.RequestLog, f store.LogFilter) bool {
     return true
 }
 
+// csvSanitize prevents CSV formula injection by prefixing a single-quote
+// when a user-controlled field starts with =, +, -, or @.
+func csvSanitize(s string) string {
+    if len(s) == 0 {
+        return s
+    }
+    switch s[0] {
+    case '=', '+', '-', '@':
+        return "'" + s
+    }
+    return s
+}
+
 func exportCSV(logs []*store.RequestLog) ([]byte, error) {
     var buf []byte
     writer := csv.NewWriter(&byteWriter{buf: &buf})
@@ -179,13 +192,13 @@ func exportCSV(logs []*store.RequestLog) ([]byte, error) {
 
     for _, l := range logs {
         row := []string{
-            l.ID,
+            csvSanitize(l.ID),
             l.Timestamp.Format(time.RFC3339),
-            l.APIKeyName,
-            l.Model,
-            l.RequestType,
-            l.ChannelName,
-            l.RouteReason,
+            csvSanitize(l.APIKeyName),
+            csvSanitize(l.Model),
+            csvSanitize(l.RequestType),
+            csvSanitize(l.ChannelName),
+            csvSanitize(l.RouteReason),
             fmt.Sprintf("%d", l.InputTokens),
             fmt.Sprintf("%d", l.OutputTokens),
             fmt.Sprintf("%d", l.TotalTokens),
@@ -193,7 +206,7 @@ func exportCSV(logs []*store.RequestLog) ([]byte, error) {
             fmt.Sprintf("%.2f", l.Latency),
             fmt.Sprintf("%d", l.StatusCode),
             fmt.Sprintf("%v", l.IsSuccess),
-            l.ErrorMessage,
+            csvSanitize(l.ErrorMessage),
         }
         _ = writer.Write(row)
     }

@@ -7,24 +7,54 @@ import (
     "time"
 
     "github.com/golang-jwt/jwt/v5"
+    "golang.org/x/crypto/bcrypt"
 )
 
-var jwtSecret []byte
-
-func SetJWTSecret(secret string) {
-    if secret == "" {
-        slog.Error("admin JWT secret is empty, admin module will be disabled")
-        jwtSecret = nil
-        return
-    }
-    if len(secret) < 32 {
-        panic(fmt.Sprintf("admin JWT secret must be at least 32 characters, got %d", len(secret)))
-    }
-    jwtSecret = []byte(secret)
+// A1 fix: AdminAuth replaces global jwtSecret + adminUsers variables.
+// Constructed via NewAdminAuth, injected into Server and Handler.
+// #12 fix: passwords stored as bcrypt hashes, not plaintext.
+type AdminAuth struct {
+    jwtSecret      []byte
+    adminUsers     map[string]string // username -> bcrypt hash
 }
 
-func JWTSecretSet() bool {
-    return len(jwtSecret) > 0
+func NewAdminAuth(secret string, users map[string]string) (*AdminAuth, error) {
+    if secret == "" {
+        slog.Error("admin JWT secret is empty, admin module will be disabled")
+        return &AdminAuth{}, nil
+    }
+    if len(secret) < 32 {
+        return nil, fmt.Errorf("admin JWT secret must be at least 32 characters, got %d", len(secret))
+    }
+
+    // #12 fix: hash all plaintext passwords at startup
+    hashedUsers := make(map[string]string, len(users))
+    for username, password := range users {
+        if isBcryptHash(password) {
+            hashedUsers[username] = password
+        } else {
+            hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+            if err != nil {
+                return nil, fmt.Errorf("failed to hash password for user %q: %w", username, err)
+            }
+            hashedUsers[username] = string(hash)
+            slog.Info("admin password hashed at startup", "username", username)
+        }
+    }
+
+    return &AdminAuth{
+        jwtSecret:  []byte(secret),
+        adminUsers: hashedUsers,
+    }, nil
+}
+
+// isBcryptHash checks if a string looks like a pre-computed bcrypt hash ($2a$, $2b$, $2y$)
+func isBcryptHash(s string) bool {
+    return len(s) == 60 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
+}
+
+func (a *AdminAuth) Enabled() bool {
+    return len(a.jwtSecret) > 0 && len(a.adminUsers) > 0
 }
 
 type AdminClaims struct {
@@ -33,8 +63,8 @@ type AdminClaims struct {
     jwt.RegisteredClaims
 }
 
-func GenerateToken(username, role string) (string, error) {
-    if len(jwtSecret) == 0 {
+func (a *AdminAuth) GenerateToken(username, role string) (string, error) {
+    if len(a.jwtSecret) == 0 {
         return "", errors.New("admin JWT secret not configured")
     }
     claims := AdminClaims{
@@ -47,18 +77,18 @@ func GenerateToken(username, role string) (string, error) {
         },
     }
     token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString(jwtSecret)
+    return token.SignedString(a.jwtSecret)
 }
 
-func ValidateToken(tokenStr string) (*AdminClaims, error) {
-    if len(jwtSecret) == 0 {
+func (a *AdminAuth) ValidateToken(tokenStr string) (*AdminClaims, error) {
+    if len(a.jwtSecret) == 0 {
         return nil, errors.New("admin JWT secret not configured")
     }
     token, err := jwt.ParseWithClaims(tokenStr, &AdminClaims{}, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
             return nil, errors.New("unexpected signing method")
         }
-        return jwtSecret, nil
+        return a.jwtSecret, nil
     })
     if err != nil {
         return nil, err
@@ -68,4 +98,17 @@ func ValidateToken(tokenStr string) (*AdminClaims, error) {
         return nil, errors.New("invalid token claims")
     }
     return claims, nil
+}
+
+// #12 fix: use bcrypt comparison instead of plaintext ==
+func (a *AdminAuth) Authenticate(username, password string) bool {
+    if len(a.adminUsers) == 0 {
+        return false
+    }
+    hashed, ok := a.adminUsers[username]
+    if !ok {
+        return false
+    }
+    err := bcrypt.CompareHashAndPassword([]byte(hashed), []byte(password))
+    return err == nil
 }

@@ -71,7 +71,7 @@ func main() {
 
     tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
-    srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine)
+    srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, *configPath)
 
     stopCh := make(chan struct{})
 

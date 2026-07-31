@@ -1,6 +1,7 @@
 package store
 
 import (
+    "encoding/json"
     "time"
 )
 
@@ -116,13 +117,123 @@ type ErrorStat struct {
 }
 
 type DashboardOverview struct {
-    TotalRequests     int64              `json:"total_requests"`
-    TotalTokens       int64              `json:"total_tokens"`
-    TotalCost         float64            `json:"total_cost"`
-    LocalHitRate      float64            `json:"local_hit_rate"`
-    RequestsTrend     []TokenStat        `json:"requests_trend"`
-    TokensTrend       []TokenStat        `json:"tokens_trend"`
-    RouteDistribution map[string]float64 `json:"route_distribution"`
+    TotalRequests      int64              `json:"total_requests"`
+    TotalTokens        int64              `json:"total_tokens"`
+    TotalCost          float64            `json:"total_cost"`
+    LocalHitRate       float64            `json:"local_hit_rate"`
+    RequestsTrend      []TokenStat        `json:"requests_trend"`
+    TokensTrend        []TokenStat        `json:"tokens_trend"`
+    CostTrend          []CostTrendItem    `json:"cost_trend"`
+    ModelDistribution  []ModelDistItem    `json:"model_distribution"`
+    RouteDistribution  map[string]float64 `json:"route_distribution"`
+}
+
+type CostTrendItem struct {
+    Date string  `json:"date"`
+    Cost float64 `json:"cost"`
+}
+
+type ModelDistItem struct {
+    Model string  `json:"model"`
+    Count float64 `json:"count"`
+}
+
+type KeyProfitStat struct {
+    KeyName      string  `json:"key_name"`
+    TotalInput   int64   `json:"total_input"`
+    TotalOutput  int64   `json:"total_output"`
+    Ratio        float64 `json:"ratio"`
+    TotalCost    float64 `json:"total_cost"`
+    RequestCount int     `json:"request_count"`
+}
+
+// A3 fix: domain types migrated from sub-packages for shared Store interface
+
+type TeamMember struct {
+    UserID string `json:"user_id"`
+    Role   string `json:"role"`
+}
+
+type Team struct {
+    ID              string       `json:"id"`
+    Name            string       `json:"name"`
+    OrgID           string       `json:"org_id,omitempty"`
+    QuotaLimit      float64      `json:"quota_limit"`
+    QuotaUsed       float64      `json:"quota_used"`
+    Members         []TeamMember `json:"members"`
+    AllowedModels   []string     `json:"allowed_models,omitempty"`
+    CostAccumulated float64      `json:"cost_accumulated"`
+    CreatedAt       time.Time    `json:"created_at"`
+    UpdatedAt       time.Time    `json:"updated_at"`
+}
+
+type Organization struct {
+    ID        string    `json:"id"`
+    Name      string    `json:"name"`
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+}
+
+type BatchStatus string
+
+const (
+    BatchStatusPending   BatchStatus = "pending"
+    BatchStatusRunning   BatchStatus = "running"
+    BatchStatusCompleted BatchStatus = "completed"
+    BatchStatusFailed    BatchStatus = "failed"
+    BatchStatusCancelled BatchStatus = "cancelled"
+)
+
+type BatchRequest struct {
+    CustomID string          `json:"custom_id"`
+    Method   string          `json:"method"`
+    URL      string          `json:"url"`
+    Body     json.RawMessage `json:"body"`
+}
+
+type BatchResponse struct {
+    StatusCode int             `json:"status_code"`
+    Body       json.RawMessage `json:"body"`
+}
+
+type BatchResult struct {
+    CustomID string         `json:"custom_id"`
+    Response *BatchResponse `json:"response,omitempty"`
+    Error    string         `json:"error,omitempty"`
+}
+
+type Batch struct {
+    ID               string         `json:"id"`
+    Status           BatchStatus    `json:"status"`
+    Requests         []BatchRequest `json:"requests"`
+    Results          []BatchResult  `json:"results,omitempty"`
+    Total            int            `json:"total"`
+    Completed        int            `json:"completed"`
+    Failed           int            `json:"failed"`
+    CreatedAt        time.Time      `json:"created_at"`
+    CompletedAt      *time.Time     `json:"completed_at,omitempty"`
+    Endpoint         string         `json:"endpoint,omitempty"`
+    CompletionWindow string         `json:"completion_window,omitempty"`
+}
+
+type UsageRecord struct {
+    Timestamp        time.Time `json:"timestamp"`
+    KeyName          string    `json:"key_name"`
+    Backend          string    `json:"backend"`
+    Model            string    `json:"model"`
+    PromptTokens     int       `json:"prompt_tokens"`
+    CompletionTokens int       `json:"completion_tokens"`
+    TotalTokens      int       `json:"total_tokens"`
+    CostUSD          float64   `json:"cost_usd"`
+}
+
+type CostSummary struct {
+    TotalCostUSD  float64           `json:"total_cost_usd"`
+    ByKey         map[string]float64 `json:"by_key"`
+    ByBackend     map[string]float64 `json:"by_backend"`
+    ByModel       map[string]float64 `json:"by_model"`
+    TotalTokens   int               `json:"total_tokens"`
+    TotalRequests int               `json:"total_requests"`
 }
 
 type Store interface {
@@ -149,7 +260,41 @@ type Store interface {
     GetLatencyStats(from, to time.Time) ([]*LatencyStat, error)
     GetErrorStats(from, to time.Time) ([]*ErrorStat, error)
     GetDashboardOverview() (*DashboardOverview, error)
+    GetKeyProfitStats(from, to time.Time) ([]*KeyProfitStat, error)
 
     CheckQuota(keyName string) (used, limit float64, exceeded bool, err error)
     DeductQuota(keyName string, amount float64) error
+
+    // A3 fix: teams/orgs/batch/cost methods for multi-instance persistence
+
+    // Teams
+    CreateTeam(team *Team) error
+    GetTeam(id string) (*Team, error)
+    ListTeams() ([]*Team, error)
+    UpdateTeam(team *Team) error
+    DeleteTeam(id string) error
+    BindKeyToTeam(apiKey, teamID string) error
+    GetTeamByKey(apiKey string) (*Team, error)
+    AddTeamCost(teamID string, cost float64) error
+    CheckTeamQuota(teamID string) (limit, used float64, ok bool, err error)
+    AddTeamMember(teamID, userID, role string) error
+    RemoveTeamMember(teamID, userID string) error
+
+    // Organizations
+    CreateOrg(org *Organization) error
+    GetOrg(id string) (*Organization, error)
+    ListOrgs() ([]*Organization, error)
+    DeleteOrg(id string) error
+
+    // Batch
+    CreateBatch(requests []BatchRequest, endpoint, window string) (*Batch, error)
+    GetBatch(id string) (*Batch, error)
+    ListBatches() ([]*Batch, error)
+    CancelBatch(id string) (*Batch, error)
+    UpdateBatch(batch *Batch) error
+
+    // Cost
+    RecordUsage(keyName, backend, model string, promptTokens, completionTokens int, costUSD float64) error
+    GetCostSummary(keyName string) (*CostSummary, error)
+    GetCostSummaryAll() (*CostSummary, error)
 }

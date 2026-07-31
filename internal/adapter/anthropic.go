@@ -7,6 +7,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "strings"
     "time"
@@ -173,11 +175,11 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         return nil, fmt.Errorf("anthropic stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         p.parseAnthropicSSE(resp.Body, ch, req.Model)
-    }()
+    })
     return ch, nil
 }
 
@@ -229,11 +231,11 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
         return nil, fmt.Errorf("anthropic stream messages returned status %d: %s", resp.StatusCode, string(respBody))
     }
     ch := make(chan AnthropicStreamEvent, 64)
-    go func() {
+    safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         p.parseAnthropicStreamEvents(resp.Body, ch)
-    }()
+    })
     return ch, nil
 }
 

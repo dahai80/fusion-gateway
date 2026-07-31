@@ -1,54 +1,25 @@
 package memory
 
-// Teams store for v0.5.0 Task #69 (Team/Org/RBAC).
-// Importers: internal/server/server.go admin handlers for /admin/teams, /admin/orgs.
-// User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md specifies
-// "internal/store/memory/teams.go — Team/Org CRUD. Key association Team, cost aggregated by Team".
-// Data: Team(id/name/org_id/quota/members/allowed_models/cost), Organization(id/name), TeamsStore(keyTeam map).
-
 import (
     "fmt"
     "log/slog"
     "sync"
     "time"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
-
-type TeamMember struct {
-    UserID string `json:"user_id"`
-    Role   string `json:"role"`
-}
-
-type Team struct {
-    ID              string       `json:"id"`
-    Name            string       `json:"name"`
-    OrgID           string       `json:"org_id,omitempty"`
-    QuotaLimit      float64      `json:"quota_limit"`
-    QuotaUsed       float64      `json:"quota_used"`
-    Members         []TeamMember `json:"members"`
-    AllowedModels   []string     `json:"allowed_models,omitempty"`
-    CostAccumulated float64      `json:"cost_accumulated"`
-    CreatedAt       time.Time    `json:"created_at"`
-    UpdatedAt       time.Time    `json:"updated_at"`
-}
-
-type Organization struct {
-    ID        string    `json:"id"`
-    Name      string    `json:"name"`
-    CreatedAt time.Time `json:"created_at"`
-    UpdatedAt time.Time `json:"updated_at"`
-}
 
 type TeamsStore struct {
     mu      sync.RWMutex
-    teams   map[string]*Team
-    orgs    map[string]*Organization
+    teams   map[string]*store.Team
+    orgs    map[string]*store.Organization
     keyTeam map[string]string
 }
 
 func NewTeamsStore() *TeamsStore {
     s := &TeamsStore{
-        teams:   make(map[string]*Team),
-        orgs:    make(map[string]*Organization),
+        teams:   make(map[string]*store.Team),
+        orgs:    make(map[string]*store.Organization),
         keyTeam: make(map[string]string),
     }
     s.seedDefaults()
@@ -57,20 +28,20 @@ func NewTeamsStore() *TeamsStore {
 
 func (s *TeamsStore) seedDefaults() {
     now := time.Now()
-    s.orgs["default"] = &Organization{
+    s.orgs["default"] = &store.Organization{
         ID: "default", Name: "Default Organization",
         CreatedAt: now, UpdatedAt: now,
     }
-    s.teams["default"] = &Team{
+    s.teams["default"] = &store.Team{
         ID: "default", Name: "Default Team", OrgID: "default",
         QuotaLimit: 1000, AllowedModels: []string{"*"},
-        Members:   []TeamMember{{UserID: "admin", Role: "admin"}},
+        Members:   []store.TeamMember{{UserID: "admin", Role: "admin"}},
         CreatedAt: now, UpdatedAt: now,
     }
     slog.Info("teams store seeded with default org and team")
 }
 
-func (s *TeamsStore) CreateTeam(team *Team) error {
+func (s *TeamsStore) CreateTeam(team *store.Team) error {
     s.mu.Lock()
     defer s.mu.Unlock()
     if _, exists := s.teams[team.ID]; exists {
@@ -80,14 +51,14 @@ func (s *TeamsStore) CreateTeam(team *Team) error {
     team.CreatedAt = now
     team.UpdatedAt = now
     if team.Members == nil {
-        team.Members = []TeamMember{}
+        team.Members = []store.TeamMember{}
     }
     s.teams[team.ID] = team
     slog.Info("team created", "id", team.ID, "name", team.Name)
     return nil
 }
 
-func (s *TeamsStore) GetTeam(id string) (*Team, error) {
+func (s *TeamsStore) GetTeam(id string) (*store.Team, error) {
     s.mu.RLock()
     defer s.mu.RUnlock()
     team, exists := s.teams[id]
@@ -97,17 +68,17 @@ func (s *TeamsStore) GetTeam(id string) (*Team, error) {
     return team, nil
 }
 
-func (s *TeamsStore) ListTeams() []*Team {
+func (s *TeamsStore) ListTeams() []*store.Team {
     s.mu.RLock()
     defer s.mu.RUnlock()
-    result := make([]*Team, 0, len(s.teams))
+    result := make([]*store.Team, 0, len(s.teams))
     for _, t := range s.teams {
         result = append(result, t)
     }
     return result
 }
 
-func (s *TeamsStore) UpdateTeam(team *Team) error {
+func (s *TeamsStore) UpdateTeam(team *store.Team) error {
     s.mu.Lock()
     defer s.mu.Unlock()
     existing, exists := s.teams[team.ID]
@@ -140,7 +111,7 @@ func (s *TeamsStore) DeleteTeam(id string) error {
     return nil
 }
 
-func (s *TeamsStore) CreateOrg(org *Organization) error {
+func (s *TeamsStore) CreateOrg(org *store.Organization) error {
     s.mu.Lock()
     defer s.mu.Unlock()
     if _, exists := s.orgs[org.ID]; exists {
@@ -154,7 +125,7 @@ func (s *TeamsStore) CreateOrg(org *Organization) error {
     return nil
 }
 
-func (s *TeamsStore) GetOrg(id string) (*Organization, error) {
+func (s *TeamsStore) GetOrg(id string) (*store.Organization, error) {
     s.mu.RLock()
     defer s.mu.RUnlock()
     org, exists := s.orgs[id]
@@ -164,10 +135,10 @@ func (s *TeamsStore) GetOrg(id string) (*Organization, error) {
     return org, nil
 }
 
-func (s *TeamsStore) ListOrgs() []*Organization {
+func (s *TeamsStore) ListOrgs() []*store.Organization {
     s.mu.RLock()
     defer s.mu.RUnlock()
-    result := make([]*Organization, 0, len(s.orgs))
+    result := make([]*store.Organization, 0, len(s.orgs))
     for _, o := range s.orgs {
         result = append(result, o)
     }
@@ -204,7 +175,7 @@ func (s *TeamsStore) BindKeyToTeam(apiKey, teamID string) error {
     return nil
 }
 
-func (s *TeamsStore) GetTeamByKey(apiKey string) (*Team, error) {
+func (s *TeamsStore) GetTeamByKey(apiKey string) (*store.Team, error) {
     s.mu.RLock()
     defer s.mu.RUnlock()
     teamID, exists := s.keyTeam[apiKey]
@@ -254,7 +225,7 @@ func (s *TeamsStore) AddMember(teamID, userID, role string) error {
             return fmt.Errorf("user %s already in team", userID)
         }
     }
-    team.Members = append(team.Members, TeamMember{UserID: userID, Role: role})
+    team.Members = append(team.Members, store.TeamMember{UserID: userID, Role: role})
     team.UpdatedAt = time.Now()
     slog.Info("member added to team", "team", teamID, "user", userID, "role", role)
     return nil

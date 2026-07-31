@@ -2,6 +2,8 @@ package memory
 
 import (
     "testing"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
 func TestTeamsStore_CreateAndGet(t *testing.T) {
@@ -17,7 +19,7 @@ func TestTeamsStore_CreateAndGet(t *testing.T) {
 
 func TestTeamsStore_CreateDuplicate(t *testing.T) {
     s := NewTeamsStore()
-    err := s.CreateTeam(&Team{ID: "default", Name: "dup"})
+    err := s.CreateTeam(&store.Team{ID: "default", Name: "dup"})
     if err == nil {
         t.Fatal("should fail on duplicate")
     }
@@ -86,7 +88,7 @@ func TestTeamsStore_CostTracking(t *testing.T) {
 
 func TestTeamsStore_OrgCRUD(t *testing.T) {
     s := NewTeamsStore()
-    err := s.CreateOrg(&Organization{ID: "org1", Name: "Org One"})
+    err := s.CreateOrg(&store.Organization{ID: "org1", Name: "Org One"})
     if err != nil {
         t.Fatal(err)
     }

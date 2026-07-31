@@ -14,7 +14,6 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
-    "github.com/fusion-gateway/fusion-gateway/internal/batch"
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
@@ -24,6 +23,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
+    redisstore "github.com/fusion-gateway/fusion-gateway/internal/store/redis"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
@@ -32,6 +32,7 @@ import (
 
 type Server struct {
     cfg             *config.ConfigSnapshot
+    cfgPath         string
     hwCollector     *hardware.Collector
     router          *router.Engine
     pool            *adapter.Pool
@@ -46,10 +47,11 @@ type Server struct {
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
     store           store.Store
-    teamsStore      *memorystore.TeamsStore
     semanticCache   *cache.SemanticCache
-    batchStore      *batch.Store
     otelShutdown    func(context.Context) error
+    // A1 fix: DI-constructed auth dependencies (no package-level globals)
+    oidcAuth  *middleware.OIDCAuthenticator
+    adminAuth *admin.AdminAuth
     // M1 fix: middleware chain constructed once, rebuilt on reload
     middlewareChainMu sync.RWMutex
     middlewareChain   func(http.Handler) http.Handler
@@ -80,6 +82,7 @@ func New(
     routerEngine *router.Engine,
     pool *adapter.Pool,
     tokEngine *tokenizer.Engine,
+    cfgPath string,
 ) *Server {
     var rp *realtime.Proxy
     if cfg.Config.Realtime.Enabled {
@@ -97,8 +100,33 @@ func New(
     if cfg.Config.Admin != nil && cfg.Config.Admin.LogMaxLen > 0 {
         logMaxLen = cfg.Config.Admin.LogMaxLen
     }
-    memStore := memorystore.NewMemoryStore(logMaxLen)
-    slog.Info("request log store initialized", "max_len", logMaxLen)
+
+    // A3 fix: store factory — select memory or redis backend from config
+    var s store.Store
+    storeBackend := cfg.Config.Store.Backend
+    if storeBackend == "" {
+        storeBackend = "memory"
+    }
+    switch storeBackend {
+    case "redis":
+        addr := cfg.Config.Store.Redis.Addr
+        if addr == "" {
+            slog.Error("store.redis.addr is required for redis backend, falling back to memory")
+            s = memorystore.NewMemoryStoreWithConfig(logMaxLen, cfg.Config.Batch)
+        } else {
+            rs, err := redisstore.NewRedisStore(addr, cfg.Config.Store.Redis.Password, cfg.Config.Store.Redis.DB)
+            if err != nil {
+                slog.Error("redis store init failed, falling back to memory", "error", err)
+                s = memorystore.NewMemoryStoreWithConfig(logMaxLen, cfg.Config.Batch)
+            } else {
+                s = rs
+                slog.Info("using redis store", "addr", addr)
+            }
+        }
+    default:
+        s = memorystore.NewMemoryStoreWithConfig(logMaxLen, cfg.Config.Batch)
+        slog.Info("using memory store")
+    }
 
     otelShutdown, err := observability.InitTracing(context.Background(), observability.OTelConfig{
         Enabled:     cfg.Config.Observability.OtelEnabled,
@@ -110,8 +138,39 @@ func New(
         slog.Warn("otel tracing init failed, continuing without tracing", "error", err)
     }
 
+    // A1 fix: construct OIDCAuthenticator via DI instead of global InitOIDC
+    oidcAuth, err := middleware.NewOIDCAuthenticator(middleware.OIDCConfig{
+        Enabled:   cfg.Config.OIDC.Enabled,
+        Issuer:    cfg.Config.OIDC.Issuer,
+        ClientID:  cfg.Config.OIDC.ClientID,
+        Audiences: cfg.Config.OIDC.Audiences,
+        Scopes:    cfg.Config.OIDC.Scopes,
+        ClaimMappings: cfg.Config.OIDC.ClaimMappings,
+    })
+    if err != nil {
+        slog.Warn("oidc authenticator init failed, OIDC auth disabled", "error", err)
+    }
+    if oidcAuth.Enabled() {
+        slog.Info("oidc authenticator initialized", "issuer", cfg.Config.OIDC.Issuer)
+    }
+
+    // A1 fix: construct AdminAuth via DI instead of global SetJWTSecret/SetAdminUsers
+    var adminAuthObj *admin.AdminAuth
+    if cfg.Config.Admin != nil && cfg.Config.Admin.Enabled {
+        adminAuthObj, err = admin.NewAdminAuth(cfg.Config.Admin.JWTSecret, cfg.Config.Admin.Users)
+        if err != nil {
+            slog.Warn("admin auth init failed", "error", err)
+        } else if adminAuthObj.Enabled() {
+            slog.Info("admin auth initialized")
+        }
+    }
+    if adminAuthObj == nil {
+        adminAuthObj = &admin.AdminAuth{}
+    }
+
     return &Server{
         cfg:            cfg,
+        cfgPath:        cfgPath,
         hwCollector:    hwCollector,
         router:         routerEngine,
         pool:           pool,
@@ -124,11 +183,11 @@ func New(
         piiMiddleware:  middleware.NewPIIMiddleware(cfg.Config.PII),
         cloudStrategy:  cs,
         latencyTracker: lt,
-        store:          memStore,
-        teamsStore:     memorystore.NewTeamsStore(),
+        store:          s,
         semanticCache:  cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
-        batchStore:     batch.NewStore(cfg.Config.Batch, nil),
         otelShutdown:   otelShutdown,
+        oidcAuth:       oidcAuth,
+        adminAuth:      adminAuthObj,
     }
 }
 
@@ -171,11 +230,10 @@ func (s *Server) Start() error {
 
     // Admin API + Dashboard UI
     if s.cfg.Config.Admin != nil && s.cfg.Config.Admin.Enabled {
-        admin.SetJWTSecret(s.cfg.Config.Admin.JWTSecret)
-	admin.SetAdminUsers(s.cfg.Config.Admin.Users)
-        adminHandler := admin.NewHandler(s.store)
+        // A1 fix: use DI-constructed adminAuth instead of globals
+        adminHandler := admin.NewHandler(s.store, s.adminAuth, s.cfgPath)
         adminHandler.RegisterRoutes(mux)
-        mux.HandleFunc("/admin/api/login", admin.HandleLogin)
+        mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
         mux.Handle("/admin/", http.StripPrefix("/admin/", adminui.Handler()))
     }
 
@@ -251,7 +309,7 @@ func (s *Server) buildMiddlewareChain() {
         observability.HTTPMiddleware,
         middleware.CORS(&s.cfg.Config.CORS),
         middleware.APIKeyAuth(&s.cfg.Config.Auth),
-        middleware.OIDCAuth(&s.cfg.Config.Auth),
+        s.oidcAuth.Middleware(&s.cfg.Config.Auth),
         middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
         middleware.BudgetBlock(s.store),
@@ -1474,7 +1532,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
         return
     }
-    body, err := io.ReadAll(r.Body)
+    // R2 fix: use MaxBytesReader to limit request body size
+    maxBodySize := int64(s.cfg.Config.Server.MaxRequestBodySize)
+    if maxBodySize <= 0 {
+        maxBodySize = 5 << 20
+    }
+    body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
     if err != nil {
         http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
         return
@@ -1599,7 +1662,12 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
         return
     }
-    body, err := io.ReadAll(r.Body)
+    // R2 fix: use MaxBytesReader to limit request body size
+    maxBodySize := int64(s.cfg.Config.Server.MaxRequestBodySize)
+    if maxBodySize <= 0 {
+        maxBodySize = 5 << 20
+    }
+    body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
     if err != nil {
         http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
         return
@@ -1643,7 +1711,12 @@ func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
         return
     }
-    body, err := io.ReadAll(r.Body)
+    // R2 fix: use MaxBytesReader to limit request body size
+    maxBodySize := int64(s.cfg.Config.Server.MaxRequestBodySize)
+    if maxBodySize <= 0 {
+        maxBodySize = 5 << 20
+    }
+    body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
     if err != nil {
         http.Error(w, `{"error":{"message":"Failed to read request","type":"invalid_request"}}`, http.StatusBadRequest)
         return
@@ -1694,10 +1767,14 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
 func (s *Server) handleAdminTeams(w http.ResponseWriter, r *http.Request) {
     switch r.Method {
     case http.MethodGet:
-        teams := s.teamsStore.ListTeams()
+        teams, err := s.store.ListTeams()
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+            return
+        }
         writeJSON(w, http.StatusOK, teams)
     case http.MethodPost:
-        var team memorystore.Team
+        var team store.Team
         if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
@@ -1706,7 +1783,7 @@ func (s *Server) handleAdminTeams(w http.ResponseWriter, r *http.Request) {
             http.Error(w, `{"error":{"message":"Team ID is required","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
-        if err := s.teamsStore.CreateTeam(&team); err != nil {
+        if err := s.store.CreateTeam(&team); err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusConflict)
             return
         }
@@ -1724,26 +1801,26 @@ func (s *Server) handleAdminTeamsCRUD(w http.ResponseWriter, r *http.Request) {
     }
     switch r.Method {
     case http.MethodGet:
-        team, err := s.teamsStore.GetTeam(id)
+        team, err := s.store.GetTeam(id)
         if err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
             return
         }
         writeJSON(w, http.StatusOK, team)
     case http.MethodPut:
-        var team memorystore.Team
+        var team store.Team
         if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
         team.ID = id
-        if err := s.teamsStore.UpdateTeam(&team); err != nil {
+        if err := s.store.UpdateTeam(&team); err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
             return
         }
         writeJSON(w, http.StatusOK, team)
     case http.MethodDelete:
-        if err := s.teamsStore.DeleteTeam(id); err != nil {
+        if err := s.store.DeleteTeam(id); err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
             return
         }
@@ -1756,10 +1833,14 @@ func (s *Server) handleAdminTeamsCRUD(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
     switch r.Method {
     case http.MethodGet:
-        orgs := s.teamsStore.ListOrgs()
+        orgs, err := s.store.ListOrgs()
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+            return
+        }
         writeJSON(w, http.StatusOK, orgs)
     case http.MethodPost:
-        var org memorystore.Organization
+        var org store.Organization
         if err := json.NewDecoder(r.Body).Decode(&org); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
@@ -1768,7 +1849,7 @@ func (s *Server) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
             http.Error(w, `{"error":{"message":"Organization ID is required","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
-        if err := s.teamsStore.CreateOrg(&org); err != nil {
+        if err := s.store.CreateOrg(&org); err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusConflict)
             return
         }
@@ -1786,14 +1867,14 @@ func (s *Server) handleAdminOrgsCRUD(w http.ResponseWriter, r *http.Request) {
     }
     switch r.Method {
     case http.MethodGet:
-        org, err := s.teamsStore.GetOrg(id)
+        org, err := s.store.GetOrg(id)
         if err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
             return
         }
         writeJSON(w, http.StatusOK, org)
     case http.MethodDelete:
-        if err := s.teamsStore.DeleteOrg(id); err != nil {
+        if err := s.store.DeleteOrg(id); err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
             return
         }
@@ -1815,7 +1896,7 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
     switch r.Method {
     case http.MethodPost:
         var req struct {
-            Requests         []batch.BatchRequest `json:"requests"`
+            Requests         []store.BatchRequest `json:"requests"`
             Endpoint         string               `json:"endpoint"`
             CompletionWindow string               `json:"completion_window"`
         }
@@ -1823,14 +1904,18 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
-        b, err := s.batchStore.Create(req.Requests, req.Endpoint, req.CompletionWindow)
+        b, err := s.store.CreateBatch(req.Requests, req.Endpoint, req.CompletionWindow)
         if err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
             return
         }
         writeJSON(w, http.StatusOK, b)
     case http.MethodGet:
-        batches := s.batchStore.List()
+        batches, err := s.store.ListBatches()
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+            return
+        }
         writeJSON(w, http.StatusOK, batches)
     default:
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
@@ -1845,7 +1930,7 @@ func (s *Server) handleBatchCRUD(w http.ResponseWriter, r *http.Request) {
     }
     switch r.Method {
     case http.MethodGet:
-        b, err := s.batchStore.Get(id)
+        b, err := s.store.GetBatch(id)
         if err != nil {
             http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"not_found"}}`, err.Error()), http.StatusNotFound)
             return
@@ -1853,7 +1938,7 @@ func (s *Server) handleBatchCRUD(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, b)
     case http.MethodPost:
         if strings.HasSuffix(r.URL.Path, "/cancel") {
-            b, err := s.batchStore.Cancel(id)
+            b, err := s.store.CancelBatch(id)
             if err != nil {
                 http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request"}}`, err.Error()), http.StatusBadRequest)
                 return

@@ -56,12 +56,17 @@ type OIDCProvider struct {
     httpClient *http.Client
 }
 
-var oidcProvider *OIDCProvider
+// A1 fix: OIDCAuthenticator replaces global oidcProvider variable.
+// Constructed via NewOIDCAuthenticator, injected into Server, used in middleware chain.
+type OIDCAuthenticator struct {
+    provider *OIDCProvider
+    cfg      OIDCConfig
+}
 
-func InitOIDC(cfg OIDCConfig) error {
+func NewOIDCAuthenticator(cfg OIDCConfig) (*OIDCAuthenticator, error) {
     if !cfg.Enabled {
         slog.Info("oidc disabled")
-        return nil
+        return &OIDCAuthenticator{cfg: cfg}, nil
     }
 
     p := &OIDCProvider{
@@ -71,16 +76,70 @@ func InitOIDC(cfg OIDCConfig) error {
     }
 
     if err := p.fetchDiscovery(); err != nil {
-        return fmt.Errorf("oidc discovery failed: %w", err)
+        return nil, fmt.Errorf("oidc discovery failed: %w", err)
     }
 
     if err := p.fetchJWKS(); err != nil {
-        return fmt.Errorf("oidc jwks fetch failed: %w", err)
+        return nil, fmt.Errorf("oidc jwks fetch failed: %w", err)
     }
 
-    oidcProvider = p
     slog.Info("oidc initialized", "issuer", cfg.Issuer, "client_id", cfg.ClientID)
-    return nil
+    return &OIDCAuthenticator{provider: p, cfg: cfg}, nil
+}
+
+func (a *OIDCAuthenticator) Enabled() bool {
+    return a.provider != nil && a.cfg.Enabled
+}
+
+func (a *OIDCAuthenticator) Middleware(authCfg *config.AuthConfig) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            ctx, p := EnsurePrincipal(r.Context())
+
+            if a.provider == nil || !a.cfg.Enabled {
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
+            // L8 fix: check both Authorization header and cookie for token
+            var tokenStr string
+            auth := r.Header.Get("Authorization")
+            if strings.HasPrefix(auth, "Bearer ") {
+                tokenStr = strings.TrimPrefix(auth, "Bearer ")
+            } else if cookie, err := r.Cookie("admin_token"); err == nil && cookie.Value != "" {
+                tokenStr = cookie.Value
+            } else {
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
+            if authCfg.Enabled && !authCfg.Passthrough {
+                for i := range authCfg.APIKeys {
+                    if authCfg.APIKeys[i].Key == tokenStr {
+                        next.ServeHTTP(w, r.WithContext(ctx))
+                        return
+                    }
+                }
+                if authCfg.MasterKey != "" && authCfg.MasterKey == tokenStr {
+                    next.ServeHTTP(w, r.WithContext(ctx))
+                    return
+                }
+            }
+
+            claims, err := a.provider.validateToken(tokenStr)
+            if err != nil {
+                slog.Warn("oidc token validation failed", "error", err, "path", r.URL.Path)
+                http.Error(w, `{"error":{"message":"Invalid OIDC token","type":"auth_error"}}`, http.StatusUnauthorized)
+                return
+            }
+
+            slog.Debug("oidc token validated", "sub", claims["sub"], "path", r.URL.Path)
+            p.AuthMethod = "oidc"
+            p.OIDCClaims = claims
+            p.OIDCToken = tokenStr
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
 }
 
 func (p *OIDCProvider) fetchDiscovery() error {
@@ -230,52 +289,4 @@ func (p *OIDCProvider) validateToken(tokenStr string) (jwt.MapClaims, error) {
     }
 
     return claims, nil
-}
-
-func OIDCAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
-    return func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            // 硬伤1 fix: populate Principal instead of separate context keys
-            ctx, p := EnsurePrincipal(r.Context())
-
-            if oidcProvider == nil || !oidcProvider.cfg.Enabled {
-                next.ServeHTTP(w, r.WithContext(ctx))
-                return
-            }
-
-            auth := r.Header.Get("Authorization")
-            if !strings.HasPrefix(auth, "Bearer ") {
-                next.ServeHTTP(w, r.WithContext(ctx))
-                return
-            }
-
-            tokenStr := strings.TrimPrefix(auth, "Bearer ")
-
-            if cfg.Enabled && !cfg.Passthrough {
-                for i := range cfg.APIKeys {
-                    if cfg.APIKeys[i].Key == tokenStr {
-                        next.ServeHTTP(w, r.WithContext(ctx))
-                        return
-                    }
-                }
-                if cfg.MasterKey != "" && cfg.MasterKey == tokenStr {
-                    next.ServeHTTP(w, r.WithContext(ctx))
-                    return
-                }
-            }
-
-            claims, err := oidcProvider.validateToken(tokenStr)
-            if err != nil {
-                slog.Warn("oidc token validation failed", "error", err, "path", r.URL.Path)
-                http.Error(w, `{"error":{"message":"Invalid OIDC token","type":"auth_error"}}`, http.StatusUnauthorized)
-                return
-            }
-
-            slog.Debug("oidc token validated", "sub", claims["sub"], "path", r.URL.Path)
-            p.AuthMethod = "oidc"
-            p.OIDCClaims = claims
-            p.OIDCToken = tokenStr
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
-    }
 }

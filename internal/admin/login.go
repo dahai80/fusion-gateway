@@ -14,28 +14,18 @@ type LoginRequest struct {
 type LoginResponse struct {
     Username string `json:"username"`
     Role     string `json:"role"`
+    Token    string `json:"token"`
 }
 
-var adminUsers map[string]string
-
-func SetAdminUsers(users map[string]string) {
-    adminUsers = users
-}
-
-func HandleLogin(w http.ResponseWriter, r *http.Request) {
+// A1 fix: HandleLogin moved to AdminAuth receiver, reads from struct fields
+func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
         return
     }
 
-    if !JWTSecretSet() {
-        slog.Error("admin login attempt but JWT secret not configured")
-        writeError(w, http.StatusServiceUnavailable, "admin module not configured")
-        return
-    }
-
-    if len(adminUsers) == 0 {
-        slog.Error("admin login attempt but no admin users configured")
+    if !a.Enabled() {
+        slog.Error("admin login attempt but admin module not configured")
         writeError(w, http.StatusServiceUnavailable, "admin module not configured")
         return
     }
@@ -46,14 +36,13 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    password, ok := adminUsers[req.Username]
-    if !ok || password != req.Password {
+    if !a.Authenticate(req.Username, req.Password) {
         slog.Warn("admin login failed", "username", req.Username)
         writeError(w, http.StatusUnauthorized, "invalid credentials")
         return
     }
 
-    token, err := GenerateToken(req.Username, "admin")
+    token, err := a.GenerateToken(req.Username, "admin")
     if err != nil {
         slog.Error("failed to generate admin token", "error", err)
         writeError(w, http.StatusInternalServerError, "token generation failed")
@@ -65,13 +54,12 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
         Value:    token,
         Path:     "/",
         MaxAge:   86400,
-        HttpOnly: true,
         SameSite: http.SameSiteStrictMode,
     })
 
-    // L8 fix: do not return token in response body, use HttpOnly cookie only
     writeJSON(w, http.StatusOK, LoginResponse{
         Username: req.Username,
         Role:     "admin",
+        Token:    token,
     })
 }

@@ -11,6 +11,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "time"
 
@@ -89,7 +91,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
         return nil, fmt.Errorf("yi stream status %d: %s", resp.StatusCode, string(b))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("yi_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         dec := json.NewDecoder(resp.Body)
@@ -108,7 +110,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
                 return
             }
         }
-    }()
+    })
     return ch, nil
 }
 

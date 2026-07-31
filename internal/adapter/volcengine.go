@@ -10,6 +10,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "net/url"
     "time"
@@ -84,7 +86,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
         return nil, fmt.Errorf("volcengine stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("volcengine_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         decoder := json.NewDecoder(resp.Body)
@@ -101,7 +103,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
                 return
             }
         }
-    }()
+    })
     return ch, nil
 }
 

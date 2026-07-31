@@ -11,6 +11,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "time"
 
@@ -89,7 +91,7 @@ func (p *ZhipuProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-cha
         return nil, fmt.Errorf("zhipu stream status %d: %s", resp.StatusCode, string(b))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("zhipu_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         dec := json.NewDecoder(resp.Body)
@@ -108,7 +110,7 @@ func (p *ZhipuProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-cha
                 return
             }
         }
-    }()
+    })
     return ch, nil
 }
 

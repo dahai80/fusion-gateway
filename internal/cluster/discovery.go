@@ -18,6 +18,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type NodeState string
@@ -157,10 +158,10 @@ func (d *Discovery) Start(ctx context.Context) {
 
     if mode == config.ClusterModeMaster {
         d.syncFromMaster()
-        go d.masterSyncLoop(ctx)
+        safego.Go("cluster_master_sync", func() { d.masterSyncLoop(ctx) })
     } else {
         d.loadNodesFromConfig()
-        go d.healthCheckLoop(ctx)
+        safego.Go("cluster_health_check", func() { d.healthCheckLoop(ctx) })
     }
 }
 

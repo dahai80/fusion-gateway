@@ -7,6 +7,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "time"
 
@@ -68,7 +70,7 @@ func (p *DeepSeekProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
         return nil, fmt.Errorf("deepseek stream status %d: %s", resp.StatusCode, string(b))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("deepseek_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         dec := json.NewDecoder(resp.Body)
@@ -80,7 +82,7 @@ func (p *DeepSeekProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
             }
             select { case ch <- chunk: default: return }
         }
-    }()
+    })
     return ch, nil
 }
 

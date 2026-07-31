@@ -12,6 +12,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type FusionMLXProvider struct {
@@ -49,6 +50,12 @@ func (p *FusionMLXProvider) Name() string {
 
 func (p *FusionMLXProvider) InFlight() int64 {
     return p.inFlightCounter.Load()
+}
+
+// L6 fix: inFlightAcquire returns a release function for clean counter management
+func (p *FusionMLXProvider) inFlightAcquire() func() {
+    p.inFlightCounter.Add(1)
+    return func() { p.inFlightCounter.Add(-1) }
 }
 
 func (p *FusionMLXProvider) ModelSet() map[string]bool {
@@ -112,8 +119,7 @@ func (p *FusionMLXProvider) ReadyCheck(ctx context.Context) error {
 }
 
 func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-    p.inFlightCounter.Add(1)
-    defer p.inFlightCounter.Add(-1)
+    defer p.inFlightAcquire()()
 
     body, err := json.Marshal(req)
     if err != nil {
@@ -151,17 +157,22 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 }
 
 func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
-    p.inFlightCounter.Add(1)
+    // L6 fix: use release function so defer works cleanly; goroutine inherits release
+    release := p.inFlightAcquire()
+    defer func() {
+        // release is nil after goroutine takes ownership
+        if release != nil {
+            release()
+        }
+    }()
 
     body, err := json.Marshal(req)
     if err != nil {
-        p.inFlightCounter.Add(-1)
         return nil, fmt.Errorf("marshal stream chat request: %w", err)
     }
 
     httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     if err != nil {
-        p.inFlightCounter.Add(-1)
         return nil, fmt.Errorf("create stream chat request: %w", err)
     }
 
@@ -173,33 +184,32 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
-        p.inFlightCounter.Add(-1)
         return nil, fmt.Errorf("stream chat request failed: %w", err)
     }
 
     if resp.StatusCode != http.StatusOK {
-        p.inFlightCounter.Add(-1)
         respBody, _ := io.ReadAll(resp.Body)
         resp.Body.Close()
         return nil, fmt.Errorf("stream chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     ch := make(chan StreamChunk, 64)
+    goroutineRelease := release
+    release = nil // goroutine takes ownership
 
-    go func() {
+    safego.Go("fusion_mlx_stream_chat", func() {
         defer close(ch)
-        defer p.inFlightCounter.Add(-1)
+        defer goroutineRelease()
         defer resp.Body.Close()
 
         p.parseSSEStream(resp.Body, ch)
-    }()
+    })
 
     return ch, nil
 }
 
 func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
-    p.inFlightCounter.Add(1)
-    defer p.inFlightCounter.Add(-1)
+    defer p.inFlightAcquire()()
 
     body, err := json.Marshal(req)
     if err != nil {
@@ -326,7 +336,7 @@ func (p *FusionMLXProvider) Cancel(requestID string) {
             minInterval = 300 // default 5 minutes
         }
         if now-lastGC > minInterval {
-            go p.SafeGC()
+            safego.Go("fusion_mlx_safe_gc", p.SafeGC)
         }
     }
 }
@@ -376,7 +386,7 @@ func (p *FusionMLXProvider) TriggerGCWhenIdle() {
     }
     slog.Info("gc queued, will execute when in-flight reaches zero", "in_flight", p.inFlightCounter.Load())
 
-    go func() {
+    safego.Go("fusion_mlx_gc_queue", func() {
         ticker := time.NewTicker(500 * time.Millisecond)
         defer ticker.Stop()
         timeout := time.After(5 * time.Minute)
@@ -394,7 +404,7 @@ func (p *FusionMLXProvider) TriggerGCWhenIdle() {
                 return
             }
         }
-    }()
+    })
 }
 
 func (p *FusionMLXProvider) StartIdleGCTimer(stopCh <-chan struct{}) {
@@ -412,7 +422,7 @@ func (p *FusionMLXProvider) StartIdleGCTimer(stopCh <-chan struct{}) {
         checkInterval = 10 * time.Second
     }
 
-    go func() {
+    safego.Go("fusion_mlx_idle_gc", func() {
         ticker := time.NewTicker(checkInterval)
         defer ticker.Stop()
 
@@ -440,7 +450,7 @@ func (p *FusionMLXProvider) StartIdleGCTimer(stopCh <-chan struct{}) {
                 }
             }
         }
-    }()
+    })
 }
 
 func (p *FusionMLXProvider) parseSSEStream(body io.Reader, ch chan<- StreamChunk) {

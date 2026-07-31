@@ -27,6 +27,16 @@ auth:
 route:
     enable_hardware_judge: true
     token_threshold: 8000
+    output_input_ratio_threshold: 0.6       # 输出/输入token比 > 此值走云端(0=禁用)
+    ratio_tiers:
+        enabled: false                       # 启用按比例分段路由(启用后替代output_input_ratio_threshold)
+        rules:                               # ratio <= max_ratio → backend，按顺序匹配
+            - max_ratio: 0.6
+              backend: volcengine
+            - max_ratio: 0.8
+              backend: dashscope
+            - max_ratio: 0.9
+              backend: qianfan
     local_max_memory_ratio: 0.9
     local_max_mlx_memory_ratio: 0.7
     local_max_concurrent: 8
@@ -275,3 +285,12 @@ admin:
     users:                             # Admin login credentials (passwords min 8 chars)
         admin: "change-me-secure-password"
     enable_pprof: false                # Enable pprof profiling endpoints (requires master_key)
+
+# A3 fix: persistent store backend selection (memory | redis)
+store:
+    backend: "memory"                  # "memory" for single-instance, "redis" for multi-instance
+    redis:
+        addr: "localhost:6379"         # Redis address (only used when backend=redis)
+        password: ""                   # Redis password
+        db: 0                          # Redis database number
+        pool_size: 10                  # Connection pool size

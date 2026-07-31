@@ -7,6 +7,7 @@ import Keys from "./pages/Keys";
 import Channels from "./pages/Channels";
 import Logs from "./pages/Logs";
 import Analytics from "./pages/Analytics";
+import Settings from "./pages/Settings";
 
 function getCookie(name: string): string | undefined {
     const match = document.cookie.match(
@@ -48,6 +49,7 @@ export default function App() {
                         <Route path="channels" element={<Channels />} />
                         <Route path="logs" element={<Logs />} />
                         <Route path="analytics" element={<Analytics />} />
+                        <Route path="settings" element={<Settings />} />
                     </Route>
                     <Route path="*" element={<Navigate to="/admin/" replace />} />
                 </Routes>

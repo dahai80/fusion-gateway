@@ -2,6 +2,7 @@ package router
 
 import (
     "context"
+    "fmt"
     "log/slog"
     "strings"
     "sync"
@@ -160,28 +161,34 @@ func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
 }
 
 func (e *Engine) RecordSuccess(backend string) {
+    // L1 fix: RLock to find breaker, then call RecordSuccess outside RLock
     e.mu.RLock()
-    defer e.mu.RUnlock()
-    if b, ok := e.breakers[backend]; ok {
+    b, ok := e.breakers[backend]
+    e.mu.RUnlock()
+    if ok {
         b.RecordSuccess()
     }
 }
 
 func (e *Engine) RecordFailure(backend string) {
+    // L1 fix: RLock to find breaker, then call RecordFailure outside RLock
     e.mu.RLock()
-    defer e.mu.RUnlock()
-    if b, ok := e.breakers[backend]; ok {
+    b, ok := e.breakers[backend]
+    e.mu.RUnlock()
+    if ok {
         b.RecordFailure()
     }
 }
 
 func (e *Engine) Trip(backend, reason string) {
+    // L1 fix: RLock to find breaker, then call Trip outside RLock
     e.mu.RLock()
-    defer e.mu.RUnlock()
-    if b, ok := e.breakers[backend]; ok {
+    b, ok := e.breakers[backend]
+    e.mu.RUnlock()
+    if ok {
         b.Trip(reason)
+        slog.Warn("circuit breaker tripped", "backend", backend, "reason", reason)
     }
-    slog.Warn("circuit breaker tripped", "backend", backend, "reason", reason)
 }
 
 func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
@@ -305,6 +312,37 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             }
         }
         return decision
+    }
+
+    // P4.5: Output/Input ratio routing
+    if budget.InputTokens > 0 {
+        ratio := float64(budget.PredictOutputTokens) / float64(budget.InputTokens)
+
+        // P4.5a: RatioTiers — segment routing by ratio to different backends
+        if cfg.Config.Routing.RatioTiers.Enabled && len(cfg.Config.Routing.RatioTiers.Rules) > 0 {
+            target := resolveCloudByRatio(ratio, cfg.Config.Routing.RatioTiers)
+            if target != "" {
+                slog.Info("ratio tier matched, routing to cloud",
+                    "ratio", fmt.Sprintf("%.2f", ratio),
+                    "cloud_target", target,
+                    "input_tokens", budget.InputTokens,
+                    "predict_output_tokens", budget.PredictOutputTokens,
+                )
+                return &RouteDecision{Backend: CloudBackend, Reason: "ratio_tier_matched", CloudTarget: target}
+            }
+        }
+
+        // P4.5b: Fallback single threshold (when RatioTiers disabled)
+        ratioThreshold := cfg.Config.Routing.OutputInputRatioThreshold
+        if ratioThreshold > 0 && ratio > ratioThreshold {
+            slog.Info("output/input ratio exceeded, routing to cloud",
+                "ratio", fmt.Sprintf("%.2f", ratio),
+                "threshold", fmt.Sprintf("%.2f", ratioThreshold),
+                "input_tokens", budget.InputTokens,
+                "predict_output_tokens", budget.PredictOutputTokens,
+            )
+            return &RouteDecision{Backend: CloudBackend, Reason: "output_input_ratio_exceeded"}
+        }
     }
 
     // P5: Concurrent limit
@@ -437,5 +475,26 @@ func resolveCloudByTier(budget tokenizer.TokenBudget, tier config.TokenTierConfi
     }
 
     slog.Debug("no token tier rule matched", "token_value", tokenValue)
+    return ""
+}
+
+func resolveCloudByRatio(ratio float64, rt config.RatioTierConfig) string {
+    slog.Debug("resolving cloud by ratio tier",
+        "ratio", ratio,
+        "rules_count", len(rt.Rules),
+    )
+
+    for _, rule := range rt.Rules {
+        if ratio <= rule.MaxRatio {
+            slog.Debug("ratio tier rule matched",
+                "max_ratio", rule.MaxRatio,
+                "backend", rule.Backend,
+                "ratio", ratio,
+            )
+            return rule.Backend
+        }
+    }
+
+    slog.Debug("no ratio tier rule matched, ratio exceeds all tiers", "ratio", ratio)
     return ""
 }

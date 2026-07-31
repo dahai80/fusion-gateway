@@ -11,6 +11,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "time"
 
@@ -89,7 +91,7 @@ func (p *StepFunProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
         return nil, fmt.Errorf("stepfun stream status %d: %s", resp.StatusCode, string(b))
     }
     ch := make(chan StreamChunk, 64)
-    go func() {
+    safego.Go("stepfun_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
         dec := json.NewDecoder(resp.Body)
@@ -108,7 +110,7 @@ func (p *StepFunProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
                 return
             }
         }
-    }()
+    })
     return ch, nil
 }
 

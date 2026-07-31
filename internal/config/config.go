@@ -86,15 +86,27 @@ type TokenTierConfig struct {
     Rules   []TokenTierRule `mapstructure:"rules"`
 }
 
+type RatioTierRule struct {
+    MaxRatio float64 `mapstructure:"max_ratio"`
+    Backend  string  `mapstructure:"backend"`
+}
+
+type RatioTierConfig struct {
+    Enabled bool            `mapstructure:"enabled"`
+    Rules   []RatioTierRule `mapstructure:"rules"`
+}
+
 type RoutingConfig struct {
-    TokenThreshold int                  `mapstructure:"token_threshold"`
-    TokenTiers     TokenTierConfig      `mapstructure:"token_tiers"`
-    LocalPriority  LocalPriorityConfig  `mapstructure:"local_priority"`
-    CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
-    Fallback       FallbackConfig       `mapstructure:"fallback"`
-    Negotiation    NegotiationConfig    `mapstructure:"negotiation"`
-    RateLimit      RateLimitConfig      `mapstructure:"rate_limit"`
-    Retry          RetryConfig          `mapstructure:"retry"`
+    TokenThreshold            int                  `mapstructure:"token_threshold"`
+    OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
+    RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
+    TokenTiers                TokenTierConfig      `mapstructure:"token_tiers"`
+    LocalPriority              LocalPriorityConfig  `mapstructure:"local_priority"`
+    CircuitBreaker             CircuitBreakerConfig `mapstructure:"circuit_breaker"`
+    Fallback                   FallbackConfig       `mapstructure:"fallback"`
+    Negotiation                NegotiationConfig    `mapstructure:"negotiation"`
+    RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
+    Retry                      RetryConfig          `mapstructure:"retry"`
 }
 
 type RetryConfig struct {
@@ -340,6 +352,11 @@ type BatchConfig struct {
     Timeout       time.Duration `mapstructure:"timeout"`
 }
 
+type StoreConfig struct {
+    Backend string      `mapstructure:"backend"`
+    Redis   RedisConfig `mapstructure:"redis"`
+}
+
 type Config struct {
     Server        ServerConfig             `mapstructure:"server"`
     Auth          AuthConfig               `mapstructure:"auth"`
@@ -365,6 +382,7 @@ type Config struct {
     PromptInjection PromptInjectionConfig  `mapstructure:"prompt_injection"`
     CostMarkup    CostMarkupConfig         `mapstructure:"cost_markup"`
     Batch         BatchConfig              `mapstructure:"batch"`
+    Store         StoreConfig              `mapstructure:"store"`
 }
 
 type ConfigSnapshot struct {
@@ -492,6 +510,18 @@ func validate(cfg *Config) error {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
     }
 
+    if cfg.Routing.OutputInputRatioThreshold < 0 {
+        return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
+    }
+    for i, r := range cfg.Routing.RatioTiers.Rules {
+        if r.MaxRatio <= 0 {
+            return fmt.Errorf("ratio_tiers.rules[%d].max_ratio must be positive, got: %f", i, r.MaxRatio)
+        }
+        if r.Backend == "" {
+            return fmt.Errorf("ratio_tiers.rules[%d].backend is required", i)
+        }
+    }
+
     if cfg.Routing.LocalPriority.MaxSystemMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxSystemMemoryRatio > 1 {
         return fmt.Errorf("max_system_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxSystemMemoryRatio)
     }
@@ -552,7 +582,12 @@ func DefaultConfig() Config {
             MaxRequestBodySize:     5242880,
         },
         Routing: RoutingConfig{
-            TokenThreshold: 8000,
+            TokenThreshold:            8000,
+            OutputInputRatioThreshold: 0.6,
+            RatioTiers: RatioTierConfig{
+                Enabled: false,
+                Rules:   []RatioTierRule{},
+            },
             TokenTiers: TokenTierConfig{
                 Enabled: false,
                 Metric:  "total",

@@ -7,6 +7,8 @@ import (
     "fmt"
     "io"
     "log/slog"
+
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
     "time"
 
@@ -124,12 +126,12 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
 
     ch := make(chan StreamChunk, 64)
 
-    go func() {
+    safego.Go("openai_compatible_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
 
         p.parseSSEStream(resp.Body, ch)
-    }()
+    })
 
     return ch, nil
 }

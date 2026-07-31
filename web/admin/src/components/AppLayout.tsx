@@ -7,6 +7,7 @@ import {
     CloudServerOutlined,
     FileTextOutlined,
     BarChartOutlined,
+    SettingOutlined,
     LogoutOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
@@ -21,6 +22,7 @@ const menuItems = [
     { key: "/admin/channels", icon: <CloudServerOutlined />, label: "Channels" },
     { key: "/admin/logs", icon: <FileTextOutlined />, label: "Logs" },
     { key: "/admin/analytics", icon: <BarChartOutlined />, label: "Analytics" },
+    { key: "/admin/settings", icon: <SettingOutlined />, label: "Settings" },
 ];
 
 export default function AppLayout() {

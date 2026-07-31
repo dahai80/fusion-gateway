@@ -7,6 +7,7 @@ import (
     "time"
 
     "github.com/fsnotify/fsnotify"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "gopkg.in/yaml.v3"
 )
 
@@ -68,7 +69,7 @@ func (m *CustomPricingManager) StartWatch() {
         slog.Error("custom pricing watch add failed", "path", m.filePath, "error", err)
         return
     }
-    go func() {
+    safego.Go("custom_pricing_watcher", func() {
         var debounce timer
         for {
             select {
@@ -95,7 +96,7 @@ func (m *CustomPricingManager) StartWatch() {
                 slog.Error("custom pricing watcher error", "error", err)
             }
         }
-    }()
+    })
     slog.Info("custom pricing file watcher started", "path", m.filePath)
 }
 

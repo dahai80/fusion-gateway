@@ -14,6 +14,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type SemanticEntry struct {
@@ -61,7 +62,8 @@ func NewSemanticCache(cfg config.SemanticCacheConfig, embedFn EmbedFunc) *Semant
         ttl:        30 * time.Minute,
         embedFn:    embedFn,
     }
-    go sc.evictExpired()
+    // M2 fix: use safeGo for panic recovery on background goroutine
+    safego.Go("semantic_evict_expired", sc.evictExpired)
     slog.Info("semantic cache initialized", "threshold", threshold, "max_entries", maxEntries)
     return sc
 }

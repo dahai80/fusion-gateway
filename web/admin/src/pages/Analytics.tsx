@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Tabs, Card, Spin, Row, Col, Statistic, Select, DatePicker, Typography } from "antd";
+import { Tabs, Card, Spin, Row, Col, Statistic, Select, Typography, Table } from "antd";
 import {
     LineChart,
     Line,
@@ -20,7 +20,6 @@ import {
 import client from "../api/client";
 
 const { Title } = Typography;
-const { RangePicker } = DatePicker;
 
 const COLORS = ["#1677ff", "#52c41a", "#faad14", "#ff4d4f", "#722ed1", "#13c2c2", "#eb2f96", "#fa541c"];
 
@@ -47,9 +46,28 @@ interface AnalyticsData {
     };
 }
 
+interface ProfitData {
+    keys: {
+        key_name: string;
+        total_input: number;
+        total_output: number;
+        ratio: number;
+        total_cost: number;
+        request_count: number;
+    }[];
+    summary: {
+        total_keys: number;
+        avg_ratio: number;
+        total_input: number;
+        total_output: number;
+        total_cost: number;
+    };
+}
+
 export default function Analytics() {
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState<AnalyticsData | null>(null);
+    const [profitData, setProfitData] = useState<ProfitData | null>(null);
     const [period, setPeriod] = useState("7d");
 
     const fetchAnalytics = async () => {
@@ -66,6 +84,9 @@ export default function Analytics() {
 
     useEffect(() => {
         fetchAnalytics();
+        client.get("/analytics/profit", { params: { period } })
+            .then(res => setProfitData(res.data?.data || res.data || null))
+            .catch(err => console.error("Failed to fetch profit stats:", err));
     }, [period]);
 
     if (loading || !data) {
@@ -260,6 +281,59 @@ export default function Analytics() {
         </div>
     );
 
+    const profitTab = profitData ? (
+        <div>
+            <Row gutter={16} style={{ marginBottom: 24 }}>
+                <Col span={4}>
+                    <Card><Statistic title="API Keys" value={profitData.summary.total_keys} /></Card>
+                </Col>
+                <Col span={5}>
+                    <Card><Statistic title="Avg Output/Input Ratio" value={profitData.summary.avg_ratio} precision={2} valueStyle={{ color: profitData.summary.avg_ratio > 0.6 ? "#faad14" : "#52c41a" }} /></Card>
+                </Col>
+                <Col span={5}>
+                    <Card><Statistic title="Total Input Tokens" value={profitData.summary.total_input} /></Card>
+                </Col>
+                <Col span={5}>
+                    <Card><Statistic title="Total Output Tokens" value={profitData.summary.total_output} /></Card>
+                </Col>
+                <Col span={5}>
+                    <Card><Statistic title="Total Cost" value={profitData.summary.total_cost} precision={4} prefix="$" valueStyle={{ color: "#ff4d4f" }} /></Card>
+                </Col>
+            </Row>
+            <Card title="Output/Input Ratio by Key" style={{ marginBottom: 24 }}>
+                <ResponsiveContainer width="100%" height={320}>
+                    <BarChart data={profitData.keys}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="key_name" angle={-30} textAnchor="end" height={80} />
+                        <YAxis />
+                        <Tooltip formatter={(v: number) => v.toFixed(2)} />
+                        <Legend />
+                        <Bar dataKey="ratio" fill="#1677ff" name="Output/Input Ratio" />
+                    </BarChart>
+                </ResponsiveContainer>
+            </Card>
+            <Card title="Key Profit Detail">
+                <Table
+                    dataSource={profitData.keys}
+                    rowKey="key_name"
+                    pagination={{ pageSize: 10 }}
+                    columns={[
+                        { title: "Key Name", dataIndex: "key_name", key: "key_name" },
+                        { title: "Input Tokens", dataIndex: "total_input", key: "total_input", render: (v: number) => v.toLocaleString() },
+                        { title: "Output Tokens", dataIndex: "total_output", key: "total_output", render: (v: number) => v.toLocaleString() },
+                        { title: "Output/Input Ratio", dataIndex: "ratio", key: "ratio", render: (v: number) => v.toFixed(2), sorter: (a: ProfitData["keys"][0], b: ProfitData["keys"][0]) => a.ratio - b.ratio },
+                        { title: "Cost ($)", dataIndex: "total_cost", key: "total_cost", render: (v: number) => v.toFixed(4), sorter: (a: ProfitData["keys"][0], b: ProfitData["keys"][0]) => a.total_cost - b.total_cost },
+                        { title: "Requests", dataIndex: "request_count", key: "request_count", render: (v: number) => v.toLocaleString() },
+                    ]}
+                />
+            </Card>
+        </div>
+    ) : (
+        <div style={{ textAlign: "center", padding: 80 }}>
+            <Spin size="large" />
+        </div>
+    );
+
     return (
         <div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
@@ -283,6 +357,7 @@ export default function Analytics() {
                     { key: "model", label: "Model", children: modelTab },
                     { key: "latency", label: "Latency", children: latencyTab },
                     { key: "error", label: "Error", children: errorTab },
+                    { key: "profit", label: "Profit", children: profitTab },
                 ]}
             />
         </div>

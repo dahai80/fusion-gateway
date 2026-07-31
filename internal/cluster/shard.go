@@ -14,6 +14,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 const defaultShardSize = 32
@@ -62,7 +63,8 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
     shardIdx := atomic.Int64{}
     for w := 0; w < numWorkers; w++ {
         wg.Add(1)
-        go func(workerID int) {
+        wid := w
+        safego.Go("shard_worker", func() {
             defer wg.Done()
             for {
                 idx := int(shardIdx.Add(1) - 1)
@@ -70,7 +72,7 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
                     return
                 }
 
-                node := healthyNodes[workerID%len(healthyNodes)]
+                node := healthyNodes[wid%len(healthyNodes)]
                 provider := NewClusterNodeProvider(node, routingCfg, sharedToken)
 
                 shardReq := &adapter.EmbeddingRequest{
@@ -94,7 +96,7 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
                     tokens: resp.Usage.PromptTokens,
                 }
             }
-        }(w)
+        })
     }
 
     wg.Wait()

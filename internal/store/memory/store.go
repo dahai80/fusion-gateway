@@ -3,6 +3,7 @@ package memory
 import (
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
@@ -13,6 +14,11 @@ type MemoryStore struct {
     analytics *AnalyticsStore
     dashboard *DashboardStore
     quota     *QuotaStore
+    profit    *ProfitStore
+    // A3 fix: sub-stores for teams/orgs/batch/cost
+    teams *TeamsStore
+    batch *BatchSubStore
+    cost  *CostSubStore
 }
 
 func NewMemoryStore(logMaxLen int) *MemoryStore {
@@ -26,7 +32,20 @@ func NewMemoryStore(logMaxLen int) *MemoryStore {
         analytics: NewAnalyticsStore(ls),
         dashboard: NewDashboardStore(ls),
         quota:     NewQuotaStore(ks),
+        profit:    NewProfitStore(ls),
+        teams:     NewTeamsStore(),
+        cost:      NewCostSubStore(10000),
     }
+}
+
+func NewMemoryStoreWithConfig(logMaxLen int, batchCfg config.BatchConfig) *MemoryStore {
+    m := NewMemoryStore(logMaxLen)
+    maxBatch := batchCfg.MaxBatchSize
+    if maxBatch <= 0 {
+        maxBatch = 100
+    }
+    m.batch = NewBatchSubStore(maxBatch)
+    return m
 }
 
 func (m *MemoryStore) AppendLog(log *store.RequestLog) error {
@@ -109,6 +128,10 @@ func (m *MemoryStore) GetDashboardOverview() (*store.DashboardOverview, error) {
     return m.dashboard.Overview()
 }
 
+func (m *MemoryStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitStat, error) {
+    return m.profit.GetKeyProfitStats(from, to)
+}
+
 func (m *MemoryStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
     return m.quota.Check(keyName)
 }
@@ -120,3 +143,96 @@ func (m *MemoryStore) DeductQuota(keyName string, amount float64) error {
 func (m *MemoryStore) KeyStore() *KeyStore         { return m.keys }
 func (m *MemoryStore) ChannelStore() *ChannelStore { return m.channels }
 func (m *MemoryStore) QuotaStore() *QuotaStore     { return m.quota }
+func (m *MemoryStore) TeamsStore() *TeamsStore     { return m.teams }
+
+// A3 fix: teams/orgs/batch/cost Store interface implementations
+
+func (m *MemoryStore) CreateTeam(team *store.Team) error {
+    return m.teams.CreateTeam(team)
+}
+func (m *MemoryStore) GetTeam(id string) (*store.Team, error) {
+    return m.teams.GetTeam(id)
+}
+func (m *MemoryStore) ListTeams() ([]*store.Team, error) {
+    return m.teams.ListTeams(), nil
+}
+func (m *MemoryStore) UpdateTeam(team *store.Team) error {
+    return m.teams.UpdateTeam(team)
+}
+func (m *MemoryStore) DeleteTeam(id string) error {
+    return m.teams.DeleteTeam(id)
+}
+func (m *MemoryStore) BindKeyToTeam(apiKey, teamID string) error {
+    return m.teams.BindKeyToTeam(apiKey, teamID)
+}
+func (m *MemoryStore) GetTeamByKey(apiKey string) (*store.Team, error) {
+    return m.teams.GetTeamByKey(apiKey)
+}
+func (m *MemoryStore) AddTeamCost(teamID string, cost float64) error {
+    return m.teams.AddCost(teamID, cost)
+}
+func (m *MemoryStore) CheckTeamQuota(teamID string) (limit, used float64, ok bool, err error) {
+    l, u, o := m.teams.CheckQuota(teamID)
+    return l, u, o, nil
+}
+func (m *MemoryStore) AddTeamMember(teamID, userID, role string) error {
+    return m.teams.AddMember(teamID, userID, role)
+}
+func (m *MemoryStore) RemoveTeamMember(teamID, userID string) error {
+    return m.teams.RemoveMember(teamID, userID)
+}
+
+func (m *MemoryStore) CreateOrg(org *store.Organization) error {
+    return m.teams.CreateOrg(org)
+}
+func (m *MemoryStore) GetOrg(id string) (*store.Organization, error) {
+    return m.teams.GetOrg(id)
+}
+func (m *MemoryStore) ListOrgs() ([]*store.Organization, error) {
+    return m.teams.ListOrgs(), nil
+}
+func (m *MemoryStore) DeleteOrg(id string) error {
+    return m.teams.DeleteOrg(id)
+}
+
+func (m *MemoryStore) CreateBatch(requests []store.BatchRequest, endpoint, window string) (*store.Batch, error) {
+    if m.batch == nil {
+        return nil, nil
+    }
+    return m.batch.Create(requests, endpoint, window)
+}
+func (m *MemoryStore) GetBatch(id string) (*store.Batch, error) {
+    if m.batch == nil {
+        return nil, nil
+    }
+    return m.batch.Get(id)
+}
+func (m *MemoryStore) ListBatches() ([]*store.Batch, error) {
+    if m.batch == nil {
+        return nil, nil
+    }
+    return m.batch.List(), nil
+}
+func (m *MemoryStore) CancelBatch(id string) (*store.Batch, error) {
+    if m.batch == nil {
+        return nil, nil
+    }
+    return m.batch.Cancel(id)
+}
+func (m *MemoryStore) UpdateBatch(batch *store.Batch) error {
+    if m.batch == nil {
+        return nil
+    }
+    return m.batch.Update(batch)
+}
+
+func (m *MemoryStore) RecordUsage(keyName, backend, model string, promptTokens, completionTokens int, costUSD float64) error {
+    m.cost.Record(keyName, backend, model, promptTokens, completionTokens, costUSD)
+    return nil
+}
+func (m *MemoryStore) GetCostSummary(keyName string) (*store.CostSummary, error) {
+    return m.cost.Summary(keyName), nil
+}
+func (m *MemoryStore) GetCostSummaryAll() (*store.CostSummary, error) {
+    return m.cost.Summary(""), nil
+}
