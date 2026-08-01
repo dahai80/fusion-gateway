@@ -21,7 +21,7 @@ export default function Login() {
             const res = await client.post("/login", values);
             const token = res.data?.data?.token || res.data?.token;
             if (token) {
-                document.cookie = `admin_token=${encodeURIComponent(token)}; path=/; max-age=86400; SameSite=Strict`;
+                localStorage.setItem("admin_token", token);
                 message.success("Login successful");
                 navigate("/admin/");
             } else {

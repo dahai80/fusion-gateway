@@ -84,7 +84,7 @@ export default function AppLayout() {
     const { token: themeToken } = theme.useToken();
 
     const handleLogout = () => {
-        document.cookie = "admin_token=; path=/; max-age=0";
+        localStorage.removeItem("admin_token");
         navigate("/admin/login");
     };
 

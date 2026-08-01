@@ -33,15 +33,8 @@ import CostMarkupConfig from "./pages/config/CostMarkupConfig";
 import AdminConfigPage from "./pages/config/AdminConfigPage";
 import PIIConfig from "./pages/config/PIIConfig";
 
-function getCookie(name: string): string | undefined {
-    const match = document.cookie.match(
-        new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()\[\]\\\/+^])/g, "\\$1") + "=([^;]*)")
-    );
-    return match ? decodeURIComponent(match[1]) : undefined;
-}
-
 function PrivateRoute({ children }: { children: React.ReactNode }) {
-    const token = getCookie("admin_token");
+    const token = localStorage.getItem("admin_token");
     if (!token) {
         return <Navigate to="/admin/login" replace />;
     }

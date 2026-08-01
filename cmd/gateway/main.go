@@ -118,7 +118,13 @@ func run(configPath string) error {
 	)
 
 	// Auto-start local inference backend (fusion-mlx) if configured
-	autoStartLocal(snap.Config.Server.AutoStart)
+	as := snap.Config.Server.AutoStart
+	if as != nil {
+		slog.Info("auto_start config loaded", "enabled", as.Enabled, "command", as.Command, "wait_url", as.WaitURL)
+	} else {
+		slog.Warn("auto_start config is nil — not configured")
+	}
+	autoStartLocal(as)
 
 	hwCollector := hardware.NewCollector(&snap.Config.Hardware)
 	hwCtx, hwCancel := context.WithCancel(context.Background())

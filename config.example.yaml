@@ -135,6 +135,7 @@ backends:
     fusion-mlx:
         type: "fusion-mlx"
         base_url: "http://127.0.0.1:11434"
+        api_key: "dahai168"                # Must match fusion-mlx settings.json auth.api_key
         timeout: 120s
         enabled: true
         gc:

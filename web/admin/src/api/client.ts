@@ -1,12 +1,5 @@
 import axios from "axios";
 
-function getCookie(name: string): string | undefined {
-    const match = document.cookie.match(
-        new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()\[\]\\\/+^])/g, "\\$1") + "=([^;]*)")
-    );
-    return match ? decodeURIComponent(match[1]) : undefined;
-}
-
 const client = axios.create({
     baseURL: "/admin/api",
     timeout: 30000,
@@ -17,7 +10,7 @@ const client = axios.create({
 
 client.interceptors.request.use(
     (config) => {
-        const token = getCookie("admin_token");
+        const token = localStorage.getItem("admin_token");
         if (token) {
             config.headers.Authorization = `Bearer ${token}`;
         }
@@ -34,7 +27,7 @@ client.interceptors.response.use(
     },
     (error) => {
         if (error.response?.status === 401) {
-            document.cookie = "admin_token=; path=/; max-age=0";
+            localStorage.removeItem("admin_token");
             window.location.href = "/admin/login";
         }
         return Promise.reject(error);
