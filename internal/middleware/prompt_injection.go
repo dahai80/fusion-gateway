@@ -77,7 +77,8 @@ func PromptInjectionMiddleware(cfg config.PromptInjectionConfig) func(http.Handl
                 return
             }
 
-            body, err := io.ReadAll(r.Body)
+            const maxPromptBodySize = 10 << 20 // 10 MB
+            body, err := io.ReadAll(io.LimitReader(r.Body, maxPromptBodySize))
             if err != nil {
                 slog.Warn("prompt injection: failed to read body", "error", err)
                 next.ServeHTTP(w, r)

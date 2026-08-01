@@ -14,8 +14,8 @@ func TestDefaultConfig_Valid(t *testing.T) {
 
 func TestDefaultConfig_Port(t *testing.T) {
     cfg := DefaultConfig()
-    if cfg.Server.Port != 8100 {
-        t.Errorf("expected port 8100, got %d", cfg.Server.Port)
+    if cfg.Server.Port != 11432 {
+        t.Errorf("expected port 11432, got %d", cfg.Server.Port)
     }
 }
 

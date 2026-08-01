@@ -2,6 +2,8 @@ package server
 
 import (
     "context"
+    "crypto/rand"
+    "encoding/hex"
     "encoding/json"
     "fmt"
     "io"
@@ -20,6 +22,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
+    "github.com/fusion-gateway/fusion-gateway/internal/crypto"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
@@ -61,6 +64,8 @@ type Server struct {
         GetNode(id string) (*cluster.Node, bool)
     }
     connectorRegistry *connector.Registry
+    oauth2States      map[string]time.Time
+    oauth2StatesMu    sync.RWMutex
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -78,9 +83,41 @@ func (s *Server) Cache() *cache.Cache {
     return s.cache
 }
 
-func newConnectorRegistry() *connector.Registry {
+func newConnectorRegistry(cfg *config.ConfigSnapshot) *connector.Registry {
     r := connector.NewRegistry()
     connector.RegisterBuiltins(r)
+
+    // Set up encryption cipher if master key configured
+    var cipher *crypto.AESCipher
+    if cfg.Config.Encryption != nil && cfg.Config.Encryption.MasterKey != "" {
+        var err error
+        cipher, err = crypto.NewAESCipher(cfg.Config.Encryption.MasterKey)
+        if err != nil {
+            slog.Error("encryption init failed, tokens will not be encrypted", "error", err)
+        } else {
+            slog.Info("AES-256-GCM encryption enabled")
+        }
+    }
+
+    // Set up OAuth2 cipher
+    if cipher != nil {
+        r.OAuth2().SetCipher(cipher)
+        r.SetCipher(cipher)
+    }
+
+    // Set up persistence
+    persistPath := "data/connections.json"
+    if cfg.Config.Connector != nil && cfg.Config.Connector.PersistencePath != "" {
+        persistPath = cfg.Config.Connector.PersistencePath
+    }
+    p := connector.NewPersistence(persistPath, cipher)
+    r.SetPersistence(p)
+
+    // Load existing connections
+    if err := r.LoadFromPersistence(); err != nil {
+        slog.Warn("failed to load persisted connections, starting fresh", "error", err)
+    }
+
     return r
 }
 
@@ -166,6 +203,9 @@ func New(
     var adminAuthObj *admin.AdminAuth
     if cfg.Config.Admin != nil && cfg.Config.Admin.Enabled {
         adminAuthObj, err = admin.NewAdminAuth(cfg.Config.Admin.JWTSecret, cfg.Config.Admin.Users)
+        if adminAuthObj != nil && cfg.Config.Server.TLS == nil {
+            adminAuthObj.SetInsecureCookie(true)
+        }
         if err != nil {
             slog.Warn("admin auth init failed", "error", err)
         } else if adminAuthObj.Enabled() {
@@ -176,7 +216,7 @@ func New(
         adminAuthObj = &admin.AdminAuth{}
     }
 
-    return &Server{
+    srv := &Server{
         cfg:               cfg,
         cfgPath:           cfgPath,
         hwCollector:       hwCollector,
@@ -196,8 +236,11 @@ func New(
         otelShutdown:      otelShutdown,
         oidcAuth:          oidcAuth,
         adminAuth:         adminAuthObj,
-        connectorRegistry: newConnectorRegistry(),
+        connectorRegistry: newConnectorRegistry(cfg),
+        oauth2States:      make(map[string]time.Time),
     }
+    go srv.evictOAuth2States()
+    return srv
 }
 
 func (s *Server) Start() error {
@@ -227,6 +270,8 @@ func (s *Server) Start() error {
     mux.HandleFunc("/gateway/v1/connector/", s.withMiddleware(s.handleConnectorAction))
     mux.HandleFunc("/gateway/v1/connection", s.withMiddleware(s.handleConnectionList))
     mux.HandleFunc("/gateway/v1/connection/", s.withMiddleware(s.handleConnectionCRUD))
+    mux.HandleFunc("/gateway/v1/oauth2/authorize", s.withMiddleware(s.handleOAuth2Authorize))
+    mux.HandleFunc("/gateway/v1/oauth2/callback", s.withMiddleware(s.handleOAuth2Callback))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -264,17 +309,22 @@ func (s *Server) Start() error {
     }
 
     addr := fmt.Sprintf("%s:%d", s.cfg.Config.Server.Host, s.cfg.Config.Server.Port)
-    slog.Info("server starting", "addr", addr)
 
     s.httpServer = &http.Server{
         Addr:              addr,
         Handler:           mux,
         ReadTimeout:       30 * time.Second,
         ReadHeaderTimeout: 10 * time.Second,
-        WriteTimeout:      120 * time.Second,
+        WriteTimeout:      0, // F3 fix: SSE streams need no write deadline; per-request timeouts handled by ctx
         IdleTimeout:       120 * time.Second,
     }
 
+    if s.cfg.Config.Server.TLS != nil && s.cfg.Config.Server.TLS.CertFile != "" && s.cfg.Config.Server.TLS.KeyFile != "" {
+        slog.Info("server starting with TLS", "addr", addr, "cert", s.cfg.Config.Server.TLS.CertFile)
+        return s.httpServer.ListenAndServeTLS(s.cfg.Config.Server.TLS.CertFile, s.cfg.Config.Server.TLS.KeyFile)
+    }
+
+    slog.Info("server starting", "addr", addr)
     return s.httpServer.ListenAndServe()
 }
 
@@ -498,11 +548,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
 
     start := time.Now()
+    tenant := "anonymous"
+    if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
+        tenant = kc.Name
+    }
 
     if req.Stream {
         s.handleStreamChat(ctx, w, provider, &req, decision, budget, start)
     } else {
-        s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start)
+        s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
     }
 }
 
@@ -551,7 +605,10 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
 
     p, ok := s.pool.Get(cloudBackend)
     if !ok {
-        http.Error(w, `{"error":{"message":"Cloud backend not available","type":"server_error"}}`, http.StatusServiceUnavailable)
+        slog.Error("cloud backend not available", "backend", cloudBackend)
+        if w != nil {
+            http.Error(w, `{"error":{"message":"Cloud backend not available","type":"server_error"}}`, http.StatusServiceUnavailable)
+        }
         return nil
     }
     return p
@@ -583,6 +640,18 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     var lastChunkCreated int64
 
     for chunk := range ch {
+        // F2 fix: check for client cancel to propagate downstream and release KV cache
+        select {
+        case <-ctx.Done():
+            slog.Info("stream chat cancelled by client", "provider", provider.Name(), "error", ctx.Err())
+            // Try to cancel on the provider if supported
+            if canceller, ok := provider.(interface{ Cancel(string) }); ok {
+                canceller.Cancel(lastChunkID)
+            }
+            return
+        default:
+        }
+
         if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
             outputTokens += chunk.Usage.CompletionTokens
         }
@@ -597,7 +666,10 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
 
             warningEvt := map[string]string{"type": "warning", "message": "stream degraded, falling back to non-streaming"}
             warningData, _ := json.Marshal(warningEvt)
-            fmt.Fprintf(w, "event: warning\ndata: %s\n\n", warningData)
+            if _, err := fmt.Fprintf(w, "event: warning\ndata: %s\n\n", warningData); err != nil {
+                slog.Error("failed to write warning event", "error", err)
+                return
+            }
             if canFlush {
                 flusher.Flush()
             }
@@ -612,7 +684,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 slog.Error("non-streaming fallback failed", "error", fallbackErr)
                 errEvt := map[string]string{"type": "error", "message": "non-streaming fallback also failed"}
                 errData, _ := json.Marshal(errEvt)
-                fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData)
+                if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData); err != nil {
+                    slog.Error("failed to write error event", "error", err)
+                }
                 if canFlush {
                     flusher.Flush()
                 }
@@ -717,11 +791,12 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     }
 }
 
-func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
+func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time, tenantName string) {
     // Cache lookup
     var cacheKey string
     if s.cache != nil {
-        cacheKey = cache.ComputeCacheKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, req.TopP)
+        cacheKey = cache.ComputeCacheKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, req.TopP,
+            "tenant", tenantName, "tools", req.Tools, "tool_choice", req.ToolChoice, "stop", req.Stop)
         if cached, ok := s.cache.Get(cacheKey); ok {
             slog.Debug("cache hit for non-stream chat", "model", req.Model)
             w.Header().Set("Content-Type", "application/json")
@@ -862,7 +937,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     }
 
     var req adapter.EmbeddingRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 10<<20)).Decode(&req); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
         return
     }
@@ -978,7 +1053,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     }
 
     var req adapter.RerankRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 10<<20)).Decode(&req); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
         return
     }
@@ -1517,10 +1592,14 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
     start := time.Now()
 
+    tenant := "anonymous"
+    if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
+        tenant = kc.Name
+    }
     if chatReq.Stream {
         s.handleStreamChat(ctx, w, provider, &chatReq, decision, budget, start)
     } else {
-        s.handleNonStreamChat(ctx, w, provider, &chatReq, decision, budget, start)
+        s.handleNonStreamChat(ctx, w, provider, &chatReq, decision, budget, start, tenant)
     }
 }
 
@@ -1599,10 +1678,14 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         chatReq.Stream = antReq.Stream
         start := time.Now()
         budget := tokenizer.TokenBudget{InputTokens: 0, TotalBudget: antReq.MaxTokens}
+        tenant := "anonymous"
+        if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
+            tenant = kc.Name
+        }
         if antReq.Stream {
             s.handleStreamChat(ctx, w, provider, chatReq, decision, budget, start)
         } else {
-            s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start)
+            s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start, tenant)
         }
     }
 }
@@ -2115,4 +2198,148 @@ func (s *Server) handleConnectionCRUD(w http.ResponseWriter, r *http.Request) {
     default:
         http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
     }
+}
+
+func (s *Server) evictOAuth2States() {
+    ticker := time.NewTicker(10 * time.Minute)
+    defer ticker.Stop()
+    for range ticker.C {
+        s.oauth2StatesMu.Lock()
+        now := time.Now()
+        for state, issuedAt := range s.oauth2States {
+            if now.Sub(issuedAt) > 10*time.Minute {
+                delete(s.oauth2States, state)
+            }
+        }
+        s.oauth2StatesMu.Unlock()
+    }
+}
+
+func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    var req struct {
+        ConnectorKey string `json:"connectorKey"`
+        State        string `json:"state"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
+        return
+    }
+    if req.ConnectorKey == "" {
+        http.Error(w, `{"error":{"message":"connectorKey is required"}}`, http.StatusBadRequest)
+        return
+    }
+    if req.State == "" {
+        b := make([]byte, 16)
+        if _, err := rand.Read(b); err != nil {
+            slog.Error("generate state failed", "error", err)
+            http.Error(w, `{"error":{"message":"internal error"}}`, http.StatusInternalServerError)
+            return
+        }
+        req.State = hex.EncodeToString(b)
+    }
+    // Enforce length limit on client-supplied state to prevent unbounded map growth
+    if len(req.State) > 64 {
+        http.Error(w, `{"error":{"message":"state parameter too long"}}`, http.StatusBadRequest)
+        return
+    }
+    s.oauth2StatesMu.Lock()
+    s.oauth2States[req.State] = time.Now().UTC()
+    s.oauth2StatesMu.Unlock()
+    authURL, err := s.connectorRegistry.OAuth2().AuthorizationURL(req.ConnectorKey, req.State)
+    if err != nil {
+        writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+            "success": false,
+            "message": err.Error(),
+        })
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "authorization_url": authURL,
+        "state":             req.State,
+    })
+}
+
+func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
+    code := r.URL.Query().Get("code")
+    state := r.URL.Query().Get("state")
+    connectorKey := r.URL.Query().Get("connector_key")
+    if code == "" || connectorKey == "" {
+        http.Error(w, `{"error":{"message":"missing code or connector_key"}}`, http.StatusBadRequest)
+        return
+    }
+    // CSRF: validate state matches a previously-issued one
+    if state == "" {
+        http.Error(w, `{"error":{"message":"missing state parameter"}}`, http.StatusBadRequest)
+        return
+    }
+    s.oauth2StatesMu.Lock()
+    issuedAt, ok := s.oauth2States[state]
+    if ok {
+        delete(s.oauth2States, state)
+    }
+    s.oauth2StatesMu.Unlock()
+    if !ok {
+        http.Error(w, `{"error":{"message":"invalid or expired state parameter"}}`, http.StatusBadRequest)
+        return
+    }
+    if time.Since(issuedAt) > 10*time.Minute {
+        http.Error(w, `{"error":{"message":"state parameter expired"}}`, http.StatusBadRequest)
+        return
+    }
+
+    slog.Info("oauth2 callback received", "connector", connectorKey, "state", state)
+    tokenResp, err := s.connectorRegistry.OAuth2().ExchangeCode(r.Context(), connectorKey, code)
+    if err != nil {
+        writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+            "success": false,
+            "message": err.Error(),
+        })
+        return
+    }
+    encAccess, err := s.connectorRegistry.OAuth2().EncryptToken(tokenResp.AccessToken)
+    if err != nil {
+        slog.Error("encrypt access token failed, aborting callback", "error", err)
+        writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+            "success": false,
+            "message": "token encryption failed",
+        })
+        return
+    }
+    encRefresh, err := s.connectorRegistry.OAuth2().EncryptToken(tokenResp.RefreshToken)
+    if err != nil {
+        slog.Error("encrypt refresh token failed, aborting callback", "error", err)
+        writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+            "success": false,
+            "message": "token encryption failed",
+        })
+        return
+    }
+    conn := &connector.Connection{
+        ID:                     fmt.Sprintf("conn-%s-%d", connectorKey, time.Now().UnixNano()),
+        ConnectorKey:           connectorKey,
+        AuthType:               connector.AuthTypeOAuth2,
+        Status:                 "active",
+        EncryptedAccessToken:   encAccess,
+        EncryptedRefreshToken:  encRefresh,
+    }
+    if tokenResp.ExpiresIn > 0 {
+        expiry := time.Now().UTC().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+        conn.TokenExpiry = &expiry
+    }
+    if err := s.connectorRegistry.CreateConnection(conn); err != nil {
+        writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+            "success": false,
+            "message": err.Error(),
+        })
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "success":       true,
+        "connection_id": conn.ID,
+        "expires_in":    tokenResp.ExpiresIn,
+    })
 }

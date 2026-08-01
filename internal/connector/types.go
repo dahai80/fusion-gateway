@@ -38,13 +38,17 @@ type ConnectorMeta struct {
 }
 
 type Connection struct {
-    ID           string     `json:"id"`
-    ConnectorKey string     `json:"connectorKey"`
-    AuthType     AuthType   `json:"authType"`
-    CreatedAt    time.Time  `json:"createdAt"`
-    UpdatedAt    time.Time  `json:"updatedAt"`
-    ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
-    Status       string     `json:"status"`
+    ID                string     `json:"id"`
+    ConnectorKey      string     `json:"connectorKey"`
+    AuthType          AuthType   `json:"authType"`
+    CreatedAt         time.Time  `json:"createdAt"`
+    UpdatedAt         time.Time  `json:"updatedAt"`
+    ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
+    Status            string     `json:"status"`
+    EncryptedAccessToken  string `json:"encryptedAccessToken,omitempty"`
+    EncryptedRefreshToken string `json:"encryptedRefreshToken,omitempty"`
+    TokenExpiry       *time.Time `json:"tokenExpiry,omitempty"`
+    AuthConfig        map[string]string `json:"authConfig,omitempty"`
 }
 
 type ActionRequest struct {
@@ -82,12 +86,14 @@ type AuditEntry struct {
 }
 
 const (
-    ErrAuthExpired     = 1001
-    ErrRateLimited     = 1002
+    ErrAuthExpired      = 1001
+    ErrRateLimited      = 1002
     ErrPermissionDenied = 1003
-    ErrNotFound        = 1004
-    ErrTimeout         = 1005
-    ErrValidation      = 2001
+    ErrNotFound         = 1004
+    ErrTimeout          = 1005
+    ErrAuth             = 1006
+    ErrExternal         = 1007
+    ErrValidation       = 2001
 )
 
 func ErrorWithCode(code int, msg string) *ActionResponse {

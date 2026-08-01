@@ -251,10 +251,18 @@ func (c *Cache) Delete(key string) {
     }
 }
 
-func ComputeCacheKey(model string, messages interface{}, temperature *float64, maxTokens *int, topP *float64) string {
-    return cacheKey(model, messages, map[string]interface{}{
+func ComputeCacheKey(model string, messages interface{}, temperature *float64, maxTokens *int, topP *float64, extra ...interface{}) string {
+    params := map[string]interface{}{
         "temperature": temperature,
         "max_tokens":  maxTokens,
         "top_p":       topP,
-    })
+    }
+    // F6 fix: include tenant, tools, tool_choice, stop in cache key
+    for i := 0; i+1 < len(extra); i += 2 {
+        key, ok := extra[i].(string)
+        if ok {
+            params[key] = extra[i+1]
+        }
+    }
+    return cacheKey(model, messages, params)
 }

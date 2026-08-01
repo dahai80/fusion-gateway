@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
@@ -36,6 +38,60 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
+// autoStartLocal launches the local inference backend and waits for it to become healthy.
+func autoStartLocal(cfg *config.AutoStartConfig) {
+	if cfg == nil || !cfg.Enabled || cfg.Command == "" {
+		slog.Info("auto_start disabled or not configured")
+		return
+	}
+	slog.Info("auto_start: launching local backend", "command", cfg.Command)
+	shell := exec.Command("sh", "-c", cfg.Command)
+	shell.Stdout = os.Stdout
+	shell.Stderr = os.Stderr
+	if err := shell.Start(); err != nil {
+		slog.Error("auto_start: failed to launch command", "error", err)
+		return
+	}
+	slog.Info("auto_start: process started", "pid", shell.Process.Pid)
+
+	if cfg.WaitURL == "" {
+		return
+	}
+	waitSecs := cfg.WaitSecs
+	if waitSecs <= 0 {
+		waitSecs = 120
+	}
+	deadline := time.Now().Add(time.Duration(waitSecs) * time.Second)
+	client := &http.Client{Timeout: 2 * time.Second}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(cfg.WaitURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode < 500 {
+				slog.Info("auto_start: local backend is healthy", "url", cfg.WaitURL)
+				return
+			}
+		}
+		slog.Info("auto_start: waiting for local backend", "url", cfg.WaitURL)
+		time.Sleep(2 * time.Second)
+	}
+	slog.Warn("auto_start: timed out waiting for local backend", "url", cfg.WaitURL, "wait_secs", waitSecs)
+}
+
+// autoStopLocal stops the local inference backend on shutdown.
+func autoStopLocal(cfg *config.AutoStartConfig) {
+	if cfg == nil || !cfg.Enabled || cfg.StopCmd == "" {
+		return
+	}
+	slog.Info("auto_start: stopping local backend", "command", cfg.StopCmd)
+	shell := exec.Command("sh", "-c", cfg.StopCmd)
+	shell.Stdout = os.Stdout
+	shell.Stderr = os.Stderr
+	if err := shell.Run(); err != nil {
+		slog.Error("auto_start: failed to stop local backend", "error", err)
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -60,6 +116,9 @@ func run(configPath string) error {
 		"cluster_enabled", snap.Config.Cluster.Enabled,
 		"version", snap.Version,
 	)
+
+	// Auto-start local inference backend (fusion-mlx) if configured
+	autoStartLocal(snap.Config.Server.AutoStart)
 
 	hwCollector := hardware.NewCollector(&snap.Config.Hardware)
 	hwCtx, hwCancel := context.WithCancel(context.Background())
@@ -163,6 +222,9 @@ func run(configPath string) error {
 	sig := <-quit
 	slog.Info("shutting down", "signal", sig.String())
 	close(stopCh)
+
+	// Auto-stop local inference backend if it was auto-started
+	autoStopLocal(snap.Config.Server.AutoStart)
 
 	if discovery != nil {
 		discovery.Stop()

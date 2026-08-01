@@ -118,7 +118,7 @@ func newTestServer() *Server {
         store:             memorystore.NewMemoryStoreWithConfig(1000, cfg.Config.Batch),
         cache:             cache.New(cfg.Config.Cache),
         semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
-        connectorRegistry: newConnectorRegistry(),
+        connectorRegistry: newConnectorRegistry(cfg),
         oidcAuth:          oidcAuth,
     }
     s.buildMiddlewareChain()
@@ -1641,12 +1641,12 @@ func TestHandleNonStreamChat_CacheHit(t *testing.T) {
 
     // First call: miss
     rec1 := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec1, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec1, provider, req, decision, budget, time.Now(), "test-tenant")
     slog.Info("TestHandleNonStreamChat_CacheHit first call", "status", rec1.Code)
 
     // Second call: should hit cache
     rec2 := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec2, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec2, provider, req, decision, budget, time.Now(), "test-tenant")
     slog.Info("TestHandleNonStreamChat_CacheHit second call", "status", rec2.Code, "cache_header", rec2.Header().Get("X-Cache"))
 }
 
@@ -1692,7 +1692,7 @@ func TestHandleNonStreamChat_LocalFailFallsBackToCloud(t *testing.T) {
 
     provider, _ := s.pool.Get("fusion-mlx")
     rec := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now(), "test-tenant")
 
     slog.Info("TestHandleNonStreamChat_LocalFailFallsBackToCloud", "status", rec.Code, "body", rec.Body.String())
 }
@@ -1996,7 +1996,7 @@ func TestChatCompletions_ClusterNoDiscovery(t *testing.T) {
     provider, _ := s.pool.Get("test-cloud")
     // clusterDiscovery is nil, so cluster backend should fall through to cloud
     rec := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now(), "test-tenant")
 
     slog.Info("TestChatCompletions_ClusterNoDiscovery", "status", rec.Code)
 }
@@ -2395,14 +2395,14 @@ func TestHandleNonStreamChat_CacheEnabled(t *testing.T) {
 
     // First: miss
     rec1 := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec1, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec1, provider, req, decision, budget, time.Now(), "test-tenant")
     if rec1.Header().Get("X-Cache") != "MISS" {
         t.Errorf("expected MISS, got %s", rec1.Header().Get("X-Cache"))
     }
 
     // Second: hit
     rec2 := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec2, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec2, provider, req, decision, budget, time.Now(), "test-tenant")
     if rec2.Header().Get("X-Cache") != "HIT" {
         t.Errorf("expected HIT, got %s", rec2.Header().Get("X-Cache"))
     }
@@ -3497,7 +3497,7 @@ func TestHandleNonStreamChat_WithLatencyCost(t *testing.T) {
 
     provider, _ := s.pool.Get("test-cloud")
     rec := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now())
+    s.handleNonStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now(), "test-tenant")
 
     if rec.Code != http.StatusOK {
         t.Fatalf("expected 200, got %d", rec.Code)
@@ -4023,7 +4023,7 @@ func TestNonStreamChat_ProviderError(t *testing.T) {
     budget := tokenizer.TokenBudget{InputTokens: 5, TotalBudget: 100}
     start := time.Now()
     rec := httptest.NewRecorder()
-    s.handleNonStreamChat(context.Background(), rec, p, req, decision, budget, start)
+    s.handleNonStreamChat(context.Background(), rec, p, req, decision, budget, start, "test-tenant")
     if rec.Code != http.StatusBadGateway {
         t.Fatalf("expected 502, got %d", rec.Code)
     }
@@ -4975,7 +4975,7 @@ func newTestServerWithMockStore(ms *mockStore) *Server {
         store:             ms,
         cache:             cache.New(cfg.Config.Cache),
         semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
-        connectorRegistry: newConnectorRegistry(),
+        connectorRegistry: newConnectorRegistry(cfg),
         oidcAuth:          oidcAuth,
     }
     s.buildMiddlewareChain()
@@ -5590,7 +5590,8 @@ func TestChatCompletions_CacheHit2(t *testing.T) {
     s.cfg.Config.Cache.Enabled = true
     s.cache = cache.New(s.cfg.Config.Cache)
     msgs := []adapter.ChatMessage{{Role: "user", Content: "cache test"}}
-    key := cache.ComputeCacheKey("test-model", msgs, nil, nil, nil)
+    key := cache.ComputeCacheKey("test-model", msgs, nil, nil, nil,
+        "tenant", "anonymous", "tools", nil, "tool_choice", nil, "stop", nil)
     cachedData, _ := json.Marshal(&adapter.ChatResponse{ID: "cached-1", Object: "chat.completion"})
     s.cache.Set(key, cachedData)
     reqBody := `{"model":"test-model","messages":[{"role":"user","content":"cache test"}]}`
@@ -6193,7 +6194,8 @@ func TestNonStreamChat_CacheHitEnabled(t *testing.T) {
     s.cfg.Config.Cache.Enabled = true
     s.cache = cache.New(s.cfg.Config.Cache)
     msgs := []adapter.ChatMessage{{Role: "user", Content: "cache hit test"}}
-    key := cache.ComputeCacheKey("test-model", msgs, nil, nil, nil)
+    key := cache.ComputeCacheKey("test-model", msgs, nil, nil, nil,
+        "tenant", "anonymous", "tools", nil, "tool_choice", nil, "stop", nil)
     cachedData, _ := json.Marshal(&adapter.ChatResponse{ID: "ch-1", Object: "chat.completion", Choices: []adapter.ChatChoice{{Index: 0, Message: adapter.ChatMessage{Role: "assistant", Content: "cached"}}}})
     s.cache.Set(key, cachedData)
     reqBody := `{"model":"test-model","messages":[{"role":"user","content":"cache hit test"}]}`

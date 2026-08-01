@@ -272,10 +272,15 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
     var msgID string
     buf := make([]byte, 4096)
     var lineBuf []byte
+    const maxLineSize = 1 << 20 // 1 MiB cap per line to prevent unbounded growth
     for {
         n, err := body.Read(buf)
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
+            if len(lineBuf) > maxLineSize {
+                slog.Error("anthropic sse line exceeded max size, discarding", "size", len(lineBuf))
+                lineBuf = nil
+            }
         }
         for {
             idx := bytes.IndexByte(lineBuf, byte('\n'))
@@ -375,10 +380,15 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
 func (p *AnthropicProvider) parseAnthropicStreamEvents(body io.Reader, ch chan<- AnthropicStreamEvent) {
     buf := make([]byte, 4096)
     var lineBuf []byte
+    const maxLineSize = 1 << 20 // 1 MiB cap per line to prevent unbounded growth
     for {
         n, err := body.Read(buf)
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
+            if len(lineBuf) > maxLineSize {
+                slog.Error("anthropic stream event line exceeded max size, discarding", "size", len(lineBuf))
+                lineBuf = nil
+            }
         }
         for {
             idx := bytes.IndexByte(lineBuf, 10)

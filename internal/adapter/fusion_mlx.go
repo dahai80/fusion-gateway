@@ -208,7 +208,7 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         defer goroutineRelease()
         defer resp.Body.Close()
 
-        p.parseSSEStream(resp.Body, ch)
+        parseSSEStream(resp.Body, ch)
     })
 
     return ch, nil
@@ -463,28 +463,4 @@ func (p *FusionMLXProvider) StartIdleGCTimer(stopCh <-chan struct{}) {
             }
         }
     })
-}
-
-func (p *FusionMLXProvider) parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
-    decoder := json.NewDecoder(body)
-    for {
-        var chunk StreamChunk
-        if err := decoder.Decode(&chunk); err != nil {
-            if err != io.EOF {
-                slog.Error("sse stream decode error", "error", err)
-            }
-            return
-        }
-        select {
-        case ch <- chunk:
-        default:
-            slog.Warn("sse backpressure: channel full, degrading to non-streaming")
-            degradedChunk := StreamChunk{Degraded: true}
-            select {
-            case ch <- degradedChunk:
-            default:
-            }
-            return
-        }
-    }
 }

@@ -267,14 +267,13 @@ func TestFusionMLXProvider_StreamChat(t *testing.T) {
     }
     b1, _ := json.Marshal(chunk1)
     b2, _ := json.Marshal(chunk2)
+    sseData := "data: " + string(b1) + "\n\ndata: " + string(b2) + "\n\ndata: [DONE]\n\n"
 
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if r.URL.Path == "/v1/chat/completions" {
+            w.Header().Set("Content-Type", "text/event-stream")
             w.WriteHeader(http.StatusOK)
-            _, _ = w.Write(b1)
-            _, _ = w.Write([]byte("\n"))
-            _, _ = w.Write(b2)
-            _, _ = w.Write([]byte("\n"))
+            _, _ = w.Write([]byte(sseData))
         }
     }))
     defer srv.Close()
@@ -554,9 +553,9 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
             Model:  "test",
         }
         b, _ := json.Marshal(chunk)
+        sseData := "data: " + string(b) + "\n\n"
         ch := make(chan StreamChunk, 64)
-        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: "http://localhost"}, config.RoutingConfig{})
-        p.parseSSEStream(bytesReader(b), ch)
+        parseSSEStream(bytesReader([]byte(sseData)), ch)
         if len(ch) != 1 {
             t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
         }
@@ -566,11 +565,11 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
         slog.Info("test FusionMLXProvider_parseSSEStream backpressure")
         chunk := StreamChunk{ID: "c1", Object: "chat.completion.chunk", Model: "test"}
         b, _ := json.Marshal(chunk)
+        sseData := "data: " + string(b) + "\n\n"
         ch := make(chan StreamChunk, 1)
         ch <- StreamChunk{ID: "filler"}
 
-        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: "http://localhost"}, config.RoutingConfig{})
-        p.parseSSEStream(bytesReader(b), ch)
+        parseSSEStream(bytesReader([]byte(sseData)), ch)
     })
 }
 

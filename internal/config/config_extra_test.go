@@ -352,8 +352,8 @@ func TestDiffConfigs_SimpleChange(t *testing.T) {
     for _, c := range changes {
         if c.Field == "Server.Port" {
             found = true
-            if c.Old != 8100 || c.New != 9090 {
-                t.Fatalf("expected 8100->9090, got %v->%v", c.Old, c.New)
+            if c.Old != 11432 || c.New != 9090 {
+                t.Fatalf("expected 11432->9090, got %v->%v", c.Old, c.New)
             }
         }
     }

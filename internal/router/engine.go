@@ -131,7 +131,9 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
         warmupSuccess = 3
     }
     e.mu.RLock()
-    e.breakers["local"].ResetToHalfOpen()
+    if b, ok := e.breakers["local"]; ok {
+        b.ResetToHalfOpen()
+    }
     e.mu.RUnlock()
     slog.Info("warmup started: local breaker set to half_open", "warmup_success_target", warmupSuccess)
 }
@@ -209,10 +211,9 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     decision := e.decideLocked(ctx, cfg, req, &trips)
     e.mu.RUnlock()
 
-    // Apply deferred trip calls outside read lock
+    // Apply deferred trip calls outside read lock (use e.Trip for proper locking)
     for _, reason := range trips {
-        e.breakers["local"].Trip(reason)
-        slog.Warn("circuit breaker tripped", "backend", "local", "reason", reason)
+        e.Trip("local", reason)
     }
     return decision
 }

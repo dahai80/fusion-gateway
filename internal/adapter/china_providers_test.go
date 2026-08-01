@@ -28,9 +28,11 @@ func makeStreamHandler(t *testing.T, id string) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         chunk := StreamChunk{ID: id, Object: "chat.completion.chunk", Model: "test"}
         b, _ := json.Marshal(chunk)
+        w.Header().Set("Content-Type", "text/event-stream")
         w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("data: "))
         _, _ = w.Write(b)
-        _, _ = w.Write([]byte("\n"))
+        _, _ = w.Write([]byte("\n\n"))
     }
 }
 

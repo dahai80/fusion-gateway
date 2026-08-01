@@ -109,11 +109,12 @@ func TestOpenAICompatibleProvider_StreamChat(t *testing.T) {
         Model:  "gpt-4",
     }
     b, _ := json.Marshal(chunk)
+    sseData := "data: " + string(b) + "\n\ndata: [DONE]\n\n"
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if r.URL.Path == "/v1/chat/completions" {
+            w.Header().Set("Content-Type", "text/event-stream")
             w.WriteHeader(http.StatusOK)
-            _, _ = w.Write(b)
-            _, _ = w.Write([]byte("\n"))
+            _, _ = w.Write([]byte(sseData))
         }
     }))
     defer srv.Close()
@@ -345,8 +346,9 @@ func TestParseSSEStream(t *testing.T) {
         Model:  "test",
     }
     b, _ := json.Marshal(chunk)
+    sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 64)
-    parseSSEStream(bytesReader(b), ch)
+    parseSSEStream(bytesReader([]byte(sseData)), ch)
     if len(ch) != 1 {
         t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
     }
@@ -356,7 +358,8 @@ func TestParseSSEStream_Backpressure(t *testing.T) {
     slog.Info("test ParseSSEStream_Backpressure")
     chunk := StreamChunk{ID: "c1", Object: "chat.completion.chunk", Model: "test"}
     b, _ := json.Marshal(chunk)
+    sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 1)
     ch <- StreamChunk{ID: "filler"}
-    parseSSEStream(bytesReader(b), ch)
+    parseSSEStream(bytesReader([]byte(sseData)), ch)
 }

@@ -10,7 +10,6 @@ import (
     "encoding/json"
     "fmt"
     "io"
-    "log/slog"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -96,22 +95,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
     safego.Go("yi_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        dec := json.NewDecoder(resp.Body)
-        for {
-            var chunk StreamChunk
-            if err := dec.Decode(&chunk); err != nil {
-                if err != io.EOF {
-                    slog.Error("yi sse error", "error", err)
-                }
-                return
-            }
-            select {
-            case ch <- chunk:
-            default:
-                slog.Warn("yi sse backpressure, dropping chunk")
-                return
-            }
-        }
+        parseSSEStream(resp.Body, ch)
     })
     return ch, nil
 }

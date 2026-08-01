@@ -64,6 +64,7 @@ type Store struct {
     batches   map[string]*Batch
     processFn ProcessFn
     maxBatch  int
+    stopCh    chan struct{}
 }
 
 func NewStore(cfg config.BatchConfig, processFn ProcessFn) *Store {
@@ -81,8 +82,11 @@ func NewStore(cfg config.BatchConfig, processFn ProcessFn) *Store {
         batches:   make(map[string]*Batch),
         processFn: processFn,
         maxBatch:  maxBatch,
+        stopCh:    make(chan struct{}),
     }
     slog.Info("batch store initialized", "max_batch_size", maxBatch)
+    // B8 fix: start background cleanup for expired batches
+    go s.cleanupLoop()
     return s
 }
 
@@ -202,4 +206,44 @@ func (s *Store) List() []*Batch {
         result = append(result, b)
     }
     return result
+}
+
+const batchTTL = 24 * time.Hour
+
+func (s *Store) cleanupLoop() {
+    ticker := time.NewTicker(1 * time.Hour)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ticker.C:
+            s.cleanup()
+        case <-s.stopCh:
+            return
+        }
+    }
+}
+
+func (s *Store) Close() {
+    if s == nil {
+        return
+    }
+    close(s.stopCh)
+}
+
+func (s *Store) cleanup() {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    now := time.Now()
+    var removed int
+    for id, b := range s.batches {
+        if b.Status == BatchStatusCompleted || b.Status == BatchStatusFailed || b.Status == BatchStatusCancelled {
+            if now.Sub(b.CreatedAt) > batchTTL {
+                delete(s.batches, id)
+                removed++
+            }
+        }
+    }
+    if removed > 0 {
+        slog.Info("batch cleanup removed expired batches", "removed", removed, "remaining", len(s.batches))
+    }
 }

@@ -10,7 +10,6 @@ import (
     "encoding/json"
     "fmt"
     "io"
-    "log/slog"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -96,22 +95,7 @@ func (p *StepFunProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     safego.Go("stepfun_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        dec := json.NewDecoder(resp.Body)
-        for {
-            var chunk StreamChunk
-            if err := dec.Decode(&chunk); err != nil {
-                if err != io.EOF {
-                    slog.Error("stepfun sse error", "error", err)
-                }
-                return
-            }
-            select {
-            case ch <- chunk:
-            default:
-                slog.Warn("stepfun sse backpressure, dropping chunk")
-                return
-            }
-        }
+        parseSSEStream(resp.Body, ch)
     })
     return ch, nil
 }

@@ -54,6 +54,8 @@ func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
         Value:    token,
         Path:     "/",
         MaxAge:   86400,
+        HttpOnly: true,
+        Secure:   !a.insecureCookie,
         SameSite: http.SameSiteStrictMode,
     })
 

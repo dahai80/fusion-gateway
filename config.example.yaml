@@ -1,7 +1,22 @@
 server:
     host: "0.0.0.0"
-    port: 8100
-    enable_pprof: false                # Enable pprof debug endpoints (requires master_key auth)
+    port: 11432                           # Fusion-Gateway default port
+    enable_pprof: false                   # Enable pprof debug endpoints (requires master_key auth)
+    # tls:                                # HTTPS termination (optional, for single-binary deployment)
+    #     cert_file: "certs/server.crt"
+    #     key_file: "certs/server.key"
+    auto_start:                           # Auto-start fusion-mlx on gateway startup
+        enabled: true
+        command: "~/claude-home/fusion-mlx/start.sh start"
+        stop_cmd: "~/claude-home/fusion-mlx/start.sh stop"
+        wait_url: "http://127.0.0.1:11434/health"
+        wait_secs: 120                    # Max seconds to wait for local backend health
+
+encryption:
+    master_key: ""                     # AES-256 master key for at-rest encryption (min 32 chars, leave empty to disable)
+
+# connector:                            # SaaS connector framework (optional)
+#     persistence_path: "data/connections.json"
 
 auth:
     enabled: true
@@ -261,11 +276,11 @@ cluster:
     nodes: []
     # nodes:
     #     - id: "mac-mini-m2"
-    #       address: "http://192.168.1.100:8100"
+    #       address: "http://192.168.1.100:11432"
     #       gpu: "M2"
     #       memory_gb: 16
     #     - id: "mac-studio-ultra"
-    #       address: "http://192.168.1.101:8100"
+    #       address: "http://192.168.1.101:11432"
     #       gpu: "M2Ultra"
     #       memory_gb: 128
     master:

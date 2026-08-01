@@ -185,7 +185,11 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
 
             keyName := keyCfg.Name
             if keyName == "" {
-                keyName = keyCfg.Key[:8]
+                if len(keyCfg.Key) >= 8 {
+                    keyName = keyCfg.Key[:8]
+                } else {
+                    keyName = keyCfg.Key
+                }
             }
 
             if !limiter.AllowRPM(keyName, keyCfg.RPM) {

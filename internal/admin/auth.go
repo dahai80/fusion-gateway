@@ -16,6 +16,11 @@ import (
 type AdminAuth struct {
     jwtSecret      []byte
     adminUsers     map[string]string // username -> bcrypt hash
+    insecureCookie bool              // true when running without TLS
+}
+
+func (a *AdminAuth) SetInsecureCookie(v bool) {
+    a.insecureCookie = v
 }
 
 func NewAdminAuth(secret string, users map[string]string) (*AdminAuth, error) {

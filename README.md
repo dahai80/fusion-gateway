@@ -9,7 +9,7 @@ Core traffic entry point for Fusion-Agent Studio, Fusion-MLX, and Fusion-Coder. 
 ```
 Clients (VSCode/UI/CLI/Agent)
         |
-Fusion-Gateway :8100
+Fusion-Gateway :11432
 |- Ingress Layer       -- Auth, parsing, standardization, rate limiting
 |- Preprocessing       -- Tokenizer counting, prompt validation, param defaults
 |- Routing Engine      -- Rule engine + hardware load sensing (core differentiator)
@@ -33,9 +33,11 @@ go build -o fusion-gateway ./cmd/gateway
 # Copy and edit config
 cp config.example.yaml config.yaml
 
-# Run
+# Run (auto-starts fusion-mlx on :11434, gateway on :11432)
 ./fusion-gateway --config config.yaml
 ```
+
+The gateway listens on **port 11432** by default. With `auto_start.enabled: true`, it automatically launches fusion-mlx on port 11434 and waits for it to become healthy before serving requests.
 
 ## Configuration
 
@@ -43,7 +45,12 @@ See `config.example.yaml` for full reference. Key settings:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `server.port` | 8100 | Gateway listen port |
+| `server.port` | 11432 | Gateway listen port |
+| `server.auto_start.enabled` | true | Auto-start fusion-mlx on gateway startup |
+| `server.auto_start.command` | `~/claude-home/fusion-mlx/start.sh start` | Shell command to start local backend |
+| `server.auto_start.stop_cmd` | `~/claude-home/fusion-mlx/start.sh stop` | Shell command to stop local backend on shutdown |
+| `server.auto_start.wait_url` | `http://127.0.0.1:11434/health` | Health URL to poll after start |
+| `server.auto_start.wait_secs` | 120 | Max seconds to wait for health check |
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `route.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
@@ -89,6 +96,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `cost_markup.global_markup` | 0 | Global markup ratio (0.2 = 20% surcharge) |
 | `batch.enabled` | false | Enable /v1/batches API |
 | `batch.max_batch_size` | 100 | Max requests per batch |
+| `server.tls.cert_file` | "" | TLS certificate file (enables HTTPS) |
+| `server.tls.key_file` | "" | TLS private key file |
+| `encryption.master_key` | "" | AES-256 master key for at-rest encryption (≥32 chars) |
+| `connector.persistence_path` | data/connections.json | Connection credentials file path |
 
 ## API Endpoints
 
@@ -127,6 +138,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `/gateway/v1/connection` | GET/POST | List/create connections |
 | `/gateway/v1/connection/{id}` | GET/DELETE | Get/delete connection |
 | `/gateway/v1/connection/{id}/refresh` | POST | Refresh connection authorization |
+| `/gateway/v1/oauth2/authorize` | POST | Generate OAuth2 authorization URL |
+| `/gateway/v1/oauth2/callback` | GET | OAuth2 callback — exchange code for tokens |
 
 ## Routing Logic
 
@@ -189,7 +202,7 @@ The router engine uses **request type** (`chat`/`embedding`/`rerank`) for fast-p
 
 The gateway proxies OpenAI Realtime API (`/v1/realtime`) via bidirectional WebSocket relay:
 
-1. Client connects to `ws://gateway:8100/v1/realtime`
+1. Client connects to `ws://gateway:11432/v1/realtime`
 2. Gateway upgrades to WebSocket, dials configured backend (`wss://api.openai.com/v1/realtime`)
 3. Messages are relayed in both directions (client↔backend) with zero-buffer forwarding
 4. Either side closing triggers cleanup of both connections
@@ -213,6 +226,8 @@ When the downstream SSE channel is full (slow client), the gateway:
 4. Sets `X-Fusion-Degraded: true` response header
 
 If the non-streaming fallback also fails, an `error` SSE event is emitted.
+
+**Memory safety**: SSE lines are capped at 1 MiB per line; oversized lines are discarded. External API responses are capped at 10 MiB. This prevents OOM from malformed or adversarial streams.
 
 ## Key-Level Security & Rate Limiting
 
@@ -385,6 +400,8 @@ Unified SaaS connector framework for third-party API integration (QuickBooks, Go
 - **Action Execution**: Unified `POST /gateway/v1/connector/{key}/action/{action}` interface
 - **Audit Logging**: Every external API call logged with timestamp, permission level, input summary (for write actions)
 - **Test Mode**: `POST /gateway/v1/connector/test` executes actions without real side effects
+- **Persistence**: JSON file-based credential storage with atomic writes (tmp + rename)
+- **Encryption**: AES-256-GCM at-rest encryption for OAuth2 tokens (configurable master key)
 
 ### Built-in Connectors (V1.0)
 
@@ -393,6 +410,69 @@ Unified SaaS connector framework for third-party API integration (QuickBooks, Go
 | QuickBooks | OAuth2 | query_overdue_invoice, list_customers, create_invoice, get_company_info |
 | Google Workspace | OAuth2 | list_users, get_user, list_calendar_events, send_email, read_drive_file |
 | HubSpot | OAuth2 | list_contacts, get_contact, create_contact, list_deals, update_deal |
+
+All connectors make real HTTP API calls to their respective SaaS endpoints. Google Workspace supports automatic token refresh on 401 responses.
+
+### HTTPS / TLS
+
+Optional HTTPS termination for single-binary deployment:
+
+```yaml
+server:
+    tls:
+        cert_file: "certs/server.crt"
+        key_file: "certs/server.key"
+```
+
+When configured, the gateway uses `http.ListenAndServeTLS` instead of plain HTTP.
+
+### AES-256-GCM Encryption
+
+At-rest encryption for OAuth2 tokens and connection credentials:
+
+```yaml
+encryption:
+    master_key: "your-32-character-minimum-secret-key"
+```
+
+- AES-256-GCM with per-entry random nonce
+- Base64-encoded storage (nonce + ciphertext)
+- Master key must be ≥32 characters
+- When empty/disabled, tokens stored as plaintext
+- Applied automatically to OAuth2 access/refresh tokens via `tokenCipher` interface
+- Encryption failures are treated as hard errors — tokens are never silently stored as plaintext
+
+### OAuth2 Authorization Flow
+
+Full OAuth2 Authorization Code Flow support:
+
+```
+POST /gateway/v1/oauth2/authorize   →  Generate authorization URL
+GET  /gateway/v1/oauth2/callback    →  Exchange code for tokens
+```
+
+Flow:
+1. Client calls `/oauth2/authorize` with `connectorKey` and optional `state`
+2. Gateway generates a cryptographic random `state` if not provided, stores it server-side with 10-minute TTL
+3. Gateway returns the SaaS provider's authorization URL with the state parameter
+4. User authorizes in browser, provider redirects to `/oauth2/callback`
+5. Gateway validates the `state` parameter matches a previously-issued one (CSRF protection)
+6. Gateway exchanges authorization code for access/refresh tokens
+7. Tokens are encrypted (if master_key configured) and stored as a Connection
+
+### Credential Persistence
+
+Connections are persisted to a JSON file with atomic writes:
+
+```yaml
+connector:
+    persistence_path: "data/connections.json"
+```
+
+- Atomic write: write to `.tmp` file then `os.Rename` for crash safety
+- Auto-loaded on startup, auto-saved on Create/Delete/Refresh mutations
+- Encrypted tokens are stored as-is; decryption happens at read time
+- Directory permissions set to 0700 (owner-only access)
 
 ### Standard Error Codes
 
@@ -403,6 +483,8 @@ Unified SaaS connector framework for third-party API integration (QuickBooks, Go
 | 1003 | Permission denied |
 | 1004 | Resource not found |
 | 1005 | Request timeout |
+| 1006 | Auth failed — invalid or missing credentials |
+| 1007 | External API error — upstream request failed |
 | 2001 | Parameter validation failed |
 
 ### Session Affinity (Cowork Spaces)
@@ -424,7 +506,7 @@ When `X-Space-Id` header is present, the gateway maintains session affinity — 
 | Resource | Manifest | Helm | Description |
 |----------|----------|------|-------------|
 | Deployment | ✅ | ✅ | 2 replicas, topology spread, probes |
-| Service | ✅ | ✅ | ClusterIP :8100 |
+| Service | ✅ | ✅ | ClusterIP :11432 |
 | ConfigMap | ✅ | ✅ | Non-sensitive config |
 | Secret | ✅ | ✅ | master_key, api_keys |
 | ServiceAccount + RBAC | ✅ | ✅ | Config reader role |
@@ -444,7 +526,7 @@ deploy/
 │   ├── serviceaccount.yaml            # SA + Role + RoleBinding
 │   ├── secret.yaml                    # Sensitive keys (master_key, api_keys)
 │   ├── deployment.yaml                # 2 replicas, topology spread, SA, secretRef
-│   ├── service.yaml                   # ClusterIP :8100
+│   ├── service.yaml                   # ClusterIP :11432
 │   ├── configmap.yaml                 # Non-sensitive config
 │   ├── hpa.yaml                       # HPA: CPU 70% / Memory 80%
 │   ├── pdb.yaml                       # PDB: minAvailable 1
@@ -559,6 +641,7 @@ Built-in web admin dashboard at `/admin`, served from the single binary via Go `
 | `/admin/api/analytics/errors` | GET | Error statistics |
 | `/admin/api/dashboard/overview` | GET | Dashboard overview (QPS, tokens, cost, local hit rate) |
 | `/admin/api/quota/:key` | GET/PUT | Get / Set key quota usage |
+| `/admin/api/config/:domain` | GET/PUT | Read / Update config domain (server, auth, rate-limit, retry, negotiation, cache, cost, cost-markup, pii, cloud-routing, hardware, tokenizer, observability, cors, hot-reload, cluster, realtime, admin, oidc, rbac, semantic-cache, prompt-injection, batch, store, validation) |
 
 **Request Log Pipeline**: Every request is automatically logged with full metadata:
 - Request ID, model, channel, route reason, token counts, cost, latency, TTFT
@@ -567,6 +650,46 @@ Built-in web admin dashboard at `/admin`, served from the single binary via Go `
 - Exportable to JSON
 
 **Frontend**: React + Ant Design + Vite SPA embedded in Go binary.
+
+### GUI Configuration
+
+All gateway configuration can be managed through the admin dashboard — no manual YAML editing required. Each config domain has a dedicated page with GET/PUT API endpoints for reading and updating settings live.
+
+**Config API** (`/admin/api/config/*`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/api/config/server` | GET/PUT | Server settings (port, read/write timeout) |
+| `/admin/api/config/auth` | GET/PUT | Auth settings (enabled, master_key, api_keys) |
+| `/admin/api/config/rate-limit` | GET/PUT | Rate limiting (RPM/TPM per key) |
+| `/admin/api/config/retry` | GET/PUT | Retry & backoff settings |
+| `/admin/api/config/negotiation` | GET/PUT | Routing negotiation rules |
+| `/admin/api/config/cache` | GET/PUT | Cache settings (backend, TTL, Redis) |
+| `/admin/api/config/cost` | GET/PUT | Cost tracking & pricing |
+| `/admin/api/config/cost-markup` | GET/PUT | Cost markup / billing margin |
+| `/admin/api/config/pii` | GET/PUT | PII detection patterns & action |
+| `/admin/api/config/cloud-routing` | GET/PUT | Cloud routing strategy & weights |
+| `/admin/api/config/hardware` | GET/PUT | Hardware metrics collection |
+| `/admin/api/config/tokenizer` | GET/PUT | Tokenizer engine settings |
+| `/admin/api/config/observability` | GET/PUT | Logging, OTel, audit |
+| `/admin/api/config/cors` | GET/PUT | CORS allowed origins/methods |
+| `/admin/api/config/hot-reload` | GET/PUT | Hot-reload & drain settings |
+| `/admin/api/config/cluster` | GET/PUT | Cluster discovery & load balancing |
+| `/admin/api/config/realtime` | GET/PUT | Realtime API proxy |
+| `/admin/api/config/admin` | GET/PUT | Admin panel settings (JWT, users) |
+| `/admin/api/config/oidc` | GET/PUT | OIDC identity provider |
+| `/admin/api/config/rbac` | GET/PUT | RBAC role mappings |
+| `/admin/api/config/semantic-cache` | GET/PUT | Semantic cache settings |
+| `/admin/api/config/prompt-injection` | GET/PUT | Prompt injection detection |
+| `/admin/api/config/batch` | GET/PUT | Batch API settings |
+| `/admin/api/config/store` | GET/PUT | Store backend (memory/Redis) |
+| `/admin/api/config/validation` | GET/PUT | Request validation rules |
+
+**Behavior**:
+- GET returns current in-memory config with sensitive fields masked (`****`)
+- PUT accepts partial updates — only provided fields are changed
+- Empty string on sensitive fields (e.g. `api_key: ""`) means "keep current value"
+- Updates are written to the YAML config file on disk, then picked up by hot-reload
 
 ## Retry & Backoff
 
@@ -729,6 +852,7 @@ config.example.yaml   Example configuration
 | Channels | Backend provider management + health check + connectivity test |
 | Request Logs | Full request logs with routing reason, token counts, cost, latency |
 | Analytics | Token usage trends, cost tracking, model distribution, latency/error stats |
+| Configuration | 24 config pages for all gateway settings (Server, Auth, Rate Limit, Retry, Cache, Cost, PII, Cloud Routing, Hardware, Tokenizer, Observability, CORS, Hot Reload, Cluster, Realtime, Admin, OIDC, RBAC, Semantic Cache, Prompt Injection, Batch, Store, Validation, Cost Markup, Negotiation) |
 
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 

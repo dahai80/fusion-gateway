@@ -15,6 +15,9 @@ type Registry struct {
     connections map[string]*Connection
     auditLog    []AuditEntry
     auditMaxLen int
+    oauth2      *OAuth2Provider
+    persistence *Persistence
+    cipher      tokenCipher
 }
 
 func NewRegistry() *Registry {
@@ -23,6 +26,74 @@ func NewRegistry() *Registry {
         connections: make(map[string]*Connection),
         auditLog:    make([]AuditEntry, 0),
         auditMaxLen: 10000,
+        oauth2:      NewOAuth2Provider(),
+    }
+}
+
+func (r *Registry) OAuth2() *OAuth2Provider {
+    return r.oauth2
+}
+
+func (r *Registry) SetCipher(c tokenCipher) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.cipher = c
+}
+
+func (r *Registry) DecryptToken(encoded string) (string, error) {
+    r.mu.RLock()
+    c := r.cipher
+    r.mu.RUnlock()
+    if c == nil {
+        return encoded, nil
+    }
+    return c.Decrypt(encoded)
+}
+
+func (r *Registry) SetPersistence(p *Persistence) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.persistence = p
+}
+
+func (r *Registry) LoadFromPersistence() error {
+    if r.persistence == nil {
+        return nil
+    }
+    loaded, err := r.persistence.Load()
+    if err != nil {
+        return err
+    }
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    for id, conn := range loaded {
+        r.connections[id] = conn
+    }
+    slog.Info("loaded connections from persistence", "count", len(loaded))
+    return nil
+}
+
+// savePersistLocked saves to persistence. Caller must hold r.mu.
+func (r *Registry) savePersistLocked() {
+    if r.persistence == nil {
+        return
+    }
+    conns := r.connections
+    if err := r.persistence.Save(conns); err != nil {
+        slog.Error("persistence save failed", "error", err)
+    }
+}
+
+// savePersist saves to persistence, acquiring the lock itself.
+func (r *Registry) savePersist() {
+    if r.persistence == nil {
+        return
+    }
+    r.mu.RLock()
+    conns := r.connections
+    r.mu.RUnlock()
+    if err := r.persistence.Save(conns); err != nil {
+        slog.Error("persistence save failed", "error", err)
     }
 }
 
@@ -70,6 +141,7 @@ func (r *Registry) CreateConnection(conn *Connection) error {
     }
     r.connections[conn.ID] = conn
     slog.Info("connection created", "id", conn.ID, "connector", conn.ConnectorKey)
+    r.savePersistLocked()
     return nil
 }
 
@@ -101,6 +173,7 @@ func (r *Registry) DeleteConnection(id string) error {
     }
     delete(r.connections, id)
     slog.Info("connection deleted", "id", id)
+    r.savePersistLocked()
     return nil
 }
 
@@ -121,6 +194,7 @@ func (r *Registry) RefreshConnection(ctx context.Context, id string) error {
     conn.UpdatedAt = time.Now().UTC()
     r.mu.Unlock()
     slog.Info("connection refreshed", "id", id)
+    r.savePersist()
     return nil
 }
 

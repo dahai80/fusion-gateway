@@ -109,11 +109,12 @@ func TestFusionKBProvider_StreamChat(t *testing.T) {
         Model:  "kb-model",
     }
     b, _ := json.Marshal(chunk)
+    sseData := "data: " + string(b) + "\n\ndata: [DONE]\n\n"
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if r.URL.Path == "/v1/chat/completions" {
+            w.Header().Set("Content-Type", "text/event-stream")
             w.WriteHeader(http.StatusOK)
-            _, _ = w.Write(b)
-            _, _ = w.Write([]byte("\n"))
+            _, _ = w.Write([]byte(sseData))
         }
     }))
     defer srv.Close()

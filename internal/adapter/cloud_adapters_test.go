@@ -109,9 +109,11 @@ func TestVolcengineProvider_StreamChat(t *testing.T) {
     b, _ := json.Marshal(chunk)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if r.URL.Path == "/v1/chat/completions" {
+            w.Header().Set("Content-Type", "text/event-stream")
             w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte("data: "))
             _, _ = w.Write(b)
-            _, _ = w.Write([]byte("\n"))
+            _, _ = w.Write([]byte("\n\n"))
         }
     }))
     defer srv.Close()
@@ -255,9 +257,11 @@ func TestQianfanProvider_StreamChat(t *testing.T) {
     chunk := StreamChunk{ID: "qianfan-chunk-1", Object: "chat.completion.chunk", Model: "ernie"}
     b, _ := json.Marshal(chunk)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
         w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("data: "))
         _, _ = w.Write(b)
-        _, _ = w.Write([]byte("\n"))
+        _, _ = w.Write([]byte("\n\n"))
     }))
     defer srv.Close()
     p := NewQianfanProvider("qianfan", config.BackendConfig{BaseURL: srv.URL, APIKey: "test-key"})
@@ -401,9 +405,11 @@ func TestDeepSeekProvider_StreamChat(t *testing.T) {
     chunk := StreamChunk{ID: "ds-chunk-1", Object: "chat.completion.chunk", Model: "deepseek-chat"}
     b, _ := json.Marshal(chunk)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
         w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("data: "))
         _, _ = w.Write(b)
-        _, _ = w.Write([]byte("\n"))
+        _, _ = w.Write([]byte("\n\n"))
     }))
     defer srv.Close()
     p := NewDeepSeekProvider("deepseek", config.BackendConfig{BaseURL: srv.URL, APIKey: "test-key"})
@@ -509,9 +515,11 @@ func TestOpenRouterProvider_StreamChat(t *testing.T) {
     chunk := StreamChunk{ID: "or-chunk-1", Object: "chat.completion.chunk", Model: "gpt-4"}
     b, _ := json.Marshal(chunk)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
         w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("data: "))
         _, _ = w.Write(b)
-        _, _ = w.Write([]byte("\n"))
+        _, _ = w.Write([]byte("\n\n"))
     }))
     defer srv.Close()
     p := NewOpenRouterProvider("openrouter", config.BackendConfig{BaseURL: srv.URL, APIKey: "test-key"})

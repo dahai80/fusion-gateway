@@ -8,6 +8,7 @@ import (
     "os"
     "strconv"
     "strings"
+    "sync"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -16,9 +17,10 @@ import (
 )
 
 type Handler struct {
-    store      store.Store
-    auth       *AdminAuth
-    configPath string
+    store       store.Store
+    auth        *AdminAuth
+    configPath  string
+    configMutex sync.Mutex
 }
 
 func NewHandler(st store.Store, auth *AdminAuth, configPath string) *Handler {
@@ -41,9 +43,35 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.withAuth(h.handleQuota))
-    mux.HandleFunc("/admin/api/config/routing", h.withAuth(h.handleRoutingConfig))
-    mux.HandleFunc("/admin/api/config/backends", h.withAuth(h.handleBackendsConfig))
-    mux.HandleFunc("/admin/api/config/backends/", h.withAuth(h.handleBackendByName))
+    mux.HandleFunc("/admin/api/config/routing", h.requireAdminRole(h.handleRoutingConfig))
+    mux.HandleFunc("/admin/api/config/backends", h.requireAdminRole(h.handleBackendsConfig))
+    mux.HandleFunc("/admin/api/config/backends/", h.requireAdminRole(h.handleBackendByName))
+    mux.HandleFunc("/admin/api/config/full", h.requireAdminRole(h.handleFullConfig))
+    mux.HandleFunc("/admin/api/config/server", h.requireAdminRole(h.handleServerConfig))
+    mux.HandleFunc("/admin/api/config/auth", h.requireAdminRole(h.handleAuthConfig))
+    mux.HandleFunc("/admin/api/config/rate-limit", h.requireAdminRole(h.handleRateLimitConfig))
+    mux.HandleFunc("/admin/api/config/retry", h.requireAdminRole(h.handleRetryConfig))
+    mux.HandleFunc("/admin/api/config/negotiation", h.requireAdminRole(h.handleNegotiationConfig))
+    mux.HandleFunc("/admin/api/config/cache", h.requireAdminRole(h.handleCacheConfig))
+    mux.HandleFunc("/admin/api/config/cost", h.requireAdminRole(h.handleCostConfig))
+    mux.HandleFunc("/admin/api/config/cost-markup", h.requireAdminRole(h.handleCostMarkupConfig))
+    mux.HandleFunc("/admin/api/config/pii", h.requireAdminRole(h.handlePIIConfig))
+    mux.HandleFunc("/admin/api/config/cloud-routing", h.requireAdminRole(h.handleCloudRoutingConfig))
+    mux.HandleFunc("/admin/api/config/hardware", h.requireAdminRole(h.handleHardwareConfig))
+    mux.HandleFunc("/admin/api/config/tokenizer", h.requireAdminRole(h.handleTokenizerConfig))
+    mux.HandleFunc("/admin/api/config/observability", h.requireAdminRole(h.handleObservabilityConfig))
+    mux.HandleFunc("/admin/api/config/cors", h.requireAdminRole(h.handleCORSConfig))
+    mux.HandleFunc("/admin/api/config/hot-reload", h.requireAdminRole(h.handleHotReloadConfig))
+    mux.HandleFunc("/admin/api/config/cluster", h.requireAdminRole(h.handleClusterConfig))
+    mux.HandleFunc("/admin/api/config/realtime", h.requireAdminRole(h.handleRealtimeConfig))
+    mux.HandleFunc("/admin/api/config/admin", h.requireAdminRole(h.handleAdminConfig))
+    mux.HandleFunc("/admin/api/config/oidc", h.requireAdminRole(h.handleOIDCConfig))
+    mux.HandleFunc("/admin/api/config/rbac", h.requireAdminRole(h.handleRBACConfig))
+    mux.HandleFunc("/admin/api/config/semantic-cache", h.requireAdminRole(h.handleSemanticCacheConfig))
+    mux.HandleFunc("/admin/api/config/prompt-injection", h.requireAdminRole(h.handlePromptInjectionConfig))
+    mux.HandleFunc("/admin/api/config/batch", h.requireAdminRole(h.handleBatchConfig))
+    mux.HandleFunc("/admin/api/config/store", h.requireAdminRole(h.handleStoreConfig))
+    mux.HandleFunc("/admin/api/config/validation", h.requireAdminRole(h.handleValidationConfig))
     slog.Info("admin API routes registered")
 }
 
@@ -63,6 +91,23 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
         ctx := WithAdminContext(r.Context(), claims)
         next.ServeHTTP(w, r.WithContext(ctx))
     }
+}
+
+// requireAdminRole wraps withAuth and rejects non-admin roles for write operations.
+func (h *Handler) requireAdminRole(next http.HandlerFunc) http.HandlerFunc {
+    return h.withAuth(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodGet {
+            next.ServeHTTP(w, r)
+            return
+        }
+        claims := GetAdminClaims(r.Context())
+        if claims == nil || claims.Role != "admin" {
+            slog.Warn("config write rejected for non-admin role", "role", func() string { if claims != nil { return claims.Role }; return "" }(), "path", r.URL.Path, "method", r.Method)
+            writeError(w, http.StatusForbidden, "admin role required for configuration changes")
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
 }
 
 func extractBearerToken(r *http.Request) string {
@@ -884,6 +929,9 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
         return
     }
 
+    h.configMutex.Lock()
+    defer h.configMutex.Unlock()
+
     raw, err := os.ReadFile(h.configPath)
     if err != nil {
         slog.Error("failed to read config file", "path", h.configPath, "error", err)
@@ -1010,7 +1058,7 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
         return
     }
 
-    if err := os.WriteFile(h.configPath, out, 0644); err != nil {
+    if err := os.WriteFile(h.configPath, out, 0600); err != nil {
         slog.Error("failed to write config file", "path", h.configPath, "error", err)
         writeError(w, http.StatusInternalServerError, "failed to write config file")
         return
@@ -1109,6 +1157,9 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             return
         }
 
+        h.configMutex.Lock()
+        defer h.configMutex.Unlock()
+
         raw, err := os.ReadFile(h.configPath)
         if err != nil {
             slog.Error("failed to read config file", "path", h.configPath, "error", err)
@@ -1155,7 +1206,7 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             return
         }
 
-        if err := os.WriteFile(h.configPath, out, 0644); err != nil {
+        if err := os.WriteFile(h.configPath, out, 0600); err != nil {
             slog.Error("failed to write config file", "path", h.configPath, "error", err)
             writeError(w, http.StatusInternalServerError, "failed to write config file")
             return

@@ -30,8 +30,10 @@ func makeBadStreamHandler() http.HandlerFunc {
 
 func makeChunkedStreamHandler() http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
         w.WriteHeader(http.StatusOK)
-        _, _ = w.Write([]byte(`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n"))
+        _, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"))
+        _, _ = w.Write([]byte("data: [DONE]\n\n"))
     }
 }
 

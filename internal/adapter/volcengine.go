@@ -9,7 +9,6 @@ import (
     "encoding/json"
     "fmt"
     "io"
-    "log/slog"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -91,20 +90,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     safego.Go("volcengine_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        decoder := json.NewDecoder(resp.Body)
-        for {
-            var chunk StreamChunk
-            if err := decoder.Decode(&chunk); err != nil {
-                if err != io.EOF { slog.Error("volcengine sse decode error", "error", err) }
-                return
-            }
-            select {
-            case ch <- chunk:
-            default:
-                slog.Warn("volcengine sse backpressure")
-                return
-            }
-        }
+        parseSSEStream(resp.Body, ch)
     })
     return ch, nil
 }

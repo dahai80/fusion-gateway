@@ -12,13 +12,36 @@ import (
     "log/slog"
 )
 
+type TLSConfig struct {
+    CertFile string `mapstructure:"cert_file"`
+    KeyFile  string `mapstructure:"key_file"`
+}
+
+type EncryptionConfig struct {
+    MasterKey string `mapstructure:"master_key"`
+}
+
+type ConnectorConfig struct {
+    PersistencePath string `mapstructure:"persistence_path"`
+}
+
 type ServerConfig struct {
-    Host                    string `mapstructure:"host"`
-    Port                    int    `mapstructure:"port"`
-    LogLevel                string `mapstructure:"log_level"`
-    GracefulShutdownTimeout int    `mapstructure:"graceful_shutdown_timeout"`
-    MaxRequestBodySize      int64  `mapstructure:"max_request_body_size"`
-    EnablePProf             bool   `mapstructure:"enable_pprof"`
+    Host                    string          `mapstructure:"host"`
+    Port                    int             `mapstructure:"port"`
+    LogLevel                string          `mapstructure:"log_level"`
+    GracefulShutdownTimeout int             `mapstructure:"graceful_shutdown_timeout"`
+    MaxRequestBodySize      int64           `mapstructure:"max_request_body_size"`
+    EnablePProf             bool            `mapstructure:"enable_pprof"`
+    TLS                     *TLSConfig      `mapstructure:"tls"`
+    AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
+}
+
+type AutoStartConfig struct {
+    Enabled  bool   `mapstructure:"enabled"`
+    Command  string `mapstructure:"command"`  // e.g. "~/claude-home/fusion-mlx/start.sh start"
+    StopCmd  string `mapstructure:"stop_cmd"` // e.g. "~/claude-home/fusion-mlx/start.sh stop"
+    WaitURL  string `mapstructure:"wait_url"` // e.g. "http://127.0.0.1:11434/health"
+    WaitSecs int    `mapstructure:"wait_secs"` // max seconds to wait for health check
 }
 
 type AuthKeyConfig struct {
@@ -383,6 +406,8 @@ type Config struct {
     CostMarkup    CostMarkupConfig         `mapstructure:"cost_markup"`
     Batch         BatchConfig              `mapstructure:"batch"`
     Store         StoreConfig              `mapstructure:"store"`
+    Encryption    *EncryptionConfig        `mapstructure:"encryption"`
+    Connector     *ConnectorConfig         `mapstructure:"connector"`
 }
 
 type ConfigSnapshot struct {
@@ -433,7 +458,13 @@ func GetSnapshot() *ConfigSnapshot {
     if s := globalConfig.Load(); s != nil {
         return s
     }
-    return &ConfigSnapshot{Config: DefaultConfig(), Version: 0, LoadedAt: time.Now()}
+    cfg := DefaultConfig()
+    // Never expose a hardcoded JWT secret — clear it in the fallback path
+    // so admin auth cannot be used before Load() provides a real secret.
+    if cfg.Admin != nil {
+        cfg.Admin.JWTSecret = ""
+    }
+    return &ConfigSnapshot{Config: cfg, Version: 0, LoadedAt: time.Now()}
 }
 
 func OnReload(fn func(old, new *ConfigSnapshot)) {
@@ -552,7 +583,10 @@ func validate(cfg *Config) error {
 
     // V1 fix: validate admin config security
     if cfg.Admin != nil && cfg.Admin.Enabled {
-        if cfg.Admin.JWTSecret != "" && len(cfg.Admin.JWTSecret) < 32 {
+        if cfg.Admin.JWTSecret == "" {
+            return fmt.Errorf("admin.jwt_secret is required when admin is enabled")
+        }
+        if len(cfg.Admin.JWTSecret) < 32 {
             return fmt.Errorf("admin.jwt_secret must be at least 32 characters, got %d", len(cfg.Admin.JWTSecret))
         }
         for username, password := range cfg.Admin.Users {
@@ -587,7 +621,7 @@ func DefaultConfig() Config {
     return Config{
         Server: ServerConfig{
             Host:                   "0.0.0.0",
-            Port:                   8100,
+            Port:                   11432,
             LogLevel:               "info",
             GracefulShutdownTimeout: 15,
             MaxRequestBodySize:     5242880,
@@ -652,6 +686,7 @@ func DefaultConfig() Config {
         },
         Admin: &AdminConfig{
             Enabled:   true,
+            JWTSecret: "default-dev-secret-change-in-production-32ch",
             LogMaxLen: 10000,
         },
     }

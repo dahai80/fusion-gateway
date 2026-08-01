@@ -59,7 +59,10 @@ func (t *Tracker) Record(keyName, backend, model string, promptTokens, completio
     t.totalCost += billedCost
     t.records = append(t.records, rec)
     if len(t.records) > t.maxRecords {
-        t.records = t.records[len(t.records)-t.maxRecords:]
+        // B9 fix: copy to new slice to release old underlying array for GC
+        trimmed := make([]UsageRecord, t.maxRecords)
+        copy(trimmed, t.records[len(t.records)-t.maxRecords:])
+        t.records = trimmed
     }
 
     slog.Debug("cost recorded",

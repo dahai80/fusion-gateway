@@ -7,6 +7,7 @@ import (
     "fmt"
     "io"
     "log/slog"
+    "strings"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -275,23 +276,56 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
 }
 
 func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
-    decoder := json.NewDecoder(body)
+    // F1 fix: proper SSE line-by-line parsing — json.Decoder.Decode() fails on "data: " prefix
+    buf := make([]byte, 4096)
+    var lineBuf []byte
+    const maxLineSize = 1 << 20 // 1 MiB cap per line to prevent unbounded growth
     for {
-        var chunk StreamChunk
-        if err := decoder.Decode(&chunk); err != nil {
-            if err != io.EOF {
-                slog.Error("sse stream decode error", "error", err)
+        n, err := body.Read(buf)
+        if n > 0 {
+            lineBuf = append(lineBuf, buf[:n]...)
+            if len(lineBuf) > maxLineSize {
+                slog.Error("sse line exceeded max size, discarding", "size", len(lineBuf))
+                lineBuf = nil
             }
-            return
         }
-        select {
-        case ch <- chunk:
-        default:
-            slog.Warn("sse backpressure: channel full, degrading to non-streaming")
-            degradedChunk := StreamChunk{Degraded: true}
+        for {
+            idx := bytes.IndexByte(lineBuf, byte('\n'))
+            if idx < 0 {
+                break
+            }
+            line := string(bytes.TrimSpace(lineBuf[:idx]))
+            lineBuf = lineBuf[idx+1:]
+            if line == "" || strings.HasPrefix(line, ":") {
+                continue
+            }
+            if !strings.HasPrefix(line, "data: ") {
+                continue
+            }
+            data := strings.TrimPrefix(line, "data: ")
+            if data == "[DONE]" {
+                return
+            }
+            var chunk StreamChunk
+            if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+                slog.Warn("sse unmarshal error", "error", err, "data", data)
+                continue
+            }
             select {
-            case ch <- degradedChunk:
+            case ch <- chunk:
             default:
+                slog.Warn("sse backpressure: channel full, degrading to non-streaming")
+                degradedChunk := StreamChunk{Degraded: true}
+                select {
+                case ch <- degradedChunk:
+                default:
+                }
+                return
+            }
+        }
+        if err != nil {
+            if err != io.EOF {
+                slog.Error("sse stream read error", "error", err)
             }
             return
         }

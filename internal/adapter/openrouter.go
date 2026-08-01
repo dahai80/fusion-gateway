@@ -6,7 +6,6 @@ import (
     "encoding/json"
     "fmt"
     "io"
-    "log/slog"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -75,15 +74,7 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     safego.Go("openrouter_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        dec := json.NewDecoder(resp.Body)
-        for {
-            var chunk StreamChunk
-            if err := dec.Decode(&chunk); err != nil {
-                if err != io.EOF { slog.Error("openrouter sse error", "error", err) }
-                return
-            }
-            select { case ch <- chunk: default: return }
-        }
+        parseSSEStream(resp.Body, ch)
     })
     return ch, nil
 }

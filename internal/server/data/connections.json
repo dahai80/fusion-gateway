@@ -1,0 +1,12 @@
+{
+  "connections": [
+    {
+      "id": "conn-1",
+      "connectorKey": "quickbooks",
+      "authType": "oauth2",
+      "createdAt": "2026-08-01T10:47:15Z",
+      "updatedAt": "2026-08-01T10:47:15Z",
+      "status": "active"
+    }
+  ]
+}
