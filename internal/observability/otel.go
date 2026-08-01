@@ -54,7 +54,10 @@ func InitTracing(ctx context.Context, cfg OTelConfig) (func(context.Context) err
         ),
     )
     if err != nil {
-        return nil, fmt.Errorf("otel resource merge: %w", err)
+        slog.Warn("otel resource merge conflict, using merged resource anyway", "error", err)
+    }
+    if res == nil {
+        res = resource.Default()
     }
 
     var exporter sdktrace.SpanExporter

@@ -14,6 +14,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
+    "github.com/fusion-gateway/fusion-gateway/internal/connector"
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
@@ -59,6 +60,7 @@ type Server struct {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
     }
+    connectorRegistry *connector.Registry
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -74,6 +76,12 @@ func (s *Server) GetStore() store.Store {
 
 func (s *Server) Cache() *cache.Cache {
     return s.cache
+}
+
+func newConnectorRegistry() *connector.Registry {
+    r := connector.NewRegistry()
+    connector.RegisterBuiltins(r)
+    return r
 }
 
 func New(
@@ -169,25 +177,26 @@ func New(
     }
 
     return &Server{
-        cfg:            cfg,
-        cfgPath:        cfgPath,
-        hwCollector:    hwCollector,
-        router:         routerEngine,
-        pool:           pool,
-        tokEngine:      tokEngine,
-        startTime:      time.Now(),
-        realtimeProxy:  rp,
-        rateLimiter:    middleware.NewRateLimiter(),
-        cache:          cache.New(cfg.Config.Cache),
-        costTracker:    cost.NewTracker(10000),
-        piiMiddleware:  middleware.NewPIIMiddleware(cfg.Config.PII),
-        cloudStrategy:  cs,
-        latencyTracker: lt,
-        store:          s,
-        semanticCache:  cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
-        otelShutdown:   otelShutdown,
-        oidcAuth:       oidcAuth,
-        adminAuth:      adminAuthObj,
+        cfg:               cfg,
+        cfgPath:           cfgPath,
+        hwCollector:       hwCollector,
+        router:            routerEngine,
+        pool:              pool,
+        tokEngine:         tokEngine,
+        startTime:         time.Now(),
+        realtimeProxy:     rp,
+        rateLimiter:       middleware.NewRateLimiter(),
+        cache:             cache.New(cfg.Config.Cache),
+        costTracker:       cost.NewTracker(10000),
+        piiMiddleware:     middleware.NewPIIMiddleware(cfg.Config.PII),
+        cloudStrategy:     cs,
+        latencyTracker:    lt,
+        store:             s,
+        semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
+        otelShutdown:      otelShutdown,
+        oidcAuth:          oidcAuth,
+        adminAuth:         adminAuthObj,
+        connectorRegistry: newConnectorRegistry(),
     }
 }
 
@@ -211,6 +220,13 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
     mux.HandleFunc("/v1/batches", s.withMiddleware(s.handleBatches))
     mux.HandleFunc("/v1/batches/", s.withMiddleware(s.handleBatchCRUD))
+
+    // Connector plugin framework routes
+    mux.HandleFunc("/gateway/v1/connector/list", s.withMiddleware(s.handleConnectorList))
+    mux.HandleFunc("/gateway/v1/connector/test", s.withMiddleware(s.handleConnectorTest))
+    mux.HandleFunc("/gateway/v1/connector/", s.withMiddleware(s.handleConnectorAction))
+    mux.HandleFunc("/gateway/v1/connection", s.withMiddleware(s.handleConnectionList))
+    mux.HandleFunc("/gateway/v1/connection/", s.withMiddleware(s.handleConnectionCRUD))
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -386,7 +402,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
@@ -416,8 +432,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
     routeReq := &router.RouteRequest{
-        Model:  req.Model,
-        Stream: req.Stream,
+        Model:   req.Model,
+        Stream:  req.Stream,
+        SpaceID: adapter.SpaceIDFromContext(ctx),
     }
     decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
@@ -474,6 +491,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         if provider == nil {
             return
         }
+    }
+
+    if spaceID := adapter.SpaceIDFromContext(ctx); spaceID != "" {
+        s.router.RecordAffinity(spaceID, provider.Name())
     }
 
     start := time.Now()
@@ -846,7 +867,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     inputLen := len(req.Input)
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
@@ -962,7 +983,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
@@ -1072,7 +1093,7 @@ func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     models := make([]adapter.ModelInfo, 0)
 
     for _, name := range s.pool.ListProviders() {
@@ -1194,7 +1215,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     localReady := s.router.CircuitBreakerState("local") != router.StateOpen
     localReasons := []string{}
 
@@ -1446,7 +1467,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
     }
 
     // Re-encode and forward to chat completions handler via internal call
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
 
     if !middleware.CheckModelAllowlist(r, chatReq.Model) {
         slog.Warn("model not allowed for this key", "model", chatReq.Model)
@@ -1551,7 +1572,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Stream: antReq.Stream})
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason)
 
@@ -1635,7 +1656,7 @@ func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
     model := r.FormValue("model")
     if model == "" { model = "whisper-1" }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: model})
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
@@ -1684,7 +1705,7 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
@@ -1732,7 +1753,7 @@ func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ctx := r.Context()
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
@@ -1949,5 +1970,149 @@ func (s *Server) handleBatchCRUD(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Unknown action","type":"invalid_request"}}`, http.StatusBadRequest)
     default:
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleConnectorList(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    connectors := s.connectorRegistry.ListConnectors()
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "connectors": connectors,
+    })
+}
+
+func (s *Server) handleConnectorTest(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    var req connector.ActionRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
+        return
+    }
+    req.TestMode = true
+    resp, _ := s.connectorRegistry.ExecuteAction(r.Context(), &req)
+    writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleConnectorAction(w http.ResponseWriter, r *http.Request) {
+    // Path: /gateway/v1/connector/{connectorKey}/action/{actionKey}
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    path := strings.TrimPrefix(r.URL.Path, "/gateway/v1/connector/")
+    parts := strings.SplitN(path, "/", 3)
+    if len(parts) < 3 || parts[1] != "action" {
+        http.Error(w, `{"error":{"message":"Invalid path, expected /gateway/v1/connector/{key}/action/{action}"}}`, http.StatusBadRequest)
+        return
+    }
+    connectorKey := parts[0]
+    actionKey := parts[2]
+
+    var body struct {
+        Params       map[string]interface{} `json:"params"`
+        ConnectionID string                 `json:"connectionId"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+        http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
+        return
+    }
+
+    // Also check header for connection ID
+    connectionID := body.ConnectionID
+    if v := r.Header.Get("X-Fusion-Connection-Id"); v != "" {
+        connectionID = v
+    }
+
+    req := &connector.ActionRequest{
+        ConnectorKey: connectorKey,
+        ActionKey:    actionKey,
+        ConnectionID: connectionID,
+        Params:       body.Params,
+    }
+    resp, _ := s.connectorRegistry.ExecuteAction(r.Context(), req)
+    writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleConnectionList(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodGet:
+        connections := s.connectorRegistry.ListConnections()
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+            "connections": connections,
+        })
+    case http.MethodPost:
+        var conn connector.Connection
+        if err := json.NewDecoder(r.Body).Decode(&conn); err != nil {
+            http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
+            return
+        }
+        if err := s.connectorRegistry.CreateConnection(&conn); err != nil {
+            writeJSON(w, http.StatusConflict, map[string]interface{}{
+                "success": false,
+                "code":    connector.ErrValidation,
+                "message": err.Error(),
+            })
+            return
+        }
+        writeJSON(w, http.StatusCreated, conn)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+    }
+}
+
+func (s *Server) handleConnectionCRUD(w http.ResponseWriter, r *http.Request) {
+    id := strings.TrimPrefix(r.URL.Path, "/gateway/v1/connection/")
+    if id == "" {
+        http.Error(w, `{"error":{"message":"Connection ID required"}}`, http.StatusBadRequest)
+        return
+    }
+    switch r.Method {
+    case http.MethodGet:
+        conn, err := s.connectorRegistry.GetConnection(id)
+        if err != nil {
+            writeJSON(w, http.StatusNotFound, map[string]interface{}{
+                "success": false,
+                "code":    connector.ErrNotFound,
+                "message": err.Error(),
+            })
+            return
+        }
+        writeJSON(w, http.StatusOK, conn)
+    case http.MethodDelete:
+        if err := s.connectorRegistry.DeleteConnection(id); err != nil {
+            writeJSON(w, http.StatusNotFound, map[string]interface{}{
+                "success": false,
+                "code":    connector.ErrNotFound,
+                "message": err.Error(),
+            })
+            return
+        }
+        w.WriteHeader(http.StatusNoContent)
+    case http.MethodPost:
+        if strings.HasSuffix(r.URL.Path, "/refresh") {
+            if err := s.connectorRegistry.RefreshConnection(r.Context(), id); err != nil {
+                writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+                    "success": false,
+                    "code":    connector.ErrAuthExpired,
+                    "message": err.Error(),
+                })
+                return
+            }
+            writeJSON(w, http.StatusOK, map[string]interface{}{
+                "success": true,
+                "code":    0,
+                "message": "refreshed",
+            })
+            return
+        }
+        http.Error(w, `{"error":{"message":"Unknown action"}}`, http.StatusBadRequest)
+    default:
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
     }
 }

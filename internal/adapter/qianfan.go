@@ -40,6 +40,7 @@ func (p *QianfanProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResp
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("qianfan chat failed: %w", err) }
     defer resp.Body.Close()
@@ -57,6 +58,7 @@ func (p *QianfanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("qianfan stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
@@ -86,6 +88,7 @@ func (p *QianfanProvider) Embedding(ctx context.Context, req *EmbeddingRequest) 
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("qianfan embedding failed: %w", err) }
     defer resp.Body.Close()

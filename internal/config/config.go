@@ -442,6 +442,17 @@ func OnReload(fn func(old, new *ConfigSnapshot)) {
     onReloadHandlers = append(onReloadHandlers, fn)
 }
 
+func FireReload(old, newSnap *ConfigSnapshot) {
+    configMu.RLock()
+    handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
+    copy(handlers, onReloadHandlers)
+    configMu.RUnlock()
+
+    for _, fn := range handlers {
+        fn(old, newSnap)
+    }
+}
+
 func WatchAndReload(path string) {
     snap := GetSnapshot()
     if !snap.Config.HotReload.Enabled {

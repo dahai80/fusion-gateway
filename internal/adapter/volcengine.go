@@ -59,6 +59,7 @@ func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
     if err != nil { return nil, fmt.Errorf("create chat request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("chat request failed: %w", err) }
     defer resp.Body.Close()
@@ -78,6 +79,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     if err != nil { return nil, fmt.Errorf("create stream chat request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("volcengine stream request failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
@@ -114,6 +116,7 @@ func (p *VolcengineProvider) Embedding(ctx context.Context, req *EmbeddingReques
     if err != nil { return nil, fmt.Errorf("create embedding request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("embedding request failed: %w", err) }
     defer resp.Body.Close()

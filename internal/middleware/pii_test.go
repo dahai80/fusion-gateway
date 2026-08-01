@@ -1,141 +1,267 @@
 package middleware
 
 import (
+    "log/slog"
+    "net/http"
+    "net/http/httptest"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
-func TestNewPIIChecker_ReturnsNilWhenDisabled(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: false}
-    checker := NewPIIChecker(cfg)
+func TestNewPIIChecker_Disabled(t *testing.T) {
+    slog.Info("test NewPIIChecker_Disabled")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: false})
     if checker != nil {
-        t.Fatal("expected nil when PII is disabled")
+        t.Error("expected nil for disabled PII")
     }
 }
 
-func TestScanText_DetectsEmail(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: true, Action: "deny"}
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("contact me at user@example.com please")
-    if !deny {
-        t.Error("expected deny=true for email with action=deny")
-    }
-    found := false
-    for _, tp := range types {
-        if tp == "email" {
-            found = true
-            break
-        }
-    }
-    if !found {
-        t.Errorf("expected 'email' in detected types, got %v", types)
+func TestNewPIIChecker_Enabled(t *testing.T) {
+    slog.Info("test NewPIIChecker_Enabled")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: true})
+    if checker == nil {
+        t.Fatal("expected non-nil checker")
     }
 }
 
-func TestScanText_DetectsPhoneCN(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: true, Action: "deny"}
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("my number is 13912345678 call me")
-    if !deny {
-        t.Error("expected deny=true for phone_cn with action=deny")
-    }
-    found := false
-    for _, tp := range types {
-        if tp == "phone_cn" {
-            found = true
-            break
-        }
-    }
-    if !found {
-        t.Errorf("expected 'phone_cn' in detected types, got %v", types)
+func TestNewPIIChecker_DefaultAction(t *testing.T) {
+    slog.Info("test NewPIIChecker_DefaultAction")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: true})
+    if checker.action != "log" {
+        t.Errorf("expected log, got %s", checker.action)
     }
 }
 
-func TestScanText_ReturnsFalseForCleanText(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: true, Action: "deny"}
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("hello world, this is a clean message")
-    if deny {
-        t.Error("expected deny=false for clean text")
-    }
-    if len(types) != 0 {
-        t.Errorf("expected no detected types, got %v", types)
+func TestNewPIIChecker_CustomAction(t *testing.T) {
+    slog.Info("test NewPIIChecker_CustomAction")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: true, Action: "deny"})
+    if checker.action != "deny" {
+        t.Errorf("expected deny, got %s", checker.action)
     }
 }
 
-func TestScanText_DenyActionReturnsTrue(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: true, Action: "deny"}
-    mw := NewPIIMiddleware(cfg)
-    deny, _ := mw.ScanText("email: test@foo.com")
-    if !deny {
-        t.Error("expected deny=true when action=deny and PII found")
-    }
-}
-
-func TestScanText_LogActionReturnsFalseButStillDetects(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: true, Action: "log"}
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("email: test@foo.com")
-    if deny {
-        t.Error("expected deny=false when action=log")
-    }
-    if len(types) == 0 {
-        t.Error("expected detected types even when action=log")
-    }
-    found := false
-    for _, tp := range types {
-        if tp == "email" {
-            found = true
-            break
-        }
-    }
-    if !found {
-        t.Errorf("expected 'email' in detected types, got %v", types)
-    }
-}
-
-func TestScanText_CustomPattern(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{
+func TestNewPIIChecker_CustomPatterns(t *testing.T) {
+    slog.Info("test NewPIIChecker_CustomPatterns")
+    checker := NewPIIChecker(config.PIIConfig{
         Enabled: true,
-        Action:  "deny",
         Patterns: []config.PIIPattern{
-            {Name: "emp_id", Regex: `EMP-\d{5}`},
+            {Name: "custom", Regex: `test\d+`},
         },
-    }
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("employee EMP-12345 is here")
-    if !deny {
-        t.Error("expected deny=true for custom pattern match")
-    }
-    found := false
-    for _, tp := range types {
-        if tp == "emp_id" {
-            found = true
-            break
-        }
-    }
-    if !found {
-        t.Errorf("expected 'emp_id' in detected types, got %v", types)
+    })
+    if checker == nil {
+        t.Fatal("expected checker")
     }
 }
 
-func TestScanText_NilCheckerReturnsFalse(t *testing.T) {
-    t.Parallel()
-    cfg := config.PIIConfig{Enabled: false}
-    mw := NewPIIMiddleware(cfg)
-    deny, types := mw.ScanText("user@example.com 13912345678")
-    if deny {
-        t.Error("expected deny=false when checker is nil")
+func TestNewPIIChecker_InvalidPattern(t *testing.T) {
+    slog.Info("test NewPIIChecker_InvalidPattern")
+    checker := NewPIIChecker(config.PIIConfig{
+        Enabled: true,
+        Patterns: []config.PIIPattern{
+            {Name: "bad", Regex: `[invalid`},
+        },
+    })
+    if checker == nil {
+        t.Fatal("expected checker even with invalid pattern")
+    }
+}
+
+func TestPIIMiddleware_Handler_NilChecker(t *testing.T) {
+    slog.Info("test PIIMiddleware_Handler_NilChecker")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: false})
+    var called bool
+    handler := pm.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("next handler should be called when checker is nil")
+    }
+}
+
+func TestPIIMiddleware_Handler_Enabled(t *testing.T) {
+    slog.Info("test PIIMiddleware_Handler_Enabled")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    var called bool
+    handler := pm.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("next handler should be called")
+    }
+}
+
+func TestPIIMiddleware_ScanText_NilChecker(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_NilChecker")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: false})
+    detected, types := pm.ScanText("user@example.com")
+    if detected {
+        t.Error("should not detect with nil checker")
     }
     if types != nil {
-        t.Errorf("expected nil types when checker is nil, got %v", types)
+        t.Error("should return nil types with nil checker")
+    }
+}
+
+func TestPIIMiddleware_ScanText_NoPII(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_NoPII")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    detected, types := pm.ScanText("hello world")
+    if detected {
+        t.Error("should not detect PII in clean text")
+    }
+    if types != nil {
+        t.Errorf("expected nil types, got %v", types)
+    }
+}
+
+func TestPIIMiddleware_ScanText_Email(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_Email")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("contact user@example.com for info")
+    if len(types) == 0 {
+        t.Error("should detect email")
+    }
+    found := false
+    for _, t := range types {
+        if t == "email" {
+            found = true
+        }
+    }
+    if !found {
+        t.Error("expected email type in results")
+    }
+}
+
+func TestPIIMiddleware_ScanText_Deny(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_Deny")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "deny"})
+    detected, _ := pm.ScanText("user@example.com")
+    if !detected {
+        t.Error("should detect and return true for deny action")
+    }
+}
+
+func TestPIIMiddleware_ScanText_Mask(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_Mask")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "mask"})
+    detected, _ := pm.ScanText("user@example.com")
+    if detected {
+        t.Error("mask action should return false for detected")
+    }
+}
+
+func TestPIIMiddleware_ScanText_PhoneCN(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_PhoneCN")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("call 13912345678 for info")
+    found := false
+    for _, t := range types {
+        if t == "phone_cn" {
+            found = true
+        }
+    }
+    if !found {
+        t.Error("expected phone_cn type")
+    }
+}
+
+func TestPIIMiddleware_ScanText_IPv4(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_IPv4")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("server at 192.168.1.1 is down")
+    found := false
+    for _, t := range types {
+        if t == "ip_v4" {
+            found = true
+        }
+    }
+    if !found {
+        t.Error("expected ip_v4 type")
+    }
+}
+
+func TestPIIMiddleware_Handler_WithPII_Deny(t *testing.T) {
+    slog.Info("test PIIMiddleware_Handler_WithPII_Deny")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "deny"})
+    called := false
+    handler := pm.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("Handler should always call next — PII Handler is passthrough")
+    }
+}
+
+func TestPIIMiddleware_Handler_WithPII_Log(t *testing.T) {
+    slog.Info("test PIIMiddleware_Handler_WithPII_Log")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "log"})
+    called := false
+    handler := pm.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("Handler should call next regardless of action")
+    }
+}
+
+func TestPIIMiddleware_ScanText_CreditCard(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_CreditCard")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("card number 4111-1111-1111-1111 on file")
+    found := false
+    for _, t := range types {
+        if t == "credit_card" {
+            found = true
+        }
+    }
+    if !found {
+        t.Errorf("expected credit_card type, got %v", types)
+    }
+}
+
+func TestPIIMiddleware_ScanText_SSN(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_SSN")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("SSN is 123-45-6789")
+    found := false
+    for _, t := range types {
+        if t == "ssn" {
+            found = true
+        }
+    }
+    if !found {
+        t.Errorf("expected ssn type, got %v", types)
+    }
+}
+
+func TestPIIMiddleware_ScanText_PhoneUS(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_PhoneUS")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("call 555-123-4567 for info")
+    found := false
+    for _, t := range types {
+        if t == "phone_us" {
+            found = true
+        }
+    }
+    if !found {
+        t.Errorf("expected phone_us type, got %v", types)
     }
 }

@@ -138,6 +138,9 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         case "yi":
             provider := NewYiProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered yi provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "fusion-kb":
+            provider := NewFusionKBProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered fusion-kb provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
             // M3 fix: fail-fast on unknown backend type instead of silent skip
             return fmt.Errorf("unknown backend type: %s for backend %q", backendCfg.Type, name)

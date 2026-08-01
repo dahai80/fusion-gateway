@@ -6,14 +6,15 @@ import (
     "strings"
 )
 
-// readSwapPageCounts reads vm.pageins and vm.pageouts via sysctl
+var readSysctlIntFn = readSysctlInt
+
 func readSwapPageCounts() (pageIn, pageOut uint64, err error) {
-    pageIn, err = readSysctlInt("vm.pageins")
+    pageIn, err = readSysctlIntFn("vm.pageins")
     if err != nil {
         return 0, 0, err
     }
 
-    pageOut, err = readSysctlInt("vm.pageouts")
+    pageOut, err = readSysctlIntFn("vm.pageouts")
     if err != nil {
         return 0, 0, err
     }

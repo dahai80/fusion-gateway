@@ -54,6 +54,12 @@ func (c *Collector) Latest() HardwareMetrics {
     return c.latest
 }
 
+func (c *Collector) SetLatestForTest(m HardwareMetrics) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    c.latest = m
+}
+
 func (c *Collector) collectLoop(ctx context.Context) {
     ticker := time.NewTicker(c.cfg.CollectInterval)
     defer ticker.Stop()
@@ -77,7 +83,7 @@ func (c *Collector) collect() {
 
     // Source 1: gopsutil system memory
     if c.cfg.Gopsutil.Enabled {
-        if err := c.collectGopsutil(&m); err != nil {
+        if err := collectGopsutilFn(c, &m); err != nil {
             slog.Error("gopsutil collection error", "error", err)
             collectErr = err
         }
@@ -90,7 +96,7 @@ func (c *Collector) collect() {
 
     // Source 3: IOKit GPU metrics
     if c.cfg.IOKit.Enabled {
-        if err := collectIOKitGPU(&m); err != nil {
+        if err := collectIOKitGPUFn(&m); err != nil {
             slog.Error("iokit gpu collection error", "error", err)
             collectErr = err
         }
@@ -98,7 +104,7 @@ func (c *Collector) collect() {
 
     // Source 4: MLX /metrics
     if c.cfg.MLXMetrics.Enabled {
-        if err := collectMLXMetrics(&m); err != nil {
+        if err := collectMLXMetricsFn(&m); err != nil {
             slog.Warn("mlx metrics collection error", "error", err)
             // MLX metrics failure is not fatal - local might be offline
         }
@@ -111,8 +117,12 @@ func (c *Collector) collect() {
     c.mu.Unlock()
 }
 
+var memVirtualMemoryFn = mem.VirtualMemory
+
+var memSwapMemoryFn = mem.SwapMemory
+
 func (c *Collector) collectGopsutil(m *HardwareMetrics) error {
-    vmStat, err := mem.VirtualMemory()
+    vmStat, err := memVirtualMemoryFn()
     if err != nil {
         return err
     }
@@ -121,7 +131,7 @@ func (c *Collector) collectGopsutil(m *HardwareMetrics) error {
     m.UsedMemory = vmStat.Used
     m.MemoryUsedRatio = vmStat.UsedPercent / 100.0
 
-    swapStat, err := mem.SwapMemory()
+    swapStat, err := memSwapMemoryFn()
     if err != nil {
         return err
     }
@@ -141,8 +151,16 @@ func (c *Collector) collectGopsutil(m *HardwareMetrics) error {
     return nil
 }
 
+var readSwapPageCountsFn = readSwapPageCounts
+
+var collectGopsutilFn = (*Collector).collectGopsutil
+
+var collectIOKitGPUFn = collectIOKitGPU
+
+var collectMLXMetricsFn = collectMLXMetrics
+
 func (c *Collector) collectSwapPageRate(m *HardwareMetrics) {
-    pageIn, pageOut, err := readSwapPageCounts()
+    pageIn, pageOut, err := readSwapPageCountsFn()
     if err != nil {
         slog.Debug("swap page rate sampling failed", "error", err)
         return

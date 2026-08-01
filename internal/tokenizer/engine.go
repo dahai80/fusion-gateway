@@ -30,11 +30,12 @@ func BudgetFromContext(ctx context.Context) (TokenBudget, bool) {
 }
 
 type Engine struct {
-    cfg        *config.TokenizerConfig
-    localCount atomic.Int64
-    calibMu    sync.Mutex
-    calibState *calibrationState
-    mlxURL     string
+    cfg              *config.TokenizerConfig
+    localCount       atomic.Int64
+    calibMu          sync.Mutex
+    calibState       *calibrationState
+    mlxURL           string
+    countViaMLXFunc  func(ctx context.Context, text string) (int, error)
 }
 
 type calibrationState struct {
@@ -159,6 +160,9 @@ func (e *Engine) maybeCalibrate(ctx context.Context, text string, localCount int
 }
 
 func (e *Engine) countViaMLX(ctx context.Context, text string) (int, error) {
+    if e.countViaMLXFunc != nil {
+        return e.countViaMLXFunc(ctx, text)
+    }
     // Phase 2: implement fusion-mlx /v1/count_tokens call
     // For MVP, return 0 to skip calibration
     return 0, nil

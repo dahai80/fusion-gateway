@@ -77,6 +77,7 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req *ChatRequest) (
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -112,6 +113,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -130,7 +132,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
         defer close(ch)
         defer resp.Body.Close()
 
-        p.parseSSEStream(resp.Body, ch)
+        parseSSEStream(resp.Body, ch)
     })
 
     return ch, nil
@@ -151,6 +153,7 @@ func (p *OpenAICompatibleProvider) Embedding(ctx context.Context, req *Embedding
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -186,6 +189,7 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -250,6 +254,7 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -269,20 +274,20 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     return &imgResp, nil
 }
 
-func (p *OpenAICompatibleProvider) parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
+func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
     decoder := json.NewDecoder(body)
     for {
         var chunk StreamChunk
         if err := decoder.Decode(&chunk); err != nil {
             if err != io.EOF {
-                slog.Error("sse stream decode error", "provider", p.name, "error", err)
+                slog.Error("sse stream decode error", "error", err)
             }
             return
         }
         select {
         case ch <- chunk:
         default:
-            slog.Warn("sse backpressure: channel full, degrading to non-streaming", "provider", p.name)
+            slog.Warn("sse backpressure: channel full, degrading to non-streaming")
             degradedChunk := StreamChunk{Degraded: true}
             select {
             case ch <- degradedChunk:

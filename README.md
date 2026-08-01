@@ -121,6 +121,12 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/batches` | POST/GET | Create/list batches |
 | `/v1/batches/{id}` | GET | Get batch status |
 | `/v1/batches/{id}/cancel` | POST | Cancel a running batch |
+| `/gateway/v1/connector/list` | GET | List registered connectors and their actions |
+| `/gateway/v1/connector/test` | POST | Test action execution (no real side effects) |
+| `/gateway/v1/connector/{key}/action/{action}` | POST | Execute connector action |
+| `/gateway/v1/connection` | GET/POST | List/create connections |
+| `/gateway/v1/connection/{id}` | GET/DELETE | Get/delete connection |
+| `/gateway/v1/connection/{id}/refresh` | POST | Refresh connection authorization |
 
 ## Routing Logic
 
@@ -131,6 +137,7 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 | Priority | Rule | Condition | Target |
 |----------|------|-----------|--------|
 | P0 | Circuit breaker | Local breaker is Open | Try cluster → cloud |
+| P0.3 | Session affinity | Same `X-Space-Id` seen before | Route to same provider (KV cache reuse) |
 | P0.5 | Metrics collection error | Hardware metrics unavailable | Try cluster → cloud |
 | P1 | System memory | Used ratio > threshold | Try cluster → cloud + trip breaker |
 | P1.5 | MLX memory | MLX/GPU ratio > threshold | Try cluster → cloud |
@@ -366,6 +373,44 @@ batch:
     enabled: true
     max_batch_size: 100
 ```
+
+## Connector Plugin Framework
+
+Unified SaaS connector framework for third-party API integration (QuickBooks, Google Workspace, HubSpot, etc.).
+
+### Architecture
+
+- **Registry**: In-memory connector registry with plugin-style registration
+- **Connection Manager**: OAuth2 / Static API Key / Basic Auth credential storage
+- **Action Execution**: Unified `POST /gateway/v1/connector/{key}/action/{action}` interface
+- **Audit Logging**: Every external API call logged with timestamp, permission level, input summary (for write actions)
+- **Test Mode**: `POST /gateway/v1/connector/test` executes actions without real side effects
+
+### Built-in Connectors (V1.0)
+
+| Connector | Auth Type | Actions |
+|-----------|-----------|---------|
+| QuickBooks | OAuth2 | query_overdue_invoice, list_customers, create_invoice, get_company_info |
+| Google Workspace | OAuth2 | list_users, get_user, list_calendar_events, send_email, read_drive_file |
+| HubSpot | OAuth2 | list_contacts, get_contact, create_contact, list_deals, update_deal |
+
+### Standard Error Codes
+
+| Code | Meaning |
+|------|---------|
+| 1001 | Auth expired — refresh required |
+| 1002 | Third-party rate limited |
+| 1003 | Permission denied |
+| 1004 | Resource not found |
+| 1005 | Request timeout |
+| 2001 | Parameter validation failed |
+
+### Session Affinity (Cowork Spaces)
+
+When `X-Space-Id` header is present, the gateway maintains session affinity — routing requests from the same collaboration space to the same inference backend. This enables KV cache reuse for shared context scenarios.
+
+- TTL-based affinity map (default 30 min, auto-eviction)
+- Affinity breaks gracefully: if the target backend is unavailable, re-routes and updates mapping
 
 - `POST /v1/batches` — create batch, returns immediately, processes in background
 - `GET /v1/batches/{id}` — check status (pending/running/completed/failed/cancelled)
@@ -613,12 +658,42 @@ go test ./... -v
 # Run specific package
 go test ./internal/router/... -v
 
+# Run with coverage
+go test ./... -cover -timeout 180s
+
 # Lint
 golangci-lint run
 
 # Build
 go build -o fusion-gateway ./cmd/gateway
 ```
+
+### Test Coverage
+
+All packages maintain ≥90% test coverage:
+
+| Package | Coverage |
+|---------|----------|
+| `cmd/gateway` | 90.7% |
+| `internal/adapter` | 90.5% |
+| `internal/admin` | 94.6% |
+| `internal/admin/ui` | 90.0% |
+| `internal/batch` | 100% |
+| `internal/cache` | 99.0% |
+| `internal/cluster` | 97.1% |
+| `internal/config` | 91.7% |
+| `internal/connector` | 100% |
+| `internal/cost` | 94.3% |
+| `internal/hardware` | 90.0% |
+| `internal/middleware` | 97.4% |
+| `internal/observability` | 98.3% |
+| `internal/realtime` | 96.1% |
+| `internal/router` | 93.2% |
+| `internal/safego` | 100% |
+| `internal/server` | 90.7% |
+| `internal/store/memory` | 92.4% |
+| `internal/store/redis` | 92.3% |
+| `internal/tokenizer` | 100% |
 
 ## Project Structure
 

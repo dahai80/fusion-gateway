@@ -19,6 +19,10 @@ type RequestLog struct {
     ChannelType  string `json:"channel_type"`
     RouteReason  string `json:"route_reason"`
 
+    ProjectID    string `json:"project_id,omitempty"`
+    ChatID       string `json:"chat_id,omitempty"`
+    SpaceID      string `json:"space_id,omitempty"`
+
     InputTokens  int `json:"input_tokens"`
     OutputTokens int `json:"output_tokens"`
     TotalTokens  int `json:"total_tokens"`

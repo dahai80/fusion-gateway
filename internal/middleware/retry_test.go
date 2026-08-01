@@ -133,3 +133,130 @@ func TestRetryChat_SucceedsOnSecondAttempt(t *testing.T) {
         t.Errorf("expected response ID=retry-ok, got %s", resp.ID)
     }
 }
+
+func TestCalculateBackoff_ZeroInitial(t *testing.T) {
+    result := calculateBackoff(0, 0, 0)
+    if result != time.Second {
+        t.Errorf("expected 1s default initial, got %v", result)
+    }
+}
+
+func TestCalculateBackoff_ZeroMax(t *testing.T) {
+    result := calculateBackoff(0, 100*time.Millisecond, 0)
+    if result != 100*time.Millisecond {
+        t.Errorf("expected 100ms initial, got %v", result)
+    }
+    cappedResult := calculateBackoff(10, 100*time.Millisecond, 0)
+    if cappedResult != 30*time.Second {
+        t.Errorf("expected 30s default max cap, got %v", cappedResult)
+    }
+}
+
+func TestCalculateBackoff_ExceedsMax(t *testing.T) {
+    result := calculateBackoff(10, 1*time.Second, 5*time.Second)
+    if result != 5*time.Second {
+        t.Errorf("expected 5s max cap, got %v", result)
+    }
+}
+
+func TestCalculateBackoff_Normal(t *testing.T) {
+    result := calculateBackoff(2, 100*time.Millisecond, 10*time.Second)
+    expected := 400 * time.Millisecond
+    if result != expected {
+        t.Errorf("expected %v, got %v", expected, result)
+    }
+}
+
+func TestIsRetryableError_Nil(t *testing.T) {
+    if isRetryableError(nil, nil) {
+        t.Error("nil error should not be retryable")
+    }
+}
+
+func TestIsRetryableError_ConnectionRefused(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("connection refused"), nil) {
+        t.Error("connection refused should be retryable")
+    }
+}
+
+func TestIsRetryableError_Timeout(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("request timeout"), nil) {
+        t.Error("timeout should be retryable")
+    }
+}
+
+func TestIsRetryableError_DeadlineExceeded(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("deadline exceeded"), nil) {
+        t.Error("deadline exceeded should be retryable")
+    }
+}
+
+func TestIsRetryableError_DefaultCodes(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("server returned 502"), nil) {
+        t.Error("502 should be retryable with default codes")
+    }
+    if !isRetryableError(fmt.Errorf("server returned 429"), nil) {
+        t.Error("429 should be retryable with default codes")
+    }
+}
+
+func TestIsRetryableError_CustomCodes(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("error 503"), []int{503}) {
+        t.Error("503 with custom codes should be retryable")
+    }
+    if isRetryableError(fmt.Errorf("error 429"), []int{503}) {
+        t.Error("429 should not be retryable with only 503 custom code")
+    }
+}
+
+func TestIsRetryableError_NonRetryableMessage(t *testing.T) {
+    if isRetryableError(fmt.Errorf("something else happened"), nil) {
+        t.Error("non-matching error should not be retryable")
+    }
+}
+
+func TestStatusCodeStr_Known(t *testing.T) {
+    if statusCodeStr(429) != "429" {
+        t.Errorf("expected 429, got %s", statusCodeStr(429))
+    }
+    if statusCodeStr(500) != "500" {
+        t.Errorf("expected 500, got %s", statusCodeStr(500))
+    }
+    if statusCodeStr(502) != "502" {
+        t.Errorf("expected 502, got %s", statusCodeStr(502))
+    }
+    if statusCodeStr(503) != "503" {
+        t.Errorf("expected 503, got %s", statusCodeStr(503))
+    }
+}
+
+func TestStatusCodeStr_Unknown(t *testing.T) {
+    if statusCodeStr(400) != "" {
+        t.Errorf("expected empty for unknown code, got %s", statusCodeStr(400))
+    }
+    if statusCodeStr(200) != "" {
+        t.Errorf("expected empty for 200, got %s", statusCodeStr(200))
+    }
+}
+
+func TestRetryChat_ExhaustsAllRetries(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           2,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.ChatRequest) (*adapter.ChatResponse, error) {
+        calls++
+        return nil, fmt.Errorf("server returned 429")
+    }
+    wrapped := RetryChat(cfg, fn)
+    _, err := wrapped(context.Background(), &adapter.ChatRequest{})
+    if err == nil {
+        t.Fatal("expected error after exhausting retries")
+    }
+    if calls != 3 {
+        t.Errorf("expected 3 calls (1 + 2 retries), got %d", calls)
+    }
+}

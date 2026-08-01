@@ -42,6 +42,7 @@ type RouteRequest struct {
     Stream   bool
     Tools    interface{}
     Type     RequestType
+    SpaceID  string
 }
 
 type ClusterSelector interface {
@@ -50,14 +51,15 @@ type ClusterSelector interface {
 }
 
 type Engine struct {
-    mu            sync.RWMutex
-    cfg           *config.ConfigSnapshot
-    hwCollector   *hardware.Collector
-    breakers      map[string]*CircuitBreaker
-    localReady    bool
-    localInFlight func() int64
-    localModels   func() map[string]bool
-    cluster       ClusterSelector
+    mu              sync.RWMutex
+    cfg             *config.ConfigSnapshot
+    hwCollector     *hardware.Collector
+    breakers        map[string]*CircuitBreaker
+    localReady      bool
+    localInFlight   func() int64
+    localModels     func() map[string]bool
+    cluster         ClusterSelector
+    sessionAffinity *SessionAffinity
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
@@ -68,12 +70,13 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
     }
 
     return &Engine{
-        cfg:           cfg,
-        hwCollector:   hwCollector,
-        breakers:      breakers,
-        localReady:    false,
-        localInFlight: func() int64 { return 0 },
-        localModels:   func() map[string]bool { return nil },
+        cfg:             cfg,
+        hwCollector:     hwCollector,
+        breakers:        breakers,
+        localReady:      false,
+        localInFlight:   func() int64 { return 0 },
+        localModels:     func() map[string]bool { return nil },
+        sessionAffinity: NewSessionAffinity(30 * time.Minute),
     }
 }
 
@@ -160,6 +163,12 @@ func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
     return StateOpen
 }
 
+func (e *Engine) RecordAffinity(spaceID, providerName string) {
+    if e.sessionAffinity != nil {
+        e.sessionAffinity.Record(spaceID, providerName)
+    }
+}
+
 func (e *Engine) RecordSuccess(backend string) {
     // L1 fix: RLock to find breaker, then call RecordSuccess outside RLock
     e.mu.RLock()
@@ -224,6 +233,22 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "circuit_breaker_open"}
+    }
+
+    // P0.3: Session affinity — same space_id routes to same provider
+    if req.SpaceID != "" && e.sessionAffinity != nil {
+        if providerName, ok := e.sessionAffinity.Lookup(req.SpaceID); ok {
+            slog.Info("session affinity hit", "space_id", req.SpaceID, "provider", providerName)
+            switch providerName {
+            case "fusion-mlx":
+                if e.breakers["local"].State() != StateOpen && e.localReady {
+                    return &RouteDecision{Backend: LocalBackend, Reason: "session_affinity:local"}
+                }
+                slog.Warn("session affinity target unavailable (local breaker open or not ready), re-routing", "space_id", req.SpaceID)
+            default:
+                return &RouteDecision{Backend: CloudBackend, Reason: "session_affinity:" + providerName, CloudTarget: providerName}
+            }
+        }
     }
 
     // P0.5: Hardware metrics collection error

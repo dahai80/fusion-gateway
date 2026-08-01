@@ -2,92 +2,313 @@ package adapter
 
 import (
     "context"
+    "log/slog"
+    "net/http"
+    "net/http/httptest"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
-func TestPool_RegisterAndGet(t *testing.T) {
-    pool := NewPool()
+type dummyProvider struct {
+    name    string
+    healthy error
+}
 
-    p := &mockProvider{name: "test-provider"}
-    pool.Register("test", p, config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://localhost:11434"})
+func (d *dummyProvider) Name() string    { return d.name }
+func (d *dummyProvider) HealthCheck(ctx context.Context) error { return d.healthy }
+func (d *dummyProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+    return nil, nil
+}
+func (d *dummyProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
+    return nil, nil
+}
+func (d *dummyProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
+    return nil, nil
+}
+func (d *dummyProvider) Rerank(ctx context.Context, req *RerankRequest) (*RerankResponse, error) {
+    return nil, nil
+}
+func (d *dummyProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
+    return nil, nil
+}
 
-    got, ok := pool.Get("test")
-    if !ok {
-        t.Fatal("expected provider to be found")
+func TestNewPool(t *testing.T) {
+    slog.Info("test NewPool")
+    p := NewPool()
+    if p == nil {
+        t.Fatal("expected pool")
     }
-    if got.Name() != "test-provider" {
-        t.Errorf("expected test-provider, got %s", got.Name())
+}
+
+func TestPool_RegisterAndGet(t *testing.T) {
+    slog.Info("test Pool_RegisterAndGet")
+    p := NewPool()
+    dp := &dummyProvider{name: "test"}
+    p.Register("test", dp, config.BackendConfig{Type: "dummy", BaseURL: "http://localhost"})
+    got, ok := p.Get("test")
+    if !ok {
+        t.Fatal("provider not found")
+    }
+    if got.Name() != "test" {
+        t.Errorf("expected test, got %s", got.Name())
+    }
+}
+
+func TestPool_Get_NotFound(t *testing.T) {
+    slog.Info("test Pool_Get_NotFound")
+    p := NewPool()
+    _, ok := p.Get("nonexistent")
+    if ok {
+        t.Error("should not find nonexistent provider")
     }
 }
 
 func TestPool_GetByBackend(t *testing.T) {
-    pool := NewPool()
-
-    p := &mockProvider{name: "mlx"}
-    pool.Register("fusion-mlx", p, config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://localhost:11434"})
-
-    got, err := pool.GetByBackend("fusion-mlx")
+    slog.Info("test Pool_GetByBackend")
+    p := NewPool()
+    dp := &dummyProvider{name: "backend1"}
+    p.Register("backend1", dp, config.BackendConfig{Type: "dummy"})
+    got, err := p.GetByBackend("backend1")
     if err != nil {
         t.Fatal(err)
     }
-    if got.Name() != "mlx" {
-        t.Errorf("expected mlx, got %s", got.Name())
+    if got.Name() != "backend1" {
+        t.Errorf("expected backend1, got %s", got.Name())
+    }
+}
+
+func TestPool_GetByBackend_NotFound(t *testing.T) {
+    slog.Info("test Pool_GetByBackend_NotFound")
+    p := NewPool()
+    _, err := p.GetByBackend("nonexistent")
+    if err == nil {
+        t.Error("expected error for nonexistent backend")
     }
 }
 
 func TestPool_ListProviders(t *testing.T) {
-    pool := NewPool()
-
-    pool.Register("a", &mockProvider{name: "a"}, config.BackendConfig{Type: "test", BaseURL: "http://a"})
-    pool.Register("b", &mockProvider{name: "b"}, config.BackendConfig{Type: "test", BaseURL: "http://b"})
-
-    list := pool.ListProviders()
-    if len(list) != 2 {
-        t.Errorf("expected 2 providers, got %d", len(list))
+    slog.Info("test Pool_ListProviders")
+    p := NewPool()
+    p.Register("a", &dummyProvider{name: "a"}, config.BackendConfig{Type: "dummy"})
+    p.Register("b", &dummyProvider{name: "b"}, config.BackendConfig{Type: "dummy"})
+    names := p.ListProviders()
+    if len(names) != 2 {
+        t.Fatalf("expected 2, got %d", len(names))
     }
 }
 
 func TestPool_GetFusionMLX(t *testing.T) {
-    pool := NewPool()
-    if mlx := pool.GetFusionMLX(); mlx != nil {
-        t.Error("expected nil when no fusion-mlx provider registered")
+    slog.Info("test Pool_GetFusionMLX")
+    p := NewPool()
+    p.Register("mlx", NewFusionMLXProvider(config.BackendConfig{BaseURL: "http://localhost:11434"}, config.RoutingConfig{}), config.BackendConfig{Type: "fusion-mlx"})
+    mlx := p.GetFusionMLX()
+    if mlx == nil {
+        t.Error("expected FusionMLX provider")
     }
+}
 
-    mlx := NewFusionMLXProvider(config.BackendConfig{
-        Type:    "fusion-mlx",
-        BaseURL: "http://localhost:11434",
-    }, config.RoutingConfig{})
-    pool.Register("fusion-mlx", mlx, config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://localhost:11434"})
+func TestPool_GetFusionMLX_None(t *testing.T) {
+    slog.Info("test Pool_GetFusionMLX_None")
+    p := NewPool()
+    p.Register("other", &dummyProvider{name: "other"}, config.BackendConfig{Type: "dummy"})
+    mlx := p.GetFusionMLX()
+    if mlx != nil {
+        t.Error("expected nil for no FusionMLX provider")
+    }
+}
 
-    got := pool.GetFusionMLX()
-    if got == nil {
-        t.Fatal("expected fusion-mlx provider, got nil")
+func TestPool_HealthCheckAll(t *testing.T) {
+    slog.Info("test Pool_HealthCheckAll")
+    p := NewPool()
+    p.Register("healthy", &dummyProvider{name: "healthy", healthy: nil}, config.BackendConfig{Type: "dummy"})
+    p.Register("sick", &dummyProvider{name: "sick", healthy: context.DeadlineExceeded}, config.BackendConfig{Type: "dummy"})
+    results := p.HealthCheckAll(context.Background())
+    if results["healthy"] != nil {
+        t.Error("healthy should be nil")
+    }
+    if results["sick"] == nil {
+        t.Error("sick should have error")
+    }
+}
+
+func TestPool_HealthCheckAll_Empty(t *testing.T) {
+    slog.Info("test Pool_HealthCheckAll_Empty")
+    p := NewPool()
+    results := p.HealthCheckAll(context.Background())
+    if len(results) != 0 {
+        t.Errorf("expected 0 results, got %d", len(results))
+    }
+}
+
+func TestPool_BuildProviders_FusionMLX(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_FusionMLX")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer srv.Close()
+
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "local": {
+                    Enabled: true,
+                    Type:    "fusion-mlx",
+                    BaseURL: srv.URL,
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    got, ok := p.Get("local")
+    if !ok {
+        t.Fatal("fusion-mlx provider not built")
     }
     if got.Name() != "fusion-mlx" {
         t.Errorf("expected fusion-mlx, got %s", got.Name())
     }
 }
 
-type mockProvider struct {
-    name string
+func TestPool_BuildProviders_OpenAICompatible(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_OpenAICompatible")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "cloud": {
+                    Enabled: true,
+                    Type:    "openai-compatible",
+                    BaseURL: "http://localhost:8080",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    got, ok := p.Get("cloud")
+    if !ok {
+        t.Fatal("openai-compatible provider not built")
+    }
+    if got.Name() != "cloud" {
+        t.Errorf("expected cloud, got %s", got.Name())
+    }
 }
 
-func (m *mockProvider) Name() string                                          { return m.name }
-func (m *mockProvider) HealthCheck(_ context.Context) error                   { return nil }
-func (m *mockProvider) Chat(_ context.Context, _ *ChatRequest) (*ChatResponse, error) {
-    return nil, nil
+func TestPool_BuildProviders_Anthropic(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_Anthropic")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "anthro": {
+                    Enabled: true,
+                    Type:    "anthropic",
+                    BaseURL: "http://localhost:8081",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    _, ok := p.Get("anthro")
+    if !ok {
+        t.Fatal("anthropic provider not built")
+    }
 }
-func (m *mockProvider) StreamChat(_ context.Context, _ *ChatRequest) (<-chan StreamChunk, error) {
-    return nil, nil
+
+func TestPool_BuildProviders_AllChineseProviders(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_AllChineseProviders")
+    types := []string{"volcengine", "qianfan", "deepseek", "openrouter",
+        "dashscope", "moonshot", "zhipu", "minimax", "baichuan",
+        "hunyuan", "stepfun", "yi", "fusion-kb"}
+    for _, typ := range types {
+        p := NewPool()
+        cfg := &config.ConfigSnapshot{
+            Config: config.Config{
+                Backends: map[string]config.BackendConfig{
+                    typ: {
+                        Enabled: true,
+                        Type:    typ,
+                        BaseURL: "http://localhost:8080",
+                    },
+                },
+            },
+        }
+        if err := p.BuildProviders(cfg); err != nil {
+            t.Errorf("BuildProviders failed for type %s: %v", typ, err)
+        }
+        got, ok := p.Get(typ)
+        if !ok {
+            t.Errorf("provider %s not built", typ)
+            continue
+        }
+        if got.Name() != typ {
+            t.Errorf("expected %s, got %s", typ, got.Name())
+        }
+    }
 }
-func (m *mockProvider) Embedding(_ context.Context, _ *EmbeddingRequest) (*EmbeddingResponse, error) {
-    return nil, nil
+
+func TestPool_BuildProviders_UnknownType(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_UnknownType")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "bad": {
+                    Enabled: true,
+                    Type:    "unknown-type",
+                    BaseURL: "http://localhost:8080",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err == nil {
+        t.Error("expected error for unknown backend type")
+    }
 }
-func (m *mockProvider) ListModels(_ context.Context) ([]ModelInfo, error) {
-    return nil, nil
+
+func TestPool_BuildProviders_Disabled(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_Disabled")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "disabled": {
+                    Enabled: false,
+                    Type:    "fusion-mlx",
+                    BaseURL: "http://localhost:11434",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    _, ok := p.Get("disabled")
+    if ok {
+        t.Error("disabled provider should not be registered")
+    }
 }
-func (m *mockProvider) Rerank(_ context.Context, _ *RerankRequest) (*RerankResponse, error) {
-    return nil, nil
+
+func TestPool_BuildProviders_RemoveStale(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_RemoveStale")
+    p := NewPool()
+    p.Register("stale", &dummyProvider{name: "stale"}, config.BackendConfig{Type: "dummy"})
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{},
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    _, ok := p.Get("stale")
+    if ok {
+        t.Error("stale provider should be removed")
+    }
 }

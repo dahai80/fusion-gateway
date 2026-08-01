@@ -60,6 +60,7 @@ func (p *StepFunProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResp
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("stepfun chat failed: %w", err)
@@ -81,6 +82,7 @@ func (p *StepFunProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("stepfun stream failed: %w", err)

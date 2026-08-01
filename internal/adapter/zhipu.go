@@ -60,6 +60,7 @@ func (p *ZhipuProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespon
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("zhipu chat failed: %w", err)
@@ -81,6 +82,7 @@ func (p *ZhipuProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-cha
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("zhipu stream failed: %w", err)
@@ -119,6 +121,7 @@ func (p *ZhipuProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/embeddings", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("zhipu embedding failed: %w", err)

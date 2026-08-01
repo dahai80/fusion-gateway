@@ -45,6 +45,7 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("openrouter chat failed: %w", err) }
     defer resp.Body.Close()
@@ -62,6 +63,7 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("openrouter stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
@@ -91,6 +93,7 @@ func (p *OpenRouterProvider) Embedding(ctx context.Context, req *EmbeddingReques
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("openrouter embedding failed: %w", err) }
     defer resp.Body.Close()

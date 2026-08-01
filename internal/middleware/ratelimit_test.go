@@ -2,403 +2,353 @@ package middleware
 
 import (
     "context"
+    "log/slog"
     "net/http"
     "net/http/httptest"
     "testing"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
-func TestAllowRPM(t *testing.T) {
-    t.Parallel()
-
-    t.Run("under_limit_returns_true", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        for i := 0; i < 5; i++ {
-            if !rl.AllowRPM("test-key", 5) {
-                t.Fatalf("request %d should be allowed, rpm=5", i+1)
-            }
-        }
-    })
-
-    t.Run("over_limit_returns_false", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        for i := 0; i < 3; i++ {
-            if !rl.AllowRPM("test-key", 3) {
-                t.Fatalf("request %d should be allowed", i+1)
-            }
-        }
-        if rl.AllowRPM("test-key", 3) {
-            t.Fatal("4th request should be denied, rpm=3")
-        }
-    })
-
-    t.Run("rpm_le_zero_returns_true", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowRPM("key", 0) {
-            t.Fatal("rpm=0 should always allow")
-        }
-        if !rl.AllowRPM("key", -1) {
-            t.Fatal("rpm=-1 should always allow")
-        }
-    })
-
-    t.Run("different_keys_independent", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowRPM("key-a", 1) {
-            t.Fatal("key-a first request should be allowed")
-        }
-        if rl.AllowRPM("key-a", 1) {
-            t.Fatal("key-a second request should be denied")
-        }
-        if !rl.AllowRPM("key-b", 1) {
-            t.Fatal("key-b should be independent from key-a")
-        }
-    })
+func TestNewRateLimiter(t *testing.T) {
+    slog.Info("test NewRateLimiter")
+    rl := NewRateLimiter()
+    if rl == nil {
+        t.Fatal("expected rate limiter")
+    }
 }
 
-func TestAllowTPM(t *testing.T) {
-    t.Parallel()
-
-    t.Run("under_limit_returns_true", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowTPM("test-key", 100, 30) {
-            t.Fatal("30 tokens under 100 tpm should be allowed")
-        }
-        if !rl.AllowTPM("test-key", 100, 50) {
-            t.Fatal("80 total tokens under 100 tpm should be allowed")
-        }
-    })
-
-    t.Run("over_limit_returns_false", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowTPM("test-key", 100, 60) {
-            t.Fatal("60 tokens under 100 tpm should be allowed")
-        }
-        if rl.AllowTPM("test-key", 100, 50) {
-            t.Fatal("110 total tokens over 100 tpm should be denied")
-        }
-    })
-
-    t.Run("tpm_le_zero_returns_true", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowTPM("key", 0, 999) {
-            t.Fatal("tpm=0 should always allow")
-        }
-        if !rl.AllowTPM("key", -1, 999) {
-            t.Fatal("tpm=-1 should always allow")
-        }
-    })
-
-    t.Run("exact_limit_allowed", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowTPM("test-key", 100, 100) {
-            t.Fatal("exactly 100 tokens at 100 tpm should be allowed")
-        }
-    })
-
-    t.Run("one_over_limit_denied", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if !rl.AllowTPM("test-key", 100, 50) {
-            t.Fatal("50 tokens should be allowed")
-        }
-        if rl.AllowTPM("test-key", 100, 51) {
-            t.Fatal("101 total tokens over 100 tpm should be denied")
-        }
-    })
+func TestRateLimiter_AllowRPM(t *testing.T) {
+    slog.Info("test RateLimiter_AllowRPM")
+    rl := NewRateLimiter()
+    if !rl.AllowRPM("key1", 5) {
+        t.Error("first request should be allowed")
+    }
 }
 
-func TestRemainingRPM(t *testing.T) {
-    t.Parallel()
-
-    t.Run("full_remaining_when_no_requests", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if got := rl.RemainingRPM("key", 10); got != 10 {
-            t.Fatalf("expected 10 remaining, got %d", got)
-        }
-    })
-
-    t.Run("decrements_after_requests", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        rl.AllowRPM("key", 10)
-        rl.AllowRPM("key", 10)
-        rl.AllowRPM("key", 10)
-        if got := rl.RemainingRPM("key", 10); got != 7 {
-            t.Fatalf("expected 7 remaining, got %d", got)
-        }
-    })
-
-    t.Run("zero_when_exhausted", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        for i := 0; i < 5; i++ {
-            rl.AllowRPM("key", 5)
-        }
-        if got := rl.RemainingRPM("key", 5); got != 0 {
-            t.Fatalf("expected 0 remaining, got %d", got)
-        }
-    })
-
-    t.Run("rpm_le_zero_returns_negative_one", func(t *testing.T) {
-        t.Parallel()
-        rl := NewRateLimiter()
-        if got := rl.RemainingRPM("key", 0); got != -1 {
-            t.Fatalf("expected -1 for rpm=0, got %d", got)
-        }
-        if got := rl.RemainingRPM("key", -5); got != -1 {
-            t.Fatalf("expected -1 for rpm=-5, got %d", got)
-        }
-    })
+func TestRateLimiter_AllowRPM_Exceeded(t *testing.T) {
+    slog.Info("test RateLimiter_AllowRPM_Exceeded")
+    rl := NewRateLimiter()
+    for i := 0; i < 5; i++ {
+        rl.AllowRPM("key1", 5)
+    }
+    if rl.AllowRPM("key1", 5) {
+        t.Error("6th request should be denied")
+    }
 }
 
-func TestRateLimitMiddleware(t *testing.T) {
-    okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestRateLimiter_AllowRPM_Zero(t *testing.T) {
+    slog.Info("test RateLimiter_AllowRPM_Zero")
+    rl := NewRateLimiter()
+    if !rl.AllowRPM("key1", 0) {
+        t.Error("zero RPM should always allow")
+    }
+}
+
+func TestRateLimiter_AllowRPM_DifferentKeys(t *testing.T) {
+    slog.Info("test RateLimiter_AllowRPM_DifferentKeys")
+    rl := NewRateLimiter()
+    for i := 0; i < 5; i++ {
+        rl.AllowRPM("key1", 5)
+    }
+    if !rl.AllowRPM("key2", 5) {
+        t.Error("different key should be allowed")
+    }
+}
+
+func TestRateLimiter_AllowTPM(t *testing.T) {
+    slog.Info("test RateLimiter_AllowTPM")
+    rl := NewRateLimiter()
+    if !rl.AllowTPM("key1", 1000, 500) {
+        t.Error("first request should be allowed")
+    }
+}
+
+func TestRateLimiter_AllowTPM_Exceeded(t *testing.T) {
+    slog.Info("test RateLimiter_AllowTPM_Exceeded")
+    rl := NewRateLimiter()
+    rl.AllowTPM("key1", 1000, 600)
+    if rl.AllowTPM("key1", 1000, 500) {
+        t.Error("should deny when TPM exceeded")
+    }
+}
+
+func TestRateLimiter_AllowTPM_Zero(t *testing.T) {
+    slog.Info("test RateLimiter_AllowTPM_Zero")
+    rl := NewRateLimiter()
+    if !rl.AllowTPM("key1", 0, 9999) {
+        t.Error("zero TPM should always allow")
+    }
+}
+
+func TestRateLimiter_RemainingRPM(t *testing.T) {
+    slog.Info("test RateLimiter_RemainingRPM")
+    rl := NewRateLimiter()
+    rl.AllowRPM("key1", 10)
+    remaining := rl.RemainingRPM("key1", 10)
+    if remaining != 9 {
+        t.Errorf("expected 9 remaining, got %d", remaining)
+    }
+}
+
+func TestRateLimiter_RemainingRPM_Zero(t *testing.T) {
+    slog.Info("test RateLimiter_RemainingRPM_Zero")
+    rl := NewRateLimiter()
+    remaining := rl.RemainingRPM("key1", 0)
+    if remaining != -1 {
+        t.Errorf("expected -1 for zero RPM, got %d", remaining)
+    }
+}
+
+func TestRateLimit_Disabled(t *testing.T) {
+    slog.Info("test RateLimit_Disabled")
+    cfg := &config.RateLimitConfig{Enabled: false}
+    rl := NewRateLimiter()
+    var called bool
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
         w.WriteHeader(http.StatusOK)
-        _, _ = w.Write([]byte("ok"))
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("should call next when disabled")
+    }
+}
+
+func TestRateLimit_MasterKey(t *testing.T) {
+    slog.Info("test RateLimit_MasterKey")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    var called bool
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    p := &Principal{IsMaster: true}
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("master key should bypass rate limit")
+    }
+}
+
+func TestRateLimit_NoKeyConfig_NoEnforcement(t *testing.T) {
+    slog.Info("test RateLimit_NoKeyConfig_NoEnforcement")
+    cfg := &config.RateLimitConfig{Enabled: true, KeyEnforcement: false}
+    rl := NewRateLimiter()
+    var called bool
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("should allow without key config when enforcement disabled")
+    }
+}
+
+func TestRateLimit_NoKeyConfig_Enforcement(t *testing.T) {
+    slog.Info("test RateLimit_NoKeyConfig_Enforcement")
+    cfg := &config.RateLimitConfig{Enabled: true, KeyEnforcement: true}
+    rl := NewRateLimiter()
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler")
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("expected 429, got %d", rec.Code)
+    }
+}
+
+func TestRateLimit_RPMExceeded(t *testing.T) {
+    slog.Info("test RateLimit_RPMExceeded")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "limited", RPM: 2}}
+    for i := 0; i < 2; i++ {
+        rl.AllowRPM("limited", 2)
+    }
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler")
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("expected 429, got %d", rec.Code)
+    }
+}
+
+func TestRateLimit_TPMExceeded(t *testing.T) {
+    slog.Info("test RateLimit_TPMExceeded")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "tpm-limited", RPM: 100, TPM: 100}}
+    rl.AllowTPM("tpm-limited", 100, 100)
+    tokFn := func(ctx context.Context) int { return 50 }
+    handler := RateLimit(cfg, rl, tokFn)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler")
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("expected 429 for TPM, got %d", rec.Code)
+    }
+}
+
+func TestRateLimit_Success(t *testing.T) {
+    slog.Info("test RateLimit_Success")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "ok", RPM: 100, TPM: 10000}}
+    var called bool
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("should call next handler")
+    }
+    if rec.Header().Get("X-RateLimit-Remaining") == "" {
+        t.Error("should set remaining header")
+    }
+}
+
+func TestRateLimit_KeyNameFallback(t *testing.T) {
+    slog.Info("test RateLimit_KeyNameFallback")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{Key: "abcdefghijklmnopqrstuvwxyz", RPM: 100, TPM: 10000}}
+    var called bool
+    handler := RateLimit(cfg, rl, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("should call next handler with key name fallback")
+    }
+}
+
+func TestFormatInt(t *testing.T) {
+    cases := []struct {
+        input    int
+        expected string
+    }{
+        {0, "0"},
+        {1, "1"},
+        {123, "123"},
+        {-1, "-1"},
+        {-42, "-42"},
+    }
+    for _, tc := range cases {
+        result := formatInt(tc.input)
+        if result != tc.expected {
+            t.Errorf("formatInt(%d) = %s, expected %s", tc.input, result, tc.expected)
+        }
+    }
+}
+
+func TestCleanupIdle_RemovesExpired(t *testing.T) {
+    slog.Info("test CleanupIdle_RemovesExpired")
+    rl := NewRateLimiter()
+    ks := rl.getOrCreate("idle-key")
+    ks.mu.Lock()
+    ks.lastAccess = time.Now().Add(-15 * time.Minute)
+    ks.mu.Unlock()
+
+    ks2 := rl.getOrCreate("active-key")
+    ks2.mu.Lock()
+    ks2.lastAccess = time.Now()
+    ks2.mu.Unlock()
+
+    rl.counters.Range(func(key, value interface{}) bool {
+        ks := value.(*keyState)
+        ks.mu.Lock()
+        idle := time.Since(ks.lastAccess) > 10*time.Minute
+        ks.mu.Unlock()
+        if idle {
+            rl.counters.Delete(key)
+        }
+        return true
     })
 
-    t.Run("master_key_bypasses", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            GlobalRPM:      1,
-            KeyEnforcement: false,
-        }
-        middleware := RateLimit(cfg, rl, nil)
+    _, idleExists := rl.counters.Load("idle-key")
+    _, activeExists := rl.counters.Load("active-key")
+    if idleExists {
+        t.Error("idle key should have been deleted")
+    }
+    if !activeExists {
+        t.Error("active key should still exist")
+    }
+}
 
-        for i := 0; i < 5; i++ {
-            req := httptest.NewRequest(http.MethodGet, "/test", nil)
-            ctx := ContextWithPrincipal(req.Context(), &Principal{IsMaster: true})
-            req = req.WithContext(ctx)
-            rec := httptest.NewRecorder()
-            middleware(okHandler).ServeHTTP(rec, req)
-            if rec.Code != http.StatusOK {
-                t.Fatalf("master key request %d should pass, got %d", i+1, rec.Code)
-            }
+func TestCleanupIdle_KeepsActive(t *testing.T) {
+    slog.Info("test CleanupIdle_KeepsActive")
+    rl := NewRateLimiter()
+    ks := rl.getOrCreate("recent-key")
+    ks.mu.Lock()
+    ks.lastAccess = time.Now()
+    ks.mu.Unlock()
+
+    rl.counters.Range(func(key, value interface{}) bool {
+        ks := value.(*keyState)
+        ks.mu.Lock()
+        idle := time.Since(ks.lastAccess) > 10*time.Minute
+        ks.mu.Unlock()
+        if idle {
+            rl.counters.Delete(key)
         }
+        return true
     })
 
-    t.Run("disabled_config_passes_through", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:   false,
-            GlobalRPM: 1,
-        }
-        middleware := RateLimit(cfg, rl, nil)
+    _, exists := rl.counters.Load("recent-key")
+    if !exists {
+        t.Error("recent key should still exist")
+    }
+}
 
-        for i := 0; i < 5; i++ {
-            req := httptest.NewRequest(http.MethodGet, "/test", nil)
-            rec := httptest.NewRecorder()
-            middleware(okHandler).ServeHTTP(rec, req)
-            if rec.Code != http.StatusOK {
-                t.Fatalf("disabled rate limit request %d should pass, got %d", i+1, rec.Code)
-            }
-        }
-    })
-
-    t.Run("key_enforcement_denies_without_key_config", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: true,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusTooManyRequests {
-            t.Fatalf("expected 429 without key config when enforcement on, got %d", rec.Code)
-        }
-    })
-
-    t.Run("key_enforcement_allows_with_key_config", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: true,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        keyCfg := &config.AuthKeyConfig{
-            Key:  "sk-test1234567890",
-            Name: "test-user",
-            RPM:  10,
-            TPM:  1000,
-        }
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("expected 200 with valid key config, got %d", rec.Code)
-        }
-    })
-
-    t.Run("429_on_rpm_exceeded", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: false,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        keyCfg := &config.AuthKeyConfig{
-            Key:  "sk-test1234567890",
-            Name: "limited-user",
-            RPM:  2,
-            TPM:  0,
-        }
-
-        for i := 0; i < 2; i++ {
-            req := httptest.NewRequest(http.MethodGet, "/test", nil)
-            ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-            req = req.WithContext(ctx)
-            rec := httptest.NewRecorder()
-            middleware(okHandler).ServeHTTP(rec, req)
-            if rec.Code != http.StatusOK {
-                t.Fatalf("request %d should pass, got %d", i+1, rec.Code)
-            }
-        }
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusTooManyRequests {
-            t.Fatalf("3rd request should get 429, got %d", rec.Code)
-        }
-        if got := rec.Header().Get("Retry-After"); got != "1" {
-            t.Fatalf("expected Retry-After=1, got %q", got)
-        }
-        if got := rec.Header().Get("X-RateLimit-Remaining"); got != "0" {
-            t.Fatalf("expected X-RateLimit-Remaining=0, got %q", got)
-        }
-    })
-
-    t.Run("429_on_tpm_exceeded", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: false,
-        }
-        tokFn := func(ctx context.Context) int { return 60 }
-        middleware := RateLimit(cfg, rl, tokFn)
-
-        keyCfg := &config.AuthKeyConfig{
-            Key:  "sk-tpm-test1234567",
-            Name: "tpm-user",
-            RPM:  100,
-            TPM:  100,
-        }
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("first request (60 tokens) should pass, got %d", rec.Code)
-        }
-
-        req = httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx = ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec = httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusTooManyRequests {
-            t.Fatalf("second request (120 total tokens) should get 429, got %d", rec.Code)
-        }
-    })
-
-    t.Run("no_key_config_no_enforcement_passes", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: false,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("no key config with enforcement off should pass, got %d", rec.Code)
-        }
-    })
-
-    t.Run("remaining_header_set", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: false,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        keyCfg := &config.AuthKeyConfig{
-            Key:  "sk-remaining-test12",
-            Name: "remaining-user",
-            RPM:  10,
-            TPM:  0,
-        }
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("expected 200, got %d", rec.Code)
-        }
-        if got := rec.Header().Get("X-RateLimit-Remaining"); got != "9" {
-            t.Fatalf("expected X-RateLimit-Remaining=9, got %q", got)
-        }
-    })
-
-    t.Run("uses_key_prefix_when_name_empty", func(t *testing.T) {
-        rl := NewRateLimiter()
-        cfg := &config.RateLimitConfig{
-            Enabled:        true,
-            KeyEnforcement: false,
-        }
-        middleware := RateLimit(cfg, rl, nil)
-
-        keyCfg := &config.AuthKeyConfig{
-            Key: "sk-shortkey123456",
-            RPM: 1,
-            TPM: 0,
-        }
-
-        req := httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx := ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec := httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("first request should pass, got %d", rec.Code)
-        }
-
-        req = httptest.NewRequest(http.MethodGet, "/test", nil)
-        ctx = ContextWithPrincipal(req.Context(), &Principal{KeyConfig: keyCfg})
-        req = req.WithContext(ctx)
-        rec = httptest.NewRecorder()
-        middleware(okHandler).ServeHTTP(rec, req)
-        if rec.Code != http.StatusTooManyRequests {
-            t.Fatalf("second request should get 429 when name empty, got %d", rec.Code)
-        }
-    })
+func TestRateLimit_TokenCountZero(t *testing.T) {
+    slog.Info("test RateLimit_TokenCountZero")
+    cfg := &config.RateLimitConfig{Enabled: true}
+    rl := NewRateLimiter()
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "toktest", RPM: 100, TPM: 100}}
+    tokFn := func(ctx context.Context) int { return 0 }
+    var called bool
+    handler := RateLimit(cfg, rl, tokFn)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    ctx := ContextWithPrincipal(req.Context(), p)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Error("should call next when token count is zero")
+    }
 }

@@ -57,6 +57,15 @@ func InitRequestLog(r *http.Request) *store.RequestLog {
         IsStream:    r.URL.Query().Get("stream") == "true",
         IsSuccess:   true,
     }
+    if v := r.Header.Get("X-Fusion-Project-Id"); v != "" {
+        entry.ProjectID = v
+    }
+    if v := r.Header.Get("X-Fusion-Chat-Id"); v != "" {
+        entry.ChatID = v
+    }
+    if v := r.Header.Get("X-Space-Id"); v != "" {
+        entry.SpaceID = v
+    }
     return entry
 }
 

@@ -125,6 +125,11 @@ backends:
         gc:
             enabled: true
             min_idle_since_last_gc: 5m
+    fusion-kb:
+        type: "fusion-kb"
+        base_url: "http://127.0.0.1:11436"
+        timeout: 120s
+        enabled: true
     openai:
         type: "openai-compatible"
         base_url: "https://api.openai.com/v1"

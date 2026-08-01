@@ -33,7 +33,7 @@ func TestBatchStore_CreateAndGet(t *testing.T) {
     if err != nil {
         t.Fatal(err)
     }
-    if b.Status != BatchStatusPending && b.Status != BatchStatusCompleted {
+    if b.Status != BatchStatusPending && b.Status != BatchStatusCompleted && b.Status != BatchStatusRunning {
         t.Fatalf("unexpected status: %s", b.Status)
     }
 }

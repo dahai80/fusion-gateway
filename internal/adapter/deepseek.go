@@ -45,6 +45,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("deepseek chat failed: %w", err) }
     defer resp.Body.Close()
@@ -62,6 +63,7 @@ func (p *DeepSeekProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("deepseek stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {

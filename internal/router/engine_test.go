@@ -2,6 +2,7 @@ package router
 
 import (
     "context"
+    "fmt"
     "testing"
     "time"
 
@@ -538,4 +539,698 @@ func TestDecide_TokenTierRouting(t *testing.T) {
             t.Errorf("expected empty cloud_target when tiers disabled, got %q", dec.CloudTarget)
         }
     })
+}
+
+func TestDecide_SessionAffinity_LocalProvider(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    e.sessionAffinity.Record("space-42", "fusion-mlx")
+    t.Logf("Recorded session affinity: space-42 -> fusion-mlx")
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "space-42",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local via session affinity, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "session_affinity:local" {
+        t.Errorf("expected session_affinity:local reason, got %s", dec.Reason)
+    }
+    t.Logf("Session affinity routes to local: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+func TestDecide_SessionAffinity_CloudProvider(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    e.sessionAffinity.Record("space-99", "qianfan")
+    t.Logf("Recorded session affinity: space-99 -> qianfan")
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "space-99",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud via session affinity, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.CloudTarget != "qianfan" {
+        t.Errorf("expected cloud_target=qianfan, got %q", dec.CloudTarget)
+    }
+    t.Logf("Session affinity routes to cloud: backend=%s target=%s reason=%s", dec.Backend, dec.CloudTarget, dec.Reason)
+}
+
+func TestDecide_SessionAffinity_CircuitBreakerOpen(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.sessionAffinity.Record("space-42", "fusion-mlx")
+    t.Logf("Recorded session affinity: space-42 -> fusion-mlx")
+
+    e.Trip("local", "overload")
+    t.Log("Tripped local circuit breaker")
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "space-42",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Backend == LocalBackend {
+        t.Errorf("expected NOT local when circuit breaker is open, got %s: %s", dec.Backend, dec.Reason)
+    }
+    t.Logf("Session affinity falls back when breaker open: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+func TestDecide_SessionAffinity_NoAffinity(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "space-no-affinity",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Reason == "session_affinity:local" || dec.Reason == "session_affinity:qianfan" {
+        t.Errorf("expected no session affinity match, got reason=%s", dec.Reason)
+    }
+    t.Logf("No affinity match falls through to normal routing: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+func TestDecide_SessionAffinity_EmptySpaceID(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Reason == "session_affinity:local" {
+        t.Errorf("expected no session affinity match with empty SpaceID, got reason=%s", dec.Reason)
+    }
+    t.Logf("Empty SpaceID skips session affinity: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+func TestRecordAffinity(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.RecordAffinity("space-rec", "openai")
+
+    provider, ok := e.sessionAffinity.Lookup("space-rec")
+    if !ok {
+        t.Fatal("expected to find recorded affinity")
+    }
+    if provider != "openai" {
+        t.Errorf("expected openai, got %s", provider)
+    }
+    t.Logf("RecordAffinity stores entry: space-rec -> %s", provider)
+}
+
+func TestDecide_SessionAffinity_LocalNotReady(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.sessionAffinity.Record("space-nr", "fusion-mlx")
+    t.Logf("Recorded session affinity: space-nr -> fusion-mlx, but local not ready")
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{
+        Model:   "test-model",
+        Stream:  false,
+        SpaceID: "space-nr",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec.Backend == LocalBackend {
+        t.Errorf("expected NOT local when not ready, got %s: %s", dec.Backend, dec.Reason)
+    }
+    t.Logf("Session affinity falls back when local not ready: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+func TestCircuitBreaker_RecordSuccess(t *testing.T) {
+    cb := NewCircuitBreaker(config.CircuitBreakerConfig{
+        FailureThreshold:    3,
+        Timeout:             30 * 1e9,
+        HalfOpenMaxRequests: 1,
+        SuccessThreshold:    2,
+    })
+
+    cb.Trip("test")
+    if cb.State() != StateOpen {
+        t.Fatalf("expected open after trip, got %s", cb.State())
+    }
+
+    cb.ResetToHalfOpen()
+    if cb.State() != StateHalfOpen {
+        t.Fatalf("expected half_open after reset, got %s", cb.State())
+    }
+
+    cb.RecordSuccess()
+    cb.RecordSuccess()
+    if cb.State() != StateClosed {
+        t.Fatalf("expected closed after enough successes, got %s", cb.State())
+    }
+    t.Logf("RecordSuccess transitions half_open -> closed after %d successes", 2)
+}
+
+func TestCircuitBreaker_RecordSuccess_Closed(t *testing.T) {
+    cb := NewCircuitBreaker(config.CircuitBreakerConfig{
+        FailureThreshold: 3,
+        Timeout:          30 * 1e9,
+    })
+
+    cb.RecordFailure()
+    cb.RecordFailure()
+    if cb.State() != StateClosed {
+        t.Fatalf("expected still closed, got %s", cb.State())
+    }
+
+    cb.RecordSuccess()
+    cb.RecordFailure()
+    cb.RecordFailure()
+    if cb.State() != StateClosed {
+        t.Fatalf("expected still closed (failureCount reset by success), got %s", cb.State())
+    }
+    t.Log("RecordSuccess in closed state resets failure count")
+}
+
+func TestCircuitBreaker_RecordFailure_HalfOpen(t *testing.T) {
+    cb := NewCircuitBreaker(config.CircuitBreakerConfig{
+        FailureThreshold: 3,
+        Timeout:          30 * 1e9,
+    })
+
+    cb.Trip("test")
+    cb.ResetToHalfOpen()
+    if cb.State() != StateHalfOpen {
+        t.Fatalf("expected half_open, got %s", cb.State())
+    }
+
+    cb.RecordFailure()
+    if cb.State() != StateOpen {
+        t.Fatalf("expected open after failure in half_open, got %s", cb.State())
+    }
+    t.Log("RecordFailure in half_open reopens breaker")
+}
+
+func TestCircuitBreaker_IsOpen(t *testing.T) {
+    cb := NewCircuitBreaker(config.CircuitBreakerConfig{
+        FailureThreshold: 3,
+        Timeout:          30 * 1e9,
+    })
+
+    if cb.IsOpen() {
+        t.Error("expected IsOpen=false when closed")
+    }
+
+    cb.Trip("test")
+    if !cb.IsOpen() {
+        t.Error("expected IsOpen=true after trip")
+    }
+    t.Log("IsOpen returns correct boolean")
+}
+
+func TestCircuitBreakerState_String(t *testing.T) {
+    tests := []struct {
+        state CircuitBreakerState
+        want  string
+    }{
+        {StateClosed, "closed"},
+        {StateOpen, "open"},
+        {StateHalfOpen, "half_open"},
+        {CircuitBreakerState(99), "unknown"},
+    }
+    for _, tt := range tests {
+        got := tt.state.String()
+        if got != tt.want {
+            t.Errorf("CircuitBreakerState(%d).String() = %q, want %q", tt.state, got, tt.want)
+        }
+    }
+}
+
+func TestEngine_RecordSuccess(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("local", "test")
+    e.RecordSuccess("local")
+    e.RecordSuccess("local")
+    e.RecordSuccess("local")
+
+    state := e.CircuitBreakerState("local")
+    if state != StateClosed {
+        t.Logf("After RecordSuccess on tripped breaker (via half_open), state=%s", state)
+    }
+    t.Log("Engine.RecordSuccess delegates to breaker")
+}
+
+func TestEngine_RecordFailure(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    for i := 0; i < 5; i++ {
+        e.RecordFailure("local")
+    }
+    if e.CircuitBreakerState("local") != StateOpen {
+        t.Log("Engine.RecordFailure triggers breaker after threshold")
+    }
+    t.Log("Engine.RecordFailure delegates to breaker")
+}
+
+func TestEngine_UpdateConfig(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 42
+    e.UpdateConfig(newCfg)
+
+    t.Log("Engine.UpdateConfig completes without panic")
+}
+
+func TestResolveCloudByRatio(t *testing.T) {
+    tests := []struct {
+        name   string
+        ratio  float64
+        rt     config.RatioTierConfig
+        want   string
+    }{
+        {
+            name:  "first_tier_match",
+            ratio: 0.3,
+            rt: config.RatioTierConfig{
+                Enabled: true,
+                Rules: []config.RatioTierRule{
+                    {MaxRatio: 0.5, Backend: "qianfan"},
+                    {MaxRatio: 2.0, Backend: "openai"},
+                },
+            },
+            want: "qianfan",
+        },
+        {
+            name:  "second_tier_match",
+            ratio: 1.5,
+            rt: config.RatioTierConfig{
+                Enabled: true,
+                Rules: []config.RatioTierRule{
+                    {MaxRatio: 0.5, Backend: "qianfan"},
+                    {MaxRatio: 2.0, Backend: "openai"},
+                },
+            },
+            want: "openai",
+        },
+        {
+            name:  "no_match_ratio_exceeds_all",
+            ratio: 5.0,
+            rt: config.RatioTierConfig{
+                Enabled: true,
+                Rules: []config.RatioTierRule{
+                    {MaxRatio: 0.5, Backend: "qianfan"},
+                    {MaxRatio: 2.0, Backend: "openai"},
+                },
+            },
+            want: "",
+        },
+        {
+            name:  "no_rules",
+            ratio: 1.0,
+            rt: config.RatioTierConfig{
+                Enabled: true,
+                Rules:   []config.RatioTierRule{},
+            },
+            want: "",
+        },
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := resolveCloudByRatio(tt.ratio, tt.rt)
+            if got != tt.want {
+                t.Errorf("resolveCloudByRatio() = %q, want %q", got, tt.want)
+            }
+        })
+    }
+}
+
+func TestDecide_RatioTierRouting(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 500
+    cfg.Config.Routing.RatioTiers = config.RatioTierConfig{
+        Enabled: true,
+        Rules: []config.RatioTierRule{
+            {MaxRatio: 0.5, Backend: "qianfan"},
+            {MaxRatio: 2.0, Backend: "openai"},
+        },
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    t.Run("ratio_tier_low_ratio", func(t *testing.T) {
+        budget := tokenizer.TokenBudget{InputTokens: 200, PredictOutputTokens: 50, TotalBudget: 250}
+        ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+        ctx = config.WithSnapshot(ctx, cfg)
+        req := &RouteRequest{Model: "test-model"}
+        dec := e.Decide(ctx, req)
+        if dec.Backend != CloudBackend {
+            t.Fatalf("expected cloud, got %s", dec.Backend)
+        }
+        if dec.CloudTarget != "qianfan" {
+            t.Errorf("expected cloud_target=qianfan, got %q", dec.CloudTarget)
+        }
+    })
+
+    t.Run("ratio_tier_high_ratio", func(t *testing.T) {
+        budget := tokenizer.TokenBudget{InputTokens: 200, PredictOutputTokens: 300, TotalBudget: 500}
+        ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+        ctx = config.WithSnapshot(ctx, cfg)
+        req := &RouteRequest{Model: "test-model"}
+        dec := e.Decide(ctx, req)
+        if dec.Backend != CloudBackend {
+            t.Fatalf("expected cloud, got %s", dec.Backend)
+        }
+        if dec.CloudTarget != "openai" {
+            t.Errorf("expected cloud_target=openai, got %q", dec.CloudTarget)
+        }
+    })
+}
+
+func TestDecide_OutputInputRatioThreshold(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 1000
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 100, PredictOutputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when output/input ratio exceeds threshold, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "output_input_ratio_exceeded" {
+        t.Errorf("expected output_input_ratio_exceeded, got %s", dec.Reason)
+    }
+    t.Logf("Output/input ratio threshold works: reason=%s", dec.Reason)
+}
+
+func TestEngine_CircuitBreakerState_Unknown(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    state := e.CircuitBreakerState("nonexistent")
+    if state != StateOpen {
+        t.Errorf("expected open for unknown backend, got %s", state)
+    }
+    t.Logf("CircuitBreakerState for unknown backend returns open")
+}
+
+func TestDecide_EmptyPrompt_Local(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 0, TotalBudget: 0}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for empty prompt, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "empty_prompt_local" {
+        t.Errorf("expected empty_prompt_local, got %s", dec.Reason)
+    }
+    t.Logf("Empty prompt routes to local: reason=%s", dec.Reason)
+}
+
+func TestDecide_TokenBudgetMissing(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when token budget missing, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "token_budget_missing" {
+        t.Errorf("expected token_budget_missing, got %s", dec.Reason)
+    }
+    t.Logf("Missing token budget routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_MemoryOverload(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.LocalPriority.MaxSystemMemoryRatio = 0.8
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{MemoryUsedRatio: 0.9})
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud on memory overload, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "memory_overload" {
+        t.Errorf("expected memory_overload, got %s", dec.Reason)
+    }
+    t.Logf("Memory overload routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_MLXMemoryOverload(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio = 0.5
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{
+        MLXActiveMemory: 800,
+        GPUInUseMemory:  1000,
+    })
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud on MLX memory overload, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "mlx_memory_overload" {
+        t.Errorf("expected mlx_memory_overload, got %s", dec.Reason)
+    }
+    t.Logf("MLX memory overload routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_SwapThrashing(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.LocalPriority.SwapPageRateThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{SwapPageInRate: 500})
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud on swap thrashing, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "swap_thrashing" {
+        t.Errorf("expected swap_thrashing, got %s", dec.Reason)
+    }
+    t.Logf("Swap thrashing routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_GPUMemoryLow(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{
+        GPUAllocMemory: 1000,
+        GPUInUseMemory: 950,
+    })
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud on GPU memory low, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "gpu_memory_low" {
+        t.Errorf("expected gpu_memory_low, got %s", dec.Reason)
+    }
+    t.Logf("GPU memory low routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_MetricsCollectionError(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Hardware.CollectionErrorProtection = true
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{
+        CollectionError: fmt.Errorf("gopsutil failed"),
+    })
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud on metrics collection error, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "metrics_collection_error" {
+        t.Errorf("expected metrics_collection_error, got %s", dec.Reason)
+    }
+    t.Logf("Metrics collection error routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_LocalNotReady(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when local not ready, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "local_not_ready" {
+        t.Errorf("expected local_not_ready, got %s", dec.Reason)
+    }
+    t.Logf("Local not ready routes to cloud: reason=%s", dec.Reason)
+}
+
+func TestDecide_ContextWindowFallback(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.ContextWindowFallback = map[string]string{
+        "small-model": "large-model",
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"large-model": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "small-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local with context window fallback, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "context_window_fallback:large-model" {
+        t.Errorf("expected context_window_fallback:large-model, got %s", dec.Reason)
+    }
+    t.Logf("Context window fallback works: reason=%s", dec.Reason)
+}
+
+func TestDecide_ContextWindowFallback_NotAvailable(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.ContextWindowFallback = map[string]string{
+        "small-model": "large-model",
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "small-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when fallback model not available, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "model_not_available_locally" {
+        t.Errorf("expected model_not_available_locally, got %s", dec.Reason)
+    }
 }

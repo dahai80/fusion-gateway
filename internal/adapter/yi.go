@@ -60,6 +60,7 @@ func (p *YiProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse,
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("yi chat failed: %w", err)
@@ -81,6 +82,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("yi stream failed: %w", err)

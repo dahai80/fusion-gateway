@@ -60,6 +60,7 @@ func (p *BaichuanProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("baichuan chat failed: %w", err)
@@ -81,6 +82,7 @@ func (p *BaichuanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     httpReq.Header.Set("Content-Type", "application/json")
     p.setAuth(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("baichuan stream failed: %w", err)

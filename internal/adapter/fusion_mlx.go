@@ -135,7 +135,10 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
-    httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    if p.routeHeader != "" {
+        httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -180,7 +183,10 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
-    httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    if p.routeHeader != "" {
+        httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -225,7 +231,10 @@ func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
-    httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    if p.routeHeader != "" {
+        httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
@@ -264,7 +273,10 @@ func (p *FusionMLXProvider) Rerank(ctx context.Context, req *RerankRequest) (*Re
     if p.apiKey != "" {
         httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
-    httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    if p.routeHeader != "" {
+        httpReq.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
+    InjectFusionHeaders(ctx, httpReq)
 
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {

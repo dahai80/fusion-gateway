@@ -11,19 +11,29 @@ import (
     "time"
 )
 
+var mlxMetricsURL = "http://127.0.0.1:11434/metrics"
+
+var mlxHTTPDoFn func(req *http.Request) (*http.Response, error)
+
+func init() {
+    mlxHTTPDoFn = defaultMLXHTTPDo
+}
+
+func defaultMLXHTTPDo(req *http.Request) (*http.Response, error) {
+    client := &http.Client{Timeout: 2 * time.Second}
+    return client.Do(req)
+}
+
 // collectMLXMetrics fetches Prometheus metrics from fusion-mlx /metrics endpoint
 func collectMLXMetrics(m *HardwareMetrics) error {
-    client := &http.Client{Timeout: 2 * time.Second}
-
-    // Default fusion-mlx metrics endpoint
-    url := "http://127.0.0.1:11434/metrics"
+    url := mlxMetricsURL
 
     req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
     if err != nil {
         return fmt.Errorf("create mlx metrics request: %w", err)
     }
 
-    resp, err := client.Do(req)
+    resp, err := mlxHTTPDoFn(req)
     if err != nil {
         return fmt.Errorf("fetch mlx metrics: %w", err)
     }

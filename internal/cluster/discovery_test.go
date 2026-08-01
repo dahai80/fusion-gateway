@@ -2,6 +2,7 @@ package cluster
 
 import (
     "context"
+    "encoding/json"
     "net/http"
     "net/http/httptest"
     "sync/atomic"
@@ -10,9 +11,6 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
-
-// Tests for internal/cluster/discovery.go — Task #23 cluster node config & registration discovery
-// Covers: NewDiscovery, loadNodesFromConfig, healthCheck, failureThreshold, SelectNode, UpdateConfig, ClusterSelectorAdapter, Status, Node.InFlight
 
 func makeClusterCfg(enabled bool, nodes ...config.ClusterNodeConfig) config.ClusterConfig {
     return config.ClusterConfig{
@@ -160,7 +158,6 @@ func TestDiscovery_SelectNode_HardwareAware(t *testing.T) {
     n1.markHealthy()
     n2.markHealthy()
 
-    // With remote metrics: node-1 has 50% mem used, node-2 has 10% mem used
     n1.mu.Lock()
     n1.remoteMetrics = NodeRemoteMetrics{MemoryUsedRatio: 0.5, QueueDepth: 0, CollectedAt: time.Now()}
     n1.mu.Unlock()
@@ -173,8 +170,6 @@ func TestDiscovery_SelectNode_HardwareAware(t *testing.T) {
     if err != nil {
         t.Fatal(err)
     }
-    // node-2: avail=64*0.9=57.6 → score=57.6*0.6 + 64*1*0.3 + 64*1*0.1 = 34.56+19.2+6.4 = 60.16
-    // node-1: avail=16*0.5=8 → score=8*0.6 + 16*1*0.3 + 16*1*0.1 = 4.8+4.8+1.6 = 11.2
     if selected.ID != "node-2" {
         t.Errorf("expected node-2 (higher hw score), got %s", selected.ID)
     }
@@ -193,7 +188,6 @@ func TestDiscovery_SelectNode_HardwareAware_QueuePenalty(t *testing.T) {
     n1.markHealthy()
     n2.markHealthy()
 
-    // Same memory, but node-2 has deep queue
     n1.mu.Lock()
     n1.remoteMetrics = NodeRemoteMetrics{MemoryUsedRatio: 0.2, QueueDepth: 0, CollectedAt: time.Now()}
     n1.mu.Unlock()
@@ -224,14 +218,12 @@ func TestDiscovery_SelectNode_HardwareAware_NoRemoteMetrics(t *testing.T) {
     n1.markHealthy()
     n2.markHealthy()
 
-    // No remote metrics — falls back to static MemoryGB / (inFlight+1)
     n2.IncrInFlight()
 
     selected, err := d.SelectNode("hardware-aware")
     if err != nil {
         t.Fatal(err)
     }
-    // node-1: 16/(0+1)=16, node-2: 64/(1+1)=32 → node-2 still wins
     if selected.ID != "node-2" {
         t.Errorf("expected node-2 (higher static score), got %s", selected.ID)
     }
@@ -249,7 +241,6 @@ func TestDiscovery_SelectNode_RoundRobin(t *testing.T) {
         n.markHealthy()
     }
 
-    // Round-robin should distribute across both nodes
     counts := map[string]int{}
     for i := 0; i < 10; i++ {
         node, _ := d.SelectNode("round-robin")
@@ -395,5 +386,646 @@ func TestNode_InFlight(t *testing.T) {
     n.DecrInFlight()
     if n.InFlight() != 1 {
         t.Errorf("expected 1 in-flight, got %d", n.InFlight())
+    }
+}
+
+func TestNode_LastHealth(t *testing.T) {
+    n := &Node{ID: "test", state: NodeStateUnhealthy}
+    if !n.LastHealth().IsZero() {
+        t.Errorf("expected zero lastHealth initially")
+    }
+    n.markHealthy()
+    if n.LastHealth().IsZero() {
+        t.Errorf("expected non-zero lastHealth after markHealthy")
+    }
+}
+
+func TestDiscovery_Stop(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+
+    if !d.running.Load() {
+        t.Fatal("discovery should be running after start")
+    }
+
+    d.Stop()
+    if d.running.Load() {
+        t.Fatal("discovery should not be running after stop")
+    }
+}
+
+func TestDiscovery_Stop_NotRunning(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    // Stop on non-running discovery should be a no-op
+    d.Stop()
+    if d.running.Load() {
+        t.Fatal("discovery should not be running")
+    }
+}
+
+func TestDiscovery_Start_AlreadyRunning(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    // Second start should be a no-op
+    d.Start(context.Background())
+}
+
+func TestDiscovery_Start_StandaloneMode(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    cfg.HealthCheckInterval = 100 * time.Millisecond
+
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    // Wait for health check loop to run at least once
+    time.Sleep(300 * time.Millisecond)
+
+    n1, _ := d.GetNode("node-1")
+    if n1.State() != NodeStateHealthy {
+        t.Errorf("expected healthy after health check loop, got %s", n1.State())
+    }
+}
+
+func TestDiscovery_Start_MasterMode(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        resp := MasterNodesResponse{
+            Total:  1,
+            Online: 1,
+            Nodes: []MasterNodeInfo{
+                {NodeID: "worker-1", Address: "http://10.0.0.1:8100", GPU: "M2", MemoryGB: 32, Status: "online"},
+            },
+        }
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    // Wait for master sync loop to run
+    time.Sleep(300 * time.Millisecond)
+
+    all := d.AllNodes()
+    if len(all) != 1 {
+        t.Fatalf("expected 1 node from master sync, got %d", len(all))
+    }
+}
+
+func TestDiscovery_healthCheckLoop_ContextCancel(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    cfg.HealthCheckInterval = 50 * time.Millisecond
+
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        d.healthCheckLoop(ctx)
+        close(done)
+    }()
+
+    time.Sleep(100 * time.Millisecond)
+    cancel()
+
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("healthCheckLoop should exit on context cancel")
+    }
+}
+
+func TestDiscovery_healthCheckLoop_StopCh(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    cfg.HealthCheckInterval = 50 * time.Millisecond
+
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    done := make(chan struct{})
+    go func() {
+        d.healthCheckLoop(context.Background())
+        close(done)
+    }()
+
+    time.Sleep(100 * time.Millisecond)
+    close(d.stopCh)
+
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("healthCheckLoop should exit on stopCh")
+    }
+}
+
+func TestDiscovery_masterSyncLoop_ContextCancel(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        resp := MasterNodesResponse{Total: 0, Online: 0}
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 50 * time.Millisecond,
+    }
+
+    d := NewDiscovery(cfg)
+
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        d.masterSyncLoop(ctx)
+        close(done)
+    }()
+
+    time.Sleep(100 * time.Millisecond)
+    cancel()
+
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("masterSyncLoop should exit on context cancel")
+    }
+}
+
+func TestDiscovery_masterSyncLoop_StopCh(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        resp := MasterNodesResponse{Total: 0, Online: 0}
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 50 * time.Millisecond,
+    }
+
+    d := NewDiscovery(cfg)
+
+    done := make(chan struct{})
+    go func() {
+        d.masterSyncLoop(context.Background())
+        close(done)
+    }()
+
+    time.Sleep(100 * time.Millisecond)
+    close(d.stopCh)
+
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("masterSyncLoop should exit on stopCh")
+    }
+}
+
+func TestDiscovery_checkNode_HealthyWithMetrics(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/health" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+        if r.URL.Path == "/v1/status" {
+            resp := struct {
+                Hardware struct {
+                    MemoryUsedRatio float64 `json:"memory_used_ratio"`
+                } `json:"hardware"`
+                Backends struct {
+                    FusionMLX struct {
+                        QueueDepth int `json:"queue_depth"`
+                    } `json:"fusion_mlx"`
+                } `json:"backends"`
+            }{}
+            resp.Hardware.MemoryUsedRatio = 0.65
+            resp.Backends.FusionMLX.QueueDepth = 7
+            _ = json.NewEncoder(w).Encode(resp)
+            return
+        }
+        w.WriteHeader(http.StatusNotFound)
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    d.checkNode(n1)
+
+    if n1.State() != NodeStateHealthy {
+        t.Errorf("expected healthy, got %s", n1.State())
+    }
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0.65 {
+        t.Errorf("expected 0.65, got %f", metrics.MemoryUsedRatio)
+    }
+    if metrics.QueueDepth != 7 {
+        t.Errorf("expected 7, got %d", metrics.QueueDepth)
+    }
+    if metrics.CollectedAt.IsZero() {
+        t.Errorf("expected non-zero CollectedAt")
+    }
+}
+
+func TestDiscovery_checkNode_FailedRequest(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://127.0.0.1:1", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+    d.client.Timeout = 1 * time.Second
+
+    n1, _ := d.GetNode("node-1")
+    d.checkNode(n1)
+
+    if n1.State() != NodeStateUnhealthy {
+        t.Errorf("expected unhealthy after connection failure, got %s", n1.State())
+    }
+}
+
+func TestDiscovery_fetchRemoteMetrics_Non200(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte("error"))
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "node-1", Address: srv.URL, state: NodeStateHealthy}
+    d.fetchRemoteMetrics(n1)
+
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0 {
+        t.Errorf("metrics should not be updated on non-200, got %f", metrics.MemoryUsedRatio)
+    }
+}
+
+func TestDiscovery_fetchRemoteMetrics_DecodeError(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("not json"))
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "node-1", Address: srv.URL, state: NodeStateHealthy}
+    d.fetchRemoteMetrics(n1)
+
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0 {
+        t.Errorf("metrics should not be updated on decode error, got %f", metrics.MemoryUsedRatio)
+    }
+}
+
+func TestDiscovery_fetchRemoteMetrics_ConnectionFailed(t *testing.T) {
+    cfg := makeClusterCfg(true)
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "node-1", Address: "http://127.0.0.1:1", state: NodeStateHealthy}
+    d.client.Timeout = 1 * time.Second
+    d.fetchRemoteMetrics(n1)
+
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0 {
+        t.Errorf("metrics should not be updated on connection failure, got %f", metrics.MemoryUsedRatio)
+    }
+}
+
+func TestDiscovery_fetchRemoteMetrics_BadURL(t *testing.T) {
+    cfg := makeClusterCfg(true)
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "node-1", Address: "://bad", state: NodeStateHealthy}
+    d.fetchRemoteMetrics(n1)
+
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0 {
+        t.Errorf("metrics should not be updated on bad URL, got %f", metrics.MemoryUsedRatio)
+    }
+}
+
+func TestDiscovery_checkFailureThreshold_DefaultThreshold(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    cfg.FailureThreshold = 0 // use default
+
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    // Default threshold is 3
+    for i := 0; i < 3; i++ {
+        n1.markUnhealthy()
+    }
+    d.checkFailureThreshold(n1)
+    if n1.State() != NodeStateDead {
+        t.Errorf("expected dead after 3 failures with default threshold, got %s", n1.State())
+    }
+}
+
+func TestDiscovery_checkFailureThreshold_NotReached(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    cfg.FailureThreshold = 5
+
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markUnhealthy()
+    d.checkFailureThreshold(n1)
+    if n1.State() == NodeStateDead {
+        t.Errorf("node should not be dead with only 1 failure and threshold 5")
+    }
+}
+
+func TestDiscovery_LoadNodesFromConfig_DuplicateID(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    all := d.AllNodes()
+    if len(all) != 1 {
+        t.Fatalf("duplicate IDs should be deduplicated, got %d", len(all))
+    }
+
+    n1, _ := d.GetNode("node-1")
+    if n1.Address != "http://localhost:9001" {
+        t.Errorf("should keep first occurrence, got %s", n1.Address)
+    }
+}
+
+func TestDiscovery_LoadNodesFromConfig_Idempotent(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+    d.loadNodesFromConfig()
+
+    all := d.AllNodes()
+    if len(all) != 1 {
+        t.Errorf("duplicate loadNodesFromConfig calls should not duplicate nodes, got %d", len(all))
+    }
+}
+
+func TestDiscovery_SelectNode_DefaultStrategy(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+
+    // Default strategy should fall back to least-connections
+    selected, err := d.SelectNode("unknown-strategy")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if selected.ID != "node-1" {
+        t.Errorf("expected node-1 with default strategy, got %s", selected.ID)
+    }
+}
+
+func TestDiscovery_SelectNodeID_Error(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    _, err := d.SelectNodeID("least-connections")
+    if err == nil {
+        t.Fatal("expected error when no healthy nodes for SelectNodeID")
+    }
+}
+
+func TestDiscovery_SelectNodeID_Success(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+
+    id, err := d.SelectNodeID("least-connections")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if id != "node-1" {
+        t.Errorf("expected node-1, got %s", id)
+    }
+}
+
+func TestDiscovery_HealthyNodeList(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-2", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+
+    list := d.HealthyNodeList()
+    if len(list) != 1 {
+        t.Fatalf("expected 1 healthy node, got %d", len(list))
+    }
+    if list[0].ID != "node-1" {
+        t.Errorf("expected node-1, got %s", list[0].ID)
+    }
+}
+
+func TestNode_markDead(t *testing.T) {
+    n := &Node{ID: "test", state: NodeStateUnhealthy}
+    n.markDead()
+    if n.State() != NodeStateDead {
+        t.Errorf("expected dead, got %s", n.State())
+    }
+}
+
+func TestDiscovery_Start_EmptyMode(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    cfg.Mode = "" // empty mode should default to standalone
+    cfg.HealthCheckInterval = 100 * time.Millisecond
+
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    time.Sleep(300 * time.Millisecond)
+
+    n1, _ := d.GetNode("node-1")
+    if n1.State() != NodeStateHealthy {
+        t.Errorf("expected healthy with empty mode defaulting to standalone, got %s", n1.State())
+    }
+}
+
+func TestDiscovery_checkNode_BadURL(t *testing.T) {
+    cfg := makeClusterCfg(true)
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "bad-node", Address: "://invalid", state: NodeStateUnhealthy}
+    d.checkNode(n1)
+
+    if n1.State() != NodeStateUnhealthy {
+        t.Errorf("expected unhealthy after bad URL, got %s", n1.State())
+    }
+}
+
+func TestDiscovery_nodeScore_NegativeMemAvail(t *testing.T) {
+    n := &Node{ID: "n1", MemoryGB: 16}
+    n.mu.Lock()
+    n.remoteMetrics = NodeRemoteMetrics{MemoryUsedRatio: 1.5, CollectedAt: time.Now()}
+    n.mu.Unlock()
+
+    d := NewDiscovery(makeClusterCfg(true))
+    score := d.nodeScore(n)
+
+    // memAvail = (1-1.5)*16 = -8, clamped to 0
+    if score < 0 {
+        t.Errorf("score should not be negative, got %f", score)
+    }
+}
+
+func TestDiscovery_nodeScore_WithInFlight(t *testing.T) {
+    n := &Node{ID: "n1", MemoryGB: 16}
+    n.mu.Lock()
+    n.remoteMetrics = NodeRemoteMetrics{MemoryUsedRatio: 0.5, QueueDepth: 2, CollectedAt: time.Now()}
+    n.mu.Unlock()
+    n.IncrInFlight()
+
+    d := NewDiscovery(makeClusterCfg(true))
+    score := d.nodeScore(n)
+    t.Logf("nodeScore with inFlight: %f", score)
+    if score <= 0 {
+        t.Errorf("score should be positive, got %f", score)
+    }
+}
+
+func TestDiscovery_nodeScore_StaticWithInFlight(t *testing.T) {
+    n := &Node{ID: "n1", MemoryGB: 16}
+    // No remote metrics, with in-flight
+    n.IncrInFlight()
+
+    d := NewDiscovery(makeClusterCfg(true))
+    score := d.nodeScore(n)
+    // Static: memScore = 16/(1+1) = 8
+    if score != 8.0 {
+        t.Errorf("expected 8.0, got %f", score)
+    }
+}
+
+func TestDiscovery_nodeScore_StaticNoInFlight(t *testing.T) {
+    n := &Node{ID: "n1", MemoryGB: 16}
+    // No remote metrics, no in-flight
+
+    d := NewDiscovery(makeClusterCfg(true))
+    score := d.nodeScore(n)
+    // Static: memScore = 16/(0+1) = 16
+    if score != 16.0 {
+        t.Errorf("expected 16.0, got %f", score)
+    }
+}
+
+func TestDiscovery_fetchRemoteMetrics_Success(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/v1/status" {
+            w.WriteHeader(http.StatusNotFound)
+            return
+        }
+        resp := struct {
+            Hardware struct {
+                MemoryUsedRatio float64 `json:"memory_used_ratio"`
+            } `json:"hardware"`
+            Backends struct {
+                FusionMLX struct {
+                    QueueDepth int `json:"queue_depth"`
+                } `json:"fusion_mlx"`
+            } `json:"backends"`
+        }{}
+        resp.Hardware.MemoryUsedRatio = 0.42
+        resp.Backends.FusionMLX.QueueDepth = 3
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true)
+    d := NewDiscovery(cfg)
+
+    n1 := &Node{ID: "node-1", Address: srv.URL, state: NodeStateHealthy}
+    d.fetchRemoteMetrics(n1)
+
+    metrics := n1.RemoteMetrics()
+    if metrics.MemoryUsedRatio != 0.42 {
+        t.Errorf("expected 0.42, got %f", metrics.MemoryUsedRatio)
+    }
+    if metrics.QueueDepth != 3 {
+        t.Errorf("expected 3, got %d", metrics.QueueDepth)
     }
 }

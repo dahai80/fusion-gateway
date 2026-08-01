@@ -137,6 +137,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
         return nil, fmt.Errorf("create anthropic request: %w", err)
     }
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic request failed: %w", err)
@@ -165,6 +166,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         return nil, fmt.Errorf("create anthropic stream request: %w", err)
     }
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic stream request failed: %w", err)
@@ -194,6 +196,7 @@ func (p *AnthropicProvider) Messages(ctx context.Context, req *AnthropicRequest)
         return nil, fmt.Errorf("create anthropic messages request: %w", err)
     }
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic messages request failed: %w", err)
@@ -221,6 +224,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
         return nil, fmt.Errorf("create anthropic stream messages request: %w", err)
     }
     p.setHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
     resp, err := p.httpClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic stream messages failed: %w", err)
@@ -272,12 +276,6 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
         n, err := body.Read(buf)
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
-        }
-        if err != nil {
-            if err != io.EOF {
-                slog.Error("anthropic sse read error", "error", err)
-            }
-            break
         }
         for {
             idx := bytes.IndexByte(lineBuf, byte('\n'))
@@ -365,6 +363,12 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
                 return
             }
         }
+        if err != nil {
+            if err != io.EOF {
+                slog.Error("anthropic sse read error", "error", err)
+            }
+            break
+        }
     }
 }
 
@@ -375,12 +379,6 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(body io.Reader, ch chan<-
         n, err := body.Read(buf)
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
-        }
-        if err != nil {
-            if err != io.EOF {
-                slog.Error("anthropic stream event read error", "error", err)
-            }
-            break
         }
         for {
             idx := bytes.IndexByte(lineBuf, 10)
@@ -402,6 +400,12 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(body io.Reader, ch chan<-
                 slog.Warn("anthropic stream event backpressure")
                 return
             }
+        }
+        if err != nil {
+            if err != io.EOF {
+                slog.Error("anthropic stream event read error", "error", err)
+            }
+            break
         }
     }
 }

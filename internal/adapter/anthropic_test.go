@@ -2,10 +2,338 @@ package adapter
 
 import (
     "context"
+    "encoding/json"
+    "log/slog"
+    "net/http"
+    "net/http/httptest"
+    "strings"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
+
+func TestAnthropicProvider_HealthCheck(t *testing.T) {
+    slog.Info("test AnthropicProvider_HealthCheck")
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: "https://api.anthropic.com",
+        APIKey:  "test-key",
+    })
+    if err := p.HealthCheck(context.Background()); err != nil {
+        t.Fatalf("expected nil health check, got %v", err)
+    }
+}
+
+func TestAnthropicProvider_Chat(t *testing.T) {
+    slog.Info("test AnthropicProvider_Chat")
+    antResp := AnthropicResponse{
+        ID:    "msg_test",
+        Type:  "message",
+        Role:  "assistant",
+        Model: "claude-3-5-sonnet-20241022",
+        Content: []AnthropicContentBlock{
+            {Type: "text", Text: "Hello from Claude!"},
+        },
+        StopReason: "end_turn",
+        Usage:      AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+    }
+    body, _ := json.Marshal(antResp)
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" && r.Method == http.MethodPost {
+            if r.Header.Get("x-api-key") != "test-key" {
+                t.Error("expected x-api-key header")
+            }
+            if r.Header.Get("anthropic-version") == "" {
+                t.Error("expected anthropic-version header")
+            }
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write(body)
+        } else {
+            w.WriteHeader(http.StatusNotFound)
+        }
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    resp, err := p.Chat(context.Background(), &ChatRequest{
+        Model:    "claude-3-5-sonnet-20241022",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    if resp.ID != "msg_test" {
+        t.Fatalf("expected msg_test, got %s", resp.ID)
+    }
+}
+
+func TestAnthropicProvider_Chat_Error(t *testing.T) {
+    slog.Info("test AnthropicProvider_Chat_Error")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte("internal error"))
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    _, err := p.Chat(context.Background(), &ChatRequest{
+        Model:    "test",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err == nil {
+        t.Fatal("expected error for 500 status")
+    }
+}
+
+func TestAnthropicProvider_Chat_ConnectionError(t *testing.T) {
+    slog.Info("test AnthropicProvider_Chat_ConnectionError")
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: "http://127.0.0.1:1",
+        APIKey:  "test-key",
+    })
+    _, err := p.Chat(context.Background(), &ChatRequest{
+        Model:    "test",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err == nil {
+        t.Fatal("expected error for connection refused")
+    }
+}
+
+func writeAnthropicSSE(w http.ResponseWriter, events [][]byte) {
+    flusher, canFlush := w.(http.Flusher)
+    w.Header().Set("Content-Type", "text/event-stream")
+    w.WriteHeader(http.StatusOK)
+    for _, ev := range events {
+        _, _ = w.Write([]byte("data: "))
+        _, _ = w.Write(ev)
+        _, _ = w.Write([]byte("\n"))
+    }
+    if canFlush {
+        flusher.Flush()
+    }
+}
+
+func TestAnthropicProvider_StreamChat(t *testing.T) {
+    slog.Info("test AnthropicProvider_StreamChat")
+    msgStartEvent := AnthropicStreamEvent{
+        Type: "message_start",
+        Message: &AnthropicResponse{
+            ID:    "msg_1",
+            Type:  "message",
+            Role:  "assistant",
+            Model: "claude-3-5-sonnet-20241022",
+            Usage: AnthropicUsage{InputTokens: 10},
+        },
+    }
+    deltaEvent := AnthropicStreamEvent{
+        Type:  "content_block_delta",
+        Index: 0,
+        Delta: json.RawMessage(`{"type":"text_delta","text":"hello"}`),
+    }
+    msgDeltaEvent := AnthropicStreamEvent{
+        Type:       "message_delta",
+        StopReason: "end_turn",
+        Usage:      &AnthropicUsage{OutputTokens: 5},
+    }
+    msgStopEvent := AnthropicStreamEvent{
+        Type: "message_stop",
+    }
+
+    b1, _ := json.Marshal(msgStartEvent)
+    b2, _ := json.Marshal(deltaEvent)
+    b3, _ := json.Marshal(msgDeltaEvent)
+    b4, _ := json.Marshal(msgStopEvent)
+
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" {
+            writeAnthropicSSE(w, [][]byte{b1, b2, b3, b4})
+        }
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    ch, err := p.StreamChat(context.Background(), &ChatRequest{
+        Model:    "claude-3-5-sonnet-20241022",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    var count int
+    for range ch {
+        count++
+    }
+    if count < 2 {
+        t.Fatalf("expected at least 2 chunks, got %d", count)
+    }
+}
+
+func TestAnthropicProvider_StreamChat_Error(t *testing.T) {
+    slog.Info("test AnthropicProvider_StreamChat_Error")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte("error"))
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    _, err := p.StreamChat(context.Background(), &ChatRequest{
+        Model:    "test",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err == nil {
+        t.Fatal("expected error for 500 status")
+    }
+}
+
+func TestAnthropicProvider_Messages(t *testing.T) {
+    slog.Info("test AnthropicProvider_Messages")
+    antResp := AnthropicResponse{
+        ID:    "msg_test2",
+        Type:  "message",
+        Role:  "assistant",
+        Model: "claude-3-5-sonnet-20241022",
+        Content: []AnthropicContentBlock{
+            {Type: "text", Text: "Hi from Messages"},
+        },
+        StopReason: "end_turn",
+        Usage:      AnthropicUsage{InputTokens: 5, OutputTokens: 3},
+    }
+    body, _ := json.Marshal(antResp)
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" {
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write(body)
+        }
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    resp, err := p.Messages(context.Background(), &AnthropicRequest{
+        Model:     "claude-3-5-sonnet-20241022",
+        MaxTokens: 1024,
+        Messages: []AnthropicMessage{{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}}}},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    if resp.ID != "msg_test2" {
+        t.Fatalf("expected msg_test2, got %s", resp.ID)
+    }
+}
+
+func TestAnthropicProvider_Messages_Error(t *testing.T) {
+    slog.Info("test AnthropicProvider_Messages_Error")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte("error"))
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    _, err := p.Messages(context.Background(), &AnthropicRequest{
+        Model:     "test",
+        MaxTokens: 1024,
+        Messages: []AnthropicMessage{{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}}}},
+    })
+    if err == nil {
+        t.Fatal("expected error for 500 status")
+    }
+}
+
+func TestAnthropicProvider_StreamMessages(t *testing.T) {
+    slog.Info("test AnthropicProvider_StreamMessages")
+    msgStartEvent := AnthropicStreamEvent{
+        Type: "message_start",
+        Message: &AnthropicResponse{
+            ID:    "msg_stream",
+            Type:  "message",
+            Role:  "assistant",
+            Model: "claude-3-5-sonnet-20241022",
+            Usage: AnthropicUsage{InputTokens: 10},
+        },
+    }
+    deltaEvent := AnthropicStreamEvent{
+        Type:  "content_block_delta",
+        Index: 0,
+        Delta: json.RawMessage(`{"type":"text_delta","text":"stream"}`),
+    }
+    msgStopEvent := AnthropicStreamEvent{
+        Type: "message_stop",
+    }
+
+    b1, _ := json.Marshal(msgStartEvent)
+    b2, _ := json.Marshal(deltaEvent)
+    b3, _ := json.Marshal(msgStopEvent)
+
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" {
+            writeAnthropicSSE(w, [][]byte{b1, b2, b3})
+        }
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    ch, err := p.StreamMessages(context.Background(), &AnthropicRequest{
+        Model:     "claude-3-5-sonnet-20241022",
+        MaxTokens: 1024,
+        Messages: []AnthropicMessage{{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}}}},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    var count int
+    for range ch {
+        count++
+    }
+    if count < 2 {
+        t.Fatalf("expected at least 2 events, got %d", count)
+    }
+}
+
+func TestAnthropicProvider_StreamMessages_Error(t *testing.T) {
+    slog.Info("test AnthropicProvider_StreamMessages_Error")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte("error"))
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    _, err := p.StreamMessages(context.Background(), &AnthropicRequest{
+        Model:     "test",
+        MaxTokens: 1024,
+        Messages: []AnthropicMessage{{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}}}},
+    })
+    if err == nil {
+        t.Fatal("expected error for 500 status")
+    }
+}
 
 func TestAnthropicProvider_Name(t *testing.T) {
     p := NewAnthropicProvider("anthropic", config.BackendConfig{
@@ -163,5 +491,129 @@ func TestAnthropicToOpenAI_ToolUse(t *testing.T) {
     chatResp := AnthropicToOpenAI(resp)
     if chatResp.Choices[0].FinishReason != "tool_calls" {
         t.Errorf("expected tool_calls, got %s", chatResp.Choices[0].FinishReason)
+    }
+}
+
+func TestAnthropicProvider_setHeaders(t *testing.T) {
+    slog.Info("test AnthropicProvider_setHeaders")
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: "http://localhost",
+        APIKey:  "test-key",
+    })
+    req, _ := http.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+    p.setHeaders(req)
+    if req.Header.Get("Content-Type") != "application/json" {
+        t.Error("expected application/json content type")
+    }
+    if req.Header.Get("x-api-key") != "test-key" {
+        t.Error("expected x-api-key")
+    }
+    if req.Header.Get("anthropic-version") == "" {
+        t.Error("expected anthropic-version header")
+    }
+}
+
+func TestParseAnthropicSSE(t *testing.T) {
+    slog.Info("test ParseAnthropicSSE")
+    msgStart := AnthropicStreamEvent{
+        Type: "message_start",
+        Message: &AnthropicResponse{
+            ID:    "msg_1",
+            Type:  "message",
+            Role:  "assistant",
+            Model: "claude-3-5-sonnet-20241022",
+            Usage: AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        },
+    }
+    deltaEvent := AnthropicStreamEvent{
+        Type:  "content_block_delta",
+        Index: 0,
+        Delta: json.RawMessage(`{"type":"text_delta","text":"hello"}`),
+    }
+    msgDelta := AnthropicStreamEvent{
+        Type:       "message_delta",
+        StopReason: "end_turn",
+        Usage:      &AnthropicUsage{OutputTokens: 5},
+    }
+    msgStop := AnthropicStreamEvent{
+        Type: "message_stop",
+    }
+
+    b1, _ := json.Marshal(msgStart)
+    b2, _ := json.Marshal(deltaEvent)
+    b3, _ := json.Marshal(msgDelta)
+    b4, _ := json.Marshal(msgStop)
+
+    var sbuf strings.Builder
+    sbuf.WriteString("data: ")
+    sbuf.Write(b1)
+    sbuf.WriteString("\n")
+    sbuf.WriteString("data: ")
+    sbuf.Write(b2)
+    sbuf.WriteString("\n")
+    sbuf.WriteString("data: ")
+    sbuf.Write(b3)
+    sbuf.WriteString("\n")
+    sbuf.WriteString("data: ")
+    sbuf.Write(b4)
+    sbuf.WriteString("\n")
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost"})
+    ch := make(chan StreamChunk, 64)
+    p.parseAnthropicSSE(strings.NewReader(sbuf.String()), ch, "claude-3-5-sonnet-20241022")
+    close(ch)
+
+    var chunks []StreamChunk
+    for c := range ch {
+        chunks = append(chunks, c)
+    }
+    if len(chunks) < 2 {
+        t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+    }
+}
+
+func TestParseAnthropicStreamEvents(t *testing.T) {
+    slog.Info("test ParseAnthropicStreamEvents")
+    event1 := AnthropicStreamEvent{
+        Type: "message_start",
+        Message: &AnthropicResponse{
+            ID:    "msg_1",
+            Type:  "message",
+            Role:  "assistant",
+            Model: "claude-3-5-sonnet-20241022",
+        },
+    }
+    event2 := AnthropicStreamEvent{
+        Type: "message_stop",
+    }
+
+    b1, _ := json.Marshal(event1)
+    b2, _ := json.Marshal(event2)
+
+    var sbuf strings.Builder
+    sbuf.WriteString("data: ")
+    sbuf.Write(b1)
+    sbuf.WriteString("\n")
+    sbuf.WriteString("data: ")
+    sbuf.Write(b2)
+    sbuf.WriteString("\n")
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost"})
+    ch := make(chan AnthropicStreamEvent, 64)
+    p.parseAnthropicStreamEvents(strings.NewReader(sbuf.String()), ch)
+    close(ch)
+
+    var events []AnthropicStreamEvent
+    for e := range ch {
+        events = append(events, e)
+    }
+    if len(events) != 2 {
+        t.Fatalf("expected 2 events, got %d", len(events))
+    }
+    if events[0].Type != "message_start" {
+        t.Errorf("expected message_start, got %s", events[0].Type)
+    }
+    if events[1].Type != "message_stop" {
+        t.Errorf("expected message_stop, got %s", events[1].Type)
     }
 }

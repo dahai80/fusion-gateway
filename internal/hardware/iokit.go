@@ -141,7 +141,7 @@ func collectIOKitGPUPurego(m *HardwareMetrics) error {
     propValue := ioRegistryEntryCreateCFPropertyFunc(service, propKey, kCFAllocatorDefault, 0)
     if propValue == 0 {
         slog.Debug("iokit: PerformanceStatistics property not found")
-        m.GPUCoreCount = getGPUCoreCount()
+        m.GPUCoreCount = getGPUCoreCountFn()
         return nil
     }
     defer cfReleaseFunc(propValue)
@@ -155,7 +155,7 @@ func collectIOKitGPUPurego(m *HardwareMetrics) error {
         slog.Debug("iokit: PerformanceStatistics is not CFDictionary", "type_id", typeID)
     }
 
-    m.GPUCoreCount = getGPUCoreCount()
+    m.GPUCoreCount = getGPUCoreCountFn()
 
     slog.Debug("iokit gpu purego: collected",
         "device_util", m.GPUDeviceUtilization,
@@ -234,13 +234,12 @@ func extractGPUMetricsFromDict(dict uintptr, m *HardwareMetrics) {
 func collectIOKitGPUViaIoreg(m *HardwareMetrics) error {
     slog.Debug("iokit gpu: collecting via ioreg")
 
-    cmd := exec.Command("ioreg", "-r", "-d", "1", "-w", "0", "-c", "AGXAccelerator")
-    output, err := cmd.Output()
+    output, err := ioregCmdFn()
     if err != nil {
         return fmt.Errorf("ioreg command failed: %w", err)
     }
 
-    m.GPUCoreCount = getGPUCoreCount()
+    m.GPUCoreCount = getGPUCoreCountFn()
 
     stats, err := parseIoregPerformanceStats(string(output))
     if err != nil {
@@ -357,9 +356,22 @@ func parseIoregKeyValue(line string) (string, float64, bool) {
     return key, val, true
 }
 
+var getGPUCoreCountFn = getGPUCoreCount
+
+var ioregCmdFn = defaultIoregCmd
+
+func defaultIoregCmd() ([]byte, error) {
+    return exec.Command("ioreg", "-r", "-d", "1", "-w", "0", "-c", "AGXAccelerator").Output()
+}
+
+var gpuCoreCountCmdFn = defaultGPUCoreCountCmd
+
+func defaultGPUCoreCountCmd() ([]byte, error) {
+    return exec.Command("sysctl", "-n", "hw.gpucorecount").Output()
+}
+
 func getGPUCoreCount() int {
-    cmd := exec.Command("sysctl", "-n", "hw.gpucorecount")
-    output, err := cmd.Output()
+    output, err := gpuCoreCountCmdFn()
     if err != nil {
         slog.Debug("iokit: failed to read gpu core count", "error", err)
         return 0

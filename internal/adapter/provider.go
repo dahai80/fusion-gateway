@@ -2,7 +2,44 @@ package adapter
 
 import (
     "context"
+    "net/http"
 )
+
+type fusionHeadersKey struct{}
+
+var fusionPassthroughHeaders = []string{
+    "X-Fusion-Project-Id",
+    "X-Fusion-Chat-Id",
+    "X-Space-Id",
+}
+
+func WithFusionHeaders(ctx context.Context, r *http.Request) context.Context {
+    headers := make(map[string]string)
+    for _, h := range fusionPassthroughHeaders {
+        if v := r.Header.Get(h); v != "" {
+            headers[h] = v
+        }
+    }
+    if len(headers) == 0 {
+        return ctx
+    }
+    return context.WithValue(ctx, fusionHeadersKey{}, headers)
+}
+
+func InjectFusionHeaders(ctx context.Context, req *http.Request) {
+    headers, _ := ctx.Value(fusionHeadersKey{}).(map[string]string)
+    for k, v := range headers {
+        req.Header.Set(k, v)
+    }
+}
+
+func SpaceIDFromContext(ctx context.Context) string {
+    headers, _ := ctx.Value(fusionHeadersKey{}).(map[string]string)
+    if headers == nil {
+        return ""
+    }
+    return headers["X-Space-Id"]
+}
 
 type ChatMessage struct {
     Role    string      `json:"role"`
