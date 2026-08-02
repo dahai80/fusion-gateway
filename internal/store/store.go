@@ -52,6 +52,7 @@ type APIKeyEntry struct {
     ExpiresAt       *time.Time        `json:"expires_at"`
     BudgetLimit     float64           `json:"budget_limit"`
     AllowedBackends []string          `json:"allowed_backends"`
+    ModelModules    []string          `json:"model_modules"`
     Metadata        map[string]string `json:"metadata"`
     CreatedAt       time.Time         `json:"created_at"`
     UpdatedAt       time.Time         `json:"updated_at"`

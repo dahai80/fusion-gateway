@@ -68,6 +68,8 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
             p.AuthMethod = "apikey"
             p.IsMaster = false
             p.KeyConfig = matchedKey
+            p.ModelModules = matchedKey.ModelModules
+            slog.Debug("api key authenticated", "key", matchedKey.Name, "modules", matchedKey.ModelModules)
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
@@ -92,6 +94,37 @@ func CheckModelAllowlist(r *http.Request, model string) bool {
             return true
         }
         if strings.HasSuffix(allowed, "*") && strings.HasPrefix(model, allowed[:len(allowed)-1]) {
+            return true
+        }
+    }
+
+    return false
+}
+
+var validModuleSet = map[string]bool{
+    "chat":   true,
+    "code":   true,
+    "design": true,
+    "rag":    true,
+    "agent":  true,
+}
+
+func ValidModule(module string) bool {
+    return validModuleSet[module]
+}
+
+func CheckModelModuleAccess(r *http.Request, module string) bool {
+    p := PrincipalFromContext(r.Context())
+    if p == nil || p.IsMaster {
+        return true
+    }
+
+    if len(p.ModelModules) == 0 {
+        return true
+    }
+
+    for _, allowed := range p.ModelModules {
+        if allowed == "*" || allowed == module {
             return true
         }
     }

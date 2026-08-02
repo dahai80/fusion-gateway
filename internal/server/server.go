@@ -264,6 +264,9 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/batches", s.withMiddleware(s.handleBatches))
     mux.HandleFunc("/v1/batches/", s.withMiddleware(s.handleBatchCRUD))
 
+    // Model-hub reverse proxy routes
+    s.setupModelHubRoutes(mux)
+
     // Connector plugin framework routes
     mux.HandleFunc("/gateway/v1/connector/list", s.withMiddleware(s.handleConnectorList))
     mux.HandleFunc("/gateway/v1/connector/test", s.withMiddleware(s.handleConnectorTest))
