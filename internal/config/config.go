@@ -381,6 +381,16 @@ type StoreConfig struct {
     Redis   RedisConfig `mapstructure:"redis"`
 }
 
+type MCPConfig struct {
+    Enabled     bool  `mapstructure:"enabled"`
+    Host        string `mapstructure:"host"`
+    Port        int    `mapstructure:"port"`
+    TokenBudget int64  `mapstructure:"token_budget"`
+    MaxRequests int    `mapstructure:"max_requests"`
+    NodePort    int    `mapstructure:"node_port"`
+    LocalPort   int    `mapstructure:"local_port"`
+}
+
 type Config struct {
     Server        ServerConfig             `mapstructure:"server"`
     Auth          AuthConfig               `mapstructure:"auth"`
@@ -409,6 +419,7 @@ type Config struct {
     Store         StoreConfig              `mapstructure:"store"`
     Encryption    *EncryptionConfig        `mapstructure:"encryption"`
     Connector     *ConnectorConfig         `mapstructure:"connector"`
+    MCP           MCPConfig                `mapstructure:"mcp"`
 }
 
 type ConfigSnapshot struct {

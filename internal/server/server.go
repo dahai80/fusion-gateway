@@ -24,6 +24,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
@@ -65,6 +66,7 @@ type Server struct {
     }
     connectorRegistry *connector.Registry
     oauth2States      map[string]time.Time
+    mcpHandler        *mcp.Handler
     oauth2StatesMu    sync.RWMutex
 }
 
@@ -238,9 +240,29 @@ func New(
         adminAuth:         adminAuthObj,
         connectorRegistry: newConnectorRegistry(cfg),
         oauth2States:      make(map[string]time.Time),
+        mcpHandler:        initMCPHandler(cfg),
     }
     go srv.evictOAuth2States()
     return srv
+}
+
+func initMCPHandler(cfg *config.ConfigSnapshot) *mcp.Handler {
+    if !cfg.Config.MCP.Enabled {
+        slog.Info("MCP gateway disabled")
+        return nil
+    }
+    gwCfg := mcp.GatewayConfig{
+        Host:        cfg.Config.MCP.Host,
+        Port:        cfg.Config.MCP.Port,
+        TokenBudget: cfg.Config.MCP.TokenBudget,
+        MaxRequests: cfg.Config.MCP.MaxRequests,
+        NodePort:    cfg.Config.MCP.NodePort,
+        LocalPort:   cfg.Config.MCP.LocalPort,
+    }
+    gw := mcp.NewMCPClusterGateway(gwCfg)
+    gw.Start()
+    slog.Info("MCP cluster gateway initialized", "host", gwCfg.Host, "port", gwCfg.Port)
+    return mcp.NewHandler(gw)
 }
 
 func (s *Server) Start() error {
@@ -266,6 +288,11 @@ func (s *Server) Start() error {
 
     // Model-hub reverse proxy routes
     s.setupModelHubRoutes(mux)
+
+    // MCP cluster gateway routes
+    if s.mcpHandler != nil {
+        s.mcpHandler.RegisterRoutes(mux)
+    }
 
     // Connector plugin framework routes
     mux.HandleFunc("/gateway/v1/connector/list", s.withMiddleware(s.handleConnectorList))
