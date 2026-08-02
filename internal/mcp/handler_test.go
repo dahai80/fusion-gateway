@@ -34,7 +34,7 @@ func TestHandler_ToolsList(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	tools, ok := resp["tools"].([]interface{})
 	if !ok {
 		t.Fatal("tools field missing or wrong type")
@@ -69,7 +69,7 @@ func TestHandler_ToolRegister(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "registered" {
 		t.Errorf("status = %v, want registered", resp["status"])
 	}
@@ -118,7 +118,7 @@ func TestHandler_ToolUnregister(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "unregistered" {
 		t.Errorf("status = %v, want unregistered", resp["status"])
 	}
@@ -205,7 +205,7 @@ func TestHandler_Stats(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["registered_tools"] != float64(1) {
 		t.Errorf("registered_tools = %v, want 1", resp["registered_tools"])
 	}
@@ -233,7 +233,7 @@ func TestHandler_Health(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "ok" {
 		t.Errorf("status = %v, want ok", resp["status"])
 	}
@@ -251,7 +251,7 @@ func TestHandler_Health_Stopped(t *testing.T) {
 	h.handleHealth(w, req)
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "stopped" {
 		t.Errorf("status = %v, want stopped", resp["status"])
 	}
@@ -270,7 +270,7 @@ func TestHandler_Health_TokenBudgetExhausted(t *testing.T) {
 	h.handleHealth(w, req)
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "token_budget_exhausted" {
 		t.Errorf("status = %v, want token_budget_exhausted", resp["status"])
 	}
@@ -305,7 +305,7 @@ func TestHealthCheck_RemoteSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/mcp/v1/health" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
