@@ -1641,6 +1641,7 @@ type authKeyResponse struct {
     TPM             int               `json:"tpm"`
     AllowedModels   []string          `json:"allowed_models"`
     AllowedBackends []string          `json:"allowed_backends"`
+    ModelModules    []string          `json:"model_modules"`
     ExpiresAt       string            `json:"expires_at"`
     BudgetLimit     float64           `json:"budget_limit"`
     Metadata        map[string]string `json:"metadata"`
@@ -1670,6 +1671,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                 Key: maskAPIKey(k.Key), Name: k.Name,
                 RPM: k.RPM, TPM: k.TPM,
                 AllowedModels: k.AllowedModels, AllowedBackends: k.AllowedBackends,
+                ModelModules: k.ModelModules,
                 ExpiresAt: k.ExpiresAt, BudgetLimit: k.BudgetLimit,
                 Metadata: k.Metadata,
             })
@@ -1696,6 +1698,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                         "name": k.Name, "rpm": k.RPM, "tpm": k.TPM,
                         "allowed_models": stringSliceToInterface(k.AllowedModels),
                         "allowed_backends": stringSliceToInterface(k.AllowedBackends),
+                        "model_modules": stringSliceToInterface(k.ModelModules),
                         "expires_at": k.ExpiresAt, "budget_limit": k.BudgetLimit,
                     }
                     if k.Key != "" && !isMaskedValue(k.Key) {
@@ -1722,6 +1725,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                         RPM: getInt(m, "rpm"), TPM: getInt(m, "tpm"),
                         AllowedModels: interfaceToStringSlice(m["allowed_models"]),
                         AllowedBackends: interfaceToStringSlice(m["allowed_backends"]),
+                        ModelModules: interfaceToStringSlice(m["model_modules"]),
                         ExpiresAt: getString(m, "expires_at"), BudgetLimit: getFloat64(m, "budget_limit"),
                         Metadata: interfaceToStringMap(m["metadata"]),
                     })

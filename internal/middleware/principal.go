@@ -16,13 +16,14 @@ import (
 )
 
 type Principal struct {
-    AuthMethod string
-    KeyConfig  *config.AuthKeyConfig
-    IsMaster   bool
-    OIDCClaims jwt.MapClaims
-    OIDCToken  string
-    Role       Role
-    Team       *TeamInfo
+    AuthMethod   string
+    KeyConfig    *config.AuthKeyConfig
+    IsMaster     bool
+    OIDCClaims   jwt.MapClaims
+    OIDCToken    string
+    Role         Role
+    Team         *TeamInfo
+    ModelModules []string
 }
 
 type principalKey string

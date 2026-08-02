@@ -49,6 +49,7 @@ type AuthKeyConfig struct {
     Name            string            `mapstructure:"name"`
     AllowedBackends []string          `mapstructure:"allowed_backends"`
     AllowedModels   []string          `mapstructure:"allowed_models"`
+    ModelModules    []string          `mapstructure:"model_modules"`
     RPM             int               `mapstructure:"rpm"`
     TPM             int               `mapstructure:"tpm"`
     ExpiresAt       string            `mapstructure:"expires_at"`

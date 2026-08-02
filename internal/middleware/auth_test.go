@@ -283,3 +283,69 @@ func TestExtractAPIKey_None(t *testing.T) {
         t.Errorf("expected empty, got %s", key)
     }
 }
+
+func TestCheckModelModuleAccess_MasterKey(t *testing.T) {
+    p := &Principal{IsMaster: true}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+    if !CheckModelModuleAccess(req, "chat") {
+        t.Error("master key should allow any module")
+    }
+}
+
+func TestCheckModelModuleAccess_NoPrincipal(t *testing.T) {
+    req := httptest.NewRequest(http.MethodGet, "/", nil)
+    if !CheckModelModuleAccess(req, "chat") {
+        t.Error("no principal should allow access")
+    }
+}
+
+func TestCheckModelModuleAccess_NoModules(t *testing.T) {
+    p := &Principal{ModelModules: nil}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+    if !CheckModelModuleAccess(req, "chat") {
+        t.Error("empty ModelModules should allow access")
+    }
+}
+
+func TestCheckModelModuleAccess_Allowed(t *testing.T) {
+    p := &Principal{ModelModules: []string{"chat", "code"}}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+    if !CheckModelModuleAccess(req, "chat") {
+        t.Error("chat should be allowed")
+    }
+    if !CheckModelModuleAccess(req, "code") {
+        t.Error("code should be allowed")
+    }
+}
+
+func TestCheckModelModuleAccess_Denied(t *testing.T) {
+    p := &Principal{ModelModules: []string{"chat"}}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+    if CheckModelModuleAccess(req, "agent") {
+        t.Error("agent should be denied")
+    }
+}
+
+func TestCheckModelModuleAccess_Wildcard(t *testing.T) {
+    p := &Principal{ModelModules: []string{"*"}}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+    if !CheckModelModuleAccess(req, "agent") {
+        t.Error("wildcard should allow any module")
+    }
+}
+
+func TestValidModule(t *testing.T) {
+    for _, m := range []string{"chat", "code", "design", "rag", "agent"} {
+        if !ValidModule(m) {
+            t.Errorf("%s should be valid", m)
+        }
+    }
+    if ValidModule("invalid") {
+        t.Error("invalid should not be valid module")
+    }
+}

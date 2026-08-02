@@ -122,13 +122,14 @@ func extractBearerToken(r *http.Request) string {
 }
 
 type createKeyRequest struct {
-    Name   string        `json:"name"`
-    Status interface{}   `json:"status"`
-    Models []string      `json:"models"`
-    Quota  float64       `json:"quota"`
-    RPM    int           `json:"rpm"`
-    TPM    int           `json:"tpm"`
-    Budget float64       `json:"budget"`
+    Name    string        `json:"name"`
+    Status  interface{}   `json:"status"`
+    Models  []string      `json:"models"`
+    Modules []string      `json:"modules"`
+    Quota   float64       `json:"quota"`
+    RPM     int           `json:"rpm"`
+    TPM     int           `json:"tpm"`
+    Budget  float64       `json:"budget"`
 }
 
 type createChannelRequest struct {
@@ -173,6 +174,7 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
                 Name:      k.Name,
                 Status:    statusToNumber(k.Status),
                 Models:    k.AllowedModels,
+                Modules:   k.ModelModules,
                 Quota:     k.QuotaLimit,
                 UsedQuota: k.QuotaUsed,
                 CreatedAt: k.CreatedAt.Format(time.RFC3339),
@@ -187,13 +189,14 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             return
         }
         key := store.APIKeyEntry{
-            Name:          req.Name,
-            Status:        normalizeStatus(req.Status),
-            AllowedModels: req.Models,
-            QuotaLimit:    req.Quota,
-            RPM:           req.RPM,
-            TPM:           req.TPM,
-            BudgetLimit:   req.Budget,
+            Name:            req.Name,
+            Status:          normalizeStatus(req.Status),
+            AllowedModels:   req.Models,
+            ModelModules:    req.Modules,
+            QuotaLimit:      req.Quota,
+            RPM:             req.RPM,
+            TPM:             req.TPM,
+            BudgetLimit:     req.Budget,
         }
         // V1 fix: validate key fields
         if key.Name == "" {
@@ -254,6 +257,7 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             Name:          name,
             Status:        normalizeStatus(req.Status),
             AllowedModels: req.Models,
+            ModelModules:  req.Modules,
             QuotaLimit:    req.Quota,
             RPM:           req.RPM,
             TPM:           req.TPM,
@@ -805,6 +809,7 @@ type keyResponse struct {
     Name      string   `json:"name"`
     Status    int      `json:"status"`
     Models    []string `json:"models"`
+    Modules   []string `json:"modules"`
     Quota     float64  `json:"quota"`
     UsedQuota float64  `json:"used_quota"`
     CreatedAt string   `json:"created_at"`

@@ -70,6 +70,17 @@ func (p *Pool) GetFusionMLX() *FusionMLXProvider {
     return nil
 }
 
+func (p *Pool) GetModelHub() *FusionModelHubProvider {
+    p.mu.RLock()
+    defer p.mu.RUnlock()
+    for _, prov := range p.providers {
+        if hub, ok := prov.(*FusionModelHubProvider); ok {
+            return hub
+        }
+    }
+    return nil
+}
+
 func (p *Pool) HealthCheckAll(ctx context.Context) map[string]error {
     p.mu.RLock()
     defer p.mu.RUnlock()
@@ -141,6 +152,9 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         case "fusion-kb":
             provider := NewFusionKBProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered fusion-kb provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "fusion-model-hub":
+            provider := NewFusionModelHubProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered fusion-model-hub provider", "name", name, "base_url", backendCfg.BaseURL)
         default:
             // M3 fix: fail-fast on unknown backend type instead of silent skip
             return fmt.Errorf("unknown backend type: %s for backend %q", backendCfg.Type, name)
