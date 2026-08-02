@@ -14,6 +14,7 @@ Fusion-Gateway :11432
 |- Preprocessing       -- Tokenizer counting, prompt validation, param defaults
 |- Routing Engine      -- Rule engine + hardware load sensing (core differentiator)
 |- Adapter Pool        -- Unified interface for all inference backends
+|- MCP Gateway         -- MCP cluster tool registry, routing, token budget
 |- Stream Forwarding   -- SSE, cancel, retry, KV cache release
 |- Observability       -- Logs, metrics, hot config reload
         |
@@ -100,6 +101,13 @@ See `config.example.yaml` for full reference. Key settings:
 | `server.tls.key_file` | "" | TLS private key file |
 | `encryption.master_key` | "" | AES-256 master key for at-rest encryption (≥32 chars) |
 | `connector.persistence_path` | data/connections.json | Connection credentials file path |
+| `mcp.enabled` | false | Enable MCP cluster gateway |
+| `mcp.host` | 127.0.0.1 | MCP gateway host |
+| `mcp.port` | 11446 | MCP gateway port |
+| `mcp.token_budget` | 10000000 | Token budget for MCP tool calls |
+| `mcp.max_requests` | 10000 | Max tracked MCP requests |
+| `mcp.node_port` | 11445 | Remote node port for forwarding |
+| `mcp.local_port` | 9000 | Local plugin server port |
 
 ## API Endpoints
 
@@ -140,6 +148,13 @@ See `config.example.yaml` for full reference. Key settings:
 | `/gateway/v1/connection/{id}/refresh` | POST | Refresh connection authorization |
 | `/gateway/v1/oauth2/authorize` | POST | Generate OAuth2 authorization URL |
 | `/gateway/v1/oauth2/callback` | GET | OAuth2 callback — exchange code for tokens |
+| `/mcp/v1/tools` | GET | List registered MCP tools |
+| `/mcp/v1/tools/register` | POST | Register an MCP tool |
+| `/mcp/v1/tools/unregister` | POST | Unregister an MCP tool |
+| `/mcp/v1/call` | POST | Call an MCP tool (forwarded to node) |
+| `/mcp/v1/stats` | GET | MCP gateway statistics |
+| `/mcp/v1/health` | GET | MCP gateway health check |
+| `/api/v1/` | ANY | Model-hub reverse proxy (with module permission enforcement) |
 
 ## Routing Logic
 
