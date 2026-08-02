@@ -30,6 +30,9 @@ auth:
               - "gpt-4o*"
               - "claude-3*"
               - "qwen*"
+          model_modules:                       # Module access for model-hub (chat, code, design, rag, agent)
+              - "chat"
+              - "code"
           expires_at: ""                       # RFC3339 expiry, e.g. "2025-12-31T23:59:59Z"
           budget_limit: 0                      # Monthly budget in USD (0 = unlimited)
         - key: "fg-admin-key"
@@ -145,6 +148,12 @@ backends:
         type: "fusion-kb"
         base_url: "http://127.0.0.1:11436"
         timeout: 120s
+        enabled: true
+    model-hub:
+        type: "fusion-model-hub"
+        base_url: "http://127.0.0.1:11444"
+        api_key: ""
+        timeout: 30s
         enabled: true
     openai:
         type: "openai-compatible"
