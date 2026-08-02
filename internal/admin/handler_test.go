@@ -1055,7 +1055,7 @@ func TestHandleChannelByID(t *testing.T) {
         body := map[string]interface{}{
             "name":     "local-mlx",
             "type":     "local",
-            "base_url": "http://localhost:11435",
+            "base_url": "http://localhost:11444",
             "status":   "disabled",
             "priority": 2,
             "weight":   5,
@@ -2370,7 +2370,7 @@ backends:
         loadTestConfig(t, backendsYAML)
 
         h := newTestHandler(t, ms, auth, configPath)
-        body := map[string]interface{}{"base_url": "http://localhost:11435"}
+        body := map[string]interface{}{"base_url": "http://localhost:11444"}
         req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/backends/local", body)
         rec := httptest.NewRecorder()
         h.handleBackendByName(rec, req)
