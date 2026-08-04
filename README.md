@@ -120,7 +120,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
-| `/v1/models` | GET | List available models |
+| `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `route.mode: local` lists only local providers) |
 | `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/health` | GET | Full health check with backend status |

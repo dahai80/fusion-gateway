@@ -98,6 +98,31 @@ func TestPool_ListProviders(t *testing.T) {
     }
 }
 
+func TestPool_IsLocalProvider(t *testing.T) {
+    slog.Info("test Pool_IsLocalProvider")
+    p := NewPool()
+    p.Register("mlx", &dummyProvider{name: "mlx"}, config.BackendConfig{Type: "fusion-mlx"})
+    p.Register("kb", &dummyProvider{name: "kb"}, config.BackendConfig{Type: "fusion-kb"})
+    p.Register("hub", &dummyProvider{name: "hub"}, config.BackendConfig{Type: "fusion-model-hub"})
+    p.Register("cloud", &dummyProvider{name: "cloud"}, config.BackendConfig{Type: "openai-compatible"})
+
+    cases := []struct {
+        name string
+        want bool
+    }{
+        {"mlx", true},
+        {"kb", true},
+        {"hub", true},
+        {"cloud", false},
+        {"nonexistent", false},
+    }
+    for _, c := range cases {
+        if got := p.IsLocalProvider(c.name); got != c.want {
+            t.Errorf("IsLocalProvider(%q) = %v, want %v", c.name, got, c.want)
+        }
+    }
+}
+
 func TestPool_GetFusionMLX(t *testing.T) {
     slog.Info("test Pool_GetFusionMLX")
     p := NewPool()

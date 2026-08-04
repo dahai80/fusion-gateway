@@ -59,6 +59,23 @@ func (p *Pool) ListProviders() []string {
     return names
 }
 
+// IsLocalProvider reports whether the named provider is a local backend
+// (fusion-mlx / fusion-kb / fusion-model-hub) rather than a cloud provider.
+// Used to filter /v1/models results when routing mode is "local".
+func (p *Pool) IsLocalProvider(name string) bool {
+    p.mu.RLock()
+    defer p.mu.RUnlock()
+    bc, ok := p.backends[name]
+    if !ok {
+        return false
+    }
+    switch bc.Type {
+    case "fusion-mlx", "fusion-kb", "fusion-model-hub":
+        return true
+    }
+    return false
+}
+
 func (p *Pool) GetFusionMLX() *FusionMLXProvider {
     p.mu.RLock()
     defer p.mu.RUnlock()

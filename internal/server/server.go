@@ -1222,31 +1222,82 @@ func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
     s.realtimeProxy.UpgradeAndProxy(w, r, backendURL, apiKey)
 }
 
+// listModelsPerProviderTimeout bounds each provider's ListModels call so a
+// single unreachable cloud backend cannot stall the /v1/models endpoint.
+const listModelsPerProviderTimeout = 3 * time.Second
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     ctx := adapter.WithFusionHeaders(r.Context(), r)
-    models := make([]adapter.ModelInfo, 0)
+    snap := config.SnapshotFromContext(ctx)
 
-    for _, name := range s.pool.ListProviders() {
-        provider, ok := s.pool.Get(name)
-        if !ok {
-            continue
+    providerNames := s.pool.ListProviders()
+
+    // mode=local: only return models from local providers (fusion-mlx/kb/hub),
+    // so a downstream health check never waits on slow cloud backends.
+    if snap.Config.Routing.Mode == "local" {
+        localOnly := make([]string, 0, len(providerNames))
+        for _, name := range providerNames {
+            if s.pool.IsLocalProvider(name) {
+                localOnly = append(localOnly, name)
+            }
         }
-        providerModels, err := provider.ListModels(ctx)
-        if err != nil {
-            slog.Debug("list models failed for provider", "provider", name, "error", err)
-            continue
-        }
-        for _, m := range providerModels {
-            m.AvailableBackends = []string{name}
-            models = append(models, m)
-        }
+        slog.Debug("mode=local, listing only local providers", "total", len(providerNames), "local", len(localOnly))
+        providerNames = localOnly
     }
+
+    models := s.listModelsConcurrent(ctx, providerNames)
 
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",
         "data":   models,
     })
+}
+
+// listModelsConcurrent fans out ListModels across providers with a per-provider
+// timeout. Failed or timed-out providers are skipped (logged at Debug) so the
+// fast local models are never blocked by a slow/unreachable cloud backend.
+func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []adapter.ModelInfo {
+    type providerResult struct {
+        name   string
+        models []adapter.ModelInfo
+        err    error
+    }
+
+    results := make(chan providerResult, len(names))
+    var wg sync.WaitGroup
+
+    for _, name := range names {
+        wg.Add(1)
+        go func(name string) {
+            defer wg.Done()
+            provider, ok := s.pool.Get(name)
+            if !ok {
+                results <- providerResult{name: name, err: fmt.Errorf("provider not found")}
+                return
+            }
+            pCtx, cancel := context.WithTimeout(ctx, listModelsPerProviderTimeout)
+            defer cancel()
+            providerModels, err := provider.ListModels(pCtx)
+            results <- providerResult{name: name, models: providerModels, err: err}
+        }(name)
+    }
+
+    wg.Wait()
+    close(results)
+
+    models := make([]adapter.ModelInfo, 0)
+    for res := range results {
+        if res.err != nil {
+            slog.Debug("list models failed for provider, skipping", "provider", res.name, "error", res.err)
+            continue
+        }
+        for _, m := range res.models {
+            m.AvailableBackends = []string{res.name}
+            models = append(models, m)
+        }
+    }
+    return models
 }
 
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
