@@ -61,6 +61,8 @@ func (p *FusionModelHubProvider) director(req *http.Request) {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
+	req.Header.Set("X-Fusion-Source", "gateway")
+
 	if _, ok := req.Header["User-Agent"]; !ok {
 		req.Header.Set("User-Agent", "fusion-gateway/model-hub-proxy")
 	}

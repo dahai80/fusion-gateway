@@ -85,6 +85,15 @@ func (s *Server) Cache() *cache.Cache {
     return s.cache
 }
 
+func (s *Server) checkBackendAccess(w http.ResponseWriter, r *http.Request, backend string) bool {
+    if !middleware.CheckBackendAccess(r, backend) {
+        slog.Warn("backend access denied", "backend", backend)
+        http.Error(w, `{"error":{"message":"Backend not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return false
+    }
+    return true
+}
+
 func newConnectorRegistry(cfg *config.ConfigSnapshot) *connector.Registry {
     r := connector.NewRegistry()
     connector.RegisterBuiltins(r)
@@ -285,6 +294,9 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
     mux.HandleFunc("/v1/batches", s.withMiddleware(s.handleBatches))
     mux.HandleFunc("/v1/batches/", s.withMiddleware(s.handleBatchCRUD))
+
+    // Model load/unload interception -> redirect to model-hub
+    mux.HandleFunc("/v1/models/", s.withMiddleware(s.handleModelLoadUnload))
 
     // Model-hub reverse proxy routes
     s.setupModelHubRoutes(mux)
@@ -518,6 +530,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
     decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
+
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
 
     slog.Info("route decision",
         "model", req.Model,
@@ -989,6 +1005,10 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     slog.Info("embedding route decision",
         "model", req.Model,
         "backend", string(decision.Backend),
@@ -1102,6 +1122,10 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     }
     decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
+
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
 
     slog.Info("rerank route decision",
         "model", req.Model,
@@ -1597,6 +1621,10 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
     decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     slog.Info("route decision (completions)",
         "model", chatReq.Model,
         "backend", string(decision.Backend),
@@ -1685,6 +1713,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Stream: antReq.Stream})
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason)
 
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     var provider adapter.Provider
     if decision.Backend == router.LocalBackend {
         provider, _ = s.pool.Get("fusion-mlx")
@@ -1771,6 +1803,11 @@ func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: model})
+
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
 
@@ -1820,6 +1857,11 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
 
@@ -1868,6 +1910,11 @@ func (s *Server) handleModeration(w http.ResponseWriter, r *http.Request) {
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
 

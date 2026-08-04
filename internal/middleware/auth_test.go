@@ -349,3 +349,72 @@ func TestValidModule(t *testing.T) {
         t.Error("invalid should not be valid module")
     }
 }
+
+func TestCheckBackendAccess_NilPrincipal(t *testing.T) {
+    slog.Info("test CheckBackendAccess_NilPrincipal")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    if !CheckBackendAccess(req, "local") {
+        t.Fatal("nil principal should allow all backends")
+    }
+}
+
+func TestCheckBackendAccess_MasterKey(t *testing.T) {
+    slog.Info("test CheckBackendAccess_MasterKey")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{IsMaster: true})
+    req = req.WithContext(ctx)
+    if !CheckBackendAccess(req, "cloud") {
+        t.Fatal("master key should allow all backends")
+    }
+}
+
+func TestCheckBackendAccess_NoRestriction(t *testing.T) {
+    slog.Info("test CheckBackendAccess_NoRestriction")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{
+        KeyConfig: &config.AuthKeyConfig{},
+    })
+    req = req.WithContext(ctx)
+    if !CheckBackendAccess(req, "cloud") {
+        t.Fatal("empty allowed_backends should allow all")
+    }
+}
+
+func TestCheckBackendAccess_Allowed(t *testing.T) {
+    slog.Info("test CheckBackendAccess_Allowed")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{
+        KeyConfig: &config.AuthKeyConfig{AllowedBackends: []string{"local", "cloud"}},
+    })
+    req = req.WithContext(ctx)
+    if !CheckBackendAccess(req, "local") {
+        t.Fatal("local should be allowed")
+    }
+    if !CheckBackendAccess(req, "cloud") {
+        t.Fatal("cloud should be allowed")
+    }
+}
+
+func TestCheckBackendAccess_Denied(t *testing.T) {
+    slog.Info("test CheckBackendAccess_Denied")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{
+        KeyConfig: &config.AuthKeyConfig{AllowedBackends: []string{"local"}},
+    })
+    req = req.WithContext(ctx)
+    if CheckBackendAccess(req, "cloud") {
+        t.Fatal("cloud should be denied when only local allowed")
+    }
+}
+
+func TestCheckBackendAccess_Wildcard(t *testing.T) {
+    slog.Info("test CheckBackendAccess_Wildcard")
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    ctx := ContextWithPrincipal(req.Context(), &Principal{
+        KeyConfig: &config.AuthKeyConfig{AllowedBackends: []string{"*"}},
+    })
+    req = req.WithContext(ctx)
+    if !CheckBackendAccess(req, "cloud") {
+        t.Fatal("wildcard should allow all backends")
+    }
+}

@@ -132,6 +132,22 @@ func CheckModelModuleAccess(r *http.Request, module string) bool {
     return false
 }
 
+func CheckBackendAccess(r *http.Request, backend string) bool {
+    p := PrincipalFromContext(r.Context())
+    if p == nil || p.IsMaster {
+        return true
+    }
+    if p.KeyConfig == nil || len(p.KeyConfig.AllowedBackends) == 0 {
+        return true
+    }
+    for _, allowed := range p.KeyConfig.AllowedBackends {
+        if allowed == "*" || allowed == backend {
+            return true
+        }
+    }
+    return false
+}
+
 func extractAPIKey(r *http.Request) string {
     auth := r.Header.Get("Authorization")
     if strings.HasPrefix(auth, "Bearer ") {

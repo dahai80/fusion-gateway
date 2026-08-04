@@ -10,6 +10,7 @@ type fusionHeadersKey struct{}
 var fusionPassthroughHeaders = []string{
     "X-Fusion-Project-Id",
     "X-Fusion-Chat-Id",
+    "X-Fusion-Route",
     "X-Space-Id",
 }
 
