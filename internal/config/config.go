@@ -121,6 +121,7 @@ type RatioTierConfig struct {
 }
 
 type RoutingConfig struct {
+    Mode                      string               `mapstructure:"mode"`
     TokenThreshold            int                  `mapstructure:"token_threshold"`
     OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
     RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
@@ -564,6 +565,10 @@ func validate(cfg *Config) error {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
     }
 
+    if cfg.Routing.Mode != "" && cfg.Routing.Mode != "local" && cfg.Routing.Mode != "cloud" && cfg.Routing.Mode != "hybrid" {
+        return fmt.Errorf("routing.mode must be local, cloud, or hybrid, got: %q", cfg.Routing.Mode)
+    }
+
     if cfg.Routing.OutputInputRatioThreshold < 0 {
         return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
     }
@@ -639,6 +644,7 @@ func DefaultConfig() Config {
             MaxRequestBodySize:     5242880,
         },
         Routing: RoutingConfig{
+            Mode:                      "hybrid",
             TokenThreshold:            8000,
             OutputInputRatioThreshold: 0.6,
             RatioTiers: RatioTierConfig{

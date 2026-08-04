@@ -55,6 +55,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `route.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
+| `route.mode` | hybrid | Routing mode: `local` (all local), `cloud` (all cloud), `hybrid` (smart routing by token/ratio/hardware) |
 | `route.enable_hardware_judge` | true | Enable hardware-aware routing |
 | `route.local_max_memory_ratio` | 0.9 | Max system memory ratio before forcing cloud |
 | `route.local_max_mlx_memory_ratio` | 0.7 | Max MLX/GPU memory ratio before forcing cloud |

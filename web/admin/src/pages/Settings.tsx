@@ -20,6 +20,7 @@ interface TokenTierRule {
 }
 
 interface RoutingConfig {
+    mode: string;
     token_threshold: number;
     output_input_ratio_threshold: number;
     ratio_tiers_enabled: boolean;
@@ -495,6 +496,14 @@ export default function Settings() {
 
             <Card title="Routing Rules" style={{ marginBottom: 24 }}>
                 <Form form={form} layout="vertical">
+                    <Form.Item label="Routing Mode" name="mode"
+                        tooltip="Local: all requests go to local backend. Cloud: all requests go to cloud. Hybrid: smart routing by token/ratio/hardware rules.">
+                        <Select style={{ width: 200 }}>
+                            <Select.Option value="hybrid">Hybrid (Smart)</Select.Option>
+                            <Select.Option value="local">Local Only</Select.Option>
+                            <Select.Option value="cloud">Cloud Only</Select.Option>
+                        </Select>
+                    </Form.Item>
                     <Row gutter={24}>
                         <Col span={12}>
                             <Form.Item label="Token Threshold" name="token_threshold"

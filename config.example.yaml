@@ -43,6 +43,7 @@ auth:
               - "*"                            # Wildcard: all models allowed
 
 route:
+    mode: hybrid                              # local=全走本地, cloud=全走云端, hybrid=智能路由(按token/比例/硬件)
     enable_hardware_judge: true
     token_threshold: 8000
     output_input_ratio_threshold: 0.6       # 输出/输入token比 > 此值走云端(0=禁用)

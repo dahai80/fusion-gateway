@@ -1234,3 +1234,98 @@ func TestDecide_ContextWindowFallback_NotAvailable(t *testing.T) {
         t.Errorf("expected model_not_available_locally, got %s", dec.Reason)
     }
 }
+
+func TestDecide_ModeLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "local"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(false)
+
+    budget := tokenizer.TokenBudget{InputTokens: 100, TotalBudget: 200}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("mode=local should force local, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "mode_local" {
+        t.Errorf("expected mode_local reason, got %s", dec.Reason)
+    }
+}
+
+func TestDecide_ModeCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "cloud"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("mode=cloud should force cloud, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "mode_cloud" {
+        t.Errorf("expected mode_cloud reason, got %s", dec.Reason)
+    }
+}
+
+func TestDecide_ModeHybrid(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "hybrid"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("mode=hybrid with small tokens should route local, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+func TestDecide_ModeLocalEmbedding(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "local"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(false)
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "embed-model", Type: RequestTypeEmbedding}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("mode=local should force embedding to local, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "mode_local:embedding" {
+        t.Errorf("expected mode_local:embedding, got %s", dec.Reason)
+    }
+}
+
+func TestDecide_ModeCloudRerank(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "cloud"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "rerank-model", Type: RequestTypeRerank}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("mode=cloud should force rerank to cloud, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "mode_cloud:rerank" {
+        t.Errorf("expected mode_cloud:rerank, got %s", dec.Reason)
+    }
+}

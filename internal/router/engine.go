@@ -228,6 +228,22 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return e.decideRerankLocked(ctx, cfg)
     }
 
+    // Mode fast-path: explicit routing mode overrides all other rules
+    mode := cfg.Config.Routing.Mode
+    switch mode {
+    case "local":
+        slog.Info("routing mode: local, forcing all requests to local backend")
+        return &RouteDecision{Backend: LocalBackend, Reason: "mode_local"}
+    case "cloud":
+        if decision := e.tryClusterLocked(cfg); decision != nil {
+            return decision
+        }
+        slog.Info("routing mode: cloud, forcing all requests to cloud backend")
+        return &RouteDecision{Backend: CloudBackend, Reason: "mode_cloud"}
+    case "hybrid":
+        // fall through to existing priority-chain logic
+    }
+
     // P0: Circuit breaker check — local
     if e.breakers["local"].State() == StateOpen {
         if decision := e.tryClusterLocked(cfg); decision != nil {
@@ -405,6 +421,22 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
 }
 
 func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+    // Mode fast-path for embedding
+    mode := cfg.Config.Routing.Mode
+    switch mode {
+    case "local":
+        slog.Info("routing mode: local, forcing embedding to local backend")
+        return &RouteDecision{Backend: LocalBackend, Reason: "mode_local:embedding"}
+    case "cloud":
+        if decision := e.tryClusterLocked(cfg); decision != nil {
+            return decision
+        }
+        slog.Info("routing mode: cloud, forcing embedding to cloud backend")
+        return &RouteDecision{Backend: CloudBackend, Reason: "mode_cloud:embedding"}
+    case "hybrid":
+        // fall through
+    }
+
     // Embedding: local-first if breaker closed + local ready
     if e.breakers["local"].State() == StateOpen || !e.localReady {
         if decision := e.tryClusterLocked(cfg); decision != nil {
@@ -416,6 +448,22 @@ func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSn
 }
 
 func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+    // Mode fast-path for rerank
+    mode := cfg.Config.Routing.Mode
+    switch mode {
+    case "local":
+        slog.Info("routing mode: local, forcing rerank to local backend")
+        return &RouteDecision{Backend: LocalBackend, Reason: "mode_local:rerank"}
+    case "cloud":
+        if decision := e.tryClusterLocked(cfg); decision != nil {
+            return decision
+        }
+        slog.Info("routing mode: cloud, forcing rerank to cloud backend")
+        return &RouteDecision{Backend: CloudBackend, Reason: "mode_cloud:rerank"}
+    case "hybrid":
+        // fall through
+    }
+
     // Rerank: typically cloud-only unless local model available
     if e.localReady && e.localModels() != nil {
         for model := range e.localModels() {

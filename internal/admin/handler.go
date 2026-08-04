@@ -864,6 +864,7 @@ type tokenTierRuleResponse struct {
 }
 
 type routingConfigResponse struct {
+    Mode                      string                   `json:"mode"`
     TokenThreshold            int                      `json:"token_threshold"`
     OutputInputRatioThreshold float64                  `json:"output_input_ratio_threshold"`
     RatioTiersEnabled         bool                     `json:"ratio_tiers_enabled"`
@@ -881,6 +882,7 @@ type routingConfigResponse struct {
 }
 
 type routingConfigUpdate struct {
+    Mode                      *string                   `json:"mode,omitempty"`
     TokenThreshold            *int                      `json:"token_threshold,omitempty"`
     OutputInputRatioThreshold *float64                  `json:"output_input_ratio_threshold,omitempty"`
     RatioTiersEnabled         *bool                     `json:"ratio_tiers_enabled,omitempty"`
@@ -920,6 +922,7 @@ func (h *Handler) handleGetRoutingConfig(w http.ResponseWriter, r *http.Request)
         tokenRules = append(tokenRules, tokenTierRuleResponse{MaxTokens: r.MaxTokens, Backend: r.Backend})
     }
     resp := routingConfigResponse{
+        Mode:                      cfg.Routing.Mode,
         TokenThreshold:            cfg.Routing.TokenThreshold,
         OutputInputRatioThreshold: cfg.Routing.OutputInputRatioThreshold,
         RatioTiersEnabled:         cfg.Routing.RatioTiers.Enabled,
@@ -977,6 +980,13 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
 
     if req.TokenThreshold != nil {
         routing["token_threshold"] = *req.TokenThreshold
+    }
+    if req.Mode != nil {
+        if *req.Mode != "local" && *req.Mode != "cloud" && *req.Mode != "hybrid" {
+            writeError(w, http.StatusBadRequest, "mode must be local, cloud, or hybrid")
+            return
+        }
+        routing["mode"] = *req.Mode
     }
     if req.OutputInputRatioThreshold != nil {
         routing["output_input_ratio_threshold"] = *req.OutputInputRatioThreshold
