@@ -1,6 +1,8 @@
 package admin
 
 import (
+    "crypto/rand"
+    "encoding/hex"
     "encoding/json"
     "fmt"
     "log/slog"
@@ -219,12 +221,28 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusBadRequest, "budget_limit must be non-negative")
             return
         }
+        rawKey, err := generateAPIKey()
+        if err != nil {
+            slog.Error("failed to generate api key", "error", err)
+            writeError(w, http.StatusInternalServerError, "key generation failed")
+            return
+        }
+        key.KeyPrefix = "sk-" + rawKey[:8]
         if err := h.store.CreateKey(&key); err != nil {
             slog.Error("failed to create key", "error", err)
             writeError(w, http.StatusConflict, "key creation failed")
             return
         }
-        writeJSON(w, http.StatusCreated, key)
+        writeJSON(w, http.StatusCreated, map[string]interface{}{
+            "name":       key.Name,
+            "key_prefix": key.KeyPrefix,
+            "raw_key":    "sk-" + rawKey,
+            "status":     key.Status,
+            "models":     key.AllowedModels,
+            "modules":    key.ModelModules,
+            "quota":      key.QuotaLimit,
+            "created_at": key.CreatedAt.Format(time.RFC3339),
+        })
 
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1233,4 +1251,12 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
     }
+}
+
+func generateAPIKey() (string, error) {
+    b := make([]byte, 24)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(b), nil
 }

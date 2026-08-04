@@ -29,6 +29,7 @@ export default function Keys() {
     const [modalOpen, setModalOpen] = useState(false);
     const [editId, setEditId] = useState<number | null>(null);
     const [form] = Form.useForm<KeyForm>();
+    const [createdKey, setCreatedKey] = useState<string | null>(null);
 
     const fetchKeys = async () => {
         setLoading(true);
@@ -80,7 +81,11 @@ export default function Keys() {
                 await client.put(`/keys/${editId}`, values);
                 message.success("Key updated");
             } else {
-                await client.post("/keys", values);
+                const res = await client.post("/keys", values);
+                const rawKey = res.data?.raw_key || res.data?.key || null;
+                if (rawKey) {
+                    setCreatedKey(rawKey);
+                }
                 message.success("Key created");
             }
             setModalOpen(false);
@@ -188,6 +193,21 @@ export default function Keys() {
                         <Input type="number" min={0} />
                     </Form.Item>
                 </Form>
+            </Modal>
+            <Modal
+                title="API Key Created"
+                open={!!createdKey}
+                onOk={() => setCreatedKey(null)}
+                onCancel={() => setCreatedKey(null)}
+                okText="I've saved the key"
+                closable={false}
+            >
+                <p style={{ marginBottom: 8, color: "#faad14" }}>
+                    Copy the key now. You won't be able to see it again!
+                </p>
+                <Typography.Text copyable code style={{ fontSize: 13, wordBreak: "break-all" }}>
+                    {createdKey}
+                </Typography.Text>
             </Modal>
         </div>
     );
