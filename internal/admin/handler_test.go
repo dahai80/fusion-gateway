@@ -1672,6 +1672,9 @@ func TestHandleLogout(t *testing.T) {
                 if !c.HttpOnly {
                     t.Fatal("expected HttpOnly cookie")
                 }
+                if !c.Secure {
+                    t.Fatal("expected Secure cookie to match login handler")
+                }
             }
         }
         if !found {

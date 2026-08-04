@@ -77,6 +77,7 @@ func (a *AdminAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
         Path:     "/",
         MaxAge:   -1,
         HttpOnly: true,
+        Secure:   !a.insecureCookie,
         SameSite: http.SameSiteStrictMode,
     })
     slog.Info("admin logout, cookie cleared", "remote", r.RemoteAddr)
