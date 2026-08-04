@@ -6,6 +6,8 @@ gateway
 CLAUDE.md
 .claude/
 .remember/
+plan.md
+com.fusion.gateway.plist
 
 # IDE
 .idea/
@@ -24,6 +26,9 @@ config.yaml
 *.test
 *.out
 coverage.html
+
+# Runtime
+logs/
 
 # Frontend
 web/admin/node_modules/
