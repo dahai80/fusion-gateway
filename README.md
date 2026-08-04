@@ -120,6 +120,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
 | `/v1/models` | GET | List available models |
+| `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
+| `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/health` | GET | Full health check with backend status |
 | `/healthz` | GET | Liveness probe |
 | `/readyz` | GET | Readiness probe (circuit breaker + health + GPU memory + queue depth + success rate) |
@@ -159,6 +161,13 @@ See `config.example.yaml` for full reference. Key settings:
 ## Routing Logic
 
 Dual-dimension decision: **request dimension** + **hardware load dimension**
+
+### Header Injection
+
+| Header | Target | Value | Behavior |
+|--------|--------|-------|----------|
+| `X-Fusion-Route` | fusion-mlx | `gateway-decision` | Injected on all forwarded requests; inbound `X-Fusion-Route` passed through |
+| `X-Fusion-Source` | model-hub | `gateway` | Injected on all proxied requests |
 
 Priority chain (high to low), three-tier fallback: **local → cluster → cloud**
 
@@ -257,6 +266,7 @@ Each API key supports fine-grained access control:
 | `rpm` | Requests per minute (0 = unlimited) |
 | `tpm` | Tokens per minute (0 = unlimited) |
 | `allowed_models` | Model allowlist with wildcard support (e.g., `gpt-4o*`, `*`) |
+| `allowed_backends` | Backend allowlist — requests routed to non-whitelisted backends get 403. Wildcard `*` allows all |
 | `expires_at` | RFC3339 expiry timestamp |
 | `budget_limit` | Monthly spend limit in USD (0 = unlimited) |
 
@@ -872,6 +882,15 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.7.4 — Header Injection, AllowedBackends, Model Interception
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **X-Fusion-Route header** | Gateway injects `X-Fusion-Route: gateway-decision` on all requests forwarded to fusion-mlx. Inbound `X-Fusion-Route` headers pass through unchanged. |
+| 2 | **X-Fusion-Source header** | Gateway injects `X-Fusion-Source: gateway` on all requests proxied to model-hub. |
+| 3 | **AllowedBackends enforcement** | API keys with `allowed_backends` configured are restricted to those backends only. Requests routed to a non-whitelisted backend receive 403. Wildcard `"*"` allows all. |
+| 4 | **Model load/unload interception** | `/v1/models/{id}/load` and `/v1/models/{id}/unload` are intercepted and redirected to model-hub `POST /api/v1/models/{id}/serve`. |
 
 ### v0.6.2 — Architecture & Robustness
 
