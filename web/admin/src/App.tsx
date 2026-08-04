@@ -34,8 +34,8 @@ import AdminConfigPage from "./pages/config/AdminConfigPage";
 import PIIConfig from "./pages/config/PIIConfig";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
-    const token = localStorage.getItem("admin_token");
-    if (!token) {
+    const loggedIn = localStorage.getItem("admin_logged_in");
+    if (!loggedIn) {
         return <Navigate to="/admin/login" replace />;
     }
     return <>{children}</>;

@@ -3,6 +3,7 @@ import axios from "axios";
 const client = axios.create({
     baseURL: "/admin/api",
     timeout: 30000,
+    withCredentials: true,
     headers: {
         "Content-Type": "application/json",
     },
@@ -10,10 +11,6 @@ const client = axios.create({
 
 client.interceptors.request.use(
     (config) => {
-        const token = localStorage.getItem("admin_token");
-        if (token) {
-            config.headers.Authorization = `Bearer ${token}`;
-        }
         return config;
     },
     (error) => {
@@ -27,7 +24,7 @@ client.interceptors.response.use(
     },
     (error) => {
         if (error.response?.status === 401) {
-            localStorage.removeItem("admin_token");
+            localStorage.removeItem("admin_logged_in");
             window.location.href = "/admin/login";
         }
         return Promise.reject(error);

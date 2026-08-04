@@ -1649,6 +1649,46 @@ func TestHandleLogin(t *testing.T) {
     })
 }
 
+func TestHandleLogout(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+
+    t.Run("clears_cookie", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodPost, "/admin/api/logout", nil)
+        rec := httptest.NewRecorder()
+        auth.HandleLogout(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        cookies := rec.Result().Cookies()
+        found := false
+        for _, c := range cookies {
+            if c.Name == "admin_token" {
+                found = true
+                if c.MaxAge != -1 {
+                    t.Fatalf("expected MaxAge -1 to expire cookie, got %d", c.MaxAge)
+                }
+                if !c.HttpOnly {
+                    t.Fatal("expected HttpOnly cookie")
+                }
+            }
+        }
+        if !found {
+            t.Fatal("expected admin_token cookie to be expired/cleared")
+        }
+    })
+
+    t.Run("method_not_allowed", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodGet, "/admin/api/logout", nil)
+        rec := httptest.NewRecorder()
+        auth.HandleLogout(rec, req)
+        if rec.Code != http.StatusMethodNotAllowed {
+            t.Fatalf("expected 405, got %d", rec.Code)
+        }
+    })
+}
+
 func TestNormalizeStatus(t *testing.T) {
     t.Parallel()
 

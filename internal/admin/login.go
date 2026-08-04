@@ -65,3 +65,20 @@ func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
         Token:    token,
     })
 }
+
+func (a *AdminAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    http.SetCookie(w, &http.Cookie{
+        Name:     "admin_token",
+        Value:    "",
+        Path:     "/",
+        MaxAge:   -1,
+        HttpOnly: true,
+        SameSite: http.SameSiteStrictMode,
+    })
+    slog.Info("admin logout, cookie cleared", "remote", r.RemoteAddr)
+    writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

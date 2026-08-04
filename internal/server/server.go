@@ -337,6 +337,7 @@ func (s *Server) Start() error {
         adminHandler := admin.NewHandler(s.store, s.adminAuth, s.cfgPath)
         adminHandler.RegisterRoutes(mux)
         mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
+        mux.HandleFunc("/admin/api/logout", s.adminAuth.HandleLogout)
         mux.Handle("/admin/", http.StripPrefix("/admin/", adminui.Handler()))
     }
 

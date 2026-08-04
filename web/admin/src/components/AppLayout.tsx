@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Layout, Menu, Button, Typography, theme } from "antd";
+import client from "../api/client";
 import {
     DashboardOutlined,
     KeyOutlined,
@@ -83,8 +84,13 @@ export default function AppLayout() {
     const location = useLocation();
     const { token: themeToken } = theme.useToken();
 
-    const handleLogout = () => {
-        localStorage.removeItem("admin_token");
+    const handleLogout = async () => {
+        try {
+            await client.post("/logout");
+        } catch {
+            // cookie clear is best-effort; UI proceeds to login regardless
+        }
+        localStorage.removeItem("admin_logged_in");
         navigate("/admin/login");
     };
 
