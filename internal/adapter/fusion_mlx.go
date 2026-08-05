@@ -306,6 +306,9 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
     if p.apiKey != "" {
         req.Header.Set("Authorization", "Bearer "+p.apiKey)
     }
+    if p.routeHeader != "" {
+        req.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
 
     resp, err := p.httpClient.Do(req)
     if err != nil {
