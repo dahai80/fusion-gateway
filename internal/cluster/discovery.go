@@ -34,6 +34,10 @@ type Node struct {
     Address  string
     GPU      string
     MemoryGB int
+    // Platform is the D4 runtime platform tag (issue #23/#25):
+    // "mac" / "windows-cuda" / "" (legacy untyped). Set from
+    // ClusterNodeConfig.Platform at registration.
+    Platform string
 
     mu            sync.RWMutex
     state         NodeState
@@ -185,6 +189,7 @@ func (d *Discovery) loadNodesFromConfig() {
             Address:  nodeCfg.Address,
             GPU:      nodeCfg.GPU,
             MemoryGB: nodeCfg.MemoryGB,
+            Platform: nodeCfg.Platform,
             state:    NodeStateUnhealthy,
         }
         slog.Info("cluster node registered from config",
@@ -192,6 +197,7 @@ func (d *Discovery) loadNodesFromConfig() {
             "address", nodeCfg.Address,
             "gpu", nodeCfg.GPU,
             "memory_gb", nodeCfg.MemoryGB,
+            "platform", nodeCfg.Platform,
         )
     }
 }
@@ -208,6 +214,7 @@ func (d *Discovery) UpdateConfig(cfg config.ClusterConfig) {
             node.Address = nodeCfg.Address
             node.GPU = nodeCfg.GPU
             node.MemoryGB = nodeCfg.MemoryGB
+            node.Platform = nodeCfg.Platform
             node.mu.Unlock()
             slog.Info("cluster node updated", "node_id", nodeCfg.ID)
         } else {
@@ -216,6 +223,7 @@ func (d *Discovery) UpdateConfig(cfg config.ClusterConfig) {
                 Address:  nodeCfg.Address,
                 GPU:      nodeCfg.GPU,
                 MemoryGB: nodeCfg.MemoryGB,
+                Platform: nodeCfg.Platform,
                 state:    NodeStateUnhealthy,
             }
             slog.Info("cluster node added on config update", "node_id", nodeCfg.ID)
@@ -480,6 +488,56 @@ func (d *Discovery) HealthyNodeList() []*Node {
     return result
 }
 
+// HealthyNodesByPlatform returns the count of healthy nodes whose Platform
+// matches the given tag. Empty platform matches all healthy nodes (legacy
+// behavior). D4 dispatch-by-platform (issue #23/#25).
+func (d *Discovery) HealthyNodesByPlatform(platform string) int {
+    if platform == "" {
+        return d.HealthyNodes()
+    }
+    d.mu.RLock()
+    defer d.mu.RUnlock()
+    count := 0
+    for _, n := range d.nodes {
+        if n.State() == NodeStateHealthy && n.Platform == platform {
+            count++
+        }
+    }
+    return count
+}
+
+// SelectNodeByPlatform selects a healthy node on the given platform using the
+// configured strategy. Empty platform falls back to platform-agnostic
+// SelectNode. D4 dispatch-by-platform (issue #23/#25).
+func (d *Discovery) SelectNodeByPlatform(strategy, platform string) (*Node, error) {
+    if platform == "" {
+        return d.SelectNode(strategy)
+    }
+    d.mu.RLock()
+    var healthy []*Node
+    for _, n := range d.nodes {
+        if n.State() == NodeStateHealthy && n.Platform == platform {
+            healthy = append(healthy, n)
+        }
+    }
+    d.mu.RUnlock()
+
+    if len(healthy) == 0 {
+        return nil, fmt.Errorf("no healthy cluster nodes on platform %q", platform)
+    }
+
+    switch strategy {
+    case "least-connections":
+        return d.selectLeastConnections(healthy), nil
+    case "hardware-aware":
+        return d.selectHardwareAware(healthy), nil
+    case "round-robin":
+        return d.selectRoundRobin(healthy), nil
+    default:
+        return d.selectLeastConnections(healthy), nil
+    }
+}
+
 func (d *Discovery) AllNodes() []*Node {
     d.mu.RLock()
     defer d.mu.RUnlock()
@@ -593,6 +651,18 @@ func (a *ClusterSelectorAdapter) HealthyNodes() int {
 
 func (a *ClusterSelectorAdapter) SelectNode(strategy string) (string, error) {
     return a.discovery.SelectNodeID(strategy)
+}
+
+func (a *ClusterSelectorAdapter) HealthyNodesByPlatform(platform string) int {
+    return a.discovery.HealthyNodesByPlatform(platform)
+}
+
+func (a *ClusterSelectorAdapter) SelectNodeByPlatform(strategy, platform string) (string, error) {
+    node, err := a.discovery.SelectNodeByPlatform(strategy, platform)
+    if err != nil {
+        return "", err
+    }
+    return node.ID, nil
 }
 
 func (d *Discovery) selectRoundRobin(nodes []*Node) *Node {

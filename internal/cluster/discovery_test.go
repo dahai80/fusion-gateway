@@ -1029,3 +1029,122 @@ func TestDiscovery_fetchRemoteMetrics_Success(t *testing.T) {
         t.Errorf("expected 3, got %d", metrics.QueueDepth)
     }
 }
+
+func TestDiscovery_LoadNodesFromConfig_Platform(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "mac-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16, Platform: "mac"},
+        config.ClusterNodeConfig{ID: "win-1", Address: "http://localhost:9002", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n, ok := d.GetNode("win-1")
+    if !ok {
+        t.Fatal("win-1 not found")
+    }
+    if n.Platform != "windows-cuda" {
+        t.Errorf("expected platform windows-cuda, got %q", n.Platform)
+    }
+    n2, ok := d.GetNode("mac-1")
+    if !ok {
+        t.Fatal("mac-1 not found")
+    }
+    if n2.Platform != "mac" {
+        t.Errorf("expected platform mac, got %q", n2.Platform)
+    }
+}
+
+func TestDiscovery_HealthyNodesByPlatform(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "mac-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16, Platform: "mac"},
+        config.ClusterNodeConfig{ID: "win-1", Address: "http://localhost:9002", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+        config.ClusterNodeConfig{ID: "win-2", Address: "http://localhost:9003", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    if got := d.HealthyNodesByPlatform("windows-cuda"); got != 0 {
+        t.Fatalf("expected 0 healthy windows-cuda, got %d", got)
+    }
+
+    n1, _ := d.GetNode("mac-1")
+    n2, _ := d.GetNode("win-1")
+    n3, _ := d.GetNode("win-2")
+    n1.markHealthy()
+    n2.markHealthy()
+    n3.markHealthy()
+
+    if got := d.HealthyNodesByPlatform("windows-cuda"); got != 2 {
+        t.Fatalf("expected 2 healthy windows-cuda, got %d", got)
+    }
+    if got := d.HealthyNodesByPlatform("mac"); got != 1 {
+        t.Fatalf("expected 1 healthy mac, got %d", got)
+    }
+    if got := d.HealthyNodesByPlatform("rocm"); got != 0 {
+        t.Fatalf("expected 0 healthy on unknown platform, got %d", got)
+    }
+    if got := d.HealthyNodesByPlatform(""); got != 3 {
+        t.Fatalf("expected 3 healthy total for empty platform, got %d", got)
+    }
+}
+
+func TestDiscovery_SelectNodeByPlatform(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "mac-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16, Platform: "mac"},
+        config.ClusterNodeConfig{ID: "win-1", Address: "http://localhost:9002", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+        config.ClusterNodeConfig{ID: "win-2", Address: "http://localhost:9003", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("mac-1")
+    n2, _ := d.GetNode("win-1")
+    n3, _ := d.GetNode("win-2")
+    n1.markHealthy()
+    n2.markHealthy()
+    n3.markHealthy()
+
+    n2.IncrInFlight()
+    n2.IncrInFlight()
+    n3.IncrInFlight()
+
+    selected, err := d.SelectNodeByPlatform("least-connections", "windows-cuda")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if selected.ID != "win-2" {
+        t.Errorf("expected win-2 (fewer connections on windows-cuda), got %s", selected.ID)
+    }
+    if selected.Platform != "windows-cuda" {
+        t.Errorf("selected node platform = %q, want windows-cuda", selected.Platform)
+    }
+
+    macSel, err := d.SelectNodeByPlatform("least-connections", "mac")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if macSel.ID != "mac-1" {
+        t.Errorf("expected mac-1, got %s", macSel.ID)
+    }
+
+    anySel, err := d.SelectNodeByPlatform("least-connections", "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if anySel.ID == "" {
+        t.Fatal("expected a node for empty platform fallback")
+    }
+}
+
+func TestDiscovery_SelectNodeByPlatform_NoHealthy(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "win-1", Address: "http://localhost:9002", GPU: "RTX4090", MemoryGB: 48, Platform: "windows-cuda"},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    _, err := d.SelectNodeByPlatform("least-connections", "windows-cuda")
+    if err == nil {
+        t.Fatal("expected error when no healthy nodes on platform")
+    }
+}

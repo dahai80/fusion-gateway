@@ -132,6 +132,19 @@ type RoutingConfig struct {
     Negotiation                NegotiationConfig    `mapstructure:"negotiation"`
     RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
     Retry                      RetryConfig          `mapstructure:"retry"`
+    IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
+}
+
+// IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
+// Disabled by default until the upstream fusion-router-light 1.5B model is
+// available (fusion-trainer issue-tr-3). When disabled, the engine uses
+// NoopClassifier and the existing P0-P7 rule chain decides routing unchanged.
+type IntentClassifierConfig struct {
+    Enabled       bool          `mapstructure:"enabled"`
+    Endpoint      string        `mapstructure:"endpoint"`       // fusion-mlx /v1/chat/completions URL or local classifier endpoint
+    Model         string        `mapstructure:"model"`          // e.g. "fusion-router-light"
+    Timeout       time.Duration `mapstructure:"timeout"`        // per-classify timeout
+    MinConfidence float64       `mapstructure:"min_confidence"` // below this, defer to rule chain
 }
 
 type RetryConfig struct {
@@ -290,6 +303,11 @@ type ClusterNodeConfig struct {
     Address  string `mapstructure:"address"`
     GPU      string `mapstructure:"gpu"`
     MemoryGB int    `mapstructure:"memory_gb"`
+    // Platform identifies the node's runtime platform for D4 dispatch
+    // (issue #23/#25): "mac" (fusion-mlx Base+LoRA+SpecDec) or
+    // "windows-cuda" (DeepSeek 70B / Qwen 72B FP8 + diffusion). Empty means
+    // legacy untyped node (eligible for all cluster fallback).
+    Platform string `mapstructure:"platform"`
 }
 
 type ClusterMode string
@@ -313,6 +331,17 @@ type ClusterConfig struct {
     HealthCheckInterval time.Duration       `mapstructure:"health_check_interval"`
     FailureThreshold    int                 `mapstructure:"failure_threshold"`
     RecoveryInterval    time.Duration       `mapstructure:"recovery_interval"`
+    // PlatformRouting enables D4 dispatch-by-platform (issue #23/#25). When
+    // enabled, the semantic intent layer routes heavy_model / diffusion
+    // intents to the configured platform's cluster nodes.
+    PlatformRouting PlatformRoutingConfig `mapstructure:"platform_routing"`
+}
+
+// PlatformRoutingConfig maps semantic intents to target cluster platforms.
+type PlatformRoutingConfig struct {
+    Enabled            bool   `mapstructure:"enabled"`
+    HeavyModelPlatform string `mapstructure:"heavy_model_platform"` // default "windows-cuda"
+    DiffusionPlatform  string `mapstructure:"diffusion_platform"`   // default "windows-cuda"
 }
 
 type RealtimeConfig struct {
@@ -672,6 +701,12 @@ func DefaultConfig() Config {
                 DisableFusionMLXRouting: true,
                 RouteHeader:             "X-Fusion-Route",
                 RouteHeaderValue:        "gateway-decision",
+            },
+            IntentClassifier: IntentClassifierConfig{
+                Enabled:       false,
+                Model:         "fusion-router-light",
+                Timeout:       2 * time.Second,
+                MinConfidence: 0.7,
             },
         },
         Hardware: HardwareConfig{

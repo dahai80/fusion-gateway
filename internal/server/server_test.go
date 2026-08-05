@@ -1853,6 +1853,14 @@ func (m *mockClusterDiscovery) SelectNode(_ string) (string, error) {
     return "", fmt.Errorf("no healthy nodes")
 }
 
+func (m *mockClusterDiscovery) HealthyNodesByPlatform(_ string) int {
+    return 0
+}
+
+func (m *mockClusterDiscovery) SelectNodeByPlatform(_, _ string) (string, error) {
+    return "", fmt.Errorf("no healthy nodes on platform")
+}
+
 // --- Completions full path ---
 
 func TestCompletions_Success(t *testing.T) {
@@ -4874,6 +4882,20 @@ func (m *mockClusterDiscoveryWithNode) SelectNode(_ string) (string, error) {
         return m.node.ID, nil
     }
     return "", fmt.Errorf("no nodes")
+}
+
+func (m *mockClusterDiscoveryWithNode) HealthyNodesByPlatform(_ string) int {
+    if m.node != nil {
+        return 1
+    }
+    return 0
+}
+
+func (m *mockClusterDiscoveryWithNode) SelectNodeByPlatform(_, _ string) (string, error) {
+    if m.node != nil {
+        return m.node.ID, nil
+    }
+    return "", fmt.Errorf("no nodes on platform")
 }
 
 type mockStore struct {

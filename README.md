@@ -174,6 +174,7 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 
 | Priority | Rule | Condition | Target |
 |----------|------|-----------|--------|
+| P-1 | Semantic intent | Classifier returns heavy/diffusion with confidence ≥ threshold | Platform cluster node → cloud |
 | P0 | Circuit breaker | Local breaker is Open | Try cluster → cloud |
 | P0.3 | Session affinity | Same `X-Space-Id` seen before | Route to same provider (KV cache reuse) |
 | P0.5 | Metrics collection error | Hardware metrics unavailable | Try cluster → cloud |
@@ -187,6 +188,42 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 | P6 | Model availability | Model not found locally | Context window fallback → cluster → cloud |
 | P6.5 | Context window fallback | Model not local but larger variant is | Route to larger local model |
 | P7 | Local priority | All checks passed | Route to local |
+
+### Semantic Intent Routing (D4)
+
+Gateway evolves from static forwarding toward a semantic scheduling center. A lightweight intent classifier (planned: `fusion-router-light` 1.5B, trained upstream in fusion-trainer) inspects each request and dispatches by intent **before** the P0–P7 rule chain. **Disabled by default** — when off, a `NoopClassifier` makes P-1 a no-op and existing behavior is unchanged.
+
+| Intent | Target |
+|--------|--------|
+| `lightweight` | Defer to rule chain (rule chain already routes healthy short requests to Mac local) |
+| `heavy_model` | Cluster node on `windows-cuda` (or configured platform) → cloud fallback |
+| `diffusion` | Cluster node on `windows-cuda` (or configured platform) → cloud fallback |
+| `unknown` / low-confidence / classifier error | Defer to rule chain |
+
+The classifier interface (`IntentClassifier`) is the integration surface the trained model will plug into; the platform-aware cluster selector (`HealthyNodesByPlatform` / `SelectNodeByPlatform`) is the surface the Windows CUDA backend will plug into. Both are gated behind config and ship with tests against stubs, so the gateway is ready to activate once the upstream model and backend land.
+
+```yaml
+route:
+  intent_classifier:
+    enabled: false              # default off; set true once fusion-router-light is deployed
+    endpoint: ""                # classifier HTTP endpoint (empty = in-process NoopClassifier)
+    model: "fusion-router-light"
+    timeout: 2s
+    min_confidence: 0.7
+
+cluster:
+  platform_routing:
+    enabled: false              # default off
+    heavy_model_platform: "windows-cuda"
+    diffusion_platform: "windows-cuda"
+  nodes:
+    - id: "mac-1"
+      address: "http://127.0.0.1:11434"
+      platform: "mac"
+    - id: "win-cuda-1"
+      address: "http://192.168.1.50:11434"
+      platform: "windows-cuda"
+```
 
 ### Cluster Load Balancing
 

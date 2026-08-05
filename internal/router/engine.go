@@ -48,6 +48,12 @@ type RouteRequest struct {
 type ClusterSelector interface {
     HealthyNodes() int
     SelectNode(strategy string) (nodeID string, err error)
+    // HealthyNodesByPlatform returns healthy node count for a given platform
+    // (D4 dispatch-by-platform, issue #23/#25). Empty platform = all nodes.
+    HealthyNodesByPlatform(platform string) int
+    // SelectNodeByPlatform selects a healthy node on the given platform.
+    // Empty platform falls back to platform-agnostic selection.
+    SelectNodeByPlatform(strategy, platform string) (nodeID string, err error)
 }
 
 type Engine struct {
@@ -60,6 +66,7 @@ type Engine struct {
     localModels     func() map[string]bool
     cluster         ClusterSelector
     sessionAffinity *SessionAffinity
+    classifier      IntentClassifier
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
@@ -77,6 +84,7 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
         localInFlight:   func() int64 { return 0 },
         localModels:     func() map[string]bool { return nil },
         sessionAffinity: NewSessionAffinity(30 * time.Minute),
+        classifier:      NoopClassifier{},
     }
 }
 
@@ -85,6 +93,16 @@ func (e *Engine) SetClusterSelector(cs ClusterSelector) {
     defer e.mu.Unlock()
     e.cluster = cs
     slog.Info("cluster selector wired to router engine")
+}
+
+// SetIntentClassifier wires a D4 semantic intent classifier (issue #22).
+// When nil or NoopClassifier, the semantic layer is a no-op and the existing
+// P0-P7 rule chain decides routing unchanged.
+func (e *Engine) SetIntentClassifier(c IntentClassifier) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    e.classifier = c
+    slog.Info("intent classifier wired to router engine")
 }
 
 func (e *Engine) UpdateConfig(cfg *config.ConfigSnapshot) {
@@ -242,6 +260,14 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return &RouteDecision{Backend: CloudBackend, Reason: "mode_cloud"}
     case "hybrid":
         // fall through to existing priority-chain logic
+    }
+
+    // P-1: D4 semantic intent layer (issue #22/#23/#25). Runs before the
+    // rule chain so semantic dispatch wins, with the rule chain as fallback.
+    // Disabled by default (intent_classifier.enabled); NoopClassifier makes
+    // this a no-op so existing P0-P7 behavior is unchanged.
+    if decision := e.decideIntentLocked(ctx, cfg, req); decision != nil {
+        return decision
     }
 
     // P0: Circuit breaker check — local
@@ -518,6 +544,82 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot) *RouteDecision {
 
     slog.Info("routing to cluster node", "node_id", nodeID, "strategy", strategy)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
+}
+
+// tryClusterByPlatformLocked attempts to route to a cluster node on a specific
+// platform (D4 dispatch-by-platform, issue #23/#25). Returns nil if cluster is
+// disabled, the breaker is open, or no healthy node on that platform — the
+// caller then falls back to the rule chain or cloud.
+func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform string) *RouteDecision {
+    if e.cluster == nil || !cfg.Config.Cluster.Enabled || platform == "" {
+        return nil
+    }
+    if e.breakers["cluster"].State() == StateOpen {
+        slog.Debug("cluster breaker open, skipping platform cluster dispatch", "platform", platform)
+        return nil
+    }
+    if e.cluster.HealthyNodesByPlatform(platform) == 0 {
+        slog.Debug("no healthy cluster nodes on platform", "platform", platform)
+        return nil
+    }
+    strategy := cfg.Config.Cluster.LoadBalancer
+    if strategy == "" {
+        strategy = "least-connections"
+    }
+    nodeID, err := e.cluster.SelectNodeByPlatform(strategy, platform)
+    if err != nil {
+        slog.Warn("platform cluster node selection failed", "platform", platform, "error", err)
+        return nil
+    }
+    slog.Info("routing to cluster node by platform", "node_id", nodeID, "platform", platform, "strategy", strategy)
+    return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_platform:" + platform, NodeID: nodeID}
+}
+
+// decideIntentLocked is the D4 semantic intent layer (issue #22/#23/#25).
+// It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
+// (intent unknown, low confidence, disabled, or no target platform available).
+func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest) *RouteDecision {
+    ic := cfg.Config.Routing.IntentClassifier
+    if !ic.Enabled {
+        return nil
+    }
+    classifier := e.classifier
+    if classifier == nil {
+        classifier = NoopClassifier{}
+    }
+    res := classifyAndLog(ctx, classifier, req)
+    if res.Intent == IntentUnknown {
+        return nil
+    }
+    if res.Confidence < ic.MinConfidence {
+        slog.Info("intent confidence below threshold, deferring to rule chain",
+            "intent", res.Intent, "confidence", res.Confidence, "min", ic.MinConfidence)
+        return nil
+    }
+
+    // IntentLightweight: prefer Mac local. Don't force — let the rule chain
+    // apply hardware/circuit-breaker protections; it already routes to local
+    // when healthy. So defer (return nil) for lightweight.
+    if res.Intent == IntentLightweight {
+        return nil
+    }
+
+    // Heavy model / diffusion: dispatch to the target platform's cluster node
+    // (Windows CUDA by default). Fall back to cloud if no platform node.
+    pr := cfg.Config.Cluster.PlatformRouting
+    platform := PlatformForIntent(res.Intent, pr.HeavyModelPlatform, pr.DiffusionPlatform)
+    if platform == "" {
+        return nil
+    }
+    if decision := e.tryClusterByPlatformLocked(cfg, platform); decision != nil {
+        decision.Reason = "intent:" + string(res.Intent) + ":" + decision.Reason
+        return decision
+    }
+    // No healthy node on target platform — fall back to cloud, with a reason
+    // that records the original intent for observability.
+    slog.Info("no cluster node on target platform, falling back to cloud",
+        "intent", res.Intent, "platform", platform)
+    return &RouteDecision{Backend: CloudBackend, Reason: "intent:" + string(res.Intent) + ":no_platform_node"}
 }
 
 func resolveCloudByTier(budget tokenizer.TokenBudget, tier config.TokenTierConfig) string {

@@ -181,10 +181,33 @@ type mockClusterSelector struct {
     healthy int
     nodeID  string
     err     error
+    // platform-aware fields for D4 dispatch-by-platform tests
+    platformNodes map[string]int
+    platformNode  map[string]string
 }
 
-func (m *mockClusterSelector) HealthyNodes() int            { return m.healthy }
+func (m *mockClusterSelector) HealthyNodes() int                 { return m.healthy }
 func (m *mockClusterSelector) SelectNode(string) (string, error) { return m.nodeID, m.err }
+
+func (m *mockClusterSelector) HealthyNodesByPlatform(platform string) int {
+    if m.platformNodes != nil {
+        if c, ok := m.platformNodes[platform]; ok {
+            return c
+        }
+        return 0
+    }
+    return m.healthy
+}
+
+func (m *mockClusterSelector) SelectNodeByPlatform(_, platform string) (string, error) {
+    if m.platformNode != nil {
+        if id, ok := m.platformNode[platform]; ok {
+            return id, m.err
+        }
+        return "", fmt.Errorf("no healthy node on platform %q", platform)
+    }
+    return m.nodeID, m.err
+}
 
 func TestDecide_ClusterFallback(t *testing.T) {
     cfg := defaultTestSnapshot()
