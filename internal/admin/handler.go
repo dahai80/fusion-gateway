@@ -865,6 +865,7 @@ type tokenTierRuleResponse struct {
 
 type routingConfigResponse struct {
     Mode                      string                   `json:"mode"`
+    DefaultModel              string                   `json:"default_model"`
     TokenThreshold            int                      `json:"token_threshold"`
     OutputInputRatioThreshold float64                  `json:"output_input_ratio_threshold"`
     RatioTiersEnabled         bool                     `json:"ratio_tiers_enabled"`
@@ -883,6 +884,7 @@ type routingConfigResponse struct {
 
 type routingConfigUpdate struct {
     Mode                      *string                   `json:"mode,omitempty"`
+    DefaultModel              *string                   `json:"default_model,omitempty"`
     TokenThreshold            *int                      `json:"token_threshold,omitempty"`
     OutputInputRatioThreshold *float64                  `json:"output_input_ratio_threshold,omitempty"`
     RatioTiersEnabled         *bool                     `json:"ratio_tiers_enabled,omitempty"`
@@ -923,6 +925,7 @@ func (h *Handler) handleGetRoutingConfig(w http.ResponseWriter, r *http.Request)
     }
     resp := routingConfigResponse{
         Mode:                      cfg.Routing.Mode,
+        DefaultModel:              cfg.Routing.DefaultModel,
         TokenThreshold:            cfg.Routing.TokenThreshold,
         OutputInputRatioThreshold: cfg.Routing.OutputInputRatioThreshold,
         RatioTiersEnabled:         cfg.Routing.RatioTiers.Enabled,
@@ -987,6 +990,9 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
             return
         }
         routing["mode"] = *req.Mode
+    }
+    if req.DefaultModel != nil {
+        routing["default_model"] = *req.DefaultModel
     }
     if req.OutputInputRatioThreshold != nil {
         routing["output_input_ratio_threshold"] = *req.OutputInputRatioThreshold

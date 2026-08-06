@@ -21,6 +21,7 @@ interface TokenTierRule {
 
 interface RoutingConfig {
     mode: string;
+    default_model: string;
     token_threshold: number;
     output_input_ratio_threshold: number;
     ratio_tiers_enabled: boolean;
@@ -503,6 +504,10 @@ export default function Settings() {
                             <Select.Option value="local">Local Only</Select.Option>
                             <Select.Option value="cloud">Cloud Only</Select.Option>
                         </Select>
+                    </Form.Item>
+                    <Form.Item label="Default Model" name="default_model"
+                        tooltip="Model used when a request omits the model field. Leave blank to auto-discover the first loaded local model (issue #28).">
+                        <Input placeholder="e.g. qwen2.5-7b (blank = auto-discover)" style={{ width: "100%" }} />
                     </Form.Item>
                     <Row gutter={24}>
                         <Col span={12}>

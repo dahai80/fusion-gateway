@@ -18,6 +18,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     "github.com/golang-jwt/jwt/v5"
+    "gopkg.in/yaml.v3"
 )
 
 func init() {
@@ -2025,6 +2026,38 @@ routing:
         h.handleRoutingConfig(rec, req)
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("update_default_model", func(t *testing.T) {
+        tmpDir := t.TempDir()
+        configPath := filepath.Join(tmpDir, "config.yaml")
+        if err := os.WriteFile(configPath, []byte(defaultYAML), 0644); err != nil {
+            t.Fatalf("failed to write config file: %v", err)
+        }
+        loadTestConfig(t, defaultYAML)
+
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{"default_model": "qwen2.5-7b"}
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/routing", body)
+        rec := httptest.NewRecorder()
+        h.handleRoutingConfig(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+
+        // Confirm the value persisted to the config file on disk.
+        written, err := os.ReadFile(configPath)
+        if err != nil {
+            t.Fatalf("failed to read config file: %v", err)
+        }
+        var doc map[string]interface{}
+        if err := yaml.Unmarshal(written, &doc); err != nil {
+            t.Fatalf("failed to parse written yaml: %v", err)
+        }
+        routing, _ := doc["routing"].(map[string]interface{})
+        if routing == nil || routing["default_model"] != "qwen2.5-7b" {
+            t.Fatalf("expected routing.default_model=qwen2.5-7b in file, got %v", routing)
         }
     })
 

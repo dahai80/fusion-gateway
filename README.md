@@ -921,6 +921,12 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.1 — Empty-Model Default Resolution (#28)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Empty-model backfill** | `/v1/chat/completions` with an empty/missing `model` no longer 404s against fusion-mlx. The model is backfilled from `routing.default_model`, or auto-discovered from the first loaded local model (`/v1/models` of local providers) when no default is configured. Auto-discovery queries local providers only, so a slow/unreachable cloud backend never blocks (mirrors the #21 fix). |
+
 ### v0.7.4 — Header Injection, AllowedBackends, Model Interception
 
 | # | Fix | Details |

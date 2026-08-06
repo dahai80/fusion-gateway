@@ -497,6 +497,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
 
+    // Issue #28: empty model would be passed through to fusion-mlx and 404.
+    // Backfill from routing.default_model, or auto-discover the first loaded
+    // local model when no default is configured.
+    if strings.TrimSpace(req.Model) == "" {
+        resolved, err := s.resolveDefaultModel(ctx)
+        if err != nil {
+            slog.Warn("default model resolution failed", "error", err)
+        }
+        if resolved != "" {
+            slog.Info("backfilling empty model", "model", resolved)
+            req.Model = resolved
+        }
+    }
+
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
         http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
@@ -1298,6 +1312,36 @@ func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []ada
         }
     }
     return models
+}
+
+// resolveDefaultModel backfills an empty request model (issue #28).
+// Priority: routing.default_model config value, then the first model returned
+// by a local provider (fusion-mlx/kb/hub) via auto-discovery. Returns "" if
+// nothing usable is found, leaving the original empty model to flow on.
+func (s *Server) resolveDefaultModel(ctx context.Context) (string, error) {
+    if dm := strings.TrimSpace(s.cfg.Config.Routing.DefaultModel); dm != "" {
+        slog.Debug("using configured default_model", "model", dm)
+        return dm, nil
+    }
+
+    // Auto-discover: only query local providers so a slow/unreachable cloud
+    // backend never blocks the request (mirrors the /v1/models fix in #21).
+    localNames := make([]string, 0)
+    for _, name := range s.pool.ListProviders() {
+        if s.pool.IsLocalProvider(name) {
+            localNames = append(localNames, name)
+        }
+    }
+    if len(localNames) == 0 {
+        return "", fmt.Errorf("no local provider registered for default-model auto-discovery")
+    }
+
+    models := s.listModelsConcurrent(ctx, localNames)
+    if len(models) == 0 {
+        return "", fmt.Errorf("default_model not configured and no local model loaded")
+    }
+    slog.Debug("auto-discovered default model", "model", models[0].ID, "candidates", len(models))
+    return models[0].ID, nil
 }
 
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {

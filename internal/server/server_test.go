@@ -411,6 +411,132 @@ func TestChatCompletions_NoBackend(t *testing.T) {
     slog.Info("TestChatCompletions_NoBackend", "status", rec.Code, "body", rec.Body.String())
 }
 
+// Issue #28: empty model should be backfilled via auto-discovery from the
+// first loaded local model, not 404 against fusion-mlx.
+func TestChatCompletions_EmptyModelAutoDiscover(t *testing.T) {
+    // fusion-mlx serves the model list for auto-discovery + the chat response.
+    localProvider := &mockProvider{
+        name:    "fusion-mlx",
+        healthy: true,
+        models: []adapter.ModelInfo{
+            {ID: "qwen2.5-7b"},
+            {ID: "deepseek-r1"},
+        },
+        chatResp: &adapter.ChatResponse{
+            ID:      "chatcmpl-ad",
+            Object:  "chat.completion",
+            Created: time.Now().Unix(),
+            Model:   "qwen2.5-7b",
+            Choices: []adapter.ChatChoice{
+                {Index: 0, Message: map[string]string{"role": "assistant", "content": "ok"}, FinishReason: "stop"},
+            },
+            Usage: adapter.UsageResponse{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+        },
+    }
+    s := newTestServer()
+    s.pool.Register("fusion-mlx", localProvider, config.BackendConfig{Type: "fusion-mlx", Enabled: true, BaseURL: "http://localhost:0"})
+    // Force local routing so the request lands on fusion-mlx regardless of
+    // the global hybrid snapshot used by the router.
+    s.cfg.Config.Routing.Fallback.CloudDefault = "fusion-mlx"
+
+    chatBody := `{"messages":[{"role":"user","content":"hi"}],"stream":false}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody))
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (auto-discovered model), got %d body=%s", rec.Code, rec.Body.String())
+    }
+    slog.Info("TestChatCompletions_EmptyModelAutoDiscover passed", "status", rec.Code)
+}
+
+// Issue #28: routing.default_model config takes priority over auto-discovery.
+func TestChatCompletions_EmptyModelDefaultConfig(t *testing.T) {
+    localProvider := &mockProvider{
+        name:    "fusion-mlx",
+        healthy: true,
+        models:  []adapter.ModelInfo{{ID: "auto-detected-model"}},
+        chatResp: &adapter.ChatResponse{
+            ID:      "chatcmpl-dc",
+            Object:  "chat.completion",
+            Created: time.Now().Unix(),
+            Model:   "configured-default",
+            Choices: []adapter.ChatChoice{
+                {Index: 0, Message: map[string]string{"role": "assistant", "content": "ok"}, FinishReason: "stop"},
+            },
+            Usage: adapter.UsageResponse{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+        },
+    }
+    s := newTestServer()
+    s.cfg.Config.Routing.DefaultModel = "configured-default"
+    s.pool.Register("fusion-mlx", localProvider, config.BackendConfig{Type: "fusion-mlx", Enabled: true, BaseURL: "http://localhost:0"})
+    s.cfg.Config.Routing.Fallback.CloudDefault = "fusion-mlx"
+
+    chatBody := `{"messages":[{"role":"user","content":"hi"}],"stream":false}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody))
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (configured default model), got %d body=%s", rec.Code, rec.Body.String())
+    }
+    slog.Info("TestChatCompletions_EmptyModelDefaultConfig passed", "status", rec.Code)
+}
+
+// Issue #28: empty model with no default and no local provider leaves the
+// model empty (resolveDefaultModel returns "" + error, no panic).
+func TestResolveDefaultModel_NoLocalProviderNoDefault(t *testing.T) {
+    s := newTestServer()
+    // Only a cloud provider, no local provider, no default_model.
+    s.pool.Register("test-cloud", &mockProvider{name: "test-cloud", healthy: true}, config.BackendConfig{Type: "openai-compatible", Enabled: true, BaseURL: "http://localhost:0"})
+
+    resolved, err := s.resolveDefaultModel(context.Background())
+    if resolved != "" {
+        t.Fatalf("expected empty resolved model, got %q", resolved)
+    }
+    if err == nil {
+        t.Fatalf("expected error when no local provider available")
+    }
+    slog.Info("TestResolveDefaultModel_NoLocalProviderNoDefault passed", "resolved", resolved, "error", err)
+}
+
+// Issue #28: resolveDefaultModel prefers configured default_model over auto-discovery.
+func TestResolveDefaultModel_ConfigWinsOverAutoDiscover(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Routing.DefaultModel = "my-default"
+    s.pool.Register("fusion-mlx", &mockProvider{
+        name:   "fusion-mlx",
+        models: []adapter.ModelInfo{{ID: "auto-detected"}},
+    }, config.BackendConfig{Type: "fusion-mlx", Enabled: true, BaseURL: "http://localhost:0"})
+
+    resolved, err := s.resolveDefaultModel(context.Background())
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if resolved != "my-default" {
+        t.Fatalf("expected configured default %q, got %q", "my-default", resolved)
+    }
+    slog.Info("TestResolveDefaultModel_ConfigWinsOverAutoDiscover passed", "resolved", resolved)
+}
+
+// Issue #28: auto-discovery picks the first local model when no default configured.
+func TestResolveDefaultModel_AutoDiscoverFirstLocal(t *testing.T) {
+    s := newTestServer()
+    s.pool.Register("fusion-mlx", &mockProvider{
+        name:   "fusion-mlx",
+        models: []adapter.ModelInfo{{ID: "first-local"}, {ID: "second-local"}},
+    }, config.BackendConfig{Type: "fusion-mlx", Enabled: true, BaseURL: "http://localhost:0"})
+
+    resolved, err := s.resolveDefaultModel(context.Background())
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if resolved != "first-local" {
+        t.Fatalf("expected first local model %q, got %q", "first-local", resolved)
+    }
+    slog.Info("TestResolveDefaultModel_AutoDiscoverFirstLocal passed", "resolved", resolved)
+}
+
 func TestChatCompletions_StreamError(t *testing.T) {
     s := newTestServerWithProvider("test-cloud", &mockProvider{
         name:      "test-cloud",

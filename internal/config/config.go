@@ -122,6 +122,7 @@ type RatioTierConfig struct {
 
 type RoutingConfig struct {
     Mode                      string               `mapstructure:"mode"`
+    DefaultModel              string               `mapstructure:"default_model"`
     TokenThreshold            int                  `mapstructure:"token_threshold"`
     OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
     RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
@@ -674,6 +675,7 @@ func DefaultConfig() Config {
         },
         Routing: RoutingConfig{
             Mode:                      "hybrid",
+            DefaultModel:              "",
             TokenThreshold:            8000,
             OutputInputRatioThreshold: 0.6,
             RatioTiers: RatioTierConfig{
