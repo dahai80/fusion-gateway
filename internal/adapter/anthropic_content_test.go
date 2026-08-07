@@ -482,3 +482,45 @@ func TestAnthropicToOpenAIChatRequest_EmptyStringSystem(t *testing.T) {
         t.Fatalf("expected 1 message (empty system skipped), got %d", len(chatReq.Messages))
     }
 }
+
+func TestAnthropicMessage_UnmarshalStringContent(t *testing.T) {
+    slog.Info("test AnthropicMessage_UnmarshalStringContent")
+    body := `{"role":"user","content":"reply ok"}`
+    var msg AnthropicMessage
+    if err := json.Unmarshal([]byte(body), &msg); err != nil {
+        t.Fatalf("string content must unmarshal without error: %v", err)
+    }
+    if msg.Role != "user" {
+        t.Fatalf("expected role user, got %q", msg.Role)
+    }
+    if len(msg.Content) != 1 {
+        t.Fatalf("expected string content normalized to 1 block, got %d", len(msg.Content))
+    }
+    if msg.Content[0].Type != "text" || msg.Content[0].Text != "reply ok" {
+        t.Fatalf("expected text block 'reply ok', got %+v", msg.Content[0])
+    }
+}
+
+func TestAnthropicMessage_UnmarshalArrayContent(t *testing.T) {
+    slog.Info("test AnthropicMessage_UnmarshalArrayContent")
+    body := `{"role":"user","content":[{"type":"text","text":"hi"}]}`
+    var msg AnthropicMessage
+    if err := json.Unmarshal([]byte(body), &msg); err != nil {
+        t.Fatalf("array content must unmarshal without error: %v", err)
+    }
+    if len(msg.Content) != 1 || msg.Content[0].Text != "hi" {
+        t.Fatalf("expected 1 block 'hi', got %+v", msg.Content)
+    }
+}
+
+func TestAnthropicRequest_UnmarshalFullStringContent(t *testing.T) {
+    slog.Info("test AnthropicRequest_UnmarshalFullStringContent")
+    body := `{"model":"claude-3","max_tokens":8,"messages":[{"role":"user","content":"ok"}]}`
+    var req AnthropicRequest
+    if err := json.Unmarshal([]byte(body), &req); err != nil {
+        t.Fatalf("full request with string content must parse: %v", err)
+    }
+    if len(req.Messages) != 1 || len(req.Messages[0].Content) != 1 {
+        t.Fatalf("expected 1 message with 1 normalized block, got %+v", req.Messages)
+    }
+}

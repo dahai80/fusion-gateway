@@ -21,6 +21,42 @@ type AnthropicMessage struct {
     Content []AnthropicContentBlock `json:"content"`
 }
 
+// UnmarshalJSON accepts Anthropic message content in either form: a plain
+// string ("content":"hi") or an array of content blocks. The real Anthropic
+// API permits both; a strict []ContentBlock type rejected string content with
+// "Invalid JSON", breaking Claude SDK / string-form clients (#acceptance: dual
+// protocol). A string is normalized to a single text block so downstream
+// consumers (which expect []AnthropicContentBlock) stay unchanged.
+func (m *AnthropicMessage) UnmarshalJSON(data []byte) error {
+    type alias AnthropicMessage
+    var raw struct {
+        alias
+        Content json.RawMessage `json:"content"`
+    }
+    if err := json.Unmarshal(data, &raw); err != nil {
+        return err
+    }
+    m.Role = raw.alias.Role
+    if len(raw.Content) == 0 {
+        return nil
+    }
+    trimmed := bytes.TrimSpace(raw.Content)
+    if len(trimmed) > 0 && trimmed[0] == '"' {
+        var s string
+        if err := json.Unmarshal(trimmed, &s); err != nil {
+            return err
+        }
+        m.Content = []AnthropicContentBlock{{Type: "text", Text: s}}
+        return nil
+    }
+    var blocks []AnthropicContentBlock
+    if err := json.Unmarshal(trimmed, &blocks); err != nil {
+        return err
+    }
+    m.Content = blocks
+    return nil
+}
+
 type AnthropicContentBlock struct {
     Type string `json:"type"`
     Text string `json:"text,omitempty"`
