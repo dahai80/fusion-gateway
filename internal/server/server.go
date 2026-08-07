@@ -321,6 +321,13 @@ func (s *Server) Start() error {
     mux.HandleFunc("/livez", s.handleLivez)
     mux.HandleFunc("/v1/status", s.withMiddleware(s.handleStatus))
 
+    // #34: proxy fusion-mlx /stats through the gateway so clients configured to
+    // route mlx traffic via :11432 (e.g. fusion-cli bench mem) can fetch
+    // server-side memory stats. Shares the /v1/* fg-key auth chain
+    // (withMiddleware); the provider's ReverseProxy injects the backend
+    // Authorization + X-Fusion-Route. Path is forwarded verbatim (/stats).
+    mux.HandleFunc("/stats", s.withMiddleware(s.handleMLXStats))
+
     // Audit fix: /metrics requires master-key auth
     mux.HandleFunc("/metrics", s.withMasterKey(observability.Handler().ServeHTTP))
 
