@@ -39,10 +39,15 @@ type RouteDecision struct {
 type RouteRequest struct {
     Model    string
     Messages interface{}
-    Stream   bool
-    Tools    interface{}
-    Type     RequestType
-    SpaceID  string
+    // Text is the flattened request text (last user message for chat). Populated
+    // by the server for the D4 semantic intent classifier (issue #22) so the
+    // router need not depend on the adapter message type. Empty for non-text
+    // requests (embeddings/rerank) where classification is not meaningful.
+    Text    string
+    Stream  bool
+    Tools   interface{}
+    Type    RequestType
+    SpaceID string
 }
 
 type ClusterSelector interface {

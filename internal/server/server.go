@@ -540,6 +540,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     routeReq := &router.RouteRequest{
         Model:   req.Model,
+        Text:    textContent,
         Stream:  req.Stream,
         SpaceID: adapter.SpaceIDFromContext(ctx),
     }
@@ -1712,6 +1713,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
     routeReq := &router.RouteRequest{
         Model:  chatReq.Model,
+        Text:   textContent,
         Stream: chatReq.Stream,
     }
     decision := s.router.Decide(ctx, routeReq)

@@ -137,15 +137,30 @@ type RoutingConfig struct {
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
-// Disabled by default until the upstream fusion-router-light 1.5B model is
-// available (fusion-trainer issue-tr-3). When disabled, the engine uses
-// NoopClassifier and the existing P0-P7 rule chain decides routing unchanged.
+// The upstream fusion-router-light 1B LoRA adapter (fusion-trainer#11, base
+// mlx-community/Llama-3.2-1B-Instruct-4bit) is now available, classifying user
+// queries into 5 lightweight task types: code/chat/math/translate/summary.
+// When disabled, the engine uses NoopClassifier and the existing P0-P7 rule
+// chain decides routing unchanged.
 type IntentClassifierConfig struct {
-    Enabled       bool          `mapstructure:"enabled"`
-    Endpoint      string        `mapstructure:"endpoint"`       // fusion-mlx /v1/chat/completions URL or local classifier endpoint
-    Model         string        `mapstructure:"model"`          // e.g. "fusion-router-light"
-    Timeout       time.Duration `mapstructure:"timeout"`        // per-classify timeout
-    MinConfidence float64       `mapstructure:"min_confidence"` // below this, defer to rule chain
+    Enabled bool `mapstructure:"enabled"`
+    // Endpoint is the fusion-mlx /v1/chat/completions base URL (e.g.
+    // "http://127.0.0.1:11434"). Defaults to the local fusion-mlx address.
+    Endpoint string `mapstructure:"endpoint"`
+    // BaseModel is the LoRA base model id served by fusion-mlx (the adapter is
+    // applied on top of it). e.g. "mlx-community/Llama-3.2-1B-Instruct-4bit".
+    BaseModel string `mapstructure:"base_model"`
+    // Model is a backward-compatible alias for the scaffolding config; when set
+    // it overrides BaseModel.
+    Model string `mapstructure:"model"`
+    // Adapter is the absolute path to the served LoRA adapter directory
+    // (the directory containing adapters.safetensors). Sent as the OpenAI
+    // request "adapters" field so fusion-mlx hot-loads the derived engine.
+    Adapter string `mapstructure:"adapter"`
+    // APIKey authenticates the classify request to fusion-mlx if auth enabled.
+    APIKey        string        `mapstructure:"api_key"`
+    Timeout       time.Duration `mapstructure:"timeout"`
+    MinConfidence float64       `mapstructure:"min_confidence"`
 }
 
 type RetryConfig struct {
@@ -706,7 +721,8 @@ func DefaultConfig() Config {
             },
             IntentClassifier: IntentClassifierConfig{
                 Enabled:       false,
-                Model:         "fusion-router-light",
+                Endpoint:      "http://127.0.0.1:11434",
+                BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
                 Timeout:       2 * time.Second,
                 MinConfidence: 0.7,
             },

@@ -92,6 +92,31 @@ func autoStopLocal(cfg *config.AutoStartConfig) {
 	}
 }
 
+// wireIntentClassifier wires the D4 fusion-router-light intent classifier
+// (issue #22) into the router engine when enabled. When disabled or when the
+// config is incomplete (no base model), it installs NoopClassifier so the
+// semantic layer is a no-op and the P0-P7 rule chain decides routing unchanged.
+func wireIntentClassifier(e *router.Engine, cfg config.IntentClassifierConfig) {
+	if !cfg.Enabled {
+		e.SetIntentClassifier(router.NoopClassifier{})
+		slog.Info("intent classifier disabled, using noop")
+		return
+	}
+	c := router.NewRouterLightClassifier(cfg)
+	if c == nil {
+		e.SetIntentClassifier(router.NoopClassifier{})
+		slog.Warn("intent classifier enabled but misconfigured, using noop")
+		return
+	}
+	e.SetIntentClassifier(c)
+	slog.Info("intent classifier wired",
+		"endpoint", cfg.Endpoint,
+		"base_model", cfg.BaseModel,
+		"adapter", cfg.Adapter,
+		"min_confidence", cfg.MinConfidence,
+	)
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -133,6 +158,11 @@ func run(configPath string) error {
 	defer hwCollector.Stop()
 
 	routerEngine := router.NewEngine(snap, hwCollector)
+
+	// D4 semantic intent layer (issue #22): wire the real fusion-router-light
+	// classifier when intent_classifier is enabled. Falls back to NoopClassifier
+	// (set by NewEngine) when disabled or misconfigured.
+	wireIntentClassifier(routerEngine, snap.Config.Routing.IntentClassifier)
 
 	pool := adapter.NewPool()
 	if err := pool.BuildProviders(snap); err != nil {
@@ -193,6 +223,9 @@ func run(configPath string) error {
 	config.OnReload(func(old, newSnap *config.ConfigSnapshot) {
 		routerEngine.DrainAndApply(newSnap)
 		observability.UpdateConfigVersion(newSnap.Version)
+		// D4: re-wire intent classifier on hot reload so enabling/disabling the
+		// semantic layer takes effect without a restart (issue #22).
+		wireIntentClassifier(routerEngine, newSnap.Config.Routing.IntentClassifier)
 		if err := pool.BuildProviders(newSnap); err != nil {
 			slog.Error("failed to rebuild providers after reload", "error", err)
 		}

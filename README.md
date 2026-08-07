@@ -191,7 +191,9 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 
 ### Semantic Intent Routing (D4)
 
-Gateway evolves from static forwarding toward a semantic scheduling center. A lightweight intent classifier (planned: `fusion-router-light` 1.5B, trained upstream in fusion-trainer) inspects each request and dispatches by intent **before** the P0–P7 rule chain. **Disabled by default** — when off, a `NoopClassifier` makes P-1 a no-op and existing behavior is unchanged.
+Gateway evolves from static forwarding toward a semantic scheduling center. A lightweight intent classifier (`fusion-router-light` 1B LoRA adapter, base `mlx-community/Llama-3.2-1B-Instruct-4bit`, trained upstream in fusion-trainer#11) inspects each chat request and dispatches by intent **before** the P0–P7 rule chain. **Disabled by default** — when off, a `NoopClassifier` makes P-1 a no-op and existing behavior is unchanged.
+
+The classifier calls the served LoRA adapter through the local fusion-mlx `/v1/chat/completions` endpoint (using the OpenAI `adapters` field to hot-load the derived engine) with the trained classification prompt. It emits one of five task-type labels — `code` / `chat` / `math` / `translate` / `summary` — all of which are lightweight/local-capable, so each maps to `IntentLightweight`. Heavy-model and diffusion intents stay with the rule chain + platform routing. The classifier **fails open**: on any transport error, timeout, or unrecognized label, the semantic layer defers to the rule chain so routing never breaks.
 
 | Intent | Target |
 |--------|--------|
@@ -200,14 +202,19 @@ Gateway evolves from static forwarding toward a semantic scheduling center. A li
 | `diffusion` | Cluster node on `windows-cuda` (or configured platform) → cloud fallback |
 | `unknown` / low-confidence / classifier error | Defer to rule chain |
 
-The classifier interface (`IntentClassifier`) is the integration surface the trained model will plug into; the platform-aware cluster selector (`HealthyNodesByPlatform` / `SelectNodeByPlatform`) is the surface the Windows CUDA backend will plug into. Both are gated behind config and ship with tests against stubs, so the gateway is ready to activate once the upstream model and backend land.
+> **Prerequisite:** fusion-mlx must be started with
+> `FUSION_LORA_ALLOWED_DIRS=~/.fusion-mlx/adapters` preset (see fusion-mlx#394
+> — the adapters-dir auto-add races the EnginePool init). Without this the
+> classifier calls fail open and the rule chain handles routing as usual.
 
 ```yaml
-route:
+routing:
   intent_classifier:
     enabled: false              # default off; set true once fusion-router-light is deployed
-    endpoint: ""                # classifier HTTP endpoint (empty = in-process NoopClassifier)
-    model: "fusion-router-light"
+    endpoint: "http://127.0.0.1:11434"
+    base_model: "mlx-community/Llama-3.2-1B-Instruct-4bit"
+    adapter: "/Users/dahai/.fusion-mlx/adapters/mlx-community--Llama-3.2-1B-Instruct-4bit/router-light-1b-intent-v3"
+    api_key: ""                 # fusion-mlx auth.api_key when auth enabled
     timeout: 2s
     min_confidence: 0.7
 
@@ -224,6 +231,8 @@ cluster:
       address: "http://192.168.1.50:11434"
       platform: "windows-cuda"
 ```
+
+The semantic layer is hot-reload aware: toggling `intent_classifier.enabled` in config takes effect without a restart.
 
 ### Cluster Load Balancing
 
