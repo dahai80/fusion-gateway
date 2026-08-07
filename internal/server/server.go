@@ -1270,8 +1270,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // listModelsConcurrent fans out ListModels across providers with a per-provider
-// timeout. Failed or timed-out providers are skipped (logged at Debug) so the
-// fast local models are never blocked by a slow/unreachable cloud backend.
+// timeout. Failed or timed-out providers are skipped (logged at Warn) so the
+// fast local models are never blocked by a slow/unreachable cloud backend, but
+// a misconfigured/route-rejected backend still surfaces visibly (#29, Rule 12).
 func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []adapter.ModelInfo {
     type providerResult struct {
         name   string
@@ -1304,7 +1305,7 @@ func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []ada
     models := make([]adapter.ModelInfo, 0)
     for res := range results {
         if res.err != nil {
-            slog.Debug("list models failed for provider, skipping", "provider", res.name, "error", res.err)
+            slog.Warn("list models failed for provider, skipping", "provider", res.name, "error", res.err)
             continue
         }
         for _, m := range res.models {

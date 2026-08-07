@@ -8,6 +8,7 @@ import (
     "io"
     "log/slog"
     "net/http"
+    "strings"
     "sync/atomic"
     "time"
 
@@ -317,7 +318,8 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("list models returned status %d", resp.StatusCode)
+        respBody, _ := io.ReadAll(resp.Body)
+        return nil, fmt.Errorf("list models returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
     }
 
     var listResp struct {
