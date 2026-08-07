@@ -318,6 +318,11 @@ Each API key supports fine-grained access control:
 | `expires_at` | RFC3339 expiry timestamp |
 | `budget_limit` | Monthly spend limit in USD (0 = unlimited) |
 
+Keys come from **two sources**, both honored at the auth layer:
+
+- **Static (config.yaml)**: `auth.api_keys` entries, matched by exact key string.
+- **Admin-managed (dashboard)**: Keys created via `POST /admin/api/keys`. The full `sk-<raw>` key is returned once at creation time; the gateway stores only an 8-char prefix + a SHA-256 hash (`key_hash`). Auth hashes the presented key and looks it up in the Store, so admin-generated keys authenticate identically to static ones (quotas, allowlists, and budget all apply). Non-`active` keys are rejected.
+
 ### MasterKey
 
 The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.
