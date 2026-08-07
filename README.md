@@ -267,7 +267,7 @@ The router engine uses **request type** (`chat`/`embedding`/`rerank`) for fast-p
 | `embedding` | Local-first (skip token budget checks) | Cluster → Cloud |
 | `rerank` | Cloud-default (unless local rerank model detected) | Cluster → Cloud |
 
-- **Embedding**: Routes locally when breaker closed + local ready. For large batches (>32 inputs), uses cluster sharding automatically.
+- **Embedding**: Routes locally when breaker closed + local ready. For large batches (>32 inputs), uses cluster sharding automatically. Accepts `input` as either a string or an array of strings (per the OpenAI API spec).
 - **Rerank**: Routes to cloud by default since local MLX typically doesn't host rerank models. If a model with "rerank"/"reranker" in the name is available locally, routes there instead.
 
 ### Realtime API
@@ -363,6 +363,7 @@ Full OpenAI `stream_options` support for chat completions:
 - **Native path**: Requests routed to an Anthropic backend are forwarded in native format (no conversion overhead)
 - **Auto-convert path**: Requests routed to non-Anthropic backends are automatically converted: AnthropicRequest → ChatRequest → ChatResponse → AnthropicResponse
 - **Bidirectional conversion**: System message extraction, tool format translation (OpenAI functions ↔ Anthropic tools), content block mapping
+- **Content forms**: Accepts `content` as either a plain string or an array of content blocks (per the Anthropic API spec; string is normalized to `[{type:"text",text:s}]`)
 - **Streaming**: Native Anthropic SSE events (`message_start`, `content_block_delta`, `message_delta`, `message_stop`)
 - **Thinking**: Supports `thinking` parameter with `budget_tokens` for extended thinking
 
