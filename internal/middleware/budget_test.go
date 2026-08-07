@@ -30,6 +30,7 @@ func (m *mockBudgetStore) ExportLogs(filter store.LogFilter, format string) ([]b
 }
 func (m *mockBudgetStore) ListKeys() ([]*store.APIKeyEntry, error)                  { return nil, nil }
 func (m *mockBudgetStore) GetKey(name string) (*store.APIKeyEntry, error)           { return nil, nil }
+func (m *mockBudgetStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error)     { return nil, nil }
 func (m *mockBudgetStore) CreateKey(key *store.APIKeyEntry) error                   { return nil }
 func (m *mockBudgetStore) UpdateKey(key *store.APIKeyEntry) error                   { return nil }
 func (m *mockBudgetStore) DeleteKey(name string) error                              { return nil }

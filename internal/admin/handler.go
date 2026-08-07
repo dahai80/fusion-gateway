@@ -2,6 +2,7 @@ package admin
 
 import (
     "crypto/rand"
+    "crypto/sha256"
     "encoding/hex"
     "encoding/json"
     "fmt"
@@ -227,7 +228,9 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusInternalServerError, "key generation failed")
             return
         }
+        fullKey := "sk-" + rawKey
         key.KeyPrefix = "sk-" + rawKey[:8]
+        key.KeyHash = hashAPIKey(fullKey)
         if err := h.store.CreateKey(&key); err != nil {
             slog.Error("failed to create key", "error", err)
             writeError(w, http.StatusConflict, "key creation failed")
@@ -236,7 +239,7 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusCreated, map[string]interface{}{
             "name":       key.Name,
             "key_prefix": key.KeyPrefix,
-            "raw_key":    "sk-" + rawKey,
+            "raw_key":    fullKey,
             "status":     key.Status,
             "models":     key.AllowedModels,
             "modules":    key.ModelModules,
@@ -1275,4 +1278,9 @@ func generateAPIKey() (string, error) {
         return "", err
     }
     return hex.EncodeToString(b), nil
+}
+
+func hashAPIKey(key string) string {
+    sum := sha256.Sum256([]byte(key))
+    return hex.EncodeToString(sum[:])
 }

@@ -9,13 +9,15 @@ import (
 )
 
 type KeyStore struct {
-    mu   sync.RWMutex
-    keys map[string]*store.APIKeyEntry
+    mu     sync.RWMutex
+    keys   map[string]*store.APIKeyEntry
+    byHash map[string]string
 }
 
 func NewKeyStore() *KeyStore {
     return &KeyStore{
-        keys: make(map[string]*store.APIKeyEntry),
+        keys:   make(map[string]*store.APIKeyEntry),
+        byHash: make(map[string]string),
     }
 }
 
@@ -39,6 +41,20 @@ func (s *KeyStore) Get(name string) (*store.APIKeyEntry, error) {
     return k, nil
 }
 
+func (s *KeyStore) GetByHash(hash string) (*store.APIKeyEntry, error) {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+    name, ok := s.byHash[hash]
+    if !ok {
+        return nil, fmt.Errorf("key not found by hash")
+    }
+    k, ok := s.keys[name]
+    if !ok {
+        return nil, fmt.Errorf("key not found by hash")
+    }
+    return k, nil
+}
+
 func (s *KeyStore) Create(key *store.APIKeyEntry) error {
     s.mu.Lock()
     defer s.mu.Unlock()
@@ -53,26 +69,40 @@ func (s *KeyStore) Create(key *store.APIKeyEntry) error {
     }
     key.QuotaRemaining = key.QuotaLimit - key.QuotaUsed
     s.keys[key.Name] = key
+    if key.KeyHash != "" {
+        s.byHash[key.KeyHash] = key.Name
+    }
     return nil
 }
 
 func (s *KeyStore) Update(key *store.APIKeyEntry) error {
     s.mu.Lock()
     defer s.mu.Unlock()
-    if _, exists := s.keys[key.Name]; !exists {
+    old, exists := s.keys[key.Name]
+    if !exists {
         return fmt.Errorf("key not found: %s", key.Name)
+    }
+    if old.KeyHash != "" && old.KeyHash != key.KeyHash {
+        delete(s.byHash, old.KeyHash)
     }
     key.UpdatedAt = time.Now()
     key.QuotaRemaining = key.QuotaLimit - key.QuotaUsed
     s.keys[key.Name] = key
+    if key.KeyHash != "" {
+        s.byHash[key.KeyHash] = key.Name
+    }
     return nil
 }
 
 func (s *KeyStore) Delete(name string) error {
     s.mu.Lock()
     defer s.mu.Unlock()
-    if _, exists := s.keys[name]; !exists {
+    k, exists := s.keys[name]
+    if !exists {
         return fmt.Errorf("key not found: %s", name)
+    }
+    if k.KeyHash != "" {
+        delete(s.byHash, k.KeyHash)
     }
     delete(s.keys, name)
     return nil
@@ -83,5 +113,8 @@ func (s *KeyStore) LoadFromConfig(keys map[string]*store.APIKeyEntry) {
     defer s.mu.Unlock()
     for name, k := range keys {
         s.keys[name] = k
+        if k.KeyHash != "" {
+            s.byHash[k.KeyHash] = name
+        }
     }
 }

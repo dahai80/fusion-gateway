@@ -42,6 +42,7 @@ type RequestLog struct {
 type APIKeyEntry struct {
     Name            string            `json:"name"`
     KeyPrefix       string            `json:"key_prefix"`
+    KeyHash         string            `json:"key_hash,omitempty"`
     Status          string            `json:"status"`
     QuotaLimit      float64           `json:"quota_limit"`
     QuotaUsed       float64           `json:"quota_used"`
@@ -249,6 +250,7 @@ type Store interface {
 
     ListKeys() ([]*APIKeyEntry, error)
     GetKey(name string) (*APIKeyEntry, error)
+    GetKeyByHash(hash string) (*APIKeyEntry, error)
     CreateKey(key *APIKeyEntry) error
     UpdateKey(key *APIKeyEntry) error
     DeleteKey(name string) error

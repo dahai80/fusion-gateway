@@ -88,6 +88,15 @@ func (m *mockStore) GetKey(name string) (*store.APIKeyEntry, error) {
     return nil, fmt.Errorf("key %q not found", name)
 }
 
+func (m *mockStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
+    for _, k := range m.keys {
+        if k.KeyHash == hash {
+            return k, nil
+        }
+    }
+    return nil, fmt.Errorf("key not found by hash")
+}
+
 func (m *mockStore) CreateKey(key *store.APIKeyEntry) error {
     for _, k := range m.keys {
         if k.Name == key.Name {

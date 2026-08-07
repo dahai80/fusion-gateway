@@ -21,7 +21,8 @@ const (
     costByTime    = "fusion:cost:by_time"
     keyTeamIndex  = "fusion:key_team:"
     logPrefix     = "fusion:log:"
-    apiKeyPrefix  = "fusion:key:"
+    apiKeyPrefix     = "fusion:key:"
+    apiKeyHashPrefix = "fusion:keyhash:"
     channelPrefix = "fusion:channel:"
 )
 
@@ -156,12 +157,28 @@ func (r *RedisStore) GetKey(name string) (*store.APIKeyEntry, error) {
     return &entry, nil
 }
 
+func (r *RedisStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
+    name, err := r.client.Get(r.ctx, apiKeyHashPrefix+hash).Result()
+    if err != nil {
+        return nil, fmt.Errorf("key not found by hash")
+    }
+    return r.GetKey(name)
+}
+
 func (r *RedisStore) CreateKey(key *store.APIKeyEntry) error {
     data, err := json.Marshal(key)
     if err != nil {
         return err
     }
-    return r.client.Set(r.ctx, apiKeyPrefix+key.Name, data, 0).Err()
+    if err := r.client.Set(r.ctx, apiKeyPrefix+key.Name, data, 0).Err(); err != nil {
+        return err
+    }
+    if key.KeyHash != "" {
+        if err := r.client.Set(r.ctx, apiKeyHashPrefix+key.KeyHash, key.Name, 0).Err(); err != nil {
+            slog.Warn("failed to index key hash", "key", key.Name, "error", err)
+        }
+    }
+    return nil
 }
 
 func (r *RedisStore) UpdateKey(key *store.APIKeyEntry) error {
@@ -169,6 +186,10 @@ func (r *RedisStore) UpdateKey(key *store.APIKeyEntry) error {
 }
 
 func (r *RedisStore) DeleteKey(name string) error {
+    existing, err := r.GetKey(name)
+    if err == nil && existing.KeyHash != "" {
+        r.client.Del(r.ctx, apiKeyHashPrefix+existing.KeyHash)
+    }
     return r.client.Del(r.ctx, apiKeyPrefix+name).Err()
 }
 

@@ -1,19 +1,29 @@
 package middleware
 
 import (
+    "crypto/sha256"
     "crypto/subtle"
+    "encoding/hex"
     "log/slog"
     "net/http"
     "strings"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
+type keyLookupStore interface {
+    GetKeyByHash(hash string) (*store.APIKeyEntry, error)
+}
+
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
+    return APIKeyAuthWithStore(cfg, nil)
+}
+
+func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            // 硬伤1 fix: populate Principal instead of scattered context keys
             ctx, p := EnsurePrincipal(r.Context())
 
             if !cfg.Enabled || cfg.Passthrough {
@@ -48,6 +58,12 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
                 }
             }
 
+            if matchedKey == nil && st != nil {
+                if kc, ok := lookupKeyByHash(st, key); ok {
+                    matchedKey = kc
+                }
+            }
+
             if matchedKey == nil {
                 slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr)
                 http.Error(w, `{"error":{"message":"Invalid API key","type":"auth_error"}}`, http.StatusUnauthorized)
@@ -73,6 +89,33 @@ func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
+}
+
+func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool) {
+    sum := sha256.Sum256([]byte(key))
+    hash := hex.EncodeToString(sum[:])
+    entry, err := st.GetKeyByHash(hash)
+    if err != nil || entry == nil {
+        return nil, false
+    }
+    if entry.Status != "" && entry.Status != "active" {
+        slog.Warn("api key disabled", "key", entry.Name, "status", entry.Status)
+        return nil, false
+    }
+    kc := &config.AuthKeyConfig{
+        Key:             key,
+        Name:            entry.Name,
+        AllowedBackends: entry.AllowedBackends,
+        AllowedModels:   entry.AllowedModels,
+        ModelModules:    entry.ModelModules,
+        RPM:             entry.RPM,
+        TPM:             entry.TPM,
+        BudgetLimit:     entry.BudgetLimit,
+    }
+    if entry.ExpiresAt != nil && !entry.ExpiresAt.IsZero() {
+        kc.ExpiresAt = entry.ExpiresAt.Format(time.RFC3339)
+    }
+    return kc, true
 }
 
 func CheckModelAllowlist(r *http.Request, model string) bool {

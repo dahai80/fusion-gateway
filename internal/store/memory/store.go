@@ -72,6 +72,10 @@ func (m *MemoryStore) GetKey(name string) (*store.APIKeyEntry, error) {
     return m.keys.Get(name)
 }
 
+func (m *MemoryStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
+    return m.keys.GetByHash(hash)
+}
+
 func (m *MemoryStore) CreateKey(key *store.APIKeyEntry) error {
     return m.keys.Create(key)
 }

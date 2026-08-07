@@ -2,6 +2,8 @@ package middleware
 
 import (
     "context"
+    "crypto/sha256"
+    "encoding/hex"
     "log/slog"
     "net/http"
     "net/http/httptest"
@@ -9,6 +11,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
 func TestAPIKeyAuth_Disabled(t *testing.T) {
@@ -416,5 +419,97 @@ func TestCheckBackendAccess_Wildcard(t *testing.T) {
     req = req.WithContext(ctx)
     if !CheckBackendAccess(req, "cloud") {
         t.Fatal("wildcard should allow all backends")
+    }
+}
+
+type mockKeyLookupStore struct {
+    entry *store.APIKeyEntry
+    err   error
+}
+
+func (m *mockKeyLookupStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
+    if m.err != nil {
+        return nil, m.err
+    }
+    return m.entry, nil
+}
+
+func TestAPIKeyAuthWithStore_HashLookupSuccess(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_HashLookupSuccess")
+    rawKey := "sk-admin-generated-test-key"
+    sum := sha256.Sum256([]byte(rawKey))
+    hash := hex.EncodeToString(sum[:])
+    st := &mockKeyLookupStore{
+        entry: &store.APIKeyEntry{
+            Name:          "managed-key",
+            KeyHash:       hash,
+            Status:        "active",
+            AllowedModels: []string{"gpt-4o"},
+        },
+    }
+    cfg := &config.AuthConfig{Enabled: true}
+    called := false
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        p := PrincipalFromContext(r.Context())
+        if p == nil || p.KeyConfig == nil || p.KeyConfig.Name != "managed-key" {
+            t.Fatalf("expected principal with managed-key, got %+v", p)
+        }
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer "+rawKey)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Fatalf("store-managed key must authenticate, got status %d body %s", rec.Code, rec.Body.String())
+    }
+}
+
+func TestAPIKeyAuthWithStore_DisabledKeyRejected(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_DisabledKeyRejected")
+    rawKey := "sk-disabled-test-key"
+    sum := sha256.Sum256([]byte(rawKey))
+    hash := hex.EncodeToString(sum[:])
+    st := &mockKeyLookupStore{
+        entry: &store.APIKeyEntry{
+            Name:    "disabled-key",
+            KeyHash: hash,
+            Status:  "revoked",
+        },
+    }
+    cfg := &config.AuthConfig{Enabled: true}
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("revoked key must not reach handler")
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer "+rawKey)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401 for revoked key, got %d", rec.Code)
+    }
+}
+
+func TestAPIKeyAuthWithStore_StaticKeyWins(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_StaticKeyWins")
+    st := &mockKeyLookupStore{entry: &store.APIKeyEntry{Name: "store-key", Status: "active"}}
+    cfg := &config.AuthConfig{
+        Enabled: true,
+        APIKeys: []config.AuthKeyConfig{{Key: "fg-static-key", Name: "static"}},
+    }
+    called := false
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        p := PrincipalFromContext(r.Context())
+        if p.KeyConfig.Name != "static" {
+            t.Fatalf("expected static key match, got %s", p.KeyConfig.Name)
+        }
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer fg-static-key")
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called {
+        t.Fatalf("static key must authenticate, got %d", rec.Code)
     }
 }

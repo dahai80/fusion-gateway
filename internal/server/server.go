@@ -423,7 +423,7 @@ func (s *Server) buildMiddlewareChain() {
         middleware.RequestID,
         observability.HTTPMiddleware,
         middleware.CORS(&s.cfg.Config.CORS),
-        middleware.APIKeyAuth(&s.cfg.Config.Auth),
+        middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store),
         s.oidcAuth.Middleware(&s.cfg.Config.Auth),
         middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
