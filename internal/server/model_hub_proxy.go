@@ -80,3 +80,19 @@ func (s *Server) handleMLXAdminProxy(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("fusion-mlx admin proxy forwarding", "method", r.Method, "path", r.URL.Path)
 	mlx.ReverseProxy().ServeHTTP(w, r)
 }
+
+// handleMLXStats forwards /stats to the fusion-mlx backend (#34), so clients
+// that route mlx traffic through the gateway (fusion-cli bench mem) can read
+// server-side memory stats. Same transparent proxy + credential injection as
+// handleMLXAdminProxy; path is forwarded verbatim so /stats maps 1:1 to the
+// backend. Clients authenticate to the gateway with their fg-key.
+func (s *Server) handleMLXStats(w http.ResponseWriter, r *http.Request) {
+	mlx := s.pool.GetFusionMLX()
+	if mlx == nil {
+		slog.Error("fusion-mlx stats proxy: backend not configured", "path", r.URL.Path)
+		http.Error(w, "fusion-mlx backend not configured", http.StatusServiceUnavailable)
+		return
+	}
+	slog.Debug("fusion-mlx stats proxy forwarding", "method", r.Method, "path", r.URL.Path)
+	mlx.ReverseProxy().ServeHTTP(w, r)
+}
