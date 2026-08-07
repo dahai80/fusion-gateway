@@ -546,6 +546,24 @@ func TestCollector_Start_DisabledConfig(t *testing.T) {
     c.Stop()
 }
 
+func TestCollector_Start_ZeroIntervalDefaults(t *testing.T) {
+    t.Log("testing Collector.Start defaults collect_interval to 5s when zero, no panic")
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 0,
+        Gopsutil:        config.GopsutilConfig{Enabled: false},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: false},
+        Swap:            config.SwapConfig{PageRateSampling: false},
+    }
+    c := NewCollector(cfg)
+    c.Start(context.Background())
+    if cfg.CollectInterval != 5*time.Second {
+        t.Errorf("expected default CollectInterval 5s, got %v", cfg.CollectInterval)
+    }
+    c.Stop()
+}
+
 func TestCollector_Stop_WithoutStart(t *testing.T) {
     t.Log("testing Collector.Stop without Start does not panic")
     cfg := &config.HardwareConfig{
