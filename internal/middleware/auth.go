@@ -132,11 +132,16 @@ func CheckModelAllowlist(r *http.Request, model string) bool {
         return true
     }
 
+    modelLower := strings.ToLower(model)
     for _, allowed := range p.KeyConfig.AllowedModels {
-        if allowed == "*" || allowed == model {
+        if allowed == "*" {
             return true
         }
-        if strings.HasSuffix(allowed, "*") && strings.HasPrefix(model, allowed[:len(allowed)-1]) {
+        allowedLower := strings.ToLower(allowed)
+        if allowedLower == modelLower {
+            return true
+        }
+        if strings.HasSuffix(allowedLower, "*") && strings.HasPrefix(modelLower, allowedLower[:len(allowedLower)-1]) {
             return true
         }
     }

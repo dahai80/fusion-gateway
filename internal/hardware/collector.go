@@ -34,6 +34,11 @@ func (c *Collector) Start(ctx context.Context) {
         return
     }
 
+    if c.cfg.CollectInterval <= 0 {
+        slog.Warn("hardware collect_interval not set or non-positive, defaulting to 5s", "configured", c.cfg.CollectInterval)
+        c.cfg.CollectInterval = 5 * time.Second
+    }
+
     childCtx, cancel := context.WithCancel(ctx)
     c.cancel = cancel
 

@@ -980,6 +980,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.9 — Case-Insensitive Model Allowlist, Collector Panic Guard (#32, #33)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Case-insensitive model allowlist** (#32) | `CheckModelAllowlist` now matches both exact names and prefix wildcards (`qwen*`) case-insensitively. The shipped demo key's `allowed_models: ["qwen*"]` now matches actual fusion-mlx model names like `Qwen3.5-9B-4bit` and `mlx-community--Qwen2.5-VL-7B-Instruct-4bit` instead of 403-ing. Backward compatible — lowercase config globs still match lowercase model names. |
+| 2 | **Hardware collector panic guard** (#33) | `Collector.Start` defaults `collect_interval` to 5s when it is missing or non-positive, instead of panicking in `time.NewTicker(0)`. Prevents a startup crash when `hardware.collect_interval` is absent from `config.yaml`. |
+
 ### v0.8.1 — Empty-Model Default Resolution (#28)
 
 | # | Fix | Details |

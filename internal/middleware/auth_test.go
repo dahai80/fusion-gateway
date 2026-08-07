@@ -264,6 +264,36 @@ func TestCheckModelAllowlist_PrefixWildcard(t *testing.T) {
     }
 }
 
+func TestCheckModelAllowlist_CaseInsensitive(t *testing.T) {
+    slog.Info("test CheckModelAllowlist_CaseInsensitive")
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{
+        Name:          "test",
+        AllowedModels: []string{"qwen*"},
+    }}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req = req.WithContext(ctx)
+    if !CheckModelAllowlist(req, "Qwen3.5-9B-4bit") {
+        t.Error("case-insensitive prefix wildcard should allow Qwen3.5-9B-4bit for qwen*")
+    }
+    if !CheckModelAllowlist(req, "QWEN2.5-7B") {
+        t.Error("case-insensitive prefix wildcard should allow QWEN2.5-7B for qwen*")
+    }
+    if CheckModelAllowlist(req, "llama-3") {
+        t.Error("prefix wildcard should deny llama-3")
+    }
+    exactP := &Principal{KeyConfig: &config.AuthKeyConfig{
+        Name:          "test",
+        AllowedModels: []string{"GPT-4"},
+    }}
+    ctx2 := ContextWithPrincipal(context.Background(), exactP)
+    req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req2 = req2.WithContext(ctx2)
+    if !CheckModelAllowlist(req2, "gpt-4") {
+        t.Error("case-insensitive exact match should allow gpt-4 for GPT-4")
+    }
+}
+
 func TestExtractAPIKey_Bearer(t *testing.T) {
     req := httptest.NewRequest(http.MethodGet, "/", nil)
     req.Header.Set("Authorization", "Bearer mykey")
