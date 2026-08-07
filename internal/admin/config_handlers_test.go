@@ -436,7 +436,7 @@ func TestHandleRateLimitConfig(t *testing.T) {
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
         }
-        sec := readYAMLNestedSection(t, configPath, "route", "rate_limit")
+        sec := readYAMLNestedSection(t, configPath, "routing", "rate_limit")
         if sec["enabled"] != false {
             t.Errorf("expected enabled false, got %v", sec["enabled"])
         }
@@ -452,7 +452,7 @@ func TestHandleRateLimitConfig(t *testing.T) {
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
         }
-        sec := readYAMLNestedSection(t, configPath, "route", "rate_limit")
+        sec := readYAMLNestedSection(t, configPath, "routing", "rate_limit")
         if sec["global_rpm"] != 200 {
             t.Errorf("expected global_rpm 200, got %v", sec["global_rpm"])
         }
@@ -501,7 +501,7 @@ func TestHandleRetryConfig(t *testing.T) {
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
         }
-        sec := readYAMLNestedSection(t, configPath, "route", "retry")
+        sec := readYAMLNestedSection(t, configPath, "routing", "retry")
         if sec["max_retries"] != 5 {
             t.Errorf("expected max_retries 5, got %v", sec["max_retries"])
         }
@@ -540,7 +540,7 @@ func TestHandleNegotiationConfig(t *testing.T) {
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
         }
-        sec := readYAMLNestedSection(t, configPath, "route", "negotiation")
+        sec := readYAMLNestedSection(t, configPath, "routing", "negotiation")
         if sec["route_header"] != "X-Custom-Route" {
             t.Errorf("expected route_header X-Custom-Route, got %v", sec["route_header"])
         }

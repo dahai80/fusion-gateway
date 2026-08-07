@@ -870,6 +870,49 @@ golangci-lint run
 go build -o fusion-gateway ./cmd/gateway
 ```
 
+### End-to-End Tests (Admin Dashboard)
+
+The admin dashboard SPA has a Playwright E2E suite under `tests/e2e/`. It
+covers every admin page — login, API keys, channels, dashboard/analytics/logs,
+and all 26 config sections — exercising both the UI (buttons, inputs, forms)
+and the runtime coupling (admin-side config changes must take effect in the
+live gateway via hot-reload).
+
+**49 tests** across 5 spec files:
+
+| Spec | Covers |
+|------|--------|
+| `01-login.spec.js` | login form, wrong/right creds, `admin_token` cookie, route guard redirect |
+| `02-keys.spec.js` | keys table, create via UI, runtime lifecycle (key works on `/v1/models` → delete → 401/403), empty-name 400, PUT edit persistence, id==name |
+| `03-channels.spec.js` | channels table, create via UI form (name/type/base_url/priority/weight), UI delete, empty-name 400, PUT edit persistence |
+| `04-dashboard-analytics.spec.js` | dashboard, analytics overview + profit, logs + export endpoints |
+| `05-config.spec.js` | all 26 config sections GET (renders) + PUT (persists) + hot-reload round-trip; CORS preflight echo; per-key rate-limit 429; unauthenticated PUT rejected |
+
+```bash
+# Prerequisites: gateway running on :11432 with admin enabled
+./fusion-gateway --config config.yaml
+
+# Install Playwright (one-time)
+cd tests/e2e && npm install
+
+# Run all E2E tests (chromium, serial)
+npx playwright test
+
+# Run a single spec
+npx playwright test tests/02-keys.spec.js
+
+# Headed mode (watch the browser)
+npx playwright test --headed
+
+# View last run report
+npx playwright show-report
+```
+
+The suite backs up `config.yaml` once before the run (via `global-setup.js`)
+and restores it once after (`global-teardown.js`), so the mutating config-PUT
+tests never leave the live gateway in a changed state. The user's running
+keys and config are untouched.
+
 ### Test Coverage
 
 All packages maintain ≥90% test coverage:

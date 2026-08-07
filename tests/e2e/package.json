@@ -1,0 +1,14 @@
+{
+    "name": "fusion-gateway-admin-e2e",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Playwright end-to-end tests for the Fusion-Gateway admin dashboard — every button, input, and the runtime-reflects-config invariant.",
+    "scripts": {
+        "test": "playwright test",
+        "test:headed": "playwright test --headed",
+        "report": "playwright show-report"
+    },
+    "devDependencies": {
+        "@playwright/test": "1.61.0"
+    }
+}

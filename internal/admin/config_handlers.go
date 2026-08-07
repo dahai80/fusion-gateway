@@ -110,7 +110,7 @@ func (h *Handler) handleRateLimitConfig(w http.ResponseWriter, r *http.Request) 
             return
         }
         doc, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
-            sec := getOrCreateSection(doc, "route", "rate_limit")
+            sec := getOrCreateSection(doc, "routing", "rate_limit")
             applyBool(sec, "enabled", req.Enabled)
             applyInt(sec, "global_rpm", req.GlobalRPM)
             applyInt(sec, "global_tpm", req.GlobalTPM)
@@ -121,7 +121,7 @@ func (h *Handler) handleRateLimitConfig(w http.ResponseWriter, r *http.Request) 
             return
         }
         slog.Info("rate-limit config updated via admin API")
-        sec := getOrCreateSection(doc, "route", "rate_limit")
+        sec := getOrCreateSection(doc, "routing", "rate_limit")
         writeJSON(w, http.StatusOK, rateLimitConfigResponse{
             Enabled: getBool(sec, "enabled"), GlobalRPM: getInt(sec, "global_rpm"),
             GlobalTPM: getInt(sec, "global_tpm"), KeyEnforcement: getBool(sec, "key_enforcement"),
@@ -162,7 +162,7 @@ func (h *Handler) handleRetryConfig(w http.ResponseWriter, r *http.Request) {
             return
         }
         doc, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
-            sec := getOrCreateSection(doc, "route", "retry")
+            sec := getOrCreateSection(doc, "routing", "retry")
             applyInt(sec, "max_retries", req.MaxRetries)
             if req.InitialBackoff != nil {
                 sec["initial_backoff"] = *req.InitialBackoff
@@ -183,7 +183,7 @@ func (h *Handler) handleRetryConfig(w http.ResponseWriter, r *http.Request) {
             return
         }
         slog.Info("retry config updated via admin API")
-        sec := getOrCreateSection(doc, "route", "retry")
+        sec := getOrCreateSection(doc, "routing", "retry")
         retryableCodes := []int{}
         if raw, ok := sec["retryable_status_codes"].([]interface{}); ok {
             for _, v := range raw {
@@ -233,7 +233,7 @@ func (h *Handler) handleNegotiationConfig(w http.ResponseWriter, r *http.Request
             return
         }
         doc, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
-            sec := getOrCreateSection(doc, "route", "negotiation")
+            sec := getOrCreateSection(doc, "routing", "negotiation")
             applyBool(sec, "disable_fusion_mlx_routing", req.DisableFusionMLXRouting)
             applyString(sec, "route_header", req.RouteHeader)
             applyString(sec, "route_header_value", req.RouteHeaderValue)
@@ -243,7 +243,7 @@ func (h *Handler) handleNegotiationConfig(w http.ResponseWriter, r *http.Request
             return
         }
         slog.Info("negotiation config updated via admin API")
-        sec := getOrCreateSection(doc, "route", "negotiation")
+        sec := getOrCreateSection(doc, "routing", "negotiation")
         writeJSON(w, http.StatusOK, negotiationConfigResponse{
             DisableFusionMLXRouting: getBool(sec, "disable_fusion_mlx_routing"),
             RouteHeader:             getString(sec, "route_header"), RouteHeaderValue: getString(sec, "route_header_value"),
