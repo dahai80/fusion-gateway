@@ -64,3 +64,19 @@ func inferModuleFromPath(path string) string {
 	}
 	return ""
 }
+
+// handleMLXAdminProxy forwards /admin/api/fine-tune/* to the fusion-mlx backend
+// (#30), transparently proxying method/path/query/body and SSE streams. The
+// fusion-mlx provider's ReverseProxy injects Authorization + X-Fusion-Route so
+// fusion-mlx's route_guard admits the request; clients authenticate to the
+// gateway with their fg-key (same chain as /v1/*) and send nothing extra.
+func (s *Server) handleMLXAdminProxy(w http.ResponseWriter, r *http.Request) {
+	mlx := s.pool.GetFusionMLX()
+	if mlx == nil {
+		slog.Error("fusion-mlx admin proxy: backend not configured", "path", r.URL.Path)
+		http.Error(w, "fusion-mlx backend not configured", http.StatusServiceUnavailable)
+		return
+	}
+	slog.Debug("fusion-mlx admin proxy forwarding", "method", r.Method, "path", r.URL.Path)
+	mlx.ReverseProxy().ServeHTTP(w, r)
+}

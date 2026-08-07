@@ -7,6 +7,7 @@ import (
     "log/slog"
     "net/http"
     "net/http/httptest"
+    "strings"
     "testing"
     "time"
 
@@ -649,5 +650,103 @@ func TestFusionMLXProvider_StartIdleGCTimer_DefaultThreshold(t *testing.T) {
     stopCh := make(chan struct{})
     close(stopCh)
     p.StartIdleGCTimer(stopCh)
+}
+
+func TestFusionMLXProvider_ReverseProxy(t *testing.T) {
+    t.Run("forwards_path_and_injects_headers", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_ReverseProxy forwards_path_and_injects_headers")
+        var gotPath, gotAuth, gotRoute, gotMethod string
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            gotPath = r.URL.Path
+            gotMethod = r.Method
+            gotAuth = r.Header.Get("Authorization")
+            gotRoute = r.Header.Get("X-Fusion-Route")
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte(`{"ok":true}`))
+        }))
+        defer srv.Close()
+
+        p := NewFusionMLXProvider(config.BackendConfig{
+            BaseURL: srv.URL,
+            APIKey:  "mlx-secret",
+        }, config.RoutingConfig{
+            Negotiation: config.NegotiationConfig{
+                RouteHeader:      "X-Fusion-Route",
+                RouteHeaderValue: "gateway-decision",
+            },
+        })
+
+        rec := httptest.NewRecorder()
+        req := httptest.NewRequest(http.MethodGet, "/admin/api/fine-tune/jobs", nil)
+        p.ReverseProxy().ServeHTTP(rec, req)
+
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        if gotPath != "/admin/api/fine-tune/jobs" {
+            t.Fatalf("expected path forwarded verbatim, got %q", gotPath)
+        }
+        if gotMethod != http.MethodGet {
+            t.Fatalf("expected GET forwarded, got %q", gotMethod)
+        }
+        if gotAuth != "Bearer mlx-secret" {
+            t.Fatalf("expected Authorization injected, got %q", gotAuth)
+        }
+        if gotRoute != "gateway-decision" {
+            t.Fatalf("expected X-Fusion-Route injected, got %q", gotRoute)
+        }
+        if rec.Body.String() != `{"ok":true}` {
+            t.Fatalf("expected body passthrough, got %q", rec.Body.String())
+        }
+    })
+
+    t.Run("forwards_post_body", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_ReverseProxy forwards_post_body")
+        var gotBody []byte
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            gotBody, _ = io.ReadAll(r.Body)
+            w.WriteHeader(http.StatusCreated)
+        }))
+        defer srv.Close()
+
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL, APIKey: "k"}, config.RoutingConfig{
+            Negotiation: config.NegotiationConfig{RouteHeader: "X-Fusion-Route", RouteHeaderValue: "gateway-decision"},
+        })
+
+        rec := httptest.NewRecorder()
+        req := httptest.NewRequest(http.MethodPost, "/admin/api/fine-tune/jobs", strings.NewReader(`{"model_id":"x"}`))
+        p.ReverseProxy().ServeHTTP(rec, req)
+
+        if rec.Code != http.StatusCreated {
+            t.Fatalf("expected 201, got %d", rec.Code)
+        }
+        if string(gotBody) != `{"model_id":"x"}` {
+            t.Fatalf("expected body passthrough, got %q", string(gotBody))
+        }
+    })
+
+    t.Run("cached_single_instance", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_ReverseProxy cached_single_instance")
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            w.WriteHeader(http.StatusOK)
+        }))
+        defer srv.Close()
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL}, config.RoutingConfig{})
+        first := p.ReverseProxy()
+        second := p.ReverseProxy()
+        if first != second {
+            t.Fatal("expected ReverseProxy to return the same cached instance")
+        }
+    })
+
+    t.Run("invalid_base_url_falls_back", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_ReverseProxy invalid_base_url_falls_back")
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: "://bad-url"}, config.RoutingConfig{})
+        rp := p.ReverseProxy()
+        if rp == nil {
+            t.Fatal("expected non-nil reverse proxy despite invalid base_url")
+        }
+    })
 }
 

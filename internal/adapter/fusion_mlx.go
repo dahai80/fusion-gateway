@@ -8,6 +8,8 @@ import (
     "io"
     "log/slog"
     "net/http"
+    "net/http/httputil"
+    "net/url"
     "strings"
     "sync/atomic"
     "time"
@@ -27,6 +29,8 @@ type FusionMLXProvider struct {
     routeHeaderValue string
     modelSet         atomic.Value
     gcPending        atomic.Bool
+    reverseProxy     *httputil.ReverseProxy
+    reverseProxyOnce atomic.Bool
 }
 
 func NewFusionMLXProvider(backendCfg config.BackendConfig, routingCfg config.RoutingConfig) *FusionMLXProvider {
@@ -330,6 +334,53 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
     }
 
     return listResp.Data, nil
+}
+
+// ReverseProxy returns a cached httputil.ReverseProxy that forwards arbitrary
+// paths to fusion-mlx verbatim (path/query/body/SSE preserved), injecting the
+// gateway's Authorization + X-Fusion-Route credentials so fusion-mlx's
+// route_guard admits the request (#30: admin fine-tune API proxy). Built
+// lazily once; the Director only rewrites scheme/host, leaving the path intact
+// so /admin/api/fine-tune/* maps 1:1 to the backend.
+func (p *FusionMLXProvider) ReverseProxy() *httputil.ReverseProxy {
+    if p.reverseProxyOnce.CompareAndSwap(false, true) {
+        parsedURL, err := url.Parse(p.baseURL)
+        if err != nil {
+            slog.Error("fusion-mlx reverse proxy: invalid base_url, falling back to 127.0.0.1:11434", "base_url", p.baseURL, "error", err)
+            parsedURL, _ = url.Parse("http://127.0.0.1:11434")
+        }
+        p.reverseProxy = &httputil.ReverseProxy{
+            Director:      p.proxyDirector(parsedURL),
+            Transport:     p.httpClient.Transport,
+            FlushInterval: -1,
+            ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+                slog.Error("fusion-mlx reverse proxy error", "method", r.Method, "path", r.URL.Path, "error", err)
+                http.Error(w, fmt.Sprintf("fusion-mlx proxy error: %v", err), http.StatusBadGateway)
+            },
+        }
+        slog.Info("fusion-mlx reverse proxy ready", "base_url", parsedURL.String())
+    }
+    return p.reverseProxy
+}
+
+// proxyDirector returns a Director that rewrites scheme/host to the backend and
+// injects the gateway credentials. The request path is untouched.
+func (p *FusionMLXProvider) proxyDirector(backend *url.URL) func(*http.Request) {
+    return func(req *http.Request) {
+        req.URL.Scheme = backend.Scheme
+        req.URL.Host = backend.Host
+        req.Host = backend.Host
+
+        if p.apiKey != "" {
+            req.Header.Set("Authorization", "Bearer "+p.apiKey)
+        }
+        if p.routeHeader != "" {
+            req.Header.Set(p.routeHeader, p.routeHeaderValue)
+        }
+        if _, ok := req.Header["User-Agent"]; !ok {
+            req.Header.Set("User-Agent", "fusion-gateway/mlx-proxy")
+        }
+    }
 }
 
 func (p *FusionMLXProvider) Cancel(requestID string) {

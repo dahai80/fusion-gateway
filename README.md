@@ -158,6 +158,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `/mcp/v1/stats` | GET | MCP gateway statistics |
 | `/mcp/v1/health` | GET | MCP gateway health check |
 | `/api/v1/` | ANY | Model-hub reverse proxy (with module permission enforcement) |
+| `/admin/api/fine-tune/*` | ANY | fusion-mlx admin fine-tune API reverse proxy (#30) — jobs CRUD, SSE progress stream, adapters; same fg-key auth chain as `/v1/*`, gateway injects `X-Fusion-Route` internally |
 
 ## Routing Logic
 
@@ -1009,6 +1010,14 @@ Diagnostics:
 - Direct check the backend itself: `curl -H "X-Fusion-Route: gateway-decision" -H "Authorization: Bearer <mlx_key>" http://127.0.0.1:11434/v1/models`.
 
 Clients do **not** send `X-Fusion-Route`; the gateway injects it on all forwarded requests, so chat and list-models share one auth chain.
+
+### `/admin/api/fine-tune/*` returns SPA HTML (#30)
+
+If a fine-tune request returns the admin dashboard HTML instead of JSON, the route is falling through to the `/admin/` SPA catch-all — meaning the `/admin/api/fine-tune/` proxy route is not registered. This happens on a **stale binary** predating the #30 fix (commit `<this release>`). Rebuild: `go build -o fusion-gateway ./cmd/gateway`.
+
+The proxy forwards `/admin/api/fine-tune/*` to fusion-mlx `:11434` 1:1 (method/path/query/body/SSE preserved) and injects `Authorization` + `X-Fusion-Route` internally; clients authenticate to the gateway with their fg-key (same chain as `/v1/*`) and send nothing extra.
+
+Known upstream limitation: `GET /admin/api/fine-tune/jobs/models` returns 404 (`Job not found: models`) because fusion-mlx's `/jobs/{id}` route shadows the static `/jobs/models` path — see fusion-mlx#397. This is a fusion-mlx routing bug, not a gateway issue; the gateway forwards the request correctly (confirmed: the same 404 occurs on a direct `:11434` call).
 
 ## Fusion Ecosystem
 
