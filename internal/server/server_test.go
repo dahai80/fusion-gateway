@@ -4629,11 +4629,23 @@ func TestConnectionCRUD_Delete(t *testing.T) {
 // --- Coverage boost: Anthropic messages paths ---
 
 func TestAnthropicMessages_StreamPath(t *testing.T) {
+    ch := make(chan adapter.StreamChunk, 1)
+    finishReason := "stop"
+    ch <- adapter.StreamChunk{
+        ID:      "chatcmpl-anthropic-stream",
+        Object:  "chat.completion.chunk",
+        Created: time.Now().Unix(),
+        Model:   "claude-3",
+        Choices: []adapter.ChoiceDelta{
+            {Index: 0, Delta: map[string]string{"content": "ok"}, FinishReason: &finishReason},
+        },
+    }
+    close(ch)
     s := newTestServer()
     s.pool.Register("test-cloud", &mockProvider{
         name:      "test-cloud",
         healthy:   true,
-        streamCh:  make(chan adapter.StreamChunk, 1),
+        streamCh:  ch,
     }, config.BackendConfig{Type: "openai-compatible", Enabled: true})
     s.cfg.Config.Routing.Fallback.CloudDefault = "test-cloud"
     reqBody := `{"model":"claude-3","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}`
