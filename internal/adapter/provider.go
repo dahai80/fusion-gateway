@@ -1,7 +1,9 @@
 package adapter
 
 import (
+    "bytes"
     "context"
+    "encoding/json"
     "net/http"
 )
 
@@ -104,6 +106,36 @@ type UsageResponse struct {
 type EmbeddingRequest struct {
     Model string   `json:"model"`
     Input []string `json:"input"`
+}
+
+func (r *EmbeddingRequest) UnmarshalJSON(data []byte) error {
+    type alias EmbeddingRequest
+    var raw struct {
+        alias
+        Input json.RawMessage `json:"input"`
+    }
+    if err := json.Unmarshal(data, &raw); err != nil {
+        return err
+    }
+    r.Model = raw.alias.Model
+    if len(raw.Input) == 0 {
+        return nil
+    }
+    trimmed := bytes.TrimSpace(raw.Input)
+    if len(trimmed) > 0 && trimmed[0] == '"' {
+        var s string
+        if err := json.Unmarshal(trimmed, &s); err != nil {
+            return err
+        }
+        r.Input = []string{s}
+        return nil
+    }
+    var inputs []string
+    if err := json.Unmarshal(trimmed, &inputs); err != nil {
+        return err
+    }
+    r.Input = inputs
+    return nil
 }
 
 type EmbeddingResponse struct {

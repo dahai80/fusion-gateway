@@ -524,3 +524,39 @@ func TestAnthropicRequest_UnmarshalFullStringContent(t *testing.T) {
         t.Fatalf("expected 1 message with 1 normalized block, got %+v", req.Messages)
     }
 }
+
+func TestEmbeddingRequest_UnmarshalStringInput(t *testing.T) {
+    slog.Info("test EmbeddingRequest_UnmarshalStringInput")
+    body := `{"model":"bge-m3","input":"hello world"}`
+    var req EmbeddingRequest
+    if err := json.Unmarshal([]byte(body), &req); err != nil {
+        t.Fatalf("string input must unmarshal without error: %v", err)
+    }
+    if len(req.Input) != 1 || req.Input[0] != "hello world" {
+        t.Fatalf("expected [hello world], got %+v", req.Input)
+    }
+}
+
+func TestEmbeddingRequest_UnmarshalArrayInput(t *testing.T) {
+    slog.Info("test EmbeddingRequest_UnmarshalArrayInput")
+    body := `{"model":"bge-m3","input":["a","b"]}`
+    var req EmbeddingRequest
+    if err := json.Unmarshal([]byte(body), &req); err != nil {
+        t.Fatalf("array input must unmarshal without error: %v", err)
+    }
+    if len(req.Input) != 2 || req.Input[0] != "a" || req.Input[1] != "b" {
+        t.Fatalf("expected [a b], got %+v", req.Input)
+    }
+}
+
+func TestEmbeddingRequest_UnmarshalEmptyInput(t *testing.T) {
+    slog.Info("test EmbeddingRequest_UnmarshalEmptyInput")
+    body := `{"model":"bge-m3"}`
+    var req EmbeddingRequest
+    if err := json.Unmarshal([]byte(body), &req); err != nil {
+        t.Fatalf("missing input must unmarshal without error: %v", err)
+    }
+    if len(req.Input) != 0 {
+        t.Fatalf("expected empty input, got %+v", req.Input)
+    }
+}
