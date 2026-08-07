@@ -996,6 +996,20 @@ v0.6.1 addresses security and correctness issues identified in a full audit:
 - `/debug/pprof/*` requires explicit `enable_pprof: true` in config
 - Semantic cache will not activate unless an `EmbedFunc` is provided
 
+## Troubleshooting
+
+### `/v1/models` returns `{"data":[]}` (#29)
+
+The gateway fans out `ListModels` to every local provider concurrently and skips any provider that errors or times out (3s per provider). If the list comes back empty, a local backend rejected the call. The most common cause is fusion-mlx's `route_guard` rejecting the gateway's internal `/v1/models` request with HTTP 403.
+
+Diagnostics:
+- The skip is logged at **Warn** (`list models failed for provider, skipping`) with the provider name and error; the 403 error now includes the response body so the route_guard reason is visible.
+- Confirm the running **binary** includes the route-header fix (#26, commit `42951e8a`) — a stale binary omits `X-Fusion-Route` and gets 403. Rebuild: `go build -o fusion-gateway ./cmd/gateway`.
+- Confirm `config.yaml` sets `backends.fusion-mlx.api_key` (the fusion-mlx auth key) and `negotiation.route_header: X-Fusion-Route` / `route_header_value: gateway-decision`.
+- Direct check the backend itself: `curl -H "X-Fusion-Route: gateway-decision" -H "Authorization: Bearer <mlx_key>" http://127.0.0.1:11434/v1/models`.
+
+Clients do **not** send `X-Fusion-Route`; the gateway injects it on all forwarded requests, so chat and list-models share one auth chain.
+
 ## Fusion Ecosystem
 
 | Project | Role |
