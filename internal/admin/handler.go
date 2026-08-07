@@ -170,9 +170,9 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             return
         }
         result := make([]keyResponse, 0, len(keys))
-        for i, k := range keys {
+        for _, k := range keys {
             result = append(result, keyResponse{
-                ID:        i + 1,
+                ID:        k.Name,
                 Key:       k.KeyPrefix,
                 Name:      k.Name,
                 Status:    statusToNumber(k.Status),
@@ -311,9 +311,9 @@ func (h *Handler) handleChannels(w http.ResponseWriter, r *http.Request) {
             return
         }
         result := make([]channelResponse, 0, len(channels))
-        for i, c := range channels {
+        for _, c := range channels {
             result = append(result, channelResponse{
-                ID:        i + 1,
+                ID:        c.Name,
                 Name:      c.Name,
                 Type:      c.Type,
                 BaseURL:   c.BaseURL,
@@ -825,7 +825,7 @@ func (h *Handler) handleProfitStats(w http.ResponseWriter, r *http.Request) {
 // Frontend response adapters — map backend fields to frontend-expected names
 
 type keyResponse struct {
-    ID        int      `json:"id"`
+    ID        string   `json:"id"`
     Key       string   `json:"key"`
     Name      string   `json:"name"`
     Status    int      `json:"status"`
@@ -837,7 +837,7 @@ type keyResponse struct {
 }
 
 type channelResponse struct {
-    ID        int      `json:"id"`
+    ID        string   `json:"id"`
     Name      string   `json:"name"`
     Type      string   `json:"type"`
     BaseURL   string   `json:"base_url"`
