@@ -980,7 +980,7 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
-### v0.9.0 — Demo Key MLX VL Model Coverage (#37)
+### v0.8.10 — Demo Key MLX VL Model Coverage (#37)
 
 | # | Fix | Details |
 |---|-----|---------|
@@ -990,7 +990,7 @@ config.example.yaml   Example configuration
 
 | # | Fix | Details |
 |---|-----|---------|
-| 1 | **Case-insensitive model allowlist** (#32) | `CheckModelAllowlist` now matches both exact names and prefix wildcards (`qwen*`) case-insensitively. The shipped demo key's `allowed_models: ["qwen*"]` now matches actual fusion-mlx model names like `Qwen3.5-9B-4bit` instead of 403-ing. (Note: `qwen*` does not cover `mlx-community--` prefixed models — see v0.9.0 / #37.) Backward compatible — lowercase config globs still match lowercase model names. |
+| 1 | **Case-insensitive model allowlist** (#32) | `CheckModelAllowlist` now matches both exact names and prefix wildcards (`qwen*`) case-insensitively. The shipped demo key's `allowed_models: ["qwen*"]` now matches actual fusion-mlx model names like `Qwen3.5-9B-4bit` instead of 403-ing. (Note: `qwen*` does not cover `mlx-community--` prefixed models — see v0.8.10 / #37.) Backward compatible — lowercase config globs still match lowercase model names. |
 | 2 | **Hardware collector panic guard** (#33) | `Collector.Start` defaults `collect_interval` to 5s when it is missing or non-positive, instead of panicking in `time.NewTicker(0)`. Prevents a startup crash when `hardware.collect_interval` is absent from `config.yaml`. |
 
 ### v0.8.1 — Empty-Model Default Resolution (#28)
