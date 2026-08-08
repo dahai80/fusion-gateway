@@ -294,6 +294,26 @@ func TestCheckModelAllowlist_CaseInsensitive(t *testing.T) {
     }
 }
 
+func TestCheckModelAllowlist_MLXCommunityPrefix(t *testing.T) {
+    slog.Info("test CheckModelAllowlist_MLXCommunityPrefix")
+    p := &Principal{KeyConfig: &config.AuthKeyConfig{
+        Name:          "demo",
+        AllowedModels: []string{"gpt-4o*", "claude-3*", "qwen*", "mlx-community--*"},
+    }}
+    ctx := ContextWithPrincipal(context.Background(), p)
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req = req.WithContext(ctx)
+    if !CheckModelAllowlist(req, "mlx-community--Qwen2.5-VL-7B-Instruct-4bit") {
+        t.Error("mlx-community--* should allow MLX VL model mlx-community--Qwen2.5-VL-7B-Instruct-4bit")
+    }
+    if !CheckModelAllowlist(req, "MLX-Community--Qwen2.5-VL-7B-Instruct-4bit") {
+        t.Error("mlx-community--* should match case-insensitively for MLX VL model")
+    }
+    if CheckModelAllowlist(req, "llama-3") {
+        t.Error("allowlist should deny llama-3 (no matching glob)")
+    }
+}
+
 func TestExtractAPIKey_Bearer(t *testing.T) {
     req := httptest.NewRequest(http.MethodGet, "/", nil)
     req.Header.Set("Authorization", "Bearer mykey")
