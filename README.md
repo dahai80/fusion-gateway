@@ -21,7 +21,7 @@ Fusion-Gateway :11432
 Heterogeneous Inference Pool
 |- Local: fusion-mlx (:11434) / llama.cpp
 |- Private: vLLM-ascend / vLLM-cuda
-|- Cloud: Volcengine / Qianfan / Claude / OpenAI / DeepSeek / OpenRouter
+|- Cloud: Volcengine / Qianfan / Claude / OpenAI / DeepSeek / OpenRouter / AWS Bedrock / GCP Vertex / Azure Foundry
 |- Cloud (China): DashScope / Moonshot / Zhipu / Minimax / Baichuan / Hunyuan / StepFun / Yi
 ```
 
@@ -371,6 +371,20 @@ Full OpenAI `stream_options` support for chat completions:
 - **Content forms**: Accepts `content` as either a plain string or an array of content blocks (per the Anthropic API spec; string is normalized to `[{type:"text",text:s}]`)
 - **Streaming**: Native Anthropic SSE events (`message_start`, `content_block_delta`, `message_delta`, `message_stop`)
 - **Thinking**: Supports `thinking` parameter with `budget_tokens` for extended thinking
+
+### Cloud-Signed Providers (AWS Bedrock / GCP Vertex / Azure Foundry)
+
+Beyond the standard `anthropic` backend, the gateway forwards `/v1/messages` to cloud-hosted Claude endpoints that require request signing rather than a static API key. All three implement the same `MessagesProvider` path — native Anthropic format in, native Anthropic SSE out — and are selected by setting a backend's `type:` in `config.yaml`. Credentials are read **only** from gateway-side environment variables and are never echoed back to clients.
+
+| Backend `type` | Cloud | Auth mechanism | Required env vars |
+|----------------|-------|-----------------|-------------------|
+| `bedrock` | AWS Bedrock | AWS SigV4 (stdlib `crypto/hmac`+`sha256`; no AWS SDK dep) | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` (or `AWS_DEFAULT_REGION`), optional `AWS_SESSION_TOKEN` |
+| `vertex` | Google Vertex AI | OAuth2 service-account: self-signed RS256 JWT exchanged at `token_uri` → access token (cached, 5-min pre-expiry refresh; reuses `golang-jwt/jwt/v5`) | `VERTEX_SERVICE_ACCOUNT_JSON` (inline) or `GOOGLE_APPLICATION_CREDENTIALS` (path); `VERTEX_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`); `VERTEX_REGION` (or `GOOGLE_CLOUD_REGION`) |
+| `foundry` | Azure AI Foundry | `api-key` header OR `Authorization: Bearer` (Entra token) | `AZURE_API_KEY` (or `AZURE_OPENAI_API_KEY`) or `AZURE_ACCESS_TOKEN` |
+
+- **URLs**: Bedrock `{base_url}/model/{model-encoded}/invoke` (`/invoke-with-response-stream` for streaming; `:` in model ids is `%3A`-encoded); Vertex `{base_url}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict`; Foundry `{base_url}/v1/messages` with `anthropic-version: 2023-06-01`.
+- **Error transparency**: Non-2xx upstream responses surface to the client with the original status code, body, and `x-request-id`/`request-id` (via `*MessagesHTTPError`), never a generic 502.
+- **SSE hardening**: 1 MiB/line and 10 MiB response caps apply, consistent with the rest of the adapter pool.
 
 ## Audio & Moderation
 
@@ -979,6 +993,17 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.8.11 — Cloud-Signed Providers: AWS Bedrock / GCP Vertex / Azure Foundry (#40)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **AWS Bedrock provider** (#40) | New `bedrock` backend type forwards `/v1/messages` to AWS Bedrock with AWS SigV4 request signing built on stdlib `crypto/hmac`+`crypto/sha256` (no AWS SDK dependency). Reads `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`/`AWS_SESSION_TOKEN` from gateway env. Streams via the Bedrock `invoke-with-response-stream` event-stream (unwraps `{"payload":{...}}` to native Anthropic events). Model id `:` is `%3A`-encoded on the path. |
+| 2 | **Google Vertex AI provider** (#40) | New `vertex` backend type forwards `/v1/messages` to Vertex AI `:rawPredict` with an OAuth2 service-account flow: self-signed RS256 JWT (via the existing `golang-jwt/jwt/v5` dep) exchanged at the SA `token_uri` for an access token, cached with 5-min pre-expiry refresh. Reads `VERTEX_SERVICE_ACCOUNT_JSON`/`GOOGLE_APPLICATION_CREDENTIALS`/`VERTEX_PROJECT_ID`/`VERTEX_REGION` from gateway env. |
+| 3 | **Azure AI Foundry provider** (#40) | New `foundry` backend type forwards `/v1/messages` to Azure AI Foundry with either an `api-key` header (`AZURE_API_KEY`/`AZURE_OPENAI_API_KEY`) or an Entra `Authorization: Bearer` token (`AZURE_ACCESS_TOKEN`). Sets `anthropic-version: 2023-06-01`. |
+| 4 | **MessagesProvider dispatch** | `/v1/messages` handler now dispatches on the `MessagesProvider` interface (implemented by Anthropic + Bedrock + Vertex + Foundry) instead of the concrete `*AnthropicProvider`, so all four backends share one native-format path. OpenAI conversion fallback for non-Anthropic backends is unchanged. |
+| 5 | **Error transparency** | Non-2xx upstream responses from the three new providers surface to the client with the original status code, body, and `x-request-id`/`request-id` (via `*MessagesHTTPError`) — no generic 502. |
+| 6 | **Tests** | 16 new provider tests (SigV4 header structure, OAuth2 token exchange + cache, api-key/bearer auth, Bedrock event-stream unwrapping, native SSE passthrough, error passthrough, missing-creds) on top of shared-helper coverage; 2533 tests green across 23 packages; `go vet` clean. |
 
 ### v0.8.10 — Demo Key MLX VL Model Coverage (#37)
 

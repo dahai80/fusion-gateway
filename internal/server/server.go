@@ -1841,11 +1841,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         return
     }
 
-    if antProv, ok := provider.(*adapter.AnthropicProvider); ok {
+    if msgProv, ok := provider.(adapter.MessagesProvider); ok {
         if antReq.Stream {
-            s.handleStreamAnthropicMessages(ctx, w, antProv, &antReq)
+            s.handleStreamAnthropicMessages(ctx, w, msgProv, &antReq)
         } else {
-            s.handleNonStreamAnthropicMessages(ctx, w, antProv, &antReq)
+            s.handleNonStreamAnthropicMessages(ctx, w, msgProv, &antReq)
         }
     } else {
         chatReq := adapter.AnthropicToOpenAIChatRequest(&antReq)
@@ -1864,22 +1864,42 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     }
 }
 
-func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p *adapter.AnthropicProvider, req *adapter.AnthropicRequest) {
+// writeMessagesError surfaces an upstream error to the client preserving the
+// upstream HTTP status code and request-id (issue #40) so fusion-code's error
+// bridge (isApiErrorLike) can identify failures. Non-MessagesHTTPError errors
+// fall back to 502 as before.
+func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
+    status := http.StatusBadGateway
+    body := fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error())
+    if httpErr, ok := err.(*adapter.MessagesHTTPError); ok {
+        status = httpErr.StatusCode
+        if httpErr.Body != "" {
+            body = httpErr.Body
+        } else {
+            body = fmt.Sprintf(`{"error":{"message":"upstream status %d","type":"api_error"}}`, httpErr.StatusCode)
+        }
+        if httpErr.RequestID != "" {
+            w.Header().Set("x-request-id", httpErr.RequestID)
+        }
+    }
+    slog.Error("anthropic messages upstream error", "error", err, "status", status)
+    http.Error(w, body, status)
+}
+
+func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
     resp, err := p.Messages(ctx, req)
     if err != nil {
-        slog.Error("anthropic messages failed", "error", err)
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+        s.writeMessagesError(w, err)
         return
     }
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p *adapter.AnthropicProvider, req *adapter.AnthropicRequest) {
+func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
     ch, err := p.StreamMessages(ctx, req)
     if err != nil {
-        slog.Error("anthropic stream messages failed", "error", err)
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error()), http.StatusBadGateway)
+        s.writeMessagesError(w, err)
         return
     }
 
