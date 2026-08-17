@@ -129,6 +129,15 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         case "anthropic":
             provider := NewAnthropicProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered anthropic provider", "name", name, "base_url", backendCfg.BaseURL)
+        case "bedrock":
+            provider := NewBedrockProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered bedrock provider (AWS SigV4)", "name", name, "base_url", backendCfg.BaseURL)
+        case "vertex":
+            provider := NewVertexProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered vertex provider (GCP OAuth2)", "name", name, "base_url", backendCfg.BaseURL)
+        case "foundry":
+            provider := NewFoundryProvider(name, backendCfg)
+            p.providers[name] = provider; slog.Info("registered foundry provider (Azure)", "name", name, "base_url", backendCfg.BaseURL)
         case "volcengine":
             provider := NewVolcengineProvider(name, backendCfg)
             p.providers[name] = provider; slog.Info("registered volcengine provider", "name", name, "base_url", backendCfg.BaseURL)

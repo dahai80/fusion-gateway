@@ -175,6 +175,28 @@ backends:
         api_key: "sk-ant-your-key"
         timeout: 60s
         enabled: false
+    bedrock:
+        # AWS Bedrock (Anthropic Claude via SigV4). Creds from gateway env:
+        # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_SESSION_TOKEN.
+        type: "bedrock"
+        base_url: "https://bedrock-runtime.us-east-1.amazonaws.com"
+        timeout: 120s
+        enabled: false
+    vertex:
+        # Google Vertex AI (Anthropic Claude via OAuth2 SA). Creds from env:
+        # VERTEX_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS,
+        # VERTEX_PROJECT_ID, VERTEX_REGION.
+        type: "vertex"
+        base_url: "https://us-central1-aiplatform.googleapis.com"
+        timeout: 120s
+        enabled: false
+    foundry:
+        # Azure AI Foundry (Anthropic Claude). Creds from env:
+        # AZURE_API_KEY / AZURE_OPENAI_API_KEY or AZURE_ACCESS_TOKEN.
+        type: "foundry"
+        base_url: "https://your-foundry-resource.services.ai.azure.com"
+        timeout: 120s
+        enabled: false
     volcengine:
         type: "volcengine"
         base_url: "https://ark.cn-beijing.volces.com/api/v3"
