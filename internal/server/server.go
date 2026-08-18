@@ -1887,7 +1887,20 @@ func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
-    resp, err := p.Messages(ctx, req)
+    // Internal stream + aggregate: reasoning upstreams (glm5.2 via LiteLLM)
+    // withhold non-stream response headers until full generation completes,
+    // tripping Client.Timeout / client-cancel 502s. Stream path has a 2s TTFB,
+    // so we stream upstream and aggregate events into a non-stream response.
+    // We force stream=true on a local copy so the original request struct is
+    // untouched (the same req may be inspected elsewhere).
+    streamReq := *req
+    streamReq.Stream = true
+    ch, err := p.StreamMessages(ctx, &streamReq)
+    if err != nil {
+        s.writeMessagesError(w, err)
+        return
+    }
+    resp, err := adapter.AggregateAnthropicStreamEvents(ch)
     if err != nil {
         s.writeMessagesError(w, err)
         return

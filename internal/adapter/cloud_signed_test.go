@@ -134,3 +134,129 @@ func TestBedrockProvider_MissingCreds(t *testing.T) {
 		t.Fatal("expected missing-credentials error")
 	}
 }
+
+func TestAggregateAnthropicStreamEvents_Text(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 16)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_1", Model: "glm5.2", Role: "assistant", Usage: AnthropicUsage{InputTokens: 10, OutputTokens: 0}}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContentBlock{Type: "text"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"text_delta","text":"hello "}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"text_delta","text":"world"}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+	evCh <- AnthropicStreamEvent{Type: "message_delta", StopReason: "end_turn", Usage: &AnthropicUsage{OutputTokens: 2}}
+	evCh <- AnthropicStreamEvent{Type: "message_stop"}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != "msg_1" || resp.Model != "glm5.2" || resp.Role != "assistant" {
+		t.Fatalf("unexpected header: %+v", resp)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("expected end_turn, got %s", resp.StopReason)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "text" || resp.Content[0].Text != "hello world" {
+		t.Fatalf("unexpected content: %+v", resp.Content)
+	}
+	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 2 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+}
+
+func TestAggregateAnthropicStreamEvents_ThinkingAndSignature(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 16)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_2", Model: "glm5.2"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContentBlock{Type: "thinking"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"thinking_delta","thinking":"reason "}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"thinking_delta","thinking":"here"}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"signature_delta","signature":"sig-abc"}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+	evCh <- AnthropicStreamEvent{Type: "message_stop"}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Content) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(resp.Content))
+	}
+	if resp.Content[0].Type != "thinking" || resp.Content[0].Thinking != "reason here" || resp.Content[0].Signature != "sig-abc" {
+		t.Fatalf("unexpected thinking block: %+v", resp.Content[0])
+	}
+}
+
+func TestAggregateAnthropicStreamEvents_ToolUse(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 16)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_3", Model: "glm5.2"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContentBlock{Type: "tool_use", ID: "tool_1", Name: "get_weather"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"input_json_delta","partial_json":"{\"city\""}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"input_json_delta","partial_json":":\"Paris\"}"}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+	evCh <- AnthropicStreamEvent{Type: "message_delta", StopReason: "tool_use", Usage: &AnthropicUsage{OutputTokens: 5}}
+	evCh <- AnthropicStreamEvent{Type: "message_stop"}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StopReason != "tool_use" {
+		t.Fatalf("expected tool_use, got %s", resp.StopReason)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "tool_use" {
+		t.Fatalf("unexpected content: %+v", resp.Content)
+	}
+	if resp.Content[0].Name != "get_weather" || resp.Content[0].ID != "tool_1" {
+		t.Fatalf("unexpected tool identity: %+v", resp.Content[0])
+	}
+	if string(resp.Content[0].Input) != `{"city":"Paris"}` {
+		t.Fatalf("unexpected tool input: %s", string(resp.Content[0].Input))
+	}
+}
+
+func TestAggregateAnthropicStreamEvents_ErrorEvent(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 4)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_4"}}
+	evCh <- AnthropicStreamEvent{Type: "error", Delta: json.RawMessage(`{"error":{"type":"overloaded_error","message":"Upstream overloaded"}}`)}
+	close(evCh)
+
+	_, err := AggregateAnthropicStreamEvents(evCh)
+	if err == nil {
+		t.Fatal("expected error from error event")
+	}
+	if !contains(err.Error(), "Upstream overloaded") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAggregateAnthropicStreamEvents_EmptyStreamDefaultsEndTurn(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 2)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_5"}}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("expected default end_turn, got %s", resp.StopReason)
+	}
+	if resp.ID != "msg_5" {
+		t.Fatalf("expected msg_5, got %s", resp.ID)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || (len(sub) > 0 && indexOf(s, sub) >= 0))
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
