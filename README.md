@@ -995,6 +995,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.12 — Non-stream /v1/messages internal stream+aggregate (#42)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Non-stream internal stream+aggregate** (#42) | A non-stream `/v1/messages` routed to a `MessagesProvider` is now internally streamed upstream (`stream=true`) and aggregated into a single non-stream `AnthropicResponse` via new `adapter.AggregateAnthropicStreamEvents`. Reasoning upstreams (e.g. glm5.2 behind a LiteLLM proxy) withhold non-stream response headers until full generation completes (6-14s+), tripping `Client.Timeout exceeded while awaiting headers` / client-cancel 502s and a Claude Code retry storm. The stream path TTFB is ~2s, so the gateway no longer blocks on the upstream header. |
+| 2 | **Full block reconstruction** | `AggregateAnthropicStreamEvents` reconstructs `text` (`text_delta`), `thinking` (`thinking_delta` + `signature_delta`), and `tool_use` (`input_json_delta` partial-json accumulation) content blocks; defaults `stop_reason` to `end_turn` when the stream ends without one; surfaces upstream `error` events. |
+| 3 | **Tests** | 5 new `TestAggregateAnthropicStreamEvents_*` (text, thinking+signature, tool_use, error event, empty-default end_turn); 2538 tests green across 23 packages; `go vet` clean. |
+
 ### v0.8.11 — Cloud-Signed Providers: AWS Bedrock / GCP Vertex / Azure Foundry (#40)
 
 | # | Fix | Details |
