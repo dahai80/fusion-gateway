@@ -371,6 +371,7 @@ Full OpenAI `stream_options` support for chat completions:
 - **Content forms**: Accepts `content` as either a plain string or an array of content blocks (per the Anthropic API spec; string is normalized to `[{type:"text",text:s}]`)
 - **Streaming**: Native Anthropic SSE events (`message_start`, `content_block_delta`, `message_delta`, `message_stop`)
 - **Thinking**: Supports `thinking` parameter with `budget_tokens` for extended thinking
+- **Non-stream internal stream+aggregate**: A non-stream `/v1/messages` routed to a `MessagesProvider` is internally streamed upstream (`stream=true`) and aggregated into a single non-stream Anthropic response via `adapter.AggregateAnthropicStreamEvents`. Reasoning upstreams (e.g. glm5.2 behind a LiteLLM proxy) withhold non-stream response headers until full generation completes, which trips `Client.Timeout exceeded while awaiting headers` / client-cancel 502s. The stream path has a ~2s TTFB, so the gateway no longer blocks on the upstream header. Text, `thinking` (+`signature_delta`), and `tool_use` (`input_json_delta`) blocks are all reconstructed.
 
 ### Cloud-Signed Providers (AWS Bedrock / GCP Vertex / Azure Foundry)
 
