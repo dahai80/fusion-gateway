@@ -67,6 +67,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `route.rate_limit.enabled` | true | Enable per-key RPM/TPM rate limiting |
 | `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests |
 | `route.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
+| `route.fallback.enabled` | false | Enable `model_mapping` below (alias → cloud model id) |
+| `route.fallback.model_mapping` | {} | Map client/SDK model aliases (e.g. `claude-opus-4-7`) to the cloud backend's real model id (e.g. `glm5.2`); applied before forwarding on `/v1/messages` and `/v1/chat/completions` (avoids upstream 400 → 502 "response stopped arriving", #52) |
 | `cache.enabled` | true | Enable LRU response cache for non-streaming |
 | `cache.backend` | local | Cache backend: local (LRU) or redis |
 | `cache.redis.addr` | localhost:6379 | Redis address (when backend=redis) |
@@ -998,6 +1000,15 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.8.16 — Anthropic /v1/messages path now applies model alias mapping (#52)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **`/v1/messages` forwards mapped model, not raw alias** (#52) | claude code (Anthropic SDK) sends model aliases like `claude-opus-4-7` to the gateway. The `/v1/chat/completions` path already applied `routing.fallback.model_mapping`, but `/v1/messages` resolved its cloud provider via `resolveCloudProvider(decision, nil, w)` — the `nil` request meant the model-mapping branch was skipped, so the alias was forwarded raw to the cloud backend (glm52 / LiteLLM), which rejected it: `400: Invalid model name passed in model=claude-opus-4-7` → gateway 502 → claude code surfaced `API Error: The response stopped arriving`. |
+| 2 | **Extracted `applyCloudModelMapping` helper** | The mapping logic lived inline inside `resolveCloudProvider` and mutated `*ChatRequest`, so it could not serve the anthropic path (`*AnthropicRequest`). Extracted into `Server.applyCloudModelMapping(model, cloudBackend) string` (returns the mapped id or the input unchanged when disabled/missed) and reused from both paths — no behavior change on chat, new behavior on messages. |
+| 3 | **Config: `routing.fallback.enabled` + `model_mapping`** | Set `routing.fallback.enabled: true` and `model_mapping: { claude-opus-4-7: glm5.2 }` (added to `config.yaml` and documented in `config.example.yaml`). This gates the alias→backend-id translation. The map is generic — add any SDK alias → real model id pairs. |
+| 4 | **Tests** | 2 new regression tests: `TestAnthropicMessages_ModelMappingApplied` (alias `claude-opus-4-7` → upstream sees `glm5.2`), `TestAnthropicMessages_ModelMappingDisabled` (`enabled:false` → raw alias passes through). Live-verified: `/v1/messages` with `claude-opus-4-7` now streams `200` from glm52 with `model:glm5.2`; log shows `model mapped for cloud routing local_model=claude-opus-4-7 cloud_model=glm5.2`. 2548 tests green; `go vet` clean. |
 
 ### v0.8.15 — Tiny requests no longer misrouted to cloud by output/input ratio (#48)
 

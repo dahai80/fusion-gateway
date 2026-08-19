@@ -667,15 +667,8 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
         }
     }
 
-    if req != nil && s.cfg.Config.Routing.Fallback.Enabled && s.cfg.Config.Routing.Fallback.ModelMapping != nil {
-        if mapped, ok := s.cfg.Config.Routing.Fallback.ModelMapping[req.Model]; ok {
-            slog.Info("model mapped for cloud routing",
-                "local_model", req.Model,
-                "cloud_model", mapped,
-                "cloud_backend", cloudBackend,
-            )
-            req.Model = mapped
-        }
+    if req != nil {
+        req.Model = s.applyCloudModelMapping(req.Model, cloudBackend)
     }
 
     p, ok := s.pool.Get(cloudBackend)
@@ -687,6 +680,30 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
         return nil
     }
     return p
+}
+
+// applyCloudModelMapping maps a client-supplied model name to the cloud
+// backend's actual model id via routing.fallback.model_mapping. This is what
+// lets SDK model aliases (e.g. claude code's claude-opus-4-7) reach a backend
+// that only serves a different model id (e.g. glm5.2 via LiteLLM). Returns the
+// input unchanged when mapping is disabled or no entry matches.
+func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
+    if model == "" {
+        return model
+    }
+    if !s.cfg.Config.Routing.Fallback.Enabled || s.cfg.Config.Routing.Fallback.ModelMapping == nil {
+        return model
+    }
+    mapped, ok := s.cfg.Config.Routing.Fallback.ModelMapping[model]
+    if !ok || strings.TrimSpace(mapped) == "" {
+        return model
+    }
+    slog.Info("model mapped for cloud routing",
+        "local_model", model,
+        "cloud_model", mapped,
+        "cloud_backend", cloudBackend,
+    )
+    return mapped
 }
 
 func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
@@ -1835,6 +1852,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     } else {
         provider = s.resolveCloudProvider(decision, nil, w)
         if provider == nil { return }
+        // Apply model alias mapping (e.g. claude-opus-4-7 -> glm5.2) before
+        // forwarding. Without this, SDK-supplied aliases are sent raw to the
+        // cloud backend which rejects them with 400 -> 502 ("response stopped
+        // arriving" in claude code). resolveCloudProvider cannot do this for
+        // the anthropic path because it mutates *ChatRequest, not
+        // *AnthropicRequest.
+        if mapped := s.applyCloudModelMapping(antReq.Model, provider.Name()); mapped != antReq.Model {
+            antReq.Model = mapped
+        }
     }
     if provider == nil {
         http.Error(w, `{"error":{"message":"No provider available","type":"server_error"}}`, http.StatusServiceUnavailable)

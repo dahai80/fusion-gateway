@@ -67,6 +67,8 @@ cp config.example.yaml config.yaml
 | `route.rate_limit.enabled` | true | 启用按 key 的 RPM/TPM 限流 |
 | `route.retry.max_retries` | 2 | 非流式请求最大重试次数 |
 | `route.fallback.context_window_fallback` | {} | 模型 → 更大模型的映射,用于上下文溢出回退 |
+| `route.fallback.enabled` | false | 启用下方 `model_mapping`(别名 → 云端模型 id) |
+| `route.fallback.model_mapping` | {} | 将客户端/SDK 模型别名(如 `claude-opus-4-7`)映射到云端后端真实模型 id(如 `glm5.2`);在转发前应用于 `/v1/messages` 和 `/v1/chat/completions`(避免上游 400 → 502 "response stopped arriving",#52) |
 | `cache.enabled` | true | 启用非流式响应的 LRU 缓存 |
 | `cache.backend` | local | 缓存后端:local (LRU) 或 redis |
 | `cache.redis.addr` | localhost:6379 | Redis 地址 (backend=redis 时) |
@@ -990,6 +992,15 @@ config.example.yaml   示例配置
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 
 ## 审计修复记录
+
+### v0.8.16 — Anthropic /v1/messages 路径现应用模型别名映射 (#52)
+
+| # | 修复 | 详情 |
+|---|-----|---------|
+| 1 | **`/v1/messages` 转发映射后的模型名,非原始别名** (#52) | claude code (Anthropic SDK) 向网关发送模型别名如 `claude-opus-4-7`。`/v1/chat/completions` 路径已应用 `routing.fallback.model_mapping`,但 `/v1/messages` 经 `resolveCloudProvider(decision, nil, w)` 解析云端 provider — `nil` request 导致 model-mapping 分支被跳过,别名原样转发到云端后端 (glm52 / LiteLLM),被拒:`400: Invalid model name passed in model=claude-opus-4-7` → 网关 502 → claude code 报 `API Error: The response stopped arriving`。 |
+| 2 | **抽出 `applyCloudModelMapping` helper** | 映射逻辑原内联于 `resolveCloudProvider` 且 mutate `*ChatRequest`,无法服务 anthropic 路径 (`*AnthropicRequest`)。抽成 `Server.applyCloudModelMapping(model, cloudBackend) string` (返回映射 id 或输入不变,当禁用/未命中时) 并在两路径复用 — chat 无行为变化,messages 新增行为。 |
+| 3 | **配置:`routing.fallback.enabled` + `model_mapping`** | 设置 `routing.fallback.enabled: true` 和 `model_mapping: { claude-opus-4-7: glm5.2 }` (已加到 `config.yaml` 并在 `config.example.yaml` 文档化)。此开关 gate 别名→后端 id 转换。该 map 通用 — 可加任意 SDK 别名 → 真实模型 id 对。 |
+| 4 | **测试** | 2 个新增回归测试:`TestAnthropicMessages_ModelMappingApplied` (别名 `claude-opus-4-7` → 上游收到 `glm5.2`)、`TestAnthropicMessages_ModelMappingDisabled` (`enabled:false` → 原始别名透传)。实测验证:`/v1/messages` 带 `claude-opus-4-7` 现从 glm52 流式返回 `200` 且 `model:glm5.2`;日志显示 `model mapped for cloud routing local_model=claude-opus-4-7 cloud_model=glm5.2`。2548 测试绿;`go vet` 干净。 |
 
 ### v0.8.15 — 极小请求不再被 output/input ratio 误判路由 cloud (#48)
 
