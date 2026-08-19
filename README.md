@@ -995,6 +995,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.13 — Stream body no longer truncated by backend timeout (#44)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Stream timeout-less client** (#44) | `AnthropicProvider` added a `streamHTTPClient` with `Timeout: 0` (body streams unbounded until the upstream closes it) and `Transport.ResponseHeaderTimeout = backend timeout` (a dead upstream still fails fast on headers/connect). `StreamChat` and `StreamMessages` now use it. Previously the single `httpClient` had `http.Client.Timeout = 120s`, which caps the **full request including body read**, force-closing long reasoning streams at 120s with `context deadline exceeded (... while reading body)` and truncating the non-stream aggregate path (#42) too. |
+| 2 | **Non-stream unchanged** | Non-stream `Messages`/`Chat` keep the bounded `httpClient` so a hung non-stream upstream is still capped by the backend timeout. |
+| 3 | **Tests** | New `TestAnthropicProvider_StreamMessagesNotTruncatedByClientTimeout`: a slow SSE upstream waits 600 ms (≫ the 300 ms test backend timeout) before its final event and asserts `message_stop` is reached. 2539 tests pass across 23 packages; `go vet` clean. |
+
 ### v0.8.12 — Non-stream /v1/messages internal stream+aggregate (#42)
 
 | # | Fix | Details |
