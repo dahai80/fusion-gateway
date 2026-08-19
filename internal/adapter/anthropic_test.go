@@ -8,6 +8,7 @@ import (
     "net/http/httptest"
     "strings"
     "testing"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -615,5 +616,55 @@ func TestParseAnthropicStreamEvents(t *testing.T) {
     }
     if events[1].Type != "message_stop" {
         t.Errorf("expected message_stop, got %s", events[1].Type)
+    }
+}
+
+func TestAnthropicProvider_StreamMessagesNotTruncatedByClientTimeout(t *testing.T) {
+    // Regression: http.Client.Timeout caps the full request incl. body read,
+    // truncating long reasoning streams. StreamMessages must use a client
+    // with Timeout:0 so a stream whose body takes longer than the backend
+    // timeout still completes. Upstream here emits headers fast, then waits
+    // 600ms (> the 300ms backend timeout below) before the final event.
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.WriteHeader(http.StatusOK)
+        flusher, _ := w.(http.Flusher)
+        _, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_slow\",\"model\":\"glm5.2\"}}\n\n"))
+        if flusher != nil {
+            flusher.Flush()
+        }
+        // Delay longer than the backend timeout to prove no Client.Timeout cut.
+        time.Sleep(600 * time.Millisecond)
+        _, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"stop_reason\":\"end_turn\"}\n\n"))
+        _, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+        if flusher != nil {
+            flusher.Flush()
+        }
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("glm52", config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+        Timeout: 300 * time.Millisecond, // would truncate at 300ms if applied to stream
+    })
+
+    ch, err := p.StreamMessages(context.Background(), &AnthropicRequest{
+        Model:     "glm5.2",
+        MaxTokens: 64,
+        Messages:  []AnthropicMessage{{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}}}},
+    })
+    if err != nil {
+        t.Fatalf("StreamMessages failed: %v", err)
+    }
+    var sawStop bool
+    for ev := range ch {
+        if ev.Type == "message_stop" {
+            sawStop = true
+        }
+    }
+    if !sawStop {
+        t.Fatal("stream was truncated before message_stop: Client.Timeout is cutting the stream body")
     }
 }
