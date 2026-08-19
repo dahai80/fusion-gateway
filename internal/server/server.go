@@ -1922,13 +1922,37 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     w.Header().Set("X-Accel-Buffering", "no")
     flusher, _ := w.(http.Flusher)
 
+    // sawMessageStop tracks whether the upstream already emitted a
+    // message_stop. We must not append a second one: the Anthropic SDK
+    // finalizes the message on the first message_stop, and a duplicate
+    // (especially a malformed data:{} with no "type") confuses the client
+    // ("Content block not found" / stream-ended errors, issue #46).
+    sawMessageStop := false
     for event := range ch {
+        if event.Type == "message_stop" {
+            sawMessageStop = true
+        }
         data, _ := json.Marshal(event)
         fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
         if flusher != nil { flusher.Flush() }
     }
-    fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
-    if flusher != nil { flusher.Flush() }
+    // Client cancelled mid-stream (context canceled): the upstream goroutine
+    // closed the channel early, possibly with content blocks still open.
+    // Emitting a terminal message_stop now would hand the SDK an unmatched
+    // block ("Content block not found"). The client already gave up, so just
+    // stop writing — do NOT synthesize a closing event.
+    if ctx.Err() != nil {
+        slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
+        return
+    }
+    // Upstream closed the channel without a message_stop (e.g. error/truncation):
+    // synthesize a well-formed one so the SDK can finalize cleanly. Only when
+    // we have not already forwarded one.
+    if !sawMessageStop {
+        slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+        if flusher != nil { flusher.Flush() }
+    }
 }
 
 func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
