@@ -29,6 +29,11 @@ const (
     RequestTypeRerank    RequestType = "rerank"
 )
 
+// defaultRatioMinInputTokens is the floor below which the output/input ratio
+// check is skipped when config does not set output_input_ratio_min_input_tokens.
+// Tiny prompts produce statistically meaningless ratios (issue #48).
+const defaultRatioMinInputTokens = 32
+
 type RouteDecision struct {
     Backend     Backend
     Reason      string
@@ -388,7 +393,21 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     }
 
     // P4.5: Output/Input ratio routing
-    if budget.InputTokens > 0 {
+    // Skip the ratio check for tiny requests: with very few input tokens the
+    // predicted-output/input ratio is statistically meaningless (e.g. 5/4=1.25
+    // for a 4-token "say pong" prompt) and would misroute local-eligible
+    // requests to cloud (issue #48). Guard with a minimum input-token floor.
+    minInputTokens := cfg.Config.Routing.OutputInputRatioMinInputTokens
+    if minInputTokens <= 0 {
+        minInputTokens = defaultRatioMinInputTokens
+    }
+    if budget.InputTokens > 0 && budget.InputTokens < minInputTokens {
+        slog.Info("output/input ratio skipped: input tokens below floor",
+            "input_tokens", budget.InputTokens,
+            "min_input_tokens", minInputTokens,
+            "predict_output_tokens", budget.PredictOutputTokens,
+        )
+    } else if budget.InputTokens > 0 {
         ratio := float64(budget.PredictOutputTokens) / float64(budget.InputTokens)
 
         // P4.5a: RatioTiers — segment routing by ratio to different backends

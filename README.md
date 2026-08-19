@@ -57,6 +57,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `route.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
+| `route.output_input_ratio_threshold` | 0.6 | Max predicted-output/input-token ratio before routing to cloud (skipped below `output_input_ratio_min_input_tokens`) |
+| `route.output_input_ratio_min_input_tokens` | 32 | Minimum input tokens for the output/input ratio check to apply; below this the ratio is skipped (avoids tiny-request misroute, #48) |
 | `route.mode` | hybrid | Routing mode: `local` (all local), `cloud` (all cloud), `hybrid` (smart routing by token/ratio/hardware) |
 | `route.enable_hardware_judge` | true | Enable hardware-aware routing |
 | `route.local_max_memory_ratio` | 0.9 | Max system memory ratio before forcing cloud |
@@ -996,6 +998,15 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.8.15 — Tiny requests no longer misrouted to cloud by output/input ratio (#48)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Output/input ratio skipped for tiny requests** (#48) | A 4-token prompt ("say pong") with `max_tokens:5` produced `predict_output/input = 5/4 = 1.25 > 0.6`, so the `output_input_ratio_exceeded` rule (P4.5) misrouted the local-eligible request to a cloud backend (glm52) that did not recognize the `Qwen3.5-9B-4bit` model name → 400 → gateway 502. The ratio is statistically meaningless at very low input counts. P4.5 now skips the ratio check when `input_tokens < output_input_ratio_min_input_tokens` (default 32, config `routing.output_input_ratio_min_input_tokens`) and falls through to P6 model-availability → P7 local. |
+| 2 | **Configurable input-token floor** | New `routing.output_input_ratio_min_input_tokens` (int, default 32). A zero/negative unset value falls back to the built-in default so existing `config.yaml` files gain the fix with no change. Validated non-negative in `config.Validate`. |
+| 3 | **Skip log for traceability** | When the ratio check is skipped due to the input floor, the engine emits `output/input ratio skipped: input tokens below floor` with `input_tokens`, `min_input_tokens`, `predict_output_tokens`, so tiny-request routing is diagnosable. |
+| 4 | **Tests** | 3 new regression tests: `TestDecide_OutputInputRatioSkippedForTinyInput` (4 input → local, not `output_input_ratio_exceeded`), `TestDecide_OutputInputRatioSkippedForTinyInput_ExplicitFloor` (explicit floor 64 → 50 input skips ratio), `TestValidate_OutputInputRatioMinInputTokensNegative` (negative floor rejected). Existing `TestDecide_OutputInputRatioThreshold` (100 input, above floor) still routes to cloud unchanged. 585 router/config/admin tests green; `go vet` clean. |
 
 ### v0.8.14 — Fix "Content block not found": content_block index=0 + duplicate/malformed message_stop (#46)
 

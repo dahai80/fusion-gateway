@@ -1011,6 +1011,65 @@ func TestDecide_OutputInputRatioThreshold(t *testing.T) {
     t.Logf("Output/input ratio threshold works: reason=%s", dec.Reason)
 }
 
+// TestDecide_OutputInputRatioSkippedForTinyInput reproduces issue #48: a tiny
+// request (4 input tokens, 5 predicted output → ratio 1.25 > 0.6) must NOT be
+// misrouted to cloud by the output/input ratio check. The ratio is statistically
+// meaningless at very low input counts, so the engine skips the check below the
+// input-token floor and falls through to local (model available locally).
+func TestDecide_OutputInputRatioSkippedForTinyInput(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 1000
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 4, PredictOutputTokens: 5, TotalBudget: 9}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.5-9B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for tiny request with model available locally, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason == "output_input_ratio_exceeded" {
+        t.Errorf("tiny request must not trigger output_input_ratio_exceeded, got reason=%s", dec.Reason)
+    }
+    t.Logf("Tiny-request ratio skip works: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
+// TestDecide_OutputInputRatioSkippedForTinyInput_ExplicitFloor verifies the
+// config-driven floor (output_input_ratio_min_input_tokens) overrides the
+// default: with an explicit floor of 64, a 50-token request (above default 32
+// but below 64) skips the ratio check even though ratio 200/50=4 > 0.6.
+func TestDecide_OutputInputRatioSkippedForTinyInput_ExplicitFloor(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 1000
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    cfg.Config.Routing.OutputInputRatioMinInputTokens = 64
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 50, PredictOutputTokens: 200, TotalBudget: 250}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.5-9B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local when input below explicit floor, got %s: %s", dec.Backend, dec.Reason)
+    }
+    t.Logf("Explicit floor works: backend=%s reason=%s", dec.Backend, dec.Reason)
+}
+
 func TestEngine_CircuitBreakerState_Unknown(t *testing.T) {
     cfg := defaultTestSnapshot()
     hw := hardware.NewCollector(&cfg.Config.Hardware)
