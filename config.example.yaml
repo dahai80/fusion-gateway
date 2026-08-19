@@ -75,6 +75,9 @@ route:
             #   backend: "openai"
     fallback:
         cloud_default: "openai"
+        enabled: true                        # Enable model_mapping below (alias -> backend model id)
+        model_mapping:                       # Map client/SDK model aliases to the cloud backend's real model id
+            claude-opus-4-7: "glm5.2"        # e.g. claude code sends claude-opus-4-7; LiteLLM serves glm5.2
         context_window_fallback:     # When model exceeds local context, try larger model
             qwen2.5-0.5b: "qwen2.5-3b"
             qwen2.5-3b: "qwen2.5-7b"

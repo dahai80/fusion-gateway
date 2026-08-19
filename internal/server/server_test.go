@@ -7824,3 +7824,115 @@ func TestRerank_ClusterNodeProviderRoute(t *testing.T) {
     s.handleRerank(rec, req)
     slog.Info("TestRerank_ClusterNodeProviderRoute", "code", rec.Code)
 }
+
+// TestAnthropicMessages_ModelMappingApplied verifies that a client-supplied
+// model alias (claude-opus-4-7) is mapped to the cloud backend's real model id
+// (glm5.2) before forwarding on the /v1/messages path. Regression for the
+// "response stopped arriving" 502 caused by sending the raw alias upstream.
+func TestAnthropicMessages_ModelMappingApplied(t *testing.T) {
+    receivedModel := make(chan string, 1)
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" {
+            antReq := adapter.AnthropicRequest{}
+            _ = json.NewDecoder(r.Body).Decode(&antReq)
+            receivedModel <- antReq.Model
+            w.Header().Set("Content-Type", "text/event-stream")
+            fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"glm5.2\"}}\n\n")
+            fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+            fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n")
+            fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            return
+        }
+        http.Error(w, "not found", http.StatusNotFound)
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Fallback.Enabled = true
+    s.cfg.Config.Routing.Fallback.CloudDefault = "glm52"
+    s.cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    antProvider := adapter.NewAnthropicProvider("glm52", config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: ts.URL,
+        APIKey:  "test-key",
+        Enabled: true,
+    })
+    s.pool.Register("glm52", antProvider, config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: ts.URL,
+        APIKey:  "test-key",
+        Enabled: true,
+    })
+
+    antBody := `{"model":"claude-opus-4-7","messages":[{"role":"user","content":"say pong"}],"stream":true,"max_tokens":100}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    select {
+    case model := <-receivedModel:
+        if model != "glm5.2" {
+            t.Fatalf("expected upstream model glm5.2, got %q (alias leaked)", model)
+        }
+        slog.Info("TestAnthropicMessages_ModelMappingApplied passed", "upstream_model", model)
+    case <-time.After(2 * time.Second):
+        t.Fatal("upstream did not receive the request within 2s")
+    }
+}
+
+// TestAnthropicMessages_ModelMappingDisabled verifies the alias passes through
+// unchanged when fallback.enabled is false (no mapping applied).
+func TestAnthropicMessages_ModelMappingDisabled(t *testing.T) {
+    receivedModel := make(chan string, 1)
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/messages" {
+            antReq := adapter.AnthropicRequest{}
+            _ = json.NewDecoder(r.Body).Decode(&antReq)
+            receivedModel <- antReq.Model
+            w.Header().Set("Content-Type", "text/event-stream")
+            fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-7\"}}\n\n")
+            fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+            fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n")
+            fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            return
+        }
+        http.Error(w, "not found", http.StatusNotFound)
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Fallback.Enabled = false
+    s.cfg.Config.Routing.Fallback.CloudDefault = "glm52"
+    s.cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    antProvider := adapter.NewAnthropicProvider("glm52", config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: ts.URL,
+        APIKey:  "test-key",
+        Enabled: true,
+    })
+    s.pool.Register("glm52", antProvider, config.BackendConfig{
+        Type:    "anthropic",
+        BaseURL: ts.URL,
+        APIKey:  "test-key",
+        Enabled: true,
+    })
+
+    antBody := `{"model":"claude-opus-4-7","messages":[{"role":"user","content":"say pong"}],"stream":true,"max_tokens":100}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    select {
+    case model := <-receivedModel:
+        if model != "claude-opus-4-7" {
+            t.Fatalf("expected raw alias claude-opus-4-7 when mapping disabled, got %q", model)
+        }
+        slog.Info("TestAnthropicMessages_ModelMappingDisabled passed", "upstream_model", model)
+    case <-time.After(2 * time.Second):
+        t.Fatal("upstream did not receive the request within 2s")
+    }
+}
