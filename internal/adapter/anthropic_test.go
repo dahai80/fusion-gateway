@@ -619,6 +619,59 @@ func TestParseAnthropicStreamEvents(t *testing.T) {
     }
 }
 
+func TestAnthropicStreamEvent_MarshalIndexZeroNotOmitted(t *testing.T) {
+    // Regression (issue #46): AnthropicStreamEvent.Index used json:"index,omitempty",
+    // so the first content block (index 0) was marshaled WITHOUT an "index" field.
+    // Clients (claude code SDK) then receive a content_block_delta with no index,
+    // cannot match it to an open content block, and throw "Content block not found".
+    // Block-scoped events must always emit "index", even when 0.
+    blockCases := []struct {
+        name string
+        ev   AnthropicStreamEvent
+    }{
+        {"content_block_start index 0", AnthropicStreamEvent{
+            Type:         "content_block_start",
+            Index:        0,
+            ContentBlock: &AnthropicContentBlock{Type: "thinking"},
+        }},
+        {"content_block_delta index 0", AnthropicStreamEvent{
+            Type:  "content_block_delta",
+            Index: 0,
+            Delta: json.RawMessage(`{"type":"thinking_delta","thinking":"1"}`),
+        }},
+        {"content_block_stop index 0", AnthropicStreamEvent{
+            Type:  "content_block_stop",
+            Index: 0,
+        }},
+    }
+    for _, c := range blockCases {
+        b, err := json.Marshal(c.ev)
+        if err != nil {
+            t.Fatalf("%s: marshal error: %v", c.name, err)
+        }
+        s := string(b)
+        if !strings.Contains(s, `"index":0`) {
+            t.Fatalf("%s: expected \"index\":0 in JSON, got: %s", c.name, s)
+        }
+    }
+    // Message-scoped events must NOT carry an index (Anthropic SSE spec).
+    msgCases := []AnthropicStreamEvent{
+        {Type: "message_start", Message: &AnthropicResponse{ID: "m1", Model: "glm5.2"}},
+        {Type: "message_delta", StopReason: "end_turn", Usage: &AnthropicUsage{OutputTokens: 5}},
+        {Type: "message_stop"},
+    }
+    for _, ev := range msgCases {
+        b, err := json.Marshal(ev)
+        if err != nil {
+            t.Fatalf("marshal error: %v", err)
+        }
+        s := string(b)
+        if strings.Contains(s, `"index"`) {
+            t.Fatalf("message-scoped event %s must not carry index, got: %s", ev.Type, s)
+        }
+    }
+}
+
 func TestAnthropicProvider_StreamMessagesNotTruncatedByClientTimeout(t *testing.T) {
     // Regression: http.Client.Timeout caps the full request incl. body read,
     // truncating long reasoning streams. StreamMessages must use a client

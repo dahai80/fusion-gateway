@@ -125,6 +125,13 @@ type AnthropicUsage struct {
 type AnthropicStreamEvent struct {
     Type         string                 `json:"type"`
     Message      *AnthropicResponse     `json:"message,omitempty"`
+    // Index carries the content-block position for content_block_start /
+    // content_block_delta / content_block_stop events. On INPUT (unmarshal)
+    // it reads upstream "index" including 0 regardless of omitempty. On OUTPUT
+    // MarshalJSON emits it explicitly for block-scoped events only (issue #46):
+    // omitempty would drop index 0 and break claude code's block matching
+    // ("Content block not found"), while message-scoped events (message_start
+    // etc.) must NOT carry an index per the Anthropic SSE spec.
     Index        int                    `json:"index,omitempty"`
     ContentBlock *AnthropicContentBlock `json:"content_block,omitempty"`
     Delta        json.RawMessage        `json:"delta,omitempty"`
@@ -133,6 +140,32 @@ type AnthropicStreamEvent struct {
     Model        string                 `json:"model,omitempty"`
     StopReason   string                 `json:"stop_reason,omitempty"`
     StopSequence *string                `json:"stop_sequence,omitempty"`
+}
+
+// MarshalJSON emits the event per the Anthropic SSE spec. Block-scoped events
+// (content_block_start / content_block_delta / content_block_stop) always carry
+// an explicit "index", even when 0 — omitting index 0 broke claude code's
+// content-block matching ("Content block not found", issue #46). Message-scoped
+// events never carry an index. Implemented via alias marshal to avoid recursion.
+func (e AnthropicStreamEvent) MarshalJSON() ([]byte, error) {
+    type alias AnthropicStreamEvent
+    raw, err := json.Marshal(alias(e))
+    if err != nil {
+        return nil, err
+    }
+    if e.Type != "content_block_start" && e.Type != "content_block_delta" && e.Type != "content_block_stop" {
+        return raw, nil
+    }
+    // Block-scoped event: ensure "index" present even when 0.
+    var m map[string]json.RawMessage
+    if err := json.Unmarshal(raw, &m); err != nil {
+        return raw, nil
+    }
+    if _, ok := m["index"]; ok {
+        return raw, nil
+    }
+    m["index"] = json.RawMessage("0")
+    return json.Marshal(m)
 }
 
 type AnthropicProvider struct {

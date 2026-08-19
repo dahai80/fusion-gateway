@@ -3373,6 +3373,122 @@ func TestHandleStreamAnthropicMessages_Error(t *testing.T) {
     slog.Info("TestHandleStreamAnthropicMessages_Error passed")
 }
 
+// Regression (issue #46): the handler used to unconditionally append a
+// synthetic "event: message_stop\ndata: {}\n\n" AFTER the for-range loop.
+// When the upstream already sent a real message_stop, the client received a
+// DUPLICATE message_stop, and the second one had data:{} with no "type"
+// field (malformed). The Anthropic SDK finalizes the message on the first
+// message_stop; a duplicate confuses it ("Content block not found" /
+// stream-ended errors). Fix: only synthesize when the upstream did NOT emit
+// one. Here the upstream emits a real message_stop, so the body must contain
+// exactly ONE message_stop and it must carry "type":"message_stop".
+func TestHandleStreamAnthropicMessages_NoDuplicateMessageStop(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi!\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    stopCount := strings.Count(body, "event: message_stop")
+    if stopCount != 1 {
+        t.Fatalf("expected exactly 1 message_stop (upstream real one), got %d. body:\n%s", stopCount, body)
+    }
+    if !strings.Contains(body, `data: {"type":"message_stop"}`) {
+        t.Fatalf("expected the single message_stop to carry type field, got body:\n%s", body)
+    }
+    if strings.Contains(body, `data: {}`) {
+        t.Fatalf("malformed empty data:{} message_stop must NOT be present, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_NoDuplicateMessageStop passed", "stop_count", stopCount)
+}
+
+// Regression (issue #46): when the upstream closes the stream WITHOUT a
+// message_stop (error / truncation), the handler must synthesize a
+// well-formed terminal event so the SDK can finalize. The old code emitted
+// data:{} (no "type"), which the SDK could not parse as a message_stop.
+func TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        // NOTE: no content_block_stop, no message_stop — upstream truncated.
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    if !strings.Contains(body, `event: message_stop`) {
+        t.Fatalf("expected synthesized message_stop when upstream omits it, got body:\n%s", body)
+    }
+    if !strings.Contains(body, `data: {"type":"message_stop"}`) {
+        t.Fatalf("synthesized message_stop must carry type field, got body:\n%s", body)
+    }
+    stopCount := strings.Count(body, "event: message_stop")
+    if stopCount != 1 {
+        t.Fatalf("expected exactly 1 synthesized message_stop, got %d", stopCount)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop passed", "stop_count", stopCount)
+}
+
+// Regression (issue #46): when the client cancels mid-stream (ctx canceled),
+// the upstream goroutine closes the channel early, possibly with content
+// blocks still OPEN. The old code then synthesized a terminal message_stop,
+// handing the SDK an unmatched open block ("Content block not found"). Fix:
+// on ctx cancellation, suppress the synthetic message_stop — the client has
+// already given up, writing more events only risks confusing it.
+func TestHandleStreamAnthropicMessages_ClientCancelSuppressesMessageStop(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+        // Block left open, then connection ends (simulating ctx cancel mid-stream).
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    ctx, cancel := context.WithCancel(context.Background())
+    rec := httptest.NewRecorder()
+    // Cancel BEFORE the handler reads the channel close so ctx.Err() is set
+    // by the time the for-range loop exits. The upstream test server returns
+    // promptly (small body), so we cancel synchronously first.
+    cancel()
+    s.handleStreamAnthropicMessages(ctx, rec, p, req)
+
+    body := rec.Body.String()
+    if strings.Contains(body, "event: message_stop") {
+        t.Fatalf("on client cancel, must NOT synthesize message_stop (unmatched block risk), got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_ClientCancelSuppressesMessageStop passed", "body_len", len(body))
+}
+
 // --- Transcriptions with transcription provider ---
 
 type mockTranscriptionProvider struct {

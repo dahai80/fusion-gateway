@@ -995,6 +995,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.14 — Fix "Content block not found": content_block index=0 + duplicate/malformed message_stop (#46)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **content_block index=0 no longer dropped** (#46) | `AnthropicStreamEvent.Index` tag `json:"index,omitempty"` dropped `index:0` on marshal — the first content block (always the `thinking` block on reasoning models like glm5.2) was emitted with no `index` field, so the Anthropic SDK could not match `content_block_delta`/`_stop` events to an open block and threw `Content block not found`. Added a custom `MarshalJSON` (alias-marshal to avoid recursion) that forces an explicit `"index"` (even 0) only on block-scoped events (`content_block_start`/`_delta`/`_stop`); message-scoped events (`message_start`/`message_delta`/`message_stop`) still carry no index per the Anthropic SSE spec. |
+| 2 | **No more duplicate / malformed message_stop** (#46) | `handleStreamAnthropicMessages` unconditionally appended `event: message_stop\ndata: {}` after the upstream channel closed, so when the upstream already sent a real `message_stop` the client received a **second** one (and it was malformed — `data:{}` with no `type`). Now tracks `sawMessageStop` and only synthesizes a well-formed `{"type":"message_stop"}` when the upstream omitted one. |
+| 3 | **Client cancel no longer synthesizes a closing event** (#46) | On `ctx.Err() != nil` (client canceled mid-stream, e.g. long 4m+ thinking), the upstream goroutine closes the channel early with content blocks possibly still OPEN. The old synthetic `message_stop` then handed the SDK an unmatched block (`Content block not found`). Now suppresses any synthetic terminal event on cancellation — the client already gave up. |
+| 4 | **Tests** | 4 new regression tests: `TestAnthropicStreamEvent_MarshalIndexZeroNotOmitted` (index 0 present on block events, absent on message events), `TestHandleStreamAnthropicMessages_NoDuplicateMessageStop`, `_SynthesizesMissingMessageStop`, `_ClientCancelSuppressesMessageStop`. Live-verified gateway→LiteLLM stream: 1 `message_stop`, 0 malformed `data:{}`, 0 SDK block-pairing errors. `go vet` clean. |
+
 ### v0.8.13 — Stream body no longer truncated by backend timeout (#44)
 
 | # | Fix | Details |

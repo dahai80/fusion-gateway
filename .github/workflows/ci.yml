@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: Build, Vet, Test
+    # fusion-gateway is Apple-Silicon local-first: internal/hardware uses
+    # macOS-only IOKit (purego) and sysctl swap-page counters with no
+    # cross-platform stubs. CI runs on macOS to match the real deployment
+    # target and compile the darwin-only hardware package.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -count=1
