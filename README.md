@@ -1,5 +1,7 @@
 # Fusion-Gateway
 
+**English | [中文](README_CN.md)**
+
 Unified hybrid inference gateway for Apple Silicon local inference + cloud LLMs.
 
 Core traffic entry point for Fusion-Agent Studio, Fusion-MLX, and Fusion-Coder. Written in **Go** to avoid competing with fusion-mlx for UMA memory.
