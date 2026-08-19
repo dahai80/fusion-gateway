@@ -136,11 +136,12 @@ type AnthropicStreamEvent struct {
 }
 
 type AnthropicProvider struct {
-    name       string
-    baseURL    string
-    apiKey     string
-    apiVersion string
-    httpClient *http.Client
+    name            string
+    baseURL         string
+    apiKey          string
+    apiVersion      string
+    httpClient      *http.Client
+    streamHTTPClient *http.Client
 }
 
 func NewAnthropicProvider(name string, backendCfg config.BackendConfig) *AnthropicProvider {
@@ -148,12 +149,23 @@ func NewAnthropicProvider(name string, backendCfg config.BackendConfig) *Anthrop
     if timeout == 0 {
         timeout = 120 * time.Second
     }
+    // streamHTTPClient: no overall Timeout (http.Client.Timeout caps the full
+    // request incl. body read, which truncates long reasoning streams at 120s).
+    // Transport.ResponseHeaderTimeout bounds time-to-first-byte so a dead
+    // upstream still fails fast, while the streamed body runs unbounded until
+    // the upstream closes it naturally. Client cancellation (ctx) still applies.
+    // Non-stream Messages keeps the bounded httpClient.
+    streamTransport := &http.Transport{
+        ResponseHeaderTimeout: timeout,
+        Proxy:                 http.ProxyFromEnvironment,
+    }
     return &AnthropicProvider{
-        name:       name,
-        baseURL:    backendCfg.BaseURL,
-        apiKey:     backendCfg.APIKey,
-        apiVersion: "2023-06-01",
-        httpClient: &http.Client{Timeout: timeout},
+        name:             name,
+        baseURL:          backendCfg.BaseURL,
+        apiKey:           backendCfg.APIKey,
+        apiVersion:       "2023-06-01",
+        httpClient:       &http.Client{Timeout: timeout},
+        streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
     }
 }
 
@@ -203,7 +215,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     }
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
-    resp, err := p.httpClient.Do(httpReq)
+    resp, err := p.streamHTTPClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic stream request failed: %w", err)
     }
@@ -261,7 +273,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
     }
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
-    resp, err := p.httpClient.Do(httpReq)
+    resp, err := p.streamHTTPClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("anthropic stream messages failed: %w", err)
     }
