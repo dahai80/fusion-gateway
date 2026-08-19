@@ -56,6 +56,14 @@ func TestValidate_OutputInputRatioNegative(t *testing.T) {
     }
 }
 
+func TestValidate_OutputInputRatioMinInputTokensNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.OutputInputRatioMinInputTokens = -1
+    if err := validate(&cfg); err == nil {
+        t.Fatal("expected error for negative output_input_ratio_min_input_tokens")
+    }
+}
+
 func TestValidate_RatioTiers_InvalidMaxRatio(t *testing.T) {
     cfg := DefaultConfig()
     cfg.Routing.RatioTiers.Enabled = true

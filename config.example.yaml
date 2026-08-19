@@ -48,6 +48,7 @@ route:
     enable_hardware_judge: true
     token_threshold: 8000
     output_input_ratio_threshold: 0.6       # 输出/输入token比 > 此值走云端(0=禁用)
+    output_input_ratio_min_input_tokens: 32 # input token < 此值时跳过 ratio 判据(极小请求 ratio 失真, #48;0=用默认32)
     ratio_tiers:
         enabled: false                       # 启用按比例分段路由(启用后替代output_input_ratio_threshold)
         rules:                               # ratio <= max_ratio → backend，按顺序匹配

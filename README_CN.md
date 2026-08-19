@@ -57,6 +57,8 @@ cp config.example.yaml config.yaml
 | `auth.enabled` | true | 启用 API key 鉴权 |
 | `auth.master_key` | "" | master key 绕过限流和模型白名单 |
 | `route.token_threshold` | 8000 | token 数阈值:低于走本地,高于走云端 |
+| `route.output_input_ratio_threshold` | 0.6 | 预测输出/input token 比例上限,超过则路由云端 (低于 `output_input_ratio_min_input_tokens` 时跳过) |
+| `route.output_input_ratio_min_input_tokens` | 32 | output/input ratio 判据的最小 input token 数;低于此值跳过 ratio (避免极小请求误判, #48) |
 | `route.mode` | hybrid | 路由模式:`local` (全本地)、`cloud` (全云端)、`hybrid` (按 token/比例/硬件智能路由) |
 | `route.enable_hardware_judge` | true | 启用硬件感知路由 |
 | `route.local_max_memory_ratio` | 0.9 | 系统内存占比上限,超过则强制走云端 |
@@ -988,6 +990,15 @@ config.example.yaml   示例配置
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 
 ## 审计修复记录
+
+### v0.8.15 — 极小请求不再被 output/input ratio 误判路由 cloud (#48)
+
+| # | 修复 | 详情 |
+|---|-----|---------|
+| 1 | **极小请求跳过 output/input ratio 判据** (#48) | 4-token prompt ("say pong") 配 `max_tokens:5` 产生 `predict_output/input = 5/4 = 1.25 > 0.6`,导致 `output_input_ratio_exceeded` 规则 (P4.5) 将本可本地的请求误判到云端 (glm52),而 glm52 不认 `Qwen3.5-9B-4bit` 模型名 → 400 → 网关 502。input 极少时 ratio 统计无意义。P4.5 现在在 `input_tokens < output_input_ratio_min_input_tokens` (默认 32,配置 `routing.output_input_ratio_min_input_tokens`) 时跳过 ratio 判据,fall through 到 P6 模型可用性 → P7 本地。 |
+| 2 | **可配置 input-token 下限** | 新增 `routing.output_input_ratio_min_input_tokens` (int,默认 32)。未设置或零/负值回退到内置默认,故既有 `config.yaml` 无需改动即获修复。`config.Validate` 校验非负。 |
+| 3 | **跳过日志便于定位** | ratio 判据因 input 下限被跳过时,引擎发出 `output/input ratio skipped: input tokens below floor`,含 `input_tokens`、`min_input_tokens`、`predict_output_tokens`,极小请求路由可诊断。 |
+| 4 | **测试** | 3 个新增回归测试:`TestDecide_OutputInputRatioSkippedForTinyInput` (4 input → 本地,非 `output_input_ratio_exceeded`)、`TestDecide_OutputInputRatioSkippedForTinyInput_ExplicitFloor` (显式下限 64 → 50 input 跳过 ratio)、`TestValidate_OutputInputRatioMinInputTokensNegative` (负下限被拒)。既有 `TestDecide_OutputInputRatioThreshold` (100 input,高于下限) 仍路由 cloud 不变。585 个 router/config/admin 测试绿;`go vet` 干净。 |
 
 ### v0.8.14 — 修复 "Content block not found":content_block index=0 + 重复/畸形 message_stop (#46)
 

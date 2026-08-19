@@ -125,6 +125,7 @@ type RoutingConfig struct {
     DefaultModel              string               `mapstructure:"default_model"`
     TokenThreshold            int                  `mapstructure:"token_threshold"`
     OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
+    OutputInputRatioMinInputTokens int             `mapstructure:"output_input_ratio_min_input_tokens"`
     RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
     TokenTiers                TokenTierConfig      `mapstructure:"token_tiers"`
     LocalPriority              LocalPriorityConfig  `mapstructure:"local_priority"`
@@ -617,6 +618,9 @@ func validate(cfg *Config) error {
     if cfg.Routing.OutputInputRatioThreshold < 0 {
         return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
     }
+    if cfg.Routing.OutputInputRatioMinInputTokens < 0 {
+        return fmt.Errorf("output_input_ratio_min_input_tokens must be non-negative, got: %d", cfg.Routing.OutputInputRatioMinInputTokens)
+    }
     for i, r := range cfg.Routing.RatioTiers.Rules {
         if r.MaxRatio <= 0 {
             return fmt.Errorf("ratio_tiers.rules[%d].max_ratio must be positive, got: %f", i, r.MaxRatio)
@@ -693,6 +697,7 @@ func DefaultConfig() Config {
             DefaultModel:              "",
             TokenThreshold:            8000,
             OutputInputRatioThreshold: 0.6,
+            OutputInputRatioMinInputTokens: 32,
             RatioTiers: RatioTierConfig{
                 Enabled: false,
                 Rules:   []RatioTierRule{},
