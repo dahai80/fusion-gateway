@@ -30,6 +30,7 @@ func (m *logMockStore) GetLog(id string) (*store.RequestLog, error)             
 func (m *logMockStore) ExportLogs(filter store.LogFilter, format string) ([]byte, error) {
     return nil, nil
 }
+func (m *logMockStore) DistinctLogFilters() (*store.LogFilters, error)            { return &store.LogFilters{}, nil }
 func (m *logMockStore) ListKeys() ([]*store.APIKeyEntry, error)                  { return nil, nil }
 func (m *logMockStore) GetKey(name string) (*store.APIKeyEntry, error)           { return nil, nil }
 func (m *logMockStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error)     { return nil, nil }

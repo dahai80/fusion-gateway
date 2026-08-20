@@ -11,6 +11,7 @@ import (
     "net/http/httptest"
     "os"
     "path/filepath"
+    "sort"
     "strings"
     "testing"
     "time"
@@ -73,6 +74,32 @@ func (m *mockStore) ExportLogs(filter store.LogFilter, format string) ([]byte, e
     }
     data, _ := json.Marshal(m.logs)
     return data, nil
+}
+
+func (m *mockStore) DistinctLogFilters() (*store.LogFilters, error) {
+    models := make(map[string]struct{})
+    channels := make(map[string]struct{})
+    for _, l := range m.logs {
+        if l.Model != "" {
+            models[l.Model] = struct{}{}
+        }
+        if l.ChannelName != "" {
+            channels[l.ChannelName] = struct{}{}
+        }
+    }
+    out := &store.LogFilters{
+        Models:   make([]string, 0, len(models)),
+        Channels: make([]string, 0, len(channels)),
+    }
+    for mm := range models {
+        out.Models = append(out.Models, mm)
+    }
+    for c := range channels {
+        out.Channels = append(out.Channels, c)
+    }
+    sort.Strings(out.Models)
+    sort.Strings(out.Channels)
+    return out, nil
 }
 
 func (m *mockStore) ListKeys() ([]*store.APIKeyEntry, error) {
@@ -1166,6 +1193,76 @@ func TestHandleLogs(t *testing.T) {
         req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/logs", nil)
         rec := httptest.NewRecorder()
         h.handleLogs(rec, req)
+        if rec.Code != http.StatusMethodNotAllowed {
+            t.Fatalf("expected 405, got %d", rec.Code)
+        }
+    })
+
+    t.Run("get_logs_returns_logs_field", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/logs", nil)
+        rec := httptest.NewRecorder()
+        h.handleLogs(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        result := decodeResponse(t, rec)
+        logs, ok := result["logs"].([]interface{})
+        if !ok {
+            t.Fatalf("expected 'logs' array field, got %T", result["logs"])
+        }
+        if len(logs) != 1 {
+            t.Fatalf("expected 1 log, got %d", len(logs))
+        }
+        row, ok := logs[0].(map[string]interface{})
+        if !ok {
+            t.Fatalf("expected log row map, got %T", logs[0])
+        }
+        if row["model"] != "qwen3" {
+            t.Errorf("expected model qwen3, got %v", row["model"])
+        }
+        if row["input_tokens"] != float64(10) {
+            t.Errorf("expected input_tokens 10, got %v", row["input_tokens"])
+        }
+    })
+}
+
+func TestHandleLogsFilters(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+    ms := newMockStore()
+    _ = ms.AppendLog(&store.RequestLog{ID: "1", Model: "qwen3", ChannelName: "local"})
+    _ = ms.AppendLog(&store.RequestLog{ID: "2", Model: "glm5.2", ChannelName: "cloud"})
+    h := newTestHandler(t, ms, auth, "")
+
+    t.Run("get_filters_success", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/logs/filters", nil)
+        rec := httptest.NewRecorder()
+        h.handleLogsFilters(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        result := decodeResponse(t, rec)
+        models, ok := result["models"].([]interface{})
+        if !ok {
+            t.Fatalf("expected 'models' array, got %T", result["models"])
+        }
+        if len(models) != 2 {
+            t.Fatalf("expected 2 models, got %d", len(models))
+        }
+        channels, ok := result["channels"].([]interface{})
+        if !ok {
+            t.Fatalf("expected 'channels' array, got %T", result["channels"])
+        }
+        if len(channels) != 2 {
+            t.Fatalf("expected 2 channels, got %d", len(channels))
+        }
+    })
+
+    t.Run("method_not_allowed", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/logs/filters", nil)
+        rec := httptest.NewRecorder()
+        h.handleLogsFilters(rec, req)
         if rec.Code != http.StatusMethodNotAllowed {
             t.Fatalf("expected 405, got %d", rec.Code)
         }

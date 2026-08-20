@@ -28,6 +28,7 @@ func (m *mockBudgetStore) GetLog(id string) (*store.RequestLog, error)          
 func (m *mockBudgetStore) ExportLogs(filter store.LogFilter, format string) ([]byte, error) {
     return nil, nil
 }
+func (m *mockBudgetStore) DistinctLogFilters() (*store.LogFilters, error)            { return &store.LogFilters{}, nil }
 func (m *mockBudgetStore) ListKeys() ([]*store.APIKeyEntry, error)                  { return nil, nil }
 func (m *mockBudgetStore) GetKey(name string) (*store.APIKeyEntry, error)           { return nil, nil }
 func (m *mockBudgetStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error)     { return nil, nil }

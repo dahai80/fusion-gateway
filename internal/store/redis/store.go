@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "fmt"
     "log/slog"
+    "sort"
     "strconv"
     "time"
 
@@ -121,6 +122,47 @@ func (r *RedisStore) ExportLogs(filter store.LogFilter, format string) ([]byte, 
         return nil, err
     }
     return json.Marshal(logs)
+}
+
+func (r *RedisStore) DistinctLogFilters() (*store.LogFilters, error) {
+    keys, err := r.client.Keys(r.ctx, logPrefix+"*").Result()
+    if err != nil {
+        return nil, fmt.Errorf("list log keys: %w", err)
+    }
+
+    models := make(map[string]struct{})
+    channels := make(map[string]struct{})
+    for _, k := range keys {
+        data, err := r.client.Get(r.ctx, k).Bytes()
+        if err != nil {
+            continue
+        }
+        var l store.RequestLog
+        if err := json.Unmarshal(data, &l); err != nil {
+            continue
+        }
+        if l.Model != "" {
+            models[l.Model] = struct{}{}
+        }
+        if l.ChannelName != "" {
+            channels[l.ChannelName] = struct{}{}
+        }
+    }
+
+    out := &store.LogFilters{
+        Models:   make([]string, 0, len(models)),
+        Channels: make([]string, 0, len(channels)),
+    }
+    for m := range models {
+        out.Models = append(out.Models, m)
+    }
+    for c := range channels {
+        out.Channels = append(out.Channels, c)
+    }
+    sort.Strings(out.Models)
+    sort.Strings(out.Channels)
+    slog.Debug("distinct log filters", "models", len(out.Models), "channels", len(out.Channels))
+    return out, nil
 }
 
 // --- API Keys ---

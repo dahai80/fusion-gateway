@@ -138,6 +138,36 @@ func (s *LogStore) AllLogs() []*store.RequestLog {
     return result
 }
 
+func (s *LogStore) DistinctFilters() *store.LogFilters {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+
+    models := make(map[string]struct{})
+    channels := make(map[string]struct{})
+    for _, l := range s.logs {
+        if l.Model != "" {
+            models[l.Model] = struct{}{}
+        }
+        if l.ChannelName != "" {
+            channels[l.ChannelName] = struct{}{}
+        }
+    }
+
+    out := &store.LogFilters{
+        Models:   make([]string, 0, len(models)),
+        Channels: make([]string, 0, len(channels)),
+    }
+    for m := range models {
+        out.Models = append(out.Models, m)
+    }
+    for c := range channels {
+        out.Channels = append(out.Channels, c)
+    }
+    sort.Strings(out.Models)
+    sort.Strings(out.Channels)
+    return out
+}
+
 func matchFilter(l *store.RequestLog, f store.LogFilter) bool {
     if f.StartTime != nil && l.Timestamp.Before(*f.StartTime) {
         return false

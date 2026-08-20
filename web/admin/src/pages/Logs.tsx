@@ -8,19 +8,20 @@ const { Title } = Typography;
 const { RangePicker } = DatePicker;
 
 interface LogEntry {
-    id: number;
+    id: string;
     request_id: string;
-    key_name: string;
+    timestamp: string;
+    api_key_name: string;
     model: string;
-    channel: string;
-    prompt_tokens: number;
-    completion_tokens: number;
+    channel_name: string;
+    input_tokens: number;
+    output_tokens: number;
     total_tokens: number;
     cost: number;
     latency_ms: number;
-    status: number;
-    route_type: string;
-    created_at: string;
+    status_code: number;
+    is_success: boolean;
+    route_reason: string;
 }
 
 interface LogFilters {
@@ -54,17 +55,17 @@ export default function Logs() {
         try {
             const params: Record<string, unknown> = {
                 page,
-                page_size: pageSize,
+                limit: pageSize,
             };
-            if (filters.key) params.key = filters.key;
+            if (filters.key) params.key_name = filters.key;
             if (filters.model) params.model = filters.model;
             if (filters.channel) params.channel = filters.channel;
             if (filters.status) params.status = filters.status;
-            if (filters.time_start) params.time_start = filters.time_start;
-            if (filters.time_end) params.time_end = filters.time_end;
+            if (filters.time_start) params.from = filters.time_start;
+            if (filters.time_end) params.to = filters.time_end;
             const res = await client.get("/logs", { params });
             const data = res.data?.data || res.data || {};
-            setLogs(data.items || data.list || []);
+            setLogs(data.logs || []);
             setTotal(data.total || 0);
         } catch {
             message.error("Failed to fetch logs");
@@ -80,7 +81,7 @@ export default function Logs() {
             setModels(data.models || []);
             setChannels(data.channels || []);
         } catch {
-            // silent
+            // silent — filters endpoint optional, dropdowns stay empty
         }
     };
 
@@ -109,9 +110,9 @@ export default function Logs() {
     };
 
     const columns: ColumnsType<LogEntry> = [
-        { title: "ID", dataIndex: "id", key: "id", width: 60 },
+        { title: "ID", dataIndex: "id", key: "id", width: 80, ellipsis: true },
         { title: "Request ID", dataIndex: "request_id", key: "request_id", width: 140, ellipsis: true },
-        { title: "Key", dataIndex: "key_name", key: "key_name", width: 120 },
+        { title: "Key", dataIndex: "api_key_name", key: "api_key_name", width: 120 },
         {
             title: "Model",
             dataIndex: "model",
@@ -121,13 +122,13 @@ export default function Logs() {
         },
         {
             title: "Channel",
-            dataIndex: "channel",
-            key: "channel",
+            dataIndex: "channel_name",
+            key: "channel_name",
             width: 120,
             render: (c: string) => <Tag color="blue">{c}</Tag>,
         },
-        { title: "Prompt", dataIndex: "prompt_tokens", key: "prompt_tokens", width: 80, sorter: true },
-        { title: "Completion", dataIndex: "completion_tokens", key: "completion_tokens", width: 90, sorter: true },
+        { title: "Prompt", dataIndex: "input_tokens", key: "input_tokens", width: 80, sorter: true },
+        { title: "Completion", dataIndex: "output_tokens", key: "output_tokens", width: 90, sorter: true },
         { title: "Total", dataIndex: "total_tokens", key: "total_tokens", width: 80, sorter: true },
         {
             title: "Cost",
@@ -146,23 +147,24 @@ export default function Logs() {
         },
         {
             title: "Route",
-            dataIndex: "route_type",
-            key: "route_type",
-            width: 80,
+            dataIndex: "route_reason",
+            key: "route_reason",
+            width: 90,
+            ellipsis: true,
             render: (r: string) => (
-                <Tag color={r === "local" ? "green" : "orange"}>{r}</Tag>
+                <Tag color={r === "local" || r?.includes("local") ? "green" : "orange"}>{r || "-"}</Tag>
             ),
         },
         {
             title: "Status",
-            dataIndex: "status",
-            key: "status",
+            dataIndex: "status_code",
+            key: "status_code",
             width: 70,
-            render: (s: number) => (
-                <Tag color={s === 200 ? "green" : "red"}>{s}</Tag>
+            render: (s: number, row: LogEntry) => (
+                <Tag color={row.is_success ? "green" : "red"}>{s}</Tag>
             ),
         },
-        { title: "Time", dataIndex: "created_at", key: "created_at", width: 160 },
+        { title: "Time", dataIndex: "timestamp", key: "timestamp", width: 160 },
     ];
 
     return (
@@ -206,7 +208,7 @@ export default function Logs() {
                     style={{ width: 120 }}
                     allowClear
                     options={[
-                        { label: "Success", value: "200" },
+                        { label: "Success", value: "success" },
                         { label: "Error", value: "error" },
                     ]}
                 />
