@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log/slog"
@@ -452,8 +453,10 @@ func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reade
             }
         }
         if err != nil {
-            if err != io.EOF {
+            if err != io.EOF && !errors.Is(err, context.Canceled) {
                 slog.Error("anthropic sse read error", "error", err)
+            } else {
+                slog.Debug("anthropic sse read ended", "error", err)
             }
             break
         }
@@ -495,8 +498,10 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body
             }
         }
         if err != nil {
-            if err != io.EOF {
+            if err != io.EOF && !errors.Is(err, context.Canceled) {
                 slog.Error("anthropic stream event read error", "error", err)
+            } else {
+                slog.Debug("anthropic stream event read ended", "error", err)
             }
             break
         }

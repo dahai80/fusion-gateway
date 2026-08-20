@@ -2291,6 +2291,50 @@ func TestAnthropicMessages_WithCloudProvider(t *testing.T) {
     slog.Info("TestAnthropicMessages_WithCloudProvider", "status", rec.Code, "body", rec.Body.String())
 }
 
+// Regression (issue #62): extractAnthropicTextContent must pull text from
+// both string-form and block-form Anthropic messages so the router gets a
+// real token budget on /v1/messages instead of "token_budget_missing".
+func TestExtractAnthropicTextContent(t *testing.T) {
+    t.Run("string_content", func(t *testing.T) {
+        msgs := []adapter.AnthropicMessage{
+            {Role: "user", Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "hello world"}}},
+        }
+        got := extractAnthropicTextContent(msgs)
+        if !strings.Contains(got, "hello world") {
+            t.Fatalf("expected 'hello world' in %q", got)
+        }
+    })
+    t.Run("multiple_blocks", func(t *testing.T) {
+        msgs := []adapter.AnthropicMessage{
+            {Role: "user", Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "first"}, {Type: "text", Text: "second"}}},
+            {Role: "assistant", Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "reply"}}},
+        }
+        got := extractAnthropicTextContent(msgs)
+        for _, want := range []string{"first", "second", "reply"} {
+            if !strings.Contains(got, want) {
+                t.Fatalf("expected %q in %q", want, got)
+            }
+        }
+    })
+    t.Run("skips_non_text", func(t *testing.T) {
+        msgs := []adapter.AnthropicMessage{
+            {Role: "user", Content: []adapter.AnthropicContentBlock{{Type: "image", Text: "ignored"}, {Type: "text", Text: "keep"}}},
+        }
+        got := extractAnthropicTextContent(msgs)
+        if strings.Contains(got, "ignored") {
+            t.Fatalf("non-text block leaked into %q", got)
+        }
+        if !strings.Contains(got, "keep") {
+            t.Fatalf("expected 'keep' in %q", got)
+        }
+    })
+    t.Run("empty", func(t *testing.T) {
+        if got := extractAnthropicTextContent(nil); got != "" {
+            t.Fatalf("expected empty, got %q", got)
+        }
+    })
+}
+
 func TestAnthropicMessages_StreamWithCloudProvider(t *testing.T) {
     ch := make(chan adapter.StreamChunk, 2)
     finishReason := "stop"

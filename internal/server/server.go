@@ -1925,6 +1925,23 @@ func extractTextContent(messages []adapter.ChatMessage) string {
     return sb
 }
 
+// extractAnthropicTextContent concatenates text blocks from Anthropic-format
+// messages for token counting. Mirrors extractTextContent for the /v1/messages
+// path so the router receives a real token budget instead of routing every
+// request to cloud with reason "token_budget_missing" (issue #62).
+func extractAnthropicTextContent(messages []adapter.AnthropicMessage) string {
+    var sb strings.Builder
+    for _, msg := range messages {
+        for _, block := range msg.Content {
+            if block.Type == "text" && block.Text != "" {
+                sb.WriteString(block.Text)
+                sb.WriteByte(' ')
+            }
+        }
+    }
+    return sb.String()
+}
+
 func healthStatus(healthy bool) string {
     if healthy {
         return "ok"
@@ -1964,8 +1981,23 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     }
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
-    decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Stream: antReq.Stream})
-    slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason)
+
+    // Inject token budget so the router's P4 token-budget tier evaluates
+    // instead of defaulting every /v1/messages request to cloud with
+    // reason "token_budget_missing". Without this, short prompts waste cloud
+    // quota and long prompts never trigger token_budget_exceeded (issue #62).
+    textContent := extractAnthropicTextContent(antReq.Messages)
+    inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
+    if err != nil {
+        slog.Error("token counting failed for anthropic messages", "error", err)
+        inputTokens = len(textContent) / 4
+    }
+    maxTokens := antReq.MaxTokens
+    budget := s.tokEngine.EstimateBudget(inputTokens, &maxTokens, antReq.Model, len(antReq.Tools) > 0, antReq.Stream)
+    ctx = tokenizer.WithTokenBudget(ctx, budget)
+
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
+    slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason, "input_tokens", inputTokens)
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
         return
