@@ -241,6 +241,31 @@ cluster:
 
 The semantic layer is hot-reload aware: toggling `intent_classifier.enabled` in config takes effect without a restart.
 
+### Heuristic Code-Intent Fast Path (<20ms)
+
+The LLM classifier above is a full model call (2s timeout, no cache, every request) — acceptable for a disabled-by-default semantic layer, but it dominates gateway end-to-end overhead once enabled. For the **coding** intent specifically (the hottest path in vibe-coding / refactor / debug workflows), a deterministic in-process heuristic classifier replaces the LLM call and keeps gateway overhead well under 20ms.
+
+`HeuristicClassifier` runs **before** the LLM classifier on every chat request. It scores a request from signals that need no model inference — model name contains `code`, fenced code blocks, language keywords, file extensions, code-action verbs, error terms, and a non-nil `tools` array — and, when the score meets `min_confidence`, returns `IntentCode`. The engine then routes to `LocalBackend` (fusion-mlx) with the LoRA code adapter (e.g. `lora-code`) hot-mounted via the per-request `adapters` field (ms-scale `FUSION_LORA_INPLACE_SWAP=1` swap, no base reload). Non-code intents fall through to the LLM classifier (if enabled) then the rule chain unchanged.
+
+Results are cached by a sha256 key (model + tools-flag + scanned text prefix) in a bounded LRU with TTL, so repeated prompts skip even the regex scan. Benchmark on Apple M5 Max: **~0.8µs/op** steady-state (cached) — ~24000× headroom under the 20ms budget.
+
+> **Heuristic vs LLM classifier:** the heuristic is a latency lever scoped to the code intent; it does not replace the LLM classifier for heavy/diffusion/translate dispatch. Both can be enabled together — the heuristic catches code first, the LLM classifier handles the rest.
+
+```yaml
+routing:
+  heuristic_classifier:
+    enabled: false            # default off; the rule chain routes as usual
+    code_adapter: "lora-code" # LoRA adapter name passed in the per-request "adapters" field
+    cache_size: 4096          # LRU entries (0 disables cache)
+    cache_ttl: 5m             # entry expiry; 0 = never expire
+    min_confidence: 0.6       # score threshold to classify as code intent
+    text_scan_bytes: 4096     # cap regex scan to this prefix of the request text
+```
+
+The fast path is hot-reload aware: toggling `heuristic_classifier.enabled` takes effect without a restart. The `adapters` and `response_format` fields are passed through `ChatRequest` to fusion-mlx (opaque to cloud providers), so OpenAI-style constrained decoding also reaches the local engine without gateway interpretation.
+
+> **fusion-mlx prerequisites:** `FUSION_LORA_INPLACE_SWAP=1` for true ms-scale in-place adapter swap (else falls back to a base reload); the base model must be pre-loaded (`POST /v1/models/{id}/load`) before an adapter request, since in-place swap requires a resident base.
+
 ### Cluster Load Balancing
 
 When local can't serve, gateway tries cluster nodes before cloud fallback.

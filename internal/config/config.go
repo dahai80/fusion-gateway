@@ -135,6 +135,7 @@ type RoutingConfig struct {
     RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
     Retry                      RetryConfig          `mapstructure:"retry"`
     IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
+    HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -162,6 +163,31 @@ type IntentClassifierConfig struct {
     APIKey        string        `mapstructure:"api_key"`
     Timeout       time.Duration `mapstructure:"timeout"`
     MinConfidence float64       `mapstructure:"min_confidence"`
+}
+
+// HeuristicClassifierConfig configures the in-process sub-ms intent classifier
+// that replaces the sync LLM RouterLightClassifier on the code path (latency
+// lever for <20ms gateway end-to-end overhead). When it recognizes a coding
+// intent with confidence >= MinConfidence, the engine dispatches straight to
+// LocalBackend + LoRA hot-swap (code_adapter), skipping the LLM classifier.
+// Disabled by default (backward compatible).
+type HeuristicClassifierConfig struct {
+    Enabled       bool          `mapstructure:"enabled"`
+    // CodeAdapter is the LoRA adapter name (e.g. "lora-code") to hot-mount on
+    // fusion-mlx via the per-request "adapters" field when a code intent is
+    // detected. Empty = code intent detected but no adapter to mount, so the
+    // engine defers to the rule chain (bare base model).
+    CodeAdapter   string        `mapstructure:"code_adapter"`
+    // CacheSize bounds the in-memory heuristic cache (LRU). 0 = no cache.
+    CacheSize     int           `mapstructure:"cache_size"`
+    // CacheTTL is the per-entry time-to-live. Stale entries are evicted on read.
+    CacheTTL      time.Duration `mapstructure:"cache_ttl"`
+    // MinConfidence is the score threshold above which a code intent dispatch
+    // fires. Below it the classifier defers to the LLM classifier / rule chain.
+    MinConfidence float64       `mapstructure:"min_confidence"`
+    // TextScanBytes caps how many bytes of the request text are hashed into the
+    // cache key / scanned for patterns. Bounds work on large prompts.
+    TextScanBytes int           `mapstructure:"text_scan_bytes"`
 }
 
 type RetryConfig struct {
@@ -730,6 +756,14 @@ func DefaultConfig() Config {
                 BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
                 Timeout:       2 * time.Second,
                 MinConfidence: 0.7,
+            },
+            HeuristicClassifier: HeuristicClassifierConfig{
+                Enabled:       false,
+                CodeAdapter:   "lora-code",
+                CacheSize:     4096,
+                CacheTTL:      5 * time.Minute,
+                MinConfidence: 0.6,
+                TextScanBytes: 4096,
             },
         },
         Hardware: HardwareConfig{

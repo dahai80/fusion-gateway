@@ -117,6 +117,26 @@ func wireIntentClassifier(e *router.Engine, cfg config.IntentClassifierConfig) {
 	)
 }
 
+// wireHeuristicClassifier wires the in-process sub-ms heuristic intent
+// classifier into the router engine when enabled (latency lever for <20ms
+// gateway end-to-end overhead, replaces the sync LLM classifier on the code
+// path). When disabled it installs nil so the heuristic layer is a no-op and
+// routing falls through to the LLM classifier (if enabled) then the rule chain.
+func wireHeuristicClassifier(e *router.Engine, cfg config.HeuristicClassifierConfig) {
+	if !cfg.Enabled {
+		e.SetHeuristicClassifier(nil)
+		slog.Info("heuristic classifier disabled, falling through to classifier/rule chain")
+		return
+	}
+	c := router.NewHeuristicClassifier(cfg)
+	e.SetHeuristicClassifier(c)
+	slog.Info("heuristic classifier wired",
+		"code_adapter", cfg.CodeAdapter,
+		"min_confidence", cfg.MinConfidence,
+		"cache_size", cfg.CacheSize,
+	)
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -163,6 +183,10 @@ func run(configPath string) error {
 	// classifier when intent_classifier is enabled. Falls back to NoopClassifier
 	// (set by NewEngine) when disabled or misconfigured.
 	wireIntentClassifier(routerEngine, snap.Config.Routing.IntentClassifier)
+	// Heuristic classifier (<20ms latency lever): runs before the LLM
+	// classifier on every request; recognizes coding intent and dispatches to
+	// LocalBackend + LoRA hot-swap. No-op when disabled (nil install).
+	wireHeuristicClassifier(routerEngine, snap.Config.Routing.HeuristicClassifier)
 
 	pool := adapter.NewPool()
 	if err := pool.BuildProviders(snap); err != nil {
@@ -226,6 +250,9 @@ func run(configPath string) error {
 		// D4: re-wire intent classifier on hot reload so enabling/disabling the
 		// semantic layer takes effect without a restart (issue #22).
 		wireIntentClassifier(routerEngine, newSnap.Config.Routing.IntentClassifier)
+		// Re-wire the heuristic classifier too so the <20ms code path can be
+		// toggled via config without a restart.
+		wireHeuristicClassifier(routerEngine, newSnap.Config.Routing.HeuristicClassifier)
 		if err := pool.BuildProviders(newSnap); err != nil {
 			slog.Error("failed to rebuild providers after reload", "error", err)
 		}

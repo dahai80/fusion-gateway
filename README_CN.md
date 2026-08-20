@@ -240,6 +240,31 @@ cluster:
 
 语义层支持热重载:在配置中切换 `intent_classifier.enabled` 无需重启即生效。
 
+### 启发式代码意图快路径 (<20ms)
+
+上方的 LLM 分类器是一次完整模型调用(2s 超时、无缓存、每请求都跑)——对默认关闭的语义层尚可接受,但一旦启用就成为网关端到端开销的主导项。针对**代码**意图(vibe-coding / 重构 / 调试工作流中的最热路径),一个确定性的进程内启发式分类器替代了这次 LLM 调用,将网关开销控制在 20ms 以内。
+
+`HeuristicClassifier` 在每个 chat 请求中先于 LLM 分类器执行。它用无需模型推理的信号打分——模型名含 `code`、围栏代码块、语言关键字、文件扩展名、代码动作动词、错误术语、以及非空 `tools` 数组——当分数达到 `min_confidence` 时返回 `IntentCode`。引擎随后路由到 `LocalBackend`(fusion-mlx),并通过 per-request `adapters` 字段热挂载 LoRA 代码 adapter(如 `lora-code`;`FUSION_LORA_INPLACE_SWAP=1` 下 ms 级热切,无 base 重载)。非代码意图则继续落到 LLM 分类器(若启用)再落规则链,行为不变。
+
+结果按 sha256 key(模型 + tools 标志 + 文本前缀)缓存在带 TTL 的有界 LRU 中,重复请求连正则扫描都跳过。Apple M5 Max 基准:**~0.8µs/op** 稳态(命中缓存)——比 20ms 预算留有 ~24000× 余量。
+
+> **启发式 vs LLM 分类器:**启发式是针对代码意图的延迟杠杆,不替代 LLM 分类器对 heavy/diffusion/translate 的派发。两者可同时启用——启发式先捕获代码,LLM 分类器处理其余。
+
+```yaml
+routing:
+  heuristic_classifier:
+    enabled: false            # 默认关闭;规则链照常路由
+    code_adapter: "lora-code" # 传入 per-request "adapters" 字段的 LoRA adapter 名
+    cache_size: 4096          # LRU 条目数(0 禁用缓存)
+    cache_ttl: 5m             # 条目过期;0 = 永不过期
+    min_confidence: 0.6       # 判定为代码意图的分数阈值
+    text_scan_bytes: 4096     # 正则扫描的请求文本前缀上限
+```
+
+快路径支持热重载:切换 `heuristic_classifier.enabled` 无需重启即生效。`adapters` 与 `response_format` 字段经 `ChatRequest` 透传到 fusion-mlx(对云端 provider 透明),故 OpenAI 风格的约束解码也能直达本地引擎,无需网关解释。
+
+> **fusion-mlx 前置条件:**需设 `FUSION_LORA_INPLACE_SWAP=1` 才能实现真正的 ms 级原地 adapter 切换(否则回退为 base 重载);adapter 请求前 base 模型须已预加载(`POST /v1/models/{id}/load`),因为原地切换要求 base 已驻留。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。

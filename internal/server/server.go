@@ -581,6 +581,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
             return
         }
         provider = p
+        // intent:code hot-swap: the routing engine detected a coding intent
+        // and selected a LoRA adapter to mount on fusion-mlx. Inject it into
+        // the per-request "adapters" field so fusion-mlx hot-loads the derived
+        // engine (FUSION_LORA_INPLACE_SWAP=1 = ms-scale, no base reload).
+        if decision.Adapter != "" {
+            req.Adapters = decision.Adapter
+            slog.Info("lora adapter hot-swap on local backend",
+                "adapter", decision.Adapter,
+                "model", req.Model,
+                "reason", decision.Reason,
+            )
+        }
 
     case router.ClusterBackend:
         if s.clusterDiscovery == nil || decision.NodeID == "" {

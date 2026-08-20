@@ -20,6 +20,13 @@ const (
     // IntentDiffusion: image / video generation requests — route to Windows
     // CUDA diffusion models.
     IntentDiffusion Intent = "diffusion"
+    // IntentCode: coding requests (vibe-coding, refactor, debug) — route to the
+    // local fusion-mlx backend with a LoRA code adapter hot-mounted via the
+    // per-request "adapters" field (lora-code weights). Not a CloudTarget: it
+    // reuses LocalBackend semantics, only swapping the adapter pointer in
+    // memory (FUSION_LORA_INPLACE_SWAP=1). See fusion-gateway UDS zero-copy +
+    // intent-routing design.
+    IntentCode Intent = "code"
     // IntentUnknown: classifier could not classify with sufficient confidence.
     // The semantic layer defers to the existing P0-P7 rule chain.
     IntentUnknown Intent = "unknown"
