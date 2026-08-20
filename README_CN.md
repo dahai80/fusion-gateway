@@ -304,6 +304,16 @@ curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions 
 
 > 与 `server.auto_start`(启动 fusion-mlx)和 `backends.*.socket_path`(出站)三者相互独立:可任意组合 TCP/UDS 入站与 TCP/UDS 出站。
 
+### LoRA Adapter 索引(Stream D)
+
+启发式代码路径将 code 意图派发到 LocalBackend,并挂载配置的 `code_adapter`(如 `lora-code`),对 fusion-mlx 做 per-request LoRA 热切。为校验该 adapter 在后端确实存在,网关维护内存中的 `AdapterIndex`,定时轮询 fusion-mlx 的 `GET /admin/api/fine-tune/adapters` 端点(已有的 admin 代理目标,现由网关直接消费)。索引从同一个 `backends.fusion-mlx` 配置(`base_url`、`api_key`、`socket_path`)构建,因此拉取与推理流量走同一传输层(TCP 或 UDS)。
+
+- **刷新**:后台 goroutine(`lora_index_refresh`)启动时拉取一次,之后每 60s 刷新一次(与 `refresh_model_set` 节奏一致)。配置热重载时,若 fusion-mlx 后端配置有变,索引重建并立即刷新,新发布的 adapter 无需重启即可生效。
+- **校验**:在路由引擎中,当 code 意图解析出 adapter 后,对索引做尽力校验。若条目缺失,记一条 warn 日志但**不阻断**派发——索引可能已过期,fusion-mlx 在 adapter 确实不存在时会自行报热切错误。未配置 fusion-mlx 后端或索引从未刷新成功时,跳过校验。
+- **响应 schema**:fusion-mlx 返回裸 JSON 数组 `{adapter_name, model_id, has_weights, has_config, lora_rank}`;解码上限 10 MiB(防 OOM,与 SSE linebuf 上限一致)。
+
+无新增配置项:索引全部派生自既有 `backends.fusion-mlx` 条目与 `routing.heuristic_classifier.code_adapter`。此为第一版索引源;长期路径(fusion-trainer 将 adapter 发布至 fusion-model-hub,网关经 webhook 消费 `GET /api/v1/models?model_type=lora`)列为上游工作,不阻塞本版。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。

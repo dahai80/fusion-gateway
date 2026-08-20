@@ -58,6 +58,16 @@ func (NoopClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentResul
     return &IntentResult{Intent: IntentUnknown, Confidence: 0}, nil
 }
 
+// AdapterLookup is a read-only view over the available LoRA adapter index.
+// The engine uses it for best-effort validation that a configured code_adapter
+// actually exists on the local backend before dispatching a code intent to a
+// LoRA hot-swap. nil (or an empty/never-refreshed index) skips validation: a
+// missing entry is logged but does not suppress a valid code intent, since the
+// index may be stale. Implemented by adapter.AdapterIndex (Stream D).
+type AdapterLookup interface {
+    Has(name string) bool
+}
+
 // PlatformForIntent maps a semantic Intent to the target cluster platform
 // identifier (matching ClusterNodeConfig.Platform). Returns "" for intents
 // that should not force a platform (the rule chain handles them).

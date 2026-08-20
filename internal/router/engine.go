@@ -88,6 +88,10 @@ type Engine struct {
     // nil = disabled (fall through to classifier/rule chain). Same
     // IntentClassifier interface so the engine treats both uniformly.
     heuristicClassifier IntentClassifier
+    // adapterLookup is a read-only view over the local LoRA adapter index
+    // (Stream D). Wired via SetAdapterLookup; nil = no index available, so
+    // code-adapter validation is skipped (best-effort, log-only on miss).
+    adapterLookup AdapterLookup
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
@@ -139,6 +143,21 @@ func (e *Engine) SetHeuristicClassifier(c IntentClassifier) {
         slog.Info("heuristic classifier disabled (nil), routing falls through to classifier/rule chain")
     } else {
         slog.Info("heuristic classifier wired to router engine")
+    }
+}
+
+// SetAdapterLookup wires the read-only LoRA adapter index (Stream D) used for
+// best-effort code_adapter validation on the heuristic code path. nil = no
+// index, validation skipped (the index may legitimately be absent until the
+// first refresh lands). Safe to call on hot-reload.
+func (e *Engine) SetAdapterLookup(a AdapterLookup) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    e.adapterLookup = a
+    if a == nil {
+        slog.Info("adapter lookup disabled (nil), code_adapter validation skipped")
+    } else {
+        slog.Info("adapter lookup wired to router engine")
     }
 }
 
@@ -647,6 +666,15 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
                 slog.Info("heuristic: code intent but no code_adapter configured, deferring to rule chain",
                     "confidence", hRes.Confidence, "model", req.Model)
                 return nil
+            }
+            // Best-effort adapter validation (Stream D): if an adapter index is
+            // wired and does not list this adapter, log a warning but still
+            // dispatch — the index may be stale or not yet refreshed, and
+            // suppressing a valid code intent is worse than a possibly-missing
+            // adapter (fusion-mlx will error on hot-swap if truly absent).
+            if e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
+                slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
+                    "adapter", adapter, "model", req.Model)
             }
             slog.Info("heuristic: code intent routed to local + lora hot-swap",
                 "adapter", adapter, "confidence", hRes.Confidence, "model", req.Model)

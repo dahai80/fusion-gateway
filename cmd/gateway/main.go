@@ -137,6 +137,22 @@ func wireHeuristicClassifier(e *router.Engine, cfg config.HeuristicClassifierCon
 	)
 }
 
+// fusionMLXBackendCfg returns the BackendConfig for the fusion-mlx backend from
+// a snapshot, or a zero value if none is configured/enabled. Used to build the
+// LoRA AdapterIndex (Stream D) from the same base_url/api_key/socket_path the
+// inference provider uses, so the index fetch rides the same transport.
+func fusionMLXBackendCfg(snap *config.ConfigSnapshot) config.BackendConfig {
+	if snap == nil {
+		return config.BackendConfig{}
+	}
+	for _, bc := range snap.Config.Backends {
+		if bc.Type == "fusion-mlx" && bc.Enabled {
+			return bc
+		}
+	}
+	return config.BackendConfig{}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -226,6 +242,43 @@ func run(configPath string) error {
 		mlxProvider.StartIdleGCTimer(stopCh)
 	}
 
+	// Stream D: LoRA adapter index. Build from the fusion-mlx backend config,
+	// wire it into the router for best-effort code_adapter validation, and
+	// refresh on a 60s cadence (mirrors the refresh_model_set safeGo pattern).
+	// Only construct when a fusion-mlx backend is configured; absent or disabled
+	// means the heuristic code path runs without adapter validation (log-only).
+	// Declared in run() scope so OnReload can rebuild it when the backend config
+	// changes (the index pins base_url/api_key at construction).
+	var adapterIndex *adapter.AdapterIndex
+	if mlxBackendCfg := fusionMLXBackendCfg(snap); mlxBackendCfg.BaseURL != "" {
+		adapterIndex = adapter.NewAdapterIndex(mlxBackendCfg)
+		routerEngine.SetAdapterLookup(adapterIndex)
+		slog.Info("wired adapter index to router engine", "base_url", mlxBackendCfg.BaseURL)
+
+		indexCtx, indexCancel := context.WithCancel(context.Background())
+		defer indexCancel()
+		safeGo("lora_index_refresh", func() {
+			// Initial fetch so validation has data before the first ticker tick.
+			if err := adapterIndex.Refresh(indexCtx); err != nil {
+				slog.Warn("adapter index initial refresh failed", "error", err)
+			}
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := adapterIndex.Refresh(indexCtx); err != nil {
+						slog.Warn("adapter index refresh failed", "error", err)
+					}
+				case <-indexCtx.Done():
+					return
+				}
+			}
+		})
+	} else {
+		slog.Info("fusion-mlx backend not configured, adapter index disabled")
+	}
+
 	// Wire cluster discovery to router
 	var discovery *cluster.Discovery
 	if snap.Config.Cluster.Enabled {
@@ -260,6 +313,25 @@ func run(configPath string) error {
 			routerEngine.SetLocalInFlight(mlxProvider.InFlight)
 			routerEngine.SetLocalModels(mlxProvider.ModelSet)
 			routerEngine.SetLocalReady(true)
+		}
+		// Stream D: rebuild the adapter index if the fusion-mlx backend config
+		// changed (base_url/api_key/socket_path are pinned at construction), and
+		// trigger an immediate refresh so newly published LoRA adapters are
+		// picked up without waiting for the next 60s tick.
+		if newCfg := fusionMLXBackendCfg(newSnap); newCfg.BaseURL != "" {
+			if adapterIndex == nil {
+				adapterIndex = adapter.NewAdapterIndex(newCfg)
+				routerEngine.SetAdapterLookup(adapterIndex)
+				slog.Info("adapter index wired on reload", "base_url", newCfg.BaseURL)
+			}
+			if err := adapterIndex.Refresh(context.Background()); err != nil {
+				slog.Warn("adapter index refresh on reload failed", "error", err)
+			}
+		} else if adapterIndex != nil {
+			// fusion-mlx backend removed on reload: drop the lookup.
+			routerEngine.SetAdapterLookup(nil)
+			adapterIndex = nil
+			slog.Info("adapter index disabled on reload (fusion-mlx backend removed)")
 		}
 		if discovery != nil && newSnap.Config.Cluster.Enabled {
 			discovery.UpdateConfig(newSnap.Config.Cluster)
