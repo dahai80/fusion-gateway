@@ -172,6 +172,78 @@ func TestFusionMLXProvider_ReadyCheck(t *testing.T) {
     })
 }
 
+func TestFusionMLXProvider_HealthDetail(t *testing.T) {
+    t.Run("model_loaded", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_HealthDetail model_loaded")
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if r.URL.Path == "/health" {
+                w.Header().Set("Content-Type", "application/json")
+                _, _ = w.Write([]byte(`{"status":"healthy","ready":true,"model_loaded":true,"loaded_models":["qwen-7b"]}`))
+                return
+            }
+            w.WriteHeader(http.StatusNotFound)
+        }))
+        defer srv.Close()
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL}, config.RoutingConfig{})
+        d := p.HealthDetail(context.Background())
+        if !d.ProcessAlive || !d.ModelLoaded {
+            t.Fatalf("expected process alive + model loaded, got %+v", d)
+        }
+        if len(d.LoadedModels) != 1 || d.LoadedModels[0] != "qwen-7b" {
+            t.Fatalf("expected loaded_models [qwen-7b], got %v", d.LoadedModels)
+        }
+        if d.FetchError != nil {
+            t.Fatalf("unexpected fetch error: %v", d.FetchError)
+        }
+    })
+
+    t.Run("model_not_loaded", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_HealthDetail model_not_loaded")
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if r.URL.Path == "/health" {
+                w.Header().Set("Content-Type", "application/json")
+                _, _ = w.Write([]byte(`{"status":"healthy","ready":true,"model_loaded":false,"loaded_models":[]}`))
+                return
+            }
+            w.WriteHeader(http.StatusNotFound)
+        }))
+        defer srv.Close()
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL}, config.RoutingConfig{})
+        d := p.HealthDetail(context.Background())
+        if !d.ProcessAlive {
+            t.Fatal("expected process alive")
+        }
+        if d.ModelLoaded {
+            t.Fatal("expected model_loaded=false (the #59 false-green scenario)")
+        }
+    })
+
+    t.Run("process_down", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_HealthDetail process_down")
+        srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            w.WriteHeader(http.StatusServiceUnavailable)
+        }))
+        defer srv.Close()
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL}, config.RoutingConfig{})
+        d := p.HealthDetail(context.Background())
+        if d.ProcessAlive {
+            t.Fatal("expected process alive=false")
+        }
+        if d.FetchError == nil {
+            t.Fatal("expected fetch error on 503")
+        }
+    })
+
+    t.Run("connection_refused", func(t *testing.T) {
+        slog.Info("test FusionMLXProvider_HealthDetail connection_refused")
+        p := NewFusionMLXProvider(config.BackendConfig{BaseURL: "http://127.0.0.1:1"}, config.RoutingConfig{})
+        d := p.HealthDetail(context.Background())
+        if d.ProcessAlive || d.FetchError == nil {
+            t.Fatal("expected not alive + fetch error on connection refused")
+        }
+    })
+}
+
 func TestFusionMLXProvider_Chat(t *testing.T) {
     slog.Info("test FusionMLXProvider_Chat")
     chatResp := ChatResponse{

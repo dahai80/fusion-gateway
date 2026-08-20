@@ -1407,6 +1407,24 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
     models := s.listModelsConcurrent(ctx, providerNames)
 
+    // Mark Loaded on models actually resident in a local engine. The
+    // authoritative source is fusion-mlx /health `loaded_models` (ModelSet
+    // reflects /v1/models, which lists registered — not necessarily loaded —
+    // models, so it cannot distinguish servable from merely catalogued, #59).
+    loadedSet := map[string]bool{}
+    if mlx := s.pool.GetFusionMLX(); mlx != nil {
+        detail := mlx.HealthDetail(ctx)
+        for _, id := range detail.LoadedModels {
+            loadedSet[id] = true
+        }
+        if detail.FetchError != nil {
+            slog.Warn("models endpoint: fusion-mlx health detail failed, loaded flags may be stale", "error", detail.FetchError)
+        }
+    }
+    for i := range models {
+        models[i].Loaded = loadedSet[models[i].ID]
+    }
+
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",
@@ -1564,7 +1582,8 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-    results := s.pool.HealthCheckAll(r.Context())
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
+    results := s.pool.HealthCheckAll(ctx)
     allHealthy := true
     for _, err := range results {
         if err != nil {
@@ -1573,11 +1592,45 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
         }
     }
 
+    backends := make(map[string]interface{}, len(results))
+    for name, err := range results {
+        if err != nil {
+            backends[name] = map[string]interface{}{"healthy": false, "error": err.Error()}
+        } else {
+            backends[name] = map[string]interface{}{"healthy": true}
+        }
+    }
+
+    // Fusion-mlx gets an authoritative model_loaded block from its /health
+    // endpoint. A live process with no model loaded is process-healthy but
+    // not servable — surface that explicitly so /health is no longer a false
+    // green (#59).
+    if mlxName, mlx := s.pool.FusionMLXName(); mlx != nil {
+        detail := mlx.HealthDetail(ctx)
+        entry := map[string]interface{}{
+            "healthy":       detail.ProcessAlive,
+            "model_loaded":  detail.ModelLoaded,
+            "loaded_models": detail.LoadedModels,
+        }
+        if detail.FetchError != nil {
+            entry["error"] = detail.FetchError.Error()
+        }
+        if backends[mlxName] == nil {
+            backends[mlxName] = entry
+        } else {
+            // merge into the HealthCheckAll result (preserve healthy flag semantics)
+            backends[mlxName] = entry
+        }
+        if !detail.ModelLoaded {
+            allHealthy = false
+            slog.Warn("fusion-mlx health: process alive but no model loaded", "loaded_models", detail.LoadedModels)
+        }
+    }
 
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "status":   healthStatus(allHealthy),
-        "backends": results,
+        "backends": backends,
     })
 }
 
@@ -1600,6 +1653,23 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
         } else {
             localReady = false
             localReasons = append(localReasons, "no_local_provider")
+        }
+    }
+
+    // Model-loaded probe: a live fusion-mlx with no resident model cannot
+    // serve generate requests (502), so /readyz must report not_ready even
+    // when the process responds 200 to /health (#59).
+    if localReady {
+        if mlx := s.pool.GetFusionMLX(); mlx != nil {
+            detail := mlx.HealthDetail(ctx)
+            if detail.FetchError != nil || !detail.ProcessAlive {
+                localReady = false
+                localReasons = append(localReasons, "health_check_failed")
+            } else if !detail.ModelLoaded {
+                localReady = false
+                localReasons = append(localReasons, "model_not_loaded")
+                slog.Warn("readyz: fusion-mlx process healthy but no model loaded")
+            }
         }
     } else {
         localReasons = append(localReasons, "circuit_breaker_open")

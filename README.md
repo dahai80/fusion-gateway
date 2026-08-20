@@ -126,12 +126,12 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
-| `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `route.mode: local` lists only local providers) |
+| `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `route.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
 | `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
-| `/health` | GET | Full health check with backend status |
+| `/health` | GET | Full health check with backend status. `backends.fusion-mlx` carries `{healthy, model_loaded, loaded_models}` from the authoritative fusion-mlx `/health` endpoint; a live process with no model loaded is reported as `degraded` (not a false green, #59). |
 | `/healthz` | GET | Liveness probe |
-| `/readyz` | GET | Readiness probe (circuit breaker + health + GPU memory + queue depth + success rate) |
+| `/readyz` | GET | Readiness probe (circuit breaker + health + GPU memory + queue depth + success rate). Adds a fusion-mlx `model_loaded` check — when no model is resident the local path reports `not_ready`/`degraded` with `local_reasons:["model_not_loaded"]` even if the process responds 200 (#59). |
 | `/livez` | GET | Liveness probe |
 | `/v1/status` | GET | Detailed status (hardware, circuit breakers, stats) |
 | `/metrics` | GET | Prometheus metrics (requires `master_key` auth) |

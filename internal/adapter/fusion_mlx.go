@@ -130,6 +130,63 @@ func (p *FusionMLXProvider) ReadyCheck(ctx context.Context) error {
     return nil
 }
 
+// MLXHealthDetail is the authoritative model-loaded state parsed from the
+// fusion-mlx /health endpoint. fusion-mlx returns model_loaded/loaded_models
+// here regardless of process liveness, so this is the signal downstream
+// consumers (fusion-design check-mlx, fusion-studio) must rely on instead of
+// a bare 200 (#59).
+type MLXHealthDetail struct {
+    ProcessAlive  bool
+    ModelLoaded   bool
+    LoadedModels  []string
+    FetchError    error
+}
+
+// HealthDetail probes fusion-mlx /health and decodes the model_loaded/
+// loaded_models fields. A non-200 or transport error sets ProcessAlive=false
+// and returns the error in the struct (never a Go error return) so callers
+// can render a structured health payload without a panic/recover dance.
+func (p *FusionMLXProvider) HealthDetail(ctx context.Context) MLXHealthDetail {
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/health", nil)
+    if err != nil {
+        slog.Warn("fusion-mlx health detail request build failed", "error", err)
+        return MLXHealthDetail{FetchError: err}
+    }
+
+    resp, err := p.httpClient.Do(req)
+    if err != nil {
+        slog.Warn("fusion-mlx health detail fetch failed", "error", err)
+        return MLXHealthDetail{FetchError: err}
+    }
+    defer resp.Body.Close()
+
+    detail := MLXHealthDetail{ProcessAlive: resp.StatusCode == http.StatusOK}
+    if !detail.ProcessAlive {
+        detail.FetchError = fmt.Errorf("fusion-mlx /health returned status %d", resp.StatusCode)
+        slog.Warn("fusion-mlx process not healthy", "status", resp.StatusCode)
+        return detail
+    }
+
+    var body struct {
+        Status       string   `json:"status"`
+        Ready        bool     `json:"ready"`
+        ModelLoaded  bool     `json:"model_loaded"`
+        LoadedModels []string `json:"loaded_models"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+        slog.Warn("fusion-mlx health body decode failed", "error", err)
+        detail.FetchError = err
+        return detail
+    }
+    detail.ModelLoaded = body.ModelLoaded
+    detail.LoadedModels = body.LoadedModels
+    if detail.LoadedModels == nil {
+        detail.LoadedModels = []string{}
+    }
+    slog.Debug("fusion-mlx health detail", "model_loaded", detail.ModelLoaded, "loaded_models", detail.LoadedModels)
+    return detail
+}
+
 func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
     defer p.inFlightAcquire()()
 
