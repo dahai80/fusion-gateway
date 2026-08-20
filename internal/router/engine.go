@@ -39,6 +39,11 @@ type RouteDecision struct {
     Reason      string
     NodeID      string
     CloudTarget string
+    // Adapter names the LoRA adapter (e.g. "lora-code") that the server layer
+    // must hot-mount on fusion-mlx via the per-request "adapters" field before
+    // forwarding. Empty = no adapter swap (bare base model). Set only by the
+    // intent:code path. See fusion-gateway UDS zero-copy + intent-routing.
+    Adapter string
 }
 
 type RouteRequest struct {
@@ -77,6 +82,16 @@ type Engine struct {
     cluster         ClusterSelector
     sessionAffinity *SessionAffinity
     classifier      IntentClassifier
+    // heuristicClassifier is the in-process sub-ms intent classifier that
+    // replaces the sync LLM RouterLightClassifier on the code path (latency
+    // lever for <20ms gateway overhead). Wired via SetHeuristicClassifier;
+    // nil = disabled (fall through to classifier/rule chain). Same
+    // IntentClassifier interface so the engine treats both uniformly.
+    heuristicClassifier IntentClassifier
+    // adapterLookup is a read-only view over the local LoRA adapter index
+    // (Stream D). Wired via SetAdapterLookup; nil = no index available, so
+    // code-adapter validation is skipped (best-effort, log-only on miss).
+    adapterLookup AdapterLookup
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
@@ -113,6 +128,37 @@ func (e *Engine) SetIntentClassifier(c IntentClassifier) {
     defer e.mu.Unlock()
     e.classifier = c
     slog.Info("intent classifier wired to router engine")
+}
+
+// SetHeuristicClassifier wires the in-process sub-ms heuristic intent
+// classifier (latency lever for <20ms gateway overhead, replaces the sync LLM
+// classifier on the code path). When nil, the heuristic layer is a no-op and
+// routing falls through to the LLM classifier (if enabled) then the rule chain.
+// Safe to call on hot-reload — guarded by the engine mutex like the LLM one.
+func (e *Engine) SetHeuristicClassifier(c IntentClassifier) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    e.heuristicClassifier = c
+    if c == nil {
+        slog.Info("heuristic classifier disabled (nil), routing falls through to classifier/rule chain")
+    } else {
+        slog.Info("heuristic classifier wired to router engine")
+    }
+}
+
+// SetAdapterLookup wires the read-only LoRA adapter index (Stream D) used for
+// best-effort code_adapter validation on the heuristic code path. nil = no
+// index, validation skipped (the index may legitimately be absent until the
+// first refresh lands). Safe to call on hot-reload.
+func (e *Engine) SetAdapterLookup(a AdapterLookup) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    e.adapterLookup = a
+    if a == nil {
+        slog.Info("adapter lookup disabled (nil), code_adapter validation skipped")
+    } else {
+        slog.Info("adapter lookup wired to router engine")
+    }
 }
 
 func (e *Engine) UpdateConfig(cfg *config.ConfigSnapshot) {
@@ -603,6 +649,55 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
 // It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
 // (intent unknown, low confidence, disabled, or no target platform available).
 func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest) *RouteDecision {
+    // Heuristic-first: the in-process sub-ms classifier runs before the LLM
+    // classifier on every request (latency lever for <20ms gateway overhead).
+    // When it returns IntentCode with sufficient confidence, dispatch straight
+    // to LocalBackend + LoRA hot-swap, skipping the sync LLM classifier
+    // entirely (the dominant latency killer on the code path).
+    hc := cfg.Config.Routing.HeuristicClassifier
+    if hc.Enabled && e.heuristicClassifier != nil {
+        hRes := classifyAndLog(ctx, e.heuristicClassifier, req)
+        if hRes.Intent == IntentCode && hRes.Confidence >= hc.MinConfidence {
+            adapter := hRes.Params["code_adapter"]
+            if adapter == "" {
+                adapter = hc.CodeAdapter
+            }
+            if adapter == "" {
+                slog.Info("heuristic: code intent but no code_adapter configured, deferring to rule chain",
+                    "confidence", hRes.Confidence, "model", req.Model)
+                return nil
+            }
+            // Best-effort adapter validation (Stream D): if an adapter index is
+            // wired and does not list this adapter, log a warning but still
+            // dispatch — the index may be stale or not yet refreshed, and
+            // suppressing a valid code intent is worse than a possibly-missing
+            // adapter (fusion-mlx will error on hot-swap if truly absent).
+            if e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
+                slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
+                    "adapter", adapter, "model", req.Model)
+            }
+            // Resolve the bare adapter name to the absolute adapter directory
+            // path that fusion-mlx's per-request "adapters" field requires (a
+            // bare name is rejected with AdapterPathError). When the index has
+            // no path (nil lookup or stale entry), fall back to the bare name
+            // so dispatch still proceeds (best-effort); fusion-mlx surfaces the
+            // error if the adapter is truly unresolvable.
+            adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
+            slog.Info("heuristic: code intent routed to local + lora hot-swap",
+                "adapter", adapter, "adapter_path", adapterPath,
+                "confidence", hRes.Confidence, "model", req.Model)
+            return &RouteDecision{
+                Backend: LocalBackend,
+                Reason:  "intent:code:lora:" + adapter,
+                Adapter: adapterPath,
+            }
+        }
+        if hRes.Intent != IntentUnknown {
+            slog.Debug("heuristic classified non-code intent, falling through to LLM classifier/rule chain",
+                "intent", hRes.Intent, "confidence", hRes.Confidence, "model", req.Model)
+        }
+    }
+
     ic := cfg.Config.Routing.IntentClassifier
     if !ic.Enabled {
         return nil
@@ -628,6 +723,32 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
         return nil
     }
 
+    // IntentCode (LLM-classifier path): the sync LLM classifier also recognized
+    // a coding intent. Dispatch to LocalBackend + LoRA hot-swap using the
+    // configured code_adapter, mirroring the heuristic-first path. The adapter
+    // comes from the classifier Params (if it set one) or the heuristic config
+    // fallback. With no adapter configured, defer to the rule chain (bare base).
+    if res.Intent == IntentCode {
+        adapter := res.Params["code_adapter"]
+        if adapter == "" {
+            adapter = cfg.Config.Routing.HeuristicClassifier.CodeAdapter
+        }
+        if adapter == "" {
+            slog.Info("llm classifier: code intent but no code_adapter configured, deferring to rule chain",
+                "confidence", res.Confidence, "model", req.Model)
+            return nil
+        }
+        adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
+        slog.Info("llm classifier: code intent routed to local + lora hot-swap",
+            "adapter", adapter, "adapter_path", adapterPath,
+            "confidence", res.Confidence, "model", req.Model)
+        return &RouteDecision{
+            Backend: LocalBackend,
+            Reason:  "intent:code:lora:" + adapter,
+            Adapter: adapterPath,
+        }
+    }
+
     // Heavy model / diffusion: dispatch to the target platform's cluster node
     // (Windows CUDA by default). Fall back to cloud if no platform node.
     pr := cfg.Config.Cluster.PlatformRouting
@@ -644,6 +765,29 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
     slog.Info("no cluster node on target platform, falling back to cloud",
         "intent", res.Intent, "platform", platform)
     return &RouteDecision{Backend: CloudBackend, Reason: "intent:" + string(res.Intent) + ":no_platform_node"}
+}
+
+// resolveAdapterPath maps a bare LoRA adapter name (the configured
+// code_adapter, e.g. "lora-code") to the absolute adapter directory path that
+// fusion-mlx's per-request "adapters" field requires. fusion-mlx rejects a
+// bare name with AdapterPathError; the full path (sourced from the adapter
+// index's adapter_path field, populated by fusion-mlx's
+// GET /admin/api/fine-tune/adapters) is what hot-swap consumes.
+//
+// Best-effort: a nil lookup (no index wired) or an absent/stale entry returns
+// the bare name unchanged. Dispatch still proceeds so a stale index never
+// suppresses a valid code intent; fusion-mlx surfaces the hot-swap error if
+// the adapter is truly unresolvable, and the index refreshes on its schedule.
+func resolveAdapterPath(lookup AdapterLookup, name string) string {
+    if lookup == nil || name == "" {
+        return name
+    }
+    if path, ok := lookup.Path(name); ok {
+        return path
+    }
+    slog.Warn("adapter path not resolved from index, dispatching bare name",
+        "adapter", name)
+    return name
 }
 
 func resolveCloudByTier(budget tokenizer.TokenBudget, tier config.TokenTierConfig) string {

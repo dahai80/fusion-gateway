@@ -34,6 +34,19 @@ type ServerConfig struct {
     EnablePProf             bool            `mapstructure:"enable_pprof"`
     TLS                     *TLSConfig      `mapstructure:"tls"`
     AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
+    // UnixSocket enables an inbound Unix Domain Socket listener (client -> gateway)
+    // in addition to (or instead of) the TCP listener. nil (default) = disabled,
+    // backward compatible. Orthogonal to outbound UDS (backends.socket_path) and
+    // to auto_start (which launches fusion-mlx over TCP/UDS independently).
+    UnixSocket              *UnixSocketConfig `mapstructure:"unix_socket"`
+}
+
+// UnixSocketConfig configures the inbound UDS listener. Path is the socket
+// file; Mode is the permission bits applied via os.Chmod (default 0660).
+type UnixSocketConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    Path    string `mapstructure:"path"` // e.g. /var/run/fusion-gateway.sock
+    Mode    uint32 `mapstructure:"mode"` // 0 = default 0660
 }
 
 type AutoStartConfig struct {
@@ -135,6 +148,8 @@ type RoutingConfig struct {
     RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
     Retry                      RetryConfig          `mapstructure:"retry"`
     IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
+    HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
+    Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -162,6 +177,51 @@ type IntentClassifierConfig struct {
     APIKey        string        `mapstructure:"api_key"`
     Timeout       time.Duration `mapstructure:"timeout"`
     MinConfidence float64       `mapstructure:"min_confidence"`
+}
+
+// HeuristicClassifierConfig configures the in-process sub-ms intent classifier
+// that replaces the sync LLM RouterLightClassifier on the code path (latency
+// lever for <20ms gateway end-to-end overhead). When it recognizes a coding
+// intent with confidence >= MinConfidence, the engine dispatches straight to
+// LocalBackend + LoRA hot-swap (code_adapter), skipping the LLM classifier.
+// Disabled by default (backward compatible).
+type HeuristicClassifierConfig struct {
+    Enabled       bool          `mapstructure:"enabled"`
+    // CodeAdapter is the LoRA adapter name (e.g. "lora-code") to hot-mount on
+    // fusion-mlx via the per-request "adapters" field when a code intent is
+    // detected. Empty = code intent detected but no adapter to mount, so the
+    // engine defers to the rule chain (bare base model).
+    CodeAdapter   string        `mapstructure:"code_adapter"`
+    // CacheSize bounds the in-memory heuristic cache (LRU). 0 = no cache.
+    CacheSize     int           `mapstructure:"cache_size"`
+    // CacheTTL is the per-entry time-to-live. Stale entries are evicted on read.
+    CacheTTL      time.Duration `mapstructure:"cache_ttl"`
+    // MinConfidence is the score threshold above which a code intent dispatch
+    // fires. Below it the classifier defers to the LLM classifier / rule chain.
+    MinConfidence float64       `mapstructure:"min_confidence"`
+    // TextScanBytes caps how many bytes of the request text are hashed into the
+    // cache key / scanned for patterns. Bounds work on large prompts.
+    TextScanBytes int           `mapstructure:"text_scan_bytes"`
+}
+
+// WebhooksConfig holds inbound webhook receivers. fusion-model-hub (and other
+// upstream sources) POST lifecycle events here so the gateway can react without
+// polling. Each sub-config pins its own shared secret for HMAC verification.
+type WebhooksConfig struct {
+    ModelHub ModelHubWebhookConfig `mapstructure:"model_hub"`
+}
+
+// ModelHubWebhookConfig configures the POST /webhooks/model-hub receiver.
+// fusion-model-hub's dispatcher signs payloads with HMAC-SHA256 over the raw
+// body and sends X-Webhook-Signature (hex) + X-Webhook-Event; the gateway
+// re-computes the MAC with this secret and rejects on mismatch. On an
+// adapter.* event the receiver triggers an immediate AdapterIndex refresh so
+// newly published LoRA adapters are picked up without waiting for the 60s poll.
+// Enabled defaults to false (no receiver registered); Enabled=true requires a
+// non-empty Secret (validated in validate()).
+type ModelHubWebhookConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    Secret  string `mapstructure:"secret"`
 }
 
 type RetryConfig struct {
@@ -226,6 +286,10 @@ type BackendConfig struct {
     Enabled             bool          `mapstructure:"enabled"`
     Models              []string      `mapstructure:"models"`
     GC                  GCConfig      `mapstructure:"gc"`
+    // SocketPath enables outbound Unix Domain Socket to this backend. When set,
+    // the adapter transport dials the unix socket instead of TCP; base_url is a
+    // dummy host (convention: http://unix/). Empty (default) = plain TCP.
+    SocketPath          string        `mapstructure:"socket_path"`
 }
 
 type IOKitConfig struct {
@@ -629,12 +693,23 @@ func validate(cfg *Config) error {
         return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
     }
 
+    // Inbound UDS listener: when enabled, a socket path is required.
+    if cfg.Server.UnixSocket != nil && cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path == "" {
+        return fmt.Errorf("server.unix_socket.enabled is true but path is empty")
+    }
+
     if cfg.Routing.TokenThreshold <= 0 {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
     }
 
     if cfg.Routing.Mode != "" && cfg.Routing.Mode != "local" && cfg.Routing.Mode != "cloud" && cfg.Routing.Mode != "hybrid" {
         return fmt.Errorf("routing.mode must be local, cloud, or hybrid, got: %q", cfg.Routing.Mode)
+    }
+
+    // Inbound model-hub webhook: when enabled, a shared HMAC secret is required
+    // to verify signed payloads (fusion-model-hub signs with HMAC-SHA256).
+    if cfg.Routing.Webhooks.ModelHub.Enabled && cfg.Routing.Webhooks.ModelHub.Secret == "" {
+        return fmt.Errorf("routing.webhooks.model_hub.enabled is true but secret is empty")
     }
 
     if cfg.Routing.OutputInputRatioThreshold < 0 {
@@ -702,6 +777,20 @@ func validate(cfg *Config) error {
         }
     }
 
+    // Outbound UDS: a backend with socket_path dials a unix socket instead of
+    // TCP. base_url is a dummy host then. Warn (not fail) so callers can opt in
+    // without hard requirements; the convention is http://unix/.
+    for name, backend := range cfg.Backends {
+        if backend.Enabled && backend.SocketPath != "" {
+            slog.Warn("backend configured for outbound UDS",
+                "backend", name,
+                "socket_path", backend.SocketPath,
+                "base_url", backend.BaseURL,
+                "note", "base_url is a dummy host; transport dials the unix socket",
+            )
+        }
+    }
+
     return nil
 }
 
@@ -752,6 +841,19 @@ func DefaultConfig() Config {
                 BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
                 Timeout:       2 * time.Second,
                 MinConfidence: 0.7,
+            },
+            HeuristicClassifier: HeuristicClassifierConfig{
+                Enabled:       false,
+                CodeAdapter:   "lora-code",
+                CacheSize:     4096,
+                CacheTTL:      5 * time.Minute,
+                MinConfidence: 0.6,
+                TextScanBytes: 4096,
+            },
+            Webhooks: WebhooksConfig{
+                ModelHub: ModelHubWebhookConfig{
+                    Enabled: false,
+                },
             },
         },
         Hardware: HardwareConfig{

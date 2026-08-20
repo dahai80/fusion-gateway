@@ -39,10 +39,17 @@ func NewFusionMLXProvider(backendCfg config.BackendConfig, routingCfg config.Rou
         timeout = 120 * time.Second
     }
 
+    // Trim a trailing slash so baseURL+"/v1/..." never produces a double slash.
+    // The UDS convention uses the dummy host http://unix/ (trailing slash), and
+    // every direct path join (Chat/StreamChat/ListModels/HealthCheck/...) would
+    // otherwise build http://unix//v1/chat/completions, which uvicorn 404s.
+    // ReverseProxy is unaffected (it url.Parses baseURL and only reads
+    // scheme/host, leaving the request path intact).
+    base := strings.TrimRight(backendCfg.BaseURL, "/")
     return &FusionMLXProvider{
-        baseURL:          backendCfg.BaseURL,
+        baseURL:          base,
         apiKey:           backendCfg.APIKey,
-        httpClient:       &http.Client{Timeout: timeout},
+        httpClient:       &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
         cfg:              backendCfg.GC,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
         routeHeaderValue: routingCfg.Negotiation.RouteHeaderValue,

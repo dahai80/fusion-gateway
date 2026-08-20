@@ -60,6 +60,15 @@ type ChatRequest struct {
     TopP          *float64       `json:"top_p,omitempty"`
     Tools         interface{}    `json:"tools,omitempty"`
     ToolChoice    interface{}    `json:"tool_choice,omitempty"`
+    // Adapters passes one or more LoRA adapter names to fusion-mlx so it
+    // hot-mounts the derived engine (e.g. "lora-code") on top of the pre-loaded
+    // base model. Opaque to cloud providers; only fusion-mlx consumes it. May
+    // be a string or []string — fusion-mlx accepts both shapes.
+    Adapters      interface{}    `json:"adapters,omitempty"`
+    // ResponseFormat passes OpenAI constrained-decoding params (json_schema /
+    // json_object) through to fusion-mlx (xgrammar/llguidance backend). The
+    // gateway does not interpret it; fusion-mlx enforces the structure.
+    ResponseFormat interface{}   `json:"response_format,omitempty"`
 }
 
 type StreamOptions struct {

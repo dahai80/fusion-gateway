@@ -1411,3 +1411,120 @@ func TestDecide_ModeCloudRerank(t *testing.T) {
         t.Errorf("expected mode_cloud:rerank, got %s", dec.Reason)
     }
 }
+
+// stubAdapterLookup is a test AdapterLookup with a fixed name->path map, used
+// to verify the best-effort code_adapter validation and name->path resolution
+// in decideIntentLocked.
+type stubAdapterLookup struct {
+    paths map[string]string
+}
+
+func (s stubAdapterLookup) Has(name string) bool {
+    _, ok := s.paths[name]
+    return ok
+}
+
+func (s stubAdapterLookup) Path(name string) (string, bool) {
+    p, ok := s.paths[name]
+    return p, ok
+}
+
+// TestDecide_CodeIntentDispatch asserts a code-intent request routes to
+// LocalBackend with the configured LoRA adapter when the heuristic classifier
+// is enabled and recognizes the request.
+func TestDecide_CodeIntentDispatch(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.HeuristicClassifier.Enabled = true
+    cfg.Config.Routing.HeuristicClassifier.MinConfidence = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetHeuristicClassifier(NewHeuristicClassifier(cfg.Config.Routing.HeuristicClassifier))
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{
+        Model: "qwen2.5-coder-7b",
+        Text:  "implement a fibonacci function in go",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec == nil {
+        t.Fatal("expected a route decision for code intent, got nil")
+    }
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected LocalBackend, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Adapter != "lora-code" {
+        t.Errorf("expected Adapter=lora-code, got %q", dec.Adapter)
+    }
+    if dec.Reason != "intent:code:lora:lora-code" {
+        t.Errorf("expected reason intent:code:lora:lora-code, got %s", dec.Reason)
+    }
+}
+
+// TestDecide_CodeIntentAdapterMissingStillDispatches asserts that when an
+// AdapterLookup is wired and does NOT contain the configured code_adapter, the
+// engine still dispatches to LocalBackend (best-effort: the index may be stale;
+// fusion-mlx will surface a hot-swap error if the adapter is truly absent).
+func TestDecide_CodeIntentAdapterMissingStillDispatches(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.HeuristicClassifier.Enabled = true
+    cfg.Config.Routing.HeuristicClassifier.MinConfidence = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetHeuristicClassifier(NewHeuristicClassifier(cfg.Config.Routing.HeuristicClassifier))
+    // Index present but does NOT list "lora-code" — validation should warn, not block.
+    e.SetAdapterLookup(stubAdapterLookup{paths: map[string]string{"lora-sql": "/adapters/lora-sql"}})
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{
+        Model: "qwen2.5-coder-7b",
+        Text:  "implement a fibonacci function in go",
+    }
+
+    dec := e.Decide(ctx, req)
+    if dec == nil {
+        t.Fatal("expected dispatch despite missing adapter in index, got nil")
+    }
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected LocalBackend despite index miss, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Adapter != "lora-code" {
+        t.Errorf("expected Adapter=lora-code preserved, got %q", dec.Adapter)
+    }
+}
+
+// TestDecide_CodeIntentAdapterPresentDispatches asserts that when the
+// AdapterLookup contains the configured code_adapter, dispatch proceeds
+// normally (validation passes silently).
+func TestDecide_CodeIntentAdapterPresentDispatches(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.HeuristicClassifier.Enabled = true
+    cfg.Config.Routing.HeuristicClassifier.MinConfidence = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetHeuristicClassifier(NewHeuristicClassifier(cfg.Config.Routing.HeuristicClassifier))
+    e.SetAdapterLookup(stubAdapterLookup{paths: map[string]string{"lora-code": "/adapters/qwen2.5-coder-7b/lora-code"}})
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{
+        Model: "qwen2.5-coder-7b",
+        Text:  "implement a fibonacci function in go",
+    }
+
+    dec := e.Decide(ctx, req)
+    // When the index lists the adapter, the engine resolves the bare name to
+    // the absolute adapter directory path that fusion-mlx's "adapters" field
+    // requires; the Reason still carries the bare name for X-Route-Decision.
+    if dec == nil || dec.Backend != LocalBackend || dec.Adapter != "/adapters/qwen2.5-coder-7b/lora-code" {
+        t.Errorf("expected local + resolved adapter path, got %+v", dec)
+    }
+    if dec.Reason != "intent:code:lora:lora-code" {
+        t.Errorf("expected reason intent:code:lora:lora-code, got %s", dec.Reason)
+    }
+}

@@ -241,6 +241,103 @@ cluster:
 
 The semantic layer is hot-reload aware: toggling `intent_classifier.enabled` in config takes effect without a restart.
 
+### Heuristic Code-Intent Fast Path (<20ms)
+
+The LLM classifier above is a full model call (2s timeout, no cache, every request) — acceptable for a disabled-by-default semantic layer, but it dominates gateway end-to-end overhead once enabled. For the **coding** intent specifically (the hottest path in vibe-coding / refactor / debug workflows), a deterministic in-process heuristic classifier replaces the LLM call and keeps gateway overhead well under 20ms.
+
+`HeuristicClassifier` runs **before** the LLM classifier on every chat request. It scores a request from signals that need no model inference — model name contains `code`, fenced code blocks, language keywords, file extensions, code-action verbs, error terms, and a non-nil `tools` array — and, when the score meets `min_confidence`, returns `IntentCode`. The engine then routes to `LocalBackend` (fusion-mlx) with the LoRA code adapter (e.g. `lora-code`) hot-mounted via the per-request `adapters` field (ms-scale `FUSION_LORA_INPLACE_SWAP=1` swap, no base reload). Non-code intents fall through to the LLM classifier (if enabled) then the rule chain unchanged.
+
+Results are cached by a sha256 key (model + tools-flag + scanned text prefix) in a bounded LRU with TTL, so repeated prompts skip even the regex scan. Benchmark on Apple M5 Max: **~0.8µs/op** steady-state (cached) — ~24000× headroom under the 20ms budget.
+
+> **Heuristic vs LLM classifier:** the heuristic is a latency lever scoped to the code intent; it does not replace the LLM classifier for heavy/diffusion/translate dispatch. Both can be enabled together — the heuristic catches code first, the LLM classifier handles the rest.
+
+```yaml
+routing:
+  heuristic_classifier:
+    enabled: false            # default off; the rule chain routes as usual
+    code_adapter: "lora-code" # LoRA adapter name passed in the per-request "adapters" field
+    cache_size: 4096          # LRU entries (0 disables cache)
+    cache_ttl: 5m             # entry expiry; 0 = never expire
+    min_confidence: 0.6       # score threshold to classify as code intent
+    text_scan_bytes: 4096     # cap regex scan to this prefix of the request text
+```
+
+The fast path is hot-reload aware: toggling `heuristic_classifier.enabled` takes effect without a restart. The `adapters` and `response_format` fields are passed through `ChatRequest` to fusion-mlx (opaque to cloud providers), so OpenAI-style constrained decoding also reaches the local engine without gateway interpretation.
+
+> **fusion-mlx prerequisites:** `FUSION_LORA_INPLACE_SWAP=1` for true ms-scale in-place adapter swap (else falls back to a base reload); the base model must be pre-loaded (`POST /v1/models/{id}/load`) before an adapter request, since in-place swap requires a resident base.
+
+### Outbound UDS to Local Backend
+
+For the local hot path, the gateway can talk to fusion-mlx over a Unix Domain Socket instead of TCP — skipping the TCP stack shaves connection-setup latency from the gateway end-to-end overhead budget. Set `socket_path` on the fusion-mlx backend and launch fusion-mlx with `--host unix:/run/fusion-mlx.sock` (supported since fusion-mlx#351). The `base_url` becomes a dummy host (convention: `http://unix/`); the transport dials the socket and ignores the host.
+
+The same transport factory tunes the connection pool for high-QPS local traffic — `MaxIdleConnsPerHost` 64 (vs the Go default of 2, which starves a busy local backend and forces redials). This pool tuning applies even when `socket_path` is empty (plain TCP), so every local backend benefits.
+
+```yaml
+backends:
+  fusion-mlx:
+    type: "fusion-mlx"
+    base_url: "http://unix/"          # dummy host; transport dials socket_path
+    socket_path: "/run/fusion-mlx.sock"  # empty (default) = plain TCP to base_url
+    enabled: true
+```
+
+> fusion-mlx must be launched with the matching `--host unix:/run/fusion-mlx.sock` and the socket file readable/writable by the gateway process. On macOS the socket path must stay under the ~104-byte `SUN_LEN` cap.
+
+### Inbound UDS Listener
+
+Symmetric to the outbound path, the gateway can also **listen** on a Unix Domain Socket so local clients (fusion-code, the CLI, agent loops on the same machine) reach it without crossing the TCP stack. A stale socket file from a previous unclean shutdown is removed before binding; on shutdown the listener is closed and the socket file unlinked. The TCP listener stays up alongside it (admin dashboard, health probes, remote clients), so UDS is purely an additional low-latency entry point.
+
+```yaml
+server:
+  unix_socket:
+    enabled: true
+    path: "/var/run/fusion-gateway.sock"  # required when enabled
+    mode: 0660                             # 0 (default) = 0660
+```
+
+Connect with curl:
+
+```sh
+curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<base>","messages":[{"role":"user","content":"hello"}]}'
+```
+
+> Orthogonal to `server.auto_start` (which launches fusion-mlx) and to `backends.*.socket_path` (outbound). The three are independent: you can run any combination of TCP/UDS inbound and TCP/UDS outbound.
+
+### LoRA Adapter Index (Stream D)
+
+The heuristic code path dispatches to LocalBackend with a configured `code_adapter` (e.g. `lora-code`) for per-request LoRA hot-swap on fusion-mlx. To validate that the adapter actually exists on the backend, the gateway maintains an in-memory `AdapterIndex` that polls fusion-mlx's `GET /admin/api/fine-tune/adapters` endpoint (the existing admin proxy target, now consumed directly). The index is built from the same `backends.fusion-mlx` config (`base_url`, `api_key`, `socket_path`), so the fetch rides the same transport (TCP or UDS) as inference traffic.
+
+- **Refresh**: a background goroutine (`lora_index_refresh`) fetches on startup, then every 60s (mirrors the `refresh_model_set` cadence). On config hot-reload, the index is rebuilt if the fusion-mlx backend config changed and an immediate refresh is triggered, so newly published adapters appear without a restart.
+- **Validation & path resolution**: in the routing engine, when a code intent resolves an adapter, the index is checked best-effort. A missing entry logs a warning but **does not suppress** the dispatch — the index may be stale, and fusion-mlx surfaces a hot-swap error if the adapter is truly absent. When no index is configured (no fusion-mlx backend) or it has never refreshed, validation is skipped. **Path resolution**: fusion-mlx's per-request `adapters` field requires the adapter's **full filesystem path** (a bare adapter name is rejected with `AdapterPathError`), so the engine resolves the configured `code_adapter` name to its `adapter_path` via the index before injecting it into the request. When the index has no path for the name (stale or pre-path-schema snapshot), the bare name is passed through and fusion-mlx surfaces the error (best-effort, mirroring the validation semantics). `X-Route-Decision` carries the bare adapter name (`intent:code:lora:<name>`) while the request body carries the resolved full path.
+- **Response schema**: fusion-mlx returns a bare JSON array of `{adapter_name, model_id, adapter_path, has_weights, has_config, lora_rank}`; decode is capped at 10 MiB (OOM hardening, consistent with the SSE linebuf caps).
+- **Route header**: the index fetch carries the negotiation header (`X-Fusion-Route: gateway-decision`) so fusion-mlx's `route_guard` middleware admits the `GET /admin/api/fine-tune/adapters` request. The header name/value are pulled from `routing.negotiation` and re-applied on config hot-reload.
+
+No new config keys: the index derives everything from the existing `backends.fusion-mlx` entry and `routing.heuristic_classifier.code_adapter`. This is the first-version index source; the long-term path (fusion-trainer publishing adapters to fusion-model-hub, gateway consuming `GET /api/v1/models?model_type=lora` via a webhook) is tracked as upstream work that does not block this version.
+
+### Inbound Model-Hub Webhook
+
+To pick up newly published LoRA adapters without waiting for the 60s `AdapterIndex` poll, the gateway exposes an inbound webhook receiver for fusion-model-hub lifecycle events:
+
+```
+POST /webhooks/model-hub
+```
+
+- **Authentication**: HMAC-SHA256 over the raw request body, verified against `routing.webhooks.model_hub.secret`. The sender (fusion-model-hub's `_sign_payload`) sets `X-Webhook-Signature` (hex) and `X-Webhook-Event`; the gateway re-computes the MAC in constant time and rejects mismatches with 401. This is independent of the fg-key auth chain — webhooks are not behind `withMiddleware`.
+- **Envelope**: `{"event": "<type>", "data": {...}}`. Body decode is capped at 1 MiB (OOM hardening, consistent with the SSE linebuf caps).
+- **Refresh trigger**: on an `adapter.*` event (e.g. `adapter.published`, `adapter.merged`), the receiver triggers an immediate `AdapterIndex` refresh (the same refresh the 60s poll runs). Non-adapter events (`model.created`, `version.published`, ...) are acknowledged (200) and logged but do not trigger a refresh. A refresh failure is logged but still returns 200 so the sender does not retry-storm.
+- **Config** (under `routing.webhooks.model_hub`):
+
+  | Key | Default | Description |
+  |-----|---------|-------------|
+  | `enabled` | `false` | Register the `POST /webhooks/model-hub` route. Disabled by default for backward compatibility. |
+  | `secret` | `""` | Shared HMAC secret. Required when `enabled=true` (validated at load). |
+
+- **No refresher wired**: when no fusion-mlx backend is configured, `adapter.*` events are acknowledged but the refresh is skipped (nothing to refresh); the route is still registered when enabled.
+
+The first-version index source remains fusion-mlx `GET /admin/api/fine-tune/adapters`; the webhook is the event-driven refresh path for the long-term model-hub source. Upstream dependencies (fusion-trainer#49 publishes adapters; fusion-models-hub#22 adds `base_model_id` FK + `adapter.*` webhook events + real LoRA merge) are tracked as issues that do not block this version.
+
 ### Cluster Load Balancing
 
 When local can't serve, gateway tries cluster nodes before cloud fallback.

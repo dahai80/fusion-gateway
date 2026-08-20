@@ -33,7 +33,7 @@ func NewOpenAICompatibleProvider(name string, backendCfg config.BackendConfig) *
         name:      name,
         baseURL:   backendCfg.BaseURL,
         apiKey:    backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout},
+        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
     }
 }
 

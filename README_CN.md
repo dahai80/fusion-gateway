@@ -240,6 +240,102 @@ cluster:
 
 语义层支持热重载:在配置中切换 `intent_classifier.enabled` 无需重启即生效。
 
+### 启发式代码意图快路径 (<20ms)
+
+上方的 LLM 分类器是一次完整模型调用(2s 超时、无缓存、每请求都跑)——对默认关闭的语义层尚可接受,但一旦启用就成为网关端到端开销的主导项。针对**代码**意图(vibe-coding / 重构 / 调试工作流中的最热路径),一个确定性的进程内启发式分类器替代了这次 LLM 调用,将网关开销控制在 20ms 以内。
+
+`HeuristicClassifier` 在每个 chat 请求中先于 LLM 分类器执行。它用无需模型推理的信号打分——模型名含 `code`、围栏代码块、语言关键字、文件扩展名、代码动作动词、错误术语、以及非空 `tools` 数组——当分数达到 `min_confidence` 时返回 `IntentCode`。引擎随后路由到 `LocalBackend`(fusion-mlx),并通过 per-request `adapters` 字段热挂载 LoRA 代码 adapter(如 `lora-code`;`FUSION_LORA_INPLACE_SWAP=1` 下 ms 级热切,无 base 重载)。非代码意图则继续落到 LLM 分类器(若启用)再落规则链,行为不变。
+
+结果按 sha256 key(模型 + tools 标志 + 文本前缀)缓存在带 TTL 的有界 LRU 中,重复请求连正则扫描都跳过。Apple M5 Max 基准:**~0.8µs/op** 稳态(命中缓存)——比 20ms 预算留有 ~24000× 余量。
+
+> **启发式 vs LLM 分类器:**启发式是针对代码意图的延迟杠杆,不替代 LLM 分类器对 heavy/diffusion/translate 的派发。两者可同时启用——启发式先捕获代码,LLM 分类器处理其余。
+
+```yaml
+routing:
+  heuristic_classifier:
+    enabled: false            # 默认关闭;规则链照常路由
+    code_adapter: "lora-code" # 传入 per-request "adapters" 字段的 LoRA adapter 名
+    cache_size: 4096          # LRU 条目数(0 禁用缓存)
+    cache_ttl: 5m             # 条目过期;0 = 永不过期
+    min_confidence: 0.6       # 判定为代码意图的分数阈值
+    text_scan_bytes: 4096     # 正则扫描的请求文本前缀上限
+```
+
+快路径支持热重载:切换 `heuristic_classifier.enabled` 无需重启即生效。`adapters` 与 `response_format` 字段经 `ChatRequest` 透传到 fusion-mlx(对云端 provider 透明),故 OpenAI 风格的约束解码也能直达本地引擎,无需网关解释。
+
+> **fusion-mlx 前置条件:**需设 `FUSION_LORA_INPLACE_SWAP=1` 才能实现真正的 ms 级原地 adapter 切换(否则回退为 base 重载);adapter 请求前 base 模型须已预加载(`POST /v1/models/{id}/load`),因为原地切换要求 base 已驻留。
+
+### 出站 UDS 到本地后端
+
+对本地热路径,网关可经 Unix Domain Socket 而非 TCP 与 fusion-mlx 通信——绕过 TCP 栈可从网关端到端开销预算中省去连接建立延迟。在 fusion-mlx 后端设 `socket_path`,并以 `--host unix:/run/fusion-mlx.sock` 启动 fusion-mlx(fusion-mlx#351 起支持)。此时 `base_url` 变为哑主机(约定 `http://unix/`);transport 拨号到 socket,忽略主机。
+
+同一 transport 工厂还为高 QPS 本地流量调优连接池——`MaxIdleConnsPerHost` 64(Go 默认为 2,会饿死繁忙的本地后端并强制重拨)。该池调优在 `socket_path` 为空(纯 TCP)时同样生效,故每个本地后端都受益。
+
+```yaml
+backends:
+  fusion-mlx:
+    type: "fusion-mlx"
+    base_url: "http://unix/"          # 哑主机;transport 拨号到 socket_path
+    socket_path: "/run/fusion-mlx.sock"  # 空(默认)= 纯 TCP 到 base_url
+    enabled: true
+```
+
+> fusion-mlx 须以匹配的 `--host unix:/run/fusion-mlx.sock` 启动,且 socket 文件对网关进程可读写。macOS 上 socket 路径须保持在 ~104 字节 `SUN_LEN` 上限内。
+
+### 入站 UDS 监听器
+
+与出站路径对称,网关也可**监听** Unix Domain Socket,使本地客户端(fusion-code、CLI、同机 agent 回路)不经 TCP 栈即可访问。绑定前会移除上次非正常关闭残留的 socket 文件;关闭时关闭监听器并 unlink socket 文件。TCP 监听器与之并存(管理后台、健康探针、远程客户端),UDS 纯粹是额外的低延迟入口。
+
+```yaml
+server:
+  unix_socket:
+    enabled: true
+    path: "/var/run/fusion-gateway.sock"  # 启用时必填
+    mode: 0660                             # 0(默认)= 0660
+```
+
+用 curl 连接:
+
+```sh
+curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<base>","messages":[{"role":"user","content":"hello"}]}'
+```
+
+> 与 `server.auto_start`(启动 fusion-mlx)和 `backends.*.socket_path`(出站)三者相互独立:可任意组合 TCP/UDS 入站与 TCP/UDS 出站。
+
+### LoRA Adapter 索引(Stream D)
+
+启发式代码路径将 code 意图派发到 LocalBackend,并挂载配置的 `code_adapter`(如 `lora-code`),对 fusion-mlx 做 per-request LoRA 热切。为校验该 adapter 在后端确实存在,网关维护内存中的 `AdapterIndex`,定时轮询 fusion-mlx 的 `GET /admin/api/fine-tune/adapters` 端点(已有的 admin 代理目标,现由网关直接消费)。索引从同一个 `backends.fusion-mlx` 配置(`base_url`、`api_key`、`socket_path`)构建,因此拉取与推理流量走同一传输层(TCP 或 UDS)。
+
+- **刷新**:后台 goroutine(`lora_index_refresh`)启动时拉取一次,之后每 60s 刷新一次(与 `refresh_model_set` 节奏一致)。配置热重载时,若 fusion-mlx 后端配置有变,索引重建并立即刷新,新发布的 adapter 无需重启即可生效。
+- **校验**:在路由引擎中,当 code 意图解析出 adapter 后,对索引做尽力校验。若条目缺失,记一条 warn 日志但**不阻断**派发——索引可能已过期,fusion-mlx 在 adapter 确实不存在时会自行报热切错误。未配置 fusion-mlx 后端或索引从未刷新成功时,跳过校验。
+- **响应 schema**:fusion-mlx 返回裸 JSON 数组 `{adapter_name, model_id, has_weights, has_config, lora_rank}`;解码上限 10 MiB(防 OOM,与 SSE linebuf 上限一致)。
+
+无新增配置项:索引全部派生自既有 `backends.fusion-mlx` 条目与 `routing.heuristic_classifier.code_adapter`。此为第一版索引源;长期路径(fusion-trainer 将 adapter 发布至 fusion-model-hub,网关经 webhook 消费 `GET /api/v1/models?model_type=lora`)列为上游工作,不阻塞本版。
+
+### 入站 Model-Hub Webhook
+
+为在 60s `AdapterIndex` 轮询之外即时感知新发布的 LoRA adapter,网关暴露 fusion-model-hub 生命周期事件的入站 webhook 接收端:
+
+```
+POST /webhooks/model-hub
+```
+
+- **鉴权**:对原始请求体做 HMAC-SHA256,用 `routing.webhooks.model_hub.secret` 校验。发送方(fusion-model-hub 的 `_sign_payload`)设置 `X-Webhook-Signature`(十六进制)与 `X-Webhook-Event` 头;网关用恒定时间比较重算 MAC,不匹配返回 401。该路径独立于 fg-key 鉴权链——webhook 不经 `withMiddleware`。
+- **信封**:`{"event": "<类型>", "data": {...}}`。解码上限 1 MiB(防 OOM,与 SSE linebuf 上限一致)。
+- **刷新触发**:收到 `adapter.*` 事件(如 `adapter.published`、`adapter.merged`)时,接收端立即触发一次 `AdapterIndex` 刷新(与 60s 轮询同一刷新路径)。非 adapter 事件(`model.created`、`version.published` 等)仅确认(200)并记日志,不触发刷新。刷新失败记日志但仍返回 200,避免发送方重试风暴。
+- **配置**(位于 `routing.webhooks.model_hub`):
+
+  | 键 | 默认 | 说明 |
+  |-----|---------|-------------|
+  | `enabled` | `false` | 注册 `POST /webhooks/model-hub` 路由。默认关闭以保持向后兼容。 |
+  | `secret` | `""` | 共享 HMAC 密钥。`enabled=true` 时必填(加载时校验)。 |
+
+- **未接 refresher**:未配置 fusion-mlx 后端时,`adapter.*` 事件被确认但刷新被跳过(无可刷新对象);启用时路由仍注册。
+
+第一版索引源仍为 fusion-mlx `GET /admin/api/fine-tune/adapters`;webhook 是长期 model-hub 源的事件驱动刷新路径。上游依赖(fusion-trainer#49 发布 adapter;fusion-models-hub#22 加 `base_model_id` FK + `adapter.*` webhook 事件 + 真实现 LoRA merge)列为不阻塞本版的 issue。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。

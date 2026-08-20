@@ -293,6 +293,32 @@ func TestWatchAndReload_Disabled(t *testing.T) {
     WatchAndReload("nonexistent.yaml")
 }
 
+func TestValidate_WebhookEnabledEmptySecret(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Webhooks.ModelHub.Enabled = true
+    cfg.Routing.Webhooks.ModelHub.Secret = ""
+    if err := validate(&cfg); err == nil {
+        t.Fatal("expected error for webhook enabled with empty secret")
+    }
+}
+
+func TestValidate_WebhookEnabledWithSecret(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Webhooks.ModelHub.Enabled = true
+    cfg.Routing.Webhooks.ModelHub.Secret = "shared-hmac-secret"
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("expected no error for webhook enabled with secret, got: %v", err)
+    }
+}
+
+func TestValidate_WebhookDisabledEmptySecretOK(t *testing.T) {
+    // Disabled + empty secret is the default and must validate (backward compat).
+    cfg := DefaultConfig()
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("default config (webhook disabled) should validate, got: %v", err)
+    }
+}
+
 func TestContextSnapshot_MissingContext(t *testing.T) {
     ctx := context.Background()
     snap := SnapshotFromContext(ctx)

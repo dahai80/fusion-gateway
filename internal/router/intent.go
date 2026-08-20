@@ -20,6 +20,13 @@ const (
     // IntentDiffusion: image / video generation requests — route to Windows
     // CUDA diffusion models.
     IntentDiffusion Intent = "diffusion"
+    // IntentCode: coding requests (vibe-coding, refactor, debug) — route to the
+    // local fusion-mlx backend with a LoRA code adapter hot-mounted via the
+    // per-request "adapters" field (lora-code weights). Not a CloudTarget: it
+    // reuses LocalBackend semantics, only swapping the adapter pointer in
+    // memory (FUSION_LORA_INPLACE_SWAP=1). See fusion-gateway UDS zero-copy +
+    // intent-routing design.
+    IntentCode Intent = "code"
     // IntentUnknown: classifier could not classify with sufficient confidence.
     // The semantic layer defers to the existing P0-P7 rule chain.
     IntentUnknown Intent = "unknown"
@@ -49,6 +56,20 @@ type NoopClassifier struct{}
 
 func (NoopClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentResult, error) {
     return &IntentResult{Intent: IntentUnknown, Confidence: 0}, nil
+}
+
+// AdapterLookup is a read-only view over the available LoRA adapter index.
+// The engine uses it for best-effort validation that a configured code_adapter
+// actually exists on the local backend before dispatching a code intent to a
+// LoRA hot-swap, and to resolve the bare adapter name to the absolute adapter
+// directory path that fusion-mlx's per-request "adapters" field requires (a
+// bare name is rejected with AdapterPathError). nil (or an empty/never-
+// refreshed index) skips both: a missing entry is logged but does not suppress
+// a valid code intent, since the index may be stale. Implemented by
+// adapter.AdapterIndex (Stream D).
+type AdapterLookup interface {
+    Has(name string) bool
+    Path(name string) (string, bool)
 }
 
 // PlatformForIntent maps a semantic Intent to the target cluster platform
