@@ -27,6 +27,7 @@ const maxAdapterIndexBytes = 10 * 1024 * 1024
 type AdapterInfo struct {
     AdapterName string `json:"adapter_name"`
     ModelID     string `json:"model_id"`
+    AdapterPath string `json:"adapter_path"`
     HasWeights  bool   `json:"has_weights"`
     HasConfig   bool   `json:"has_config"`
     LoraRank    int    `json:"lora_rank"`
@@ -38,15 +39,29 @@ type AdapterInfo struct {
 // router's heuristic classifier can validate a configured code_adapter against
 // this index (best-effort: an empty/never-refreshed index skips validation).
 type AdapterIndex struct {
-    baseURL    string
-    apiKey     string
-    httpClient *http.Client
+    baseURL         string
+    apiKey          string
+    routeHeader     string
+    routeHeaderValue string
+    httpClient      *http.Client
 
     mu          sync.RWMutex
     adapters    []AdapterInfo
     byName      map[string]AdapterInfo
     lastErr     error
     refreshedAt time.Time
+}
+
+// SetRouteHeader configures the negotiation header (X-Fusion-Route) the index
+// sends on each Refresh. fusion-mlx's route_guard middleware rejects requests
+// to /admin/api/fine-tune/adapters that lack this header (403 Forbidden), so
+// the index must carry the same gateway-decision credential as the inference
+// providers. Call once after construction from main.go; unset (empty) leaves
+// the header off, which only works against backends without route_guard (e.g.
+// the httptest servers in unit tests).
+func (a *AdapterIndex) SetRouteHeader(header, value string) {
+    a.routeHeader = header
+    a.routeHeaderValue = value
 }
 
 // NewAdapterIndex builds an index that polls the fusion-mlx backend described
@@ -94,6 +109,9 @@ func (a *AdapterIndex) Refresh(ctx context.Context) error {
     }
     if a.apiKey != "" {
         req.Header.Set("Authorization", "Bearer "+a.apiKey)
+    }
+    if a.routeHeader != "" {
+        req.Header.Set(a.routeHeader, a.routeHeaderValue)
     }
     req.Header.Set("Accept", "application/json")
 
@@ -165,6 +183,27 @@ func (a *AdapterIndex) Has(name string) bool {
     defer a.mu.RUnlock()
     _, ok := a.byName[name]
     return ok
+}
+
+// Path resolves an adapter's absolute filesystem path from the cached
+// snapshot, as reported by fusion-mlx's adapter endpoint. fusion-mlx's
+// per-request "adapters" field requires the full adapter directory path (a
+// bare adapter name is rejected with AdapterPathError), so the routing engine
+// resolves name -> path via this lookup before injecting the adapter. Returns
+// ("", false) when the name is absent or the entry carries no path (stale or
+// pre-path-schema snapshot); callers fall back to the bare name and let
+// fusion-mlx surface the error (best-effort, mirroring Has semantics).
+func (a *AdapterIndex) Path(name string) (string, bool) {
+    if name == "" {
+        return "", false
+    }
+    a.mu.RLock()
+    defer a.mu.RUnlock()
+    info, ok := a.byName[name]
+    if !ok || info.AdapterPath == "" {
+        return "", false
+    }
+    return info.AdapterPath, true
 }
 
 // List returns a copy of the cached adapter snapshot. Safe for concurrent use.

@@ -61,11 +61,15 @@ func (NoopClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentResul
 // AdapterLookup is a read-only view over the available LoRA adapter index.
 // The engine uses it for best-effort validation that a configured code_adapter
 // actually exists on the local backend before dispatching a code intent to a
-// LoRA hot-swap. nil (or an empty/never-refreshed index) skips validation: a
-// missing entry is logged but does not suppress a valid code intent, since the
-// index may be stale. Implemented by adapter.AdapterIndex (Stream D).
+// LoRA hot-swap, and to resolve the bare adapter name to the absolute adapter
+// directory path that fusion-mlx's per-request "adapters" field requires (a
+// bare name is rejected with AdapterPathError). nil (or an empty/never-
+// refreshed index) skips both: a missing entry is logged but does not suppress
+// a valid code intent, since the index may be stale. Implemented by
+// adapter.AdapterIndex (Stream D).
 type AdapterLookup interface {
     Has(name string) bool
+    Path(name string) (string, bool)
 }
 
 // PlatformForIntent maps a semantic Intent to the target cluster platform

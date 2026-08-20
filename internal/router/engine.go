@@ -676,12 +676,20 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
                 slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
                     "adapter", adapter, "model", req.Model)
             }
+            // Resolve the bare adapter name to the absolute adapter directory
+            // path that fusion-mlx's per-request "adapters" field requires (a
+            // bare name is rejected with AdapterPathError). When the index has
+            // no path (nil lookup or stale entry), fall back to the bare name
+            // so dispatch still proceeds (best-effort); fusion-mlx surfaces the
+            // error if the adapter is truly unresolvable.
+            adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
             slog.Info("heuristic: code intent routed to local + lora hot-swap",
-                "adapter", adapter, "confidence", hRes.Confidence, "model", req.Model)
+                "adapter", adapter, "adapter_path", adapterPath,
+                "confidence", hRes.Confidence, "model", req.Model)
             return &RouteDecision{
                 Backend: LocalBackend,
                 Reason:  "intent:code:lora:" + adapter,
-                Adapter: adapter,
+                Adapter: adapterPath,
             }
         }
         if hRes.Intent != IntentUnknown {
@@ -730,12 +738,14 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
                 "confidence", res.Confidence, "model", req.Model)
             return nil
         }
+        adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
         slog.Info("llm classifier: code intent routed to local + lora hot-swap",
-            "adapter", adapter, "confidence", res.Confidence, "model", req.Model)
+            "adapter", adapter, "adapter_path", adapterPath,
+            "confidence", res.Confidence, "model", req.Model)
         return &RouteDecision{
             Backend: LocalBackend,
             Reason:  "intent:code:lora:" + adapter,
-            Adapter: adapter,
+            Adapter: adapterPath,
         }
     }
 
@@ -755,6 +765,29 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
     slog.Info("no cluster node on target platform, falling back to cloud",
         "intent", res.Intent, "platform", platform)
     return &RouteDecision{Backend: CloudBackend, Reason: "intent:" + string(res.Intent) + ":no_platform_node"}
+}
+
+// resolveAdapterPath maps a bare LoRA adapter name (the configured
+// code_adapter, e.g. "lora-code") to the absolute adapter directory path that
+// fusion-mlx's per-request "adapters" field requires. fusion-mlx rejects a
+// bare name with AdapterPathError; the full path (sourced from the adapter
+// index's adapter_path field, populated by fusion-mlx's
+// GET /admin/api/fine-tune/adapters) is what hot-swap consumes.
+//
+// Best-effort: a nil lookup (no index wired) or an absent/stale entry returns
+// the bare name unchanged. Dispatch still proceeds so a stale index never
+// suppresses a valid code intent; fusion-mlx surfaces the hot-swap error if
+// the adapter is truly unresolvable, and the index refreshes on its schedule.
+func resolveAdapterPath(lookup AdapterLookup, name string) string {
+    if lookup == nil || name == "" {
+        return name
+    }
+    if path, ok := lookup.Path(name); ok {
+        return path
+    }
+    slog.Warn("adapter path not resolved from index, dispatching bare name",
+        "adapter", name)
+    return name
 }
 
 func resolveCloudByTier(budget tokenizer.TokenBudget, tier config.TokenTierConfig) string {

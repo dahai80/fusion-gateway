@@ -1412,14 +1412,21 @@ func TestDecide_ModeCloudRerank(t *testing.T) {
     }
 }
 
-// stubAdapterLookup is a test AdapterLookup with a fixed name set, used to
-// verify the best-effort code_adapter validation in decideIntentLocked.
+// stubAdapterLookup is a test AdapterLookup with a fixed name->path map, used
+// to verify the best-effort code_adapter validation and name->path resolution
+// in decideIntentLocked.
 type stubAdapterLookup struct {
-    names map[string]bool
+    paths map[string]string
 }
 
 func (s stubAdapterLookup) Has(name string) bool {
-    return s.names[name]
+    _, ok := s.paths[name]
+    return ok
+}
+
+func (s stubAdapterLookup) Path(name string) (string, bool) {
+    p, ok := s.paths[name]
+    return p, ok
 }
 
 // TestDecide_CodeIntentDispatch asserts a code-intent request routes to
@@ -1470,7 +1477,7 @@ func TestDecide_CodeIntentAdapterMissingStillDispatches(t *testing.T) {
     e.SetLocalReady(true)
     e.SetHeuristicClassifier(NewHeuristicClassifier(cfg.Config.Routing.HeuristicClassifier))
     // Index present but does NOT list "lora-code" — validation should warn, not block.
-    e.SetAdapterLookup(stubAdapterLookup{names: map[string]bool{"lora-sql": true}})
+    e.SetAdapterLookup(stubAdapterLookup{paths: map[string]string{"lora-sql": "/adapters/lora-sql"}})
 
     ctx := config.WithSnapshot(context.Background(), cfg)
     req := &RouteRequest{
@@ -1502,7 +1509,7 @@ func TestDecide_CodeIntentAdapterPresentDispatches(t *testing.T) {
     e := NewEngine(cfg, hw)
     e.SetLocalReady(true)
     e.SetHeuristicClassifier(NewHeuristicClassifier(cfg.Config.Routing.HeuristicClassifier))
-    e.SetAdapterLookup(stubAdapterLookup{names: map[string]bool{"lora-code": true}})
+    e.SetAdapterLookup(stubAdapterLookup{paths: map[string]string{"lora-code": "/adapters/qwen2.5-coder-7b/lora-code"}})
 
     ctx := config.WithSnapshot(context.Background(), cfg)
     req := &RouteRequest{
@@ -1511,7 +1518,13 @@ func TestDecide_CodeIntentAdapterPresentDispatches(t *testing.T) {
     }
 
     dec := e.Decide(ctx, req)
-    if dec == nil || dec.Backend != LocalBackend || dec.Adapter != "lora-code" {
-        t.Errorf("expected local+lora-code, got %+v", dec)
+    // When the index lists the adapter, the engine resolves the bare name to
+    // the absolute adapter directory path that fusion-mlx's "adapters" field
+    // requires; the Reason still carries the bare name for X-Route-Decision.
+    if dec == nil || dec.Backend != LocalBackend || dec.Adapter != "/adapters/qwen2.5-coder-7b/lora-code" {
+        t.Errorf("expected local + resolved adapter path, got %+v", dec)
+    }
+    if dec.Reason != "intent:code:lora:lora-code" {
+        t.Errorf("expected reason intent:code:lora:lora-code, got %s", dec.Reason)
     }
 }

@@ -17,8 +17,8 @@ import (
 // fakeAdaptersPayload mirrors fusion-mlx FineTuneService.list_adapters() output:
 // a bare JSON array of dicts (no envelope).
 const fakeAdaptersPayload = `[
-    {"adapter_name":"lora-code","model_id":"qwen2.5-coder-7b","has_weights":true,"has_config":true,"lora_rank":8},
-    {"adapter_name":"lora-sql","model_id":"qwen2.5-coder-7b","has_weights":true,"has_config":true,"lora_rank":16}
+    {"adapter_name":"lora-code","model_id":"qwen2.5-coder-7b","adapter_path":"/adapters/qwen2.5-coder-7b/lora-code","has_weights":true,"has_config":true,"lora_rank":8},
+    {"adapter_name":"lora-sql","model_id":"qwen2.5-coder-7b","adapter_path":"/adapters/qwen2.5-coder-7b/lora-sql","has_weights":true,"has_config":true,"lora_rank":16}
 ]`
 
 // newAdapterIndexServer stands up an httptest server emulating the fusion-mlx
@@ -70,6 +70,9 @@ func TestAdapterIndex_RefreshAndList(t *testing.T) {
     if list[1].ModelID != "qwen2.5-coder-7b" {
         t.Errorf("second entry model_id: %s", list[1].ModelID)
     }
+    if list[0].AdapterPath != "/adapters/qwen2.5-coder-7b/lora-code" {
+        t.Errorf("first entry adapter_path: %s", list[0].AdapterPath)
+    }
 
     if !idx.Has("lora-code") {
         t.Error("Has(lora-code): want true")
@@ -82,6 +85,19 @@ func TestAdapterIndex_RefreshAndList(t *testing.T) {
     }
     if idx.Has("") {
         t.Error("Has(empty): want false")
+    }
+
+    if path, ok := idx.Path("lora-code"); !ok || path != "/adapters/qwen2.5-coder-7b/lora-code" {
+        t.Errorf("Path(lora-code): want (/adapters/qwen2.5-coder-7b/lora-code, true), got (%q, %v)", path, ok)
+    }
+    if path, ok := idx.Path("lora-sql"); !ok || path != "/adapters/qwen2.5-coder-7b/lora-sql" {
+        t.Errorf("Path(lora-sql): want (/adapters/qwen2.5-coder-7b/lora-sql, true), got (%q, %v)", path, ok)
+    }
+    if _, ok := idx.Path("missing"); ok {
+        t.Error("Path(missing): want false")
+    }
+    if _, ok := idx.Path(""); ok {
+        t.Error("Path(empty): want false")
     }
 
     if idx.LastError() != nil {

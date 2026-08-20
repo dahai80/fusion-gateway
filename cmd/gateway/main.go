@@ -265,6 +265,7 @@ func run(configPath string) error {
 	var adapterIndex *adapter.AdapterIndex
 	if mlxBackendCfg := fusionMLXBackendCfg(snap); mlxBackendCfg.BaseURL != "" {
 		adapterIndex = adapter.NewAdapterIndex(mlxBackendCfg)
+		adapterIndex.SetRouteHeader(snap.Config.Routing.Negotiation.RouteHeader, snap.Config.Routing.Negotiation.RouteHeaderValue)
 		routerEngine.SetAdapterLookup(adapterIndex)
 		// Wire the index as the webhook receiver's refresh callback so an
 		// inbound adapter.* event from fusion-model-hub triggers an immediate
@@ -340,8 +341,12 @@ func run(configPath string) error {
 		if newCfg := fusionMLXBackendCfg(newSnap); newCfg.BaseURL != "" {
 			if adapterIndex == nil {
 				adapterIndex = adapter.NewAdapterIndex(newCfg)
+				adapterIndex.SetRouteHeader(newSnap.Config.Routing.Negotiation.RouteHeader, newSnap.Config.Routing.Negotiation.RouteHeaderValue)
 				routerEngine.SetAdapterLookup(adapterIndex)
 				slog.Info("adapter index wired on reload", "base_url", newCfg.BaseURL)
+			} else {
+				// Header/value may have changed on reload; refresh the credential.
+				adapterIndex.SetRouteHeader(newSnap.Config.Routing.Negotiation.RouteHeader, newSnap.Config.Routing.Negotiation.RouteHeaderValue)
 			}
 			if err := adapterIndex.Refresh(context.Background()); err != nil {
 				slog.Warn("adapter index refresh on reload failed", "error", err)
