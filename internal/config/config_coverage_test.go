@@ -621,3 +621,172 @@ backends:
     }
     t.Logf("loaded %d backends", len(snap.Config.Backends))
 }
+
+// TestReload_RereadsFileAndUpdatesSnapshot verifies config.Reload re-reads the
+// file from disk, bumps the version, commits the new global snapshot, and fires
+// OnReload handlers. This is the deterministic path behind /admin/config/reload
+// (fsnotify is unreliable on macOS — issue #57).
+func TestReload_RereadsFileAndUpdatesSnapshot(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+  fallback:
+    enabled: true
+    cloud_default: glm52
+    model_mapping:
+      claude-opus-4-7: glm5.2
+hot_reload:
+  enabled: true
+  debounce: 100ms
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+
+    onReloadHandlers = nil
+    var fired int32
+    OnReload(func(old, newSnap *ConfigSnapshot) {
+        atomic.AddInt32(&fired, 1)
+    })
+
+    initial, err := Load(f)
+    if err != nil {
+        t.Fatalf("initial load failed: %v", err)
+    }
+    initialVer := initial.Version
+    if _, ok := initial.Config.Routing.Fallback.ModelMapping["claude-opus-4-7"]; !ok {
+        t.Fatalf("initial load missing opus mapping")
+    }
+
+    // Add a new alias on disk (the real-world bug: added post-startup).
+    updated := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+  fallback:
+    enabled: true
+    cloud_default: glm52
+    model_mapping:
+      claude-opus-4-7: glm5.2
+      claude-sonnet-4-6: glm5.2
+hot_reload:
+  enabled: true
+  debounce: 100ms
+`
+    if err := os.WriteFile(f, []byte(updated), 0644); err != nil {
+        t.Fatal(err)
+    }
+
+    reloaded, err := Reload(f)
+    if err != nil {
+        t.Fatalf("reload failed: %v", err)
+    }
+    if reloaded.Version <= initialVer {
+        t.Errorf("reload did not bump version: initial=%d reloaded=%d", initialVer, reloaded.Version)
+    }
+
+    live := GetSnapshot()
+    if live.Version != reloaded.Version {
+        t.Errorf("global snapshot not committed: live=%d reloaded=%d", live.Version, reloaded.Version)
+    }
+    mapped, ok := live.Config.Routing.Fallback.ModelMapping["claude-sonnet-4-6"]
+    if !ok || mapped != "glm5.2" {
+        t.Errorf("new alias claude-sonnet-4-6 not mapped after reload: ok=%v mapped=%q", ok, mapped)
+    }
+    if atomic.LoadInt32(&fired) != 1 {
+        t.Errorf("OnReload handler not fired once: fired=%d", atomic.LoadInt32(&fired))
+    }
+    t.Logf("reload ok: initial=%d reloaded=%d fired=%d", initialVer, reloaded.Version, atomic.LoadInt32(&fired))
+}
+
+// TestReload_ValidationErrorUnchanged verifies Reload rejects an invalid file
+// and leaves the global snapshot untouched (validation failure returns before
+// the handler-run/commit phase).
+func TestReload_ValidationErrorUnchanged(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    valid := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+`
+    if err := os.WriteFile(f, []byte(valid), 0644); err != nil {
+        t.Fatal(err)
+    }
+    onReloadHandlers = nil
+    initial, err := Load(f)
+    if err != nil {
+        t.Fatalf("initial load failed: %v", err)
+    }
+    initialVer := initial.Version
+
+    // Invalid: server.port out of range.
+    broken := `
+server:
+  host: "0.0.0.0"
+  port: 99999
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+`
+    if err := os.WriteFile(f, []byte(broken), 0644); err != nil {
+        t.Fatal(err)
+    }
+
+    if _, err := Reload(f); err == nil {
+        t.Fatalf("expected reload error for invalid port, got nil")
+    }
+    live := GetSnapshot()
+    if live.Version != initialVer {
+        t.Errorf("snapshot changed after failed reload: initial=%d live=%d", initialVer, live.Version)
+    }
+    t.Logf("invalid reload rejected, snapshot stays at version=%d", live.Version)
+}
