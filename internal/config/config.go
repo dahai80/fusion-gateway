@@ -34,6 +34,19 @@ type ServerConfig struct {
     EnablePProf             bool            `mapstructure:"enable_pprof"`
     TLS                     *TLSConfig      `mapstructure:"tls"`
     AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
+    // UnixSocket enables an inbound Unix Domain Socket listener (client -> gateway)
+    // in addition to (or instead of) the TCP listener. nil (default) = disabled,
+    // backward compatible. Orthogonal to outbound UDS (backends.socket_path) and
+    // to auto_start (which launches fusion-mlx over TCP/UDS independently).
+    UnixSocket              *UnixSocketConfig `mapstructure:"unix_socket"`
+}
+
+// UnixSocketConfig configures the inbound UDS listener. Path is the socket
+// file; Mode is the permission bits applied via os.Chmod (default 0660).
+type UnixSocketConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    Path    string `mapstructure:"path"` // e.g. /var/run/fusion-gateway.sock
+    Mode    uint32 `mapstructure:"mode"` // 0 = default 0660
 }
 
 type AutoStartConfig struct {
@@ -635,6 +648,11 @@ func WatchAndReload(path string) {
 func validate(cfg *Config) error {
     if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
         return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
+    }
+
+    // Inbound UDS listener: when enabled, a socket path is required.
+    if cfg.Server.UnixSocket != nil && cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path == "" {
+        return fmt.Errorf("server.unix_socket.enabled is true but path is empty")
     }
 
     if cfg.Routing.TokenThreshold <= 0 {

@@ -283,6 +283,28 @@ backends:
 
 > fusion-mlx must be launched with the matching `--host unix:/run/fusion-mlx.sock` and the socket file readable/writable by the gateway process. On macOS the socket path must stay under the ~104-byte `SUN_LEN` cap.
 
+### Inbound UDS Listener
+
+Symmetric to the outbound path, the gateway can also **listen** on a Unix Domain Socket so local clients (fusion-code, the CLI, agent loops on the same machine) reach it without crossing the TCP stack. A stale socket file from a previous unclean shutdown is removed before binding; on shutdown the listener is closed and the socket file unlinked. The TCP listener stays up alongside it (admin dashboard, health probes, remote clients), so UDS is purely an additional low-latency entry point.
+
+```yaml
+server:
+  unix_socket:
+    enabled: true
+    path: "/var/run/fusion-gateway.sock"  # required when enabled
+    mode: 0660                             # 0 (default) = 0660
+```
+
+Connect with curl:
+
+```sh
+curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<base>","messages":[{"role":"user","content":"hello"}]}'
+```
+
+> Orthogonal to `server.auto_start` (which launches fusion-mlx) and to `backends.*.socket_path` (outbound). The three are independent: you can run any combination of TCP/UDS inbound and TCP/UDS outbound.
+
 ### Cluster Load Balancing
 
 When local can't serve, gateway tries cluster nodes before cloud fallback.

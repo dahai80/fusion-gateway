@@ -8,8 +8,10 @@ import (
     "fmt"
     "io"
     "log/slog"
+    "net"
     "net/http"
     "net/http/pprof"
+    "os"
     "strings"
     "sync"
     "time"
@@ -28,6 +30,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     redisstore "github.com/fusion-gateway/fusion-gateway/internal/store/redis"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
@@ -43,6 +46,9 @@ type Server struct {
     pool            *adapter.Pool
     tokEngine       *tokenizer.Engine
     httpServer      *http.Server
+    // unixListener holds the inbound UDS listener when server.unix_socket is
+    // enabled; nil otherwise. Closed + unlinked in Shutdown.
+    unixListener    net.Listener
     startTime       time.Time
     realtimeProxy   *realtime.Proxy
     rateLimiter     *middleware.RateLimiter
@@ -375,6 +381,26 @@ func (s *Server) Start() error {
         IdleTimeout:       120 * time.Second,
     }
 
+    // Inbound UDS listener (client -> gateway), orthogonal to TCP. When enabled
+    // it serves the same mux on a unix socket. Served in a safeGo goroutine so
+    // the TCP path still blocks Start() (main.go relies on Start() blocking until
+    // shutdown). When only UDS is desired, TCP still binds (port 0 collision is
+    // caught by validate) — keeping TCP up is intentional: admin/dashboard and
+    // health probes stay reachable, and UDS is the low-latency app path.
+    if uds := s.cfg.Config.Server.UnixSocket; uds != nil && uds.Enabled {
+        ln, err := s.listenUnix(uds)
+        if err != nil {
+            return fmt.Errorf("listen unix socket: %w", err)
+        }
+        s.unixListener = ln
+        slog.Info("inbound UDS listener serving", "path", uds.Path)
+        safego.Go("uds_serve", func() {
+            if err := s.serve(ln); err != nil && err != http.ErrServerClosed {
+                slog.Error("uds serve error", "path", uds.Path, "error", err)
+            }
+        })
+    }
+
     if s.cfg.Config.Server.TLS != nil && s.cfg.Config.Server.TLS.CertFile != "" && s.cfg.Config.Server.TLS.KeyFile != "" {
         slog.Info("server starting with TLS", "addr", addr, "cert", s.cfg.Config.Server.TLS.CertFile)
         return s.httpServer.ListenAndServeTLS(s.cfg.Config.Server.TLS.CertFile, s.cfg.Config.Server.TLS.KeyFile)
@@ -384,6 +410,36 @@ func (s *Server) Start() error {
     return s.httpServer.ListenAndServe()
 }
 
+// listenUnix creates the inbound UDS listener. A stale socket file from a
+// previous unclean shutdown is removed first (os.Remove ignores NotExist), then
+// net.Listen binds the socket and os.Chmod applies the configured permission
+// bits (default 0660) so only the owning group can connect.
+func (s *Server) listenUnix(uds *config.UnixSocketConfig) (net.Listener, error) {
+    if err := os.Remove(uds.Path); err != nil && !os.IsNotExist(err) {
+        return nil, fmt.Errorf("remove stale socket %s: %w", uds.Path, err)
+    }
+    ln, err := net.Listen("unix", uds.Path)
+    if err != nil {
+        return nil, fmt.Errorf("listen unix %s: %w", uds.Path, err)
+    }
+    mode := uds.Mode
+    if mode == 0 {
+        mode = 0660
+    }
+    if err := os.Chmod(uds.Path, os.FileMode(mode)); err != nil {
+        ln.Close()
+        return nil, fmt.Errorf("chmod socket %s: %w", uds.Path, err)
+    }
+    slog.Info("inbound UDS listener bound", "path", uds.Path, "mode", fmt.Sprintf("%04o", mode))
+    return ln, nil
+}
+
+// serve runs httpServer.Serve on a listener. Used by the UDS path; the TCP
+// path keeps ListenAndServe for its built-in addr binding.
+func (s *Server) serve(ln net.Listener) error {
+    return s.httpServer.Serve(ln)
+}
+
 func (s *Server) Shutdown(ctx context.Context) error {
     slog.Info("server shutting down")
     if s.otelShutdown != nil {
@@ -391,7 +447,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
             slog.Warn("otel shutdown error", "error", err)
         }
     }
-    return s.httpServer.Shutdown(ctx)
+    err := s.httpServer.Shutdown(ctx)
+    // Inbound UDS cleanup: close the listener (stops the safeGo serve loop) and
+    // unlink the socket file so a stale inode doesn't block the next start.
+    if s.unixListener != nil {
+        if cerr := s.unixListener.Close(); cerr != nil {
+            slog.Warn("unix listener close error", "error", cerr)
+        }
+        if uds := s.cfg.Config.Server.UnixSocket; uds != nil && uds.Path != "" {
+            if rerr := os.Remove(uds.Path); rerr != nil && !os.IsNotExist(rerr) {
+                slog.Warn("unix socket unlink error", "path", uds.Path, "error", rerr)
+            }
+        }
+    }
+    return err
 }
 
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {

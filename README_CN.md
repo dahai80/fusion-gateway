@@ -282,6 +282,28 @@ backends:
 
 > fusion-mlx 须以匹配的 `--host unix:/run/fusion-mlx.sock` 启动,且 socket 文件对网关进程可读写。macOS 上 socket 路径须保持在 ~104 字节 `SUN_LEN` 上限内。
 
+### 入站 UDS 监听器
+
+与出站路径对称,网关也可**监听** Unix Domain Socket,使本地客户端(fusion-code、CLI、同机 agent 回路)不经 TCP 栈即可访问。绑定前会移除上次非正常关闭残留的 socket 文件;关闭时关闭监听器并 unlink socket 文件。TCP 监听器与之并存(管理后台、健康探针、远程客户端),UDS 纯粹是额外的低延迟入口。
+
+```yaml
+server:
+  unix_socket:
+    enabled: true
+    path: "/var/run/fusion-gateway.sock"  # 启用时必填
+    mode: 0660                             # 0(默认)= 0660
+```
+
+用 curl 连接:
+
+```sh
+curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<base>","messages":[{"role":"user","content":"hello"}]}'
+```
+
+> 与 `server.auto_start`(启动 fusion-mlx)和 `backends.*.socket_path`(出站)三者相互独立:可任意组合 TCP/UDS 入站与 TCP/UDS 出站。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。
