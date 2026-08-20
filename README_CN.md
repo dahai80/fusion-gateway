@@ -314,6 +314,28 @@ curl --unix-socket /var/run/fusion-gateway.sock http://unix/v1/chat/completions 
 
 无新增配置项:索引全部派生自既有 `backends.fusion-mlx` 条目与 `routing.heuristic_classifier.code_adapter`。此为第一版索引源;长期路径(fusion-trainer 将 adapter 发布至 fusion-model-hub,网关经 webhook 消费 `GET /api/v1/models?model_type=lora`)列为上游工作,不阻塞本版。
 
+### 入站 Model-Hub Webhook
+
+为在 60s `AdapterIndex` 轮询之外即时感知新发布的 LoRA adapter,网关暴露 fusion-model-hub 生命周期事件的入站 webhook 接收端:
+
+```
+POST /webhooks/model-hub
+```
+
+- **鉴权**:对原始请求体做 HMAC-SHA256,用 `routing.webhooks.model_hub.secret` 校验。发送方(fusion-model-hub 的 `_sign_payload`)设置 `X-Webhook-Signature`(十六进制)与 `X-Webhook-Event` 头;网关用恒定时间比较重算 MAC,不匹配返回 401。该路径独立于 fg-key 鉴权链——webhook 不经 `withMiddleware`。
+- **信封**:`{"event": "<类型>", "data": {...}}`。解码上限 1 MiB(防 OOM,与 SSE linebuf 上限一致)。
+- **刷新触发**:收到 `adapter.*` 事件(如 `adapter.published`、`adapter.merged`)时,接收端立即触发一次 `AdapterIndex` 刷新(与 60s 轮询同一刷新路径)。非 adapter 事件(`model.created`、`version.published` 等)仅确认(200)并记日志,不触发刷新。刷新失败记日志但仍返回 200,避免发送方重试风暴。
+- **配置**(位于 `routing.webhooks.model_hub`):
+
+  | 键 | 默认 | 说明 |
+  |-----|---------|-------------|
+  | `enabled` | `false` | 注册 `POST /webhooks/model-hub` 路由。默认关闭以保持向后兼容。 |
+  | `secret` | `""` | 共享 HMAC 密钥。`enabled=true` 时必填(加载时校验)。 |
+
+- **未接 refresher**:未配置 fusion-mlx 后端时,`adapter.*` 事件被确认但刷新被跳过(无可刷新对象);启用时路由仍注册。
+
+第一版索引源仍为 fusion-mlx `GET /admin/api/fine-tune/adapters`;webhook 是长期 model-hub 源的事件驱动刷新路径。上游依赖(fusion-trainer#49 发布 adapter;fusion-models-hub#22 加 `base_model_id` FK + `adapter.*` webhook 事件 + 真实现 LoRA merge)列为不阻塞本版的 issue。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。

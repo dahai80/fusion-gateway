@@ -153,6 +153,19 @@ func fusionMLXBackendCfg(snap *config.ConfigSnapshot) config.BackendConfig {
 	return config.BackendConfig{}
 }
 
+// adapterIndexRefresherShim adapts *adapter.AdapterIndex (Refresh(ctx)) to the
+// server.adapterIndexRefresher interface (Refresh() error) used by the inbound
+// model-hub webhook receiver. The webhook triggers a refresh after responding
+// 200, so no request context is propagated; a background context is fine (the
+// index's own httpClient Timeout bounds the call).
+type adapterIndexRefresherShim struct {
+	idx *adapter.AdapterIndex
+}
+
+func (s adapterIndexRefresherShim) Refresh() error {
+	return s.idx.Refresh(context.Background())
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -253,6 +266,12 @@ func run(configPath string) error {
 	if mlxBackendCfg := fusionMLXBackendCfg(snap); mlxBackendCfg.BaseURL != "" {
 		adapterIndex = adapter.NewAdapterIndex(mlxBackendCfg)
 		routerEngine.SetAdapterLookup(adapterIndex)
+		// Wire the index as the webhook receiver's refresh callback so an
+		// inbound adapter.* event from fusion-model-hub triggers an immediate
+		// refresh (no request context is propagated — the webhook handler has
+		// already returned 200 by the time this runs on the hot path; use a
+		// background context with the same timeout as the index's own refresh).
+		srv.SetAdapterIndexRefresher(adapterIndexRefresherShim{idx: adapterIndex})
 		slog.Info("wired adapter index to router engine", "base_url", mlxBackendCfg.BaseURL)
 
 		indexCtx, indexCancel := context.WithCancel(context.Background())

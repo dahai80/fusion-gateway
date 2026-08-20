@@ -149,6 +149,7 @@ type RoutingConfig struct {
     Retry                      RetryConfig          `mapstructure:"retry"`
     IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
     HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
+    Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -201,6 +202,26 @@ type HeuristicClassifierConfig struct {
     // TextScanBytes caps how many bytes of the request text are hashed into the
     // cache key / scanned for patterns. Bounds work on large prompts.
     TextScanBytes int           `mapstructure:"text_scan_bytes"`
+}
+
+// WebhooksConfig holds inbound webhook receivers. fusion-model-hub (and other
+// upstream sources) POST lifecycle events here so the gateway can react without
+// polling. Each sub-config pins its own shared secret for HMAC verification.
+type WebhooksConfig struct {
+    ModelHub ModelHubWebhookConfig `mapstructure:"model_hub"`
+}
+
+// ModelHubWebhookConfig configures the POST /webhooks/model-hub receiver.
+// fusion-model-hub's dispatcher signs payloads with HMAC-SHA256 over the raw
+// body and sends X-Webhook-Signature (hex) + X-Webhook-Event; the gateway
+// re-computes the MAC with this secret and rejects on mismatch. On an
+// adapter.* event the receiver triggers an immediate AdapterIndex refresh so
+// newly published LoRA adapters are picked up without waiting for the 60s poll.
+// Enabled defaults to false (no receiver registered); Enabled=true requires a
+// non-empty Secret (validated in validate()).
+type ModelHubWebhookConfig struct {
+    Enabled bool   `mapstructure:"enabled"`
+    Secret  string `mapstructure:"secret"`
 }
 
 type RetryConfig struct {
@@ -663,6 +684,12 @@ func validate(cfg *Config) error {
         return fmt.Errorf("routing.mode must be local, cloud, or hybrid, got: %q", cfg.Routing.Mode)
     }
 
+    // Inbound model-hub webhook: when enabled, a shared HMAC secret is required
+    // to verify signed payloads (fusion-model-hub signs with HMAC-SHA256).
+    if cfg.Routing.Webhooks.ModelHub.Enabled && cfg.Routing.Webhooks.ModelHub.Secret == "" {
+        return fmt.Errorf("routing.webhooks.model_hub.enabled is true but secret is empty")
+    }
+
     if cfg.Routing.OutputInputRatioThreshold < 0 {
         return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
     }
@@ -800,6 +827,11 @@ func DefaultConfig() Config {
                 CacheTTL:      5 * time.Minute,
                 MinConfidence: 0.6,
                 TextScanBytes: 4096,
+            },
+            Webhooks: WebhooksConfig{
+                ModelHub: ModelHubWebhookConfig{
+                    Enabled: false,
+                },
             },
         },
         Hardware: HardwareConfig{

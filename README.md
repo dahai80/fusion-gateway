@@ -315,6 +315,28 @@ The heuristic code path dispatches to LocalBackend with a configured `code_adapt
 
 No new config keys: the index derives everything from the existing `backends.fusion-mlx` entry and `routing.heuristic_classifier.code_adapter`. This is the first-version index source; the long-term path (fusion-trainer publishing adapters to fusion-model-hub, gateway consuming `GET /api/v1/models?model_type=lora` via a webhook) is tracked as upstream work that does not block this version.
 
+### Inbound Model-Hub Webhook
+
+To pick up newly published LoRA adapters without waiting for the 60s `AdapterIndex` poll, the gateway exposes an inbound webhook receiver for fusion-model-hub lifecycle events:
+
+```
+POST /webhooks/model-hub
+```
+
+- **Authentication**: HMAC-SHA256 over the raw request body, verified against `routing.webhooks.model_hub.secret`. The sender (fusion-model-hub's `_sign_payload`) sets `X-Webhook-Signature` (hex) and `X-Webhook-Event`; the gateway re-computes the MAC in constant time and rejects mismatches with 401. This is independent of the fg-key auth chain — webhooks are not behind `withMiddleware`.
+- **Envelope**: `{"event": "<type>", "data": {...}}`. Body decode is capped at 1 MiB (OOM hardening, consistent with the SSE linebuf caps).
+- **Refresh trigger**: on an `adapter.*` event (e.g. `adapter.published`, `adapter.merged`), the receiver triggers an immediate `AdapterIndex` refresh (the same refresh the 60s poll runs). Non-adapter events (`model.created`, `version.published`, ...) are acknowledged (200) and logged but do not trigger a refresh. A refresh failure is logged but still returns 200 so the sender does not retry-storm.
+- **Config** (under `routing.webhooks.model_hub`):
+
+  | Key | Default | Description |
+  |-----|---------|-------------|
+  | `enabled` | `false` | Register the `POST /webhooks/model-hub` route. Disabled by default for backward compatibility. |
+  | `secret` | `""` | Shared HMAC secret. Required when `enabled=true` (validated at load). |
+
+- **No refresher wired**: when no fusion-mlx backend is configured, `adapter.*` events are acknowledged but the refresh is skipped (nothing to refresh); the route is still registered when enabled.
+
+The first-version index source remains fusion-mlx `GET /admin/api/fine-tune/adapters`; the webhook is the event-driven refresh path for the long-term model-hub source. Upstream dependencies (fusion-trainer#49 publishes adapters; fusion-models-hub#22 adds `base_model_id` FK + `adapter.*` webhook events + real LoRA merge) are tracked as issues that do not block this version.
+
 ### Cluster Load Balancing
 
 When local can't serve, gateway tries cluster nodes before cloud fallback.

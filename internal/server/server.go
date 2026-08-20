@@ -70,6 +70,12 @@ type Server struct {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
     }
+    // adapterIndexRefresher is wired by main.go so the inbound model-hub
+    // webhook receiver can trigger an immediate AdapterIndex refresh on
+    // adapter.* events (instead of waiting for the 60s poll). nil when no
+    // fusion-mlx backend is configured — the receiver then acknowledges
+    // adapter events but skips the refresh (nothing to refresh).
+    adapterIndexRefresher adapterIndexRefresher
     connectorRegistry *connector.Registry
     oauth2States      map[string]time.Time
     mcpHandler        *mcp.Handler
@@ -81,6 +87,19 @@ func (s *Server) SetClusterDiscovery(d interface {
     GetNode(id string) (*cluster.Node, bool)
 }) {
     s.clusterDiscovery = d
+}
+
+// SetAdapterIndexRefresher wires the LoRA AdapterIndex refresh callback used by
+// the inbound model-hub webhook receiver (POST /webhooks/model-hub). main.go
+// passes a shim around *adapter.AdapterIndex; nil when no fusion-mlx backend
+// is configured (the receiver then skips refresh on adapter.* events).
+func (s *Server) SetAdapterIndexRefresher(r adapterIndexRefresher) {
+    s.adapterIndexRefresher = r
+    if r == nil {
+        slog.Info("adapter index refresher not wired (nil), webhook adapter.* events will skip refresh")
+    } else {
+        slog.Info("adapter index refresher wired to webhook receiver")
+    }
 }
 
 func (s *Server) GetStore() store.Store {
@@ -336,6 +355,17 @@ func (s *Server) Start() error {
 
     // Audit fix: /metrics requires master-key auth
     mux.HandleFunc("/metrics", s.withMasterKey(observability.Handler().ServeHTTP))
+
+    // Inbound model-hub webhook receiver (POST /webhooks/model-hub): verifies
+    // HMAC-SHA256 over the raw body with routing.webhooks.model_hub.secret, and
+    // on adapter.* events triggers an immediate AdapterIndex refresh. Only
+    // registered when routing.webhooks.model_hub.enabled is true. Not behind
+    // withMiddleware (fg-key auth chain) — webhooks authenticate via the shared
+    // HMAC secret in the X-Webhook-Signature header, not an API key.
+    if modelHubWebhookEnabled(s.cfg) {
+        mux.HandleFunc("/webhooks/model-hub", s.handleModelHubWebhook)
+        slog.Info("registered inbound model-hub webhook receiver", "path", "/webhooks/model-hub")
+    }
 
     mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
     mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
