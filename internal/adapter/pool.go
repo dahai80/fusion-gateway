@@ -87,6 +87,21 @@ func (p *Pool) GetFusionMLX() *FusionMLXProvider {
     return nil
 }
 
+// FusionMLXName returns the config key under which the fusion-mlx provider is
+// registered (e.g. "fusion-mlx"), plus the typed provider. Returns "" and nil
+// when no fusion-mlx backend is configured. Callers need the key to render it
+// in the health payload's backends map (#59).
+func (p *Pool) FusionMLXName() (string, *FusionMLXProvider) {
+    p.mu.RLock()
+    defer p.mu.RUnlock()
+    for name, prov := range p.providers {
+        if mlx, ok := prov.(*FusionMLXProvider); ok {
+            return name, mlx
+        }
+    }
+    return "", nil
+}
+
 func (p *Pool) GetModelHub() *FusionModelHubProvider {
     p.mu.RLock()
     defer p.mu.RUnlock()

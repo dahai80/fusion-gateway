@@ -182,10 +182,15 @@ type RerankResult struct {
 }
 
 type ModelInfo struct {
-    ID               string   `json:"id"`
-    Object           string   `json:"object"`
-    OwnedBy          string   `json:"owned_by"`
+    ID                string   `json:"id"`
+    Object            string   `json:"object"`
+    OwnedBy           string   `json:"owned_by"`
     AvailableBackends []string `json:"available_backends,omitempty"`
+    // Loaded reports whether the model is actually resident in a local engine
+    // (fusion-mlx). false for cloud-only or registered-but-unloaded local
+    // models so downstream consumers can distinguish "listed" from "servable"
+    // (#59). Omitted for cloud models where the concept does not apply.
+    Loaded bool `json:"loaded,omitempty"`
 }
 
 type ImageRequest struct {

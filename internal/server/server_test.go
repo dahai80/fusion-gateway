@@ -177,6 +177,204 @@ func TestHealthzEndpoint(t *testing.T) {
     slog.Info("TestHealthzEndpoint passed")
 }
 
+// newTestServerWithMLX spins a real fusion-mlx provider against an httptest
+// backend that serves /health, /readyz, and /v1/models. modelLoaded toggles
+// the model_loaded field returned by /health so #59 false-green is exercised.
+func newTestServerWithMLX(t *testing.T, modelLoaded bool, loadedModels []string) (*Server, *httptest.Server) {
+    t.Helper()
+    healthBody, _ := json.Marshal(map[string]interface{}{
+        "status":       "healthy",
+        "ready":        true,
+        "model_loaded": modelLoaded,
+        "loaded_models": loadedModels,
+    })
+    modelsBody, _ := json.Marshal(map[string]interface{}{
+        "object": "list",
+        "data": []map[string]string{
+            {"id": "qwen-7b", "object": "model", "owned_by": "mlx"},
+        },
+    })
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch r.URL.Path {
+        case "/health":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write(healthBody)
+        case "/readyz":
+            if modelLoaded {
+                w.WriteHeader(http.StatusOK)
+            } else {
+                w.WriteHeader(http.StatusServiceUnavailable)
+            }
+        case "/v1/models":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write(modelsBody)
+        default:
+            w.WriteHeader(http.StatusNotFound)
+        }
+    }))
+
+    s := newTestServer()
+    mlx := adapter.NewFusionMLXProvider(config.BackendConfig{
+        Type:    "fusion-mlx",
+        BaseURL: srv.URL,
+        Enabled: true,
+    }, config.RoutingConfig{})
+    s.pool.Register("fusion-mlx", mlx, config.BackendConfig{Type: "fusion-mlx", BaseURL: srv.URL, Enabled: true})
+    mlx.RefreshModelSet(context.Background())
+    return s, srv
+}
+
+func TestHandleHealth_MLXModelNotLoaded(t *testing.T) {
+    slog.Info("test TestHandleHealth_MLXModelNotLoaded (#59)")
+    s, srv := newTestServerWithMLX(t, false, []string{})
+    defer srv.Close()
+
+    req := httptest.NewRequest(http.MethodGet, "/health", nil)
+    rec := httptest.NewRecorder()
+    s.handleHealth(rec, req)
+
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    // process alive but no model loaded -> degraded, not ok
+    if body["status"] != "degraded" {
+        t.Fatalf("expected status degraded (model not loaded), got %v body=%s", body["status"], rec.Body.String())
+    }
+    backends, _ := body["backends"].(map[string]interface{})
+    mlx, _ := backends["fusion-mlx"].(map[string]interface{})
+    if mlx == nil {
+        t.Fatal("expected fusion-mlx backend entry, got nil")
+    }
+    if mlx["model_loaded"] != false {
+        t.Errorf("expected model_loaded=false, got %v", mlx["model_loaded"])
+    }
+    if mlx["healthy"] != true {
+        t.Errorf("expected process healthy=true, got %v", mlx["healthy"])
+    }
+    slog.Info("TestHandleHealth_MLXModelNotLoaded passed")
+}
+
+func TestHandleHealth_MLXModelLoaded(t *testing.T) {
+    slog.Info("test TestHandleHealth_MLXModelLoaded (#59)")
+    s, srv := newTestServerWithMLX(t, true, []string{"qwen-7b"})
+    defer srv.Close()
+
+    req := httptest.NewRequest(http.MethodGet, "/health", nil)
+    rec := httptest.NewRecorder()
+    s.handleHealth(rec, req)
+
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    if body["status"] != "ok" {
+        t.Fatalf("expected status ok, got %v body=%s", body["status"], rec.Body.String())
+    }
+    slog.Info("TestHandleHealth_MLXModelLoaded passed")
+}
+
+func TestHandleReadyz_MLXModelNotLoaded(t *testing.T) {
+    slog.Info("test TestHandleReadyz_MLXModelNotLoaded (#59)")
+    s, srv := newTestServerWithMLX(t, false, []string{})
+    defer srv.Close()
+    // readyz requires a cloud default to avoid both-down 503 path; register a healthy cloud
+    s.pool.Register("test-cloud", &mockProvider{name: "test-cloud", healthy: true}, config.BackendConfig{
+        Type: "openai-compatible", BaseURL: "http://localhost:0", Enabled: true,
+    })
+    s.cfg.Config.Routing.Fallback.CloudDefault = "test-cloud"
+
+    req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+    rec := httptest.NewRecorder()
+    s.handleReadyz(rec, req)
+
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    // local not ready (model not loaded), cloud ready -> degraded mode, 200
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (cloud available), got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if body["mode"] != "degraded" {
+        t.Fatalf("expected mode degraded, got %v body=%s", body["mode"], rec.Body.String())
+    }
+    reasons, _ := body["local_reasons"].([]interface{})
+    found := false
+    for _, r := range reasons {
+        if r == "model_not_loaded" {
+            found = true
+        }
+    }
+    if !found {
+        t.Fatalf("expected local_reasons to contain model_not_loaded, got %v", reasons)
+    }
+    slog.Info("TestHandleReadyz_MLXModelNotLoaded passed")
+}
+
+func TestHandleReadyz_MLXModelLoaded(t *testing.T) {
+    slog.Info("test TestHandleReadyz_MLXModelLoaded (#59)")
+    s, srv := newTestServerWithMLX(t, true, []string{"qwen-7b"})
+    defer srv.Close()
+    s.pool.Register("test-cloud", &mockProvider{name: "test-cloud", healthy: true}, config.BackendConfig{
+        Type: "openai-compatible", BaseURL: "http://localhost:0", Enabled: true,
+    })
+    s.cfg.Config.Routing.Fallback.CloudDefault = "test-cloud"
+
+    req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+    rec := httptest.NewRecorder()
+    s.handleReadyz(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+    }
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    if body["mode"] == "degraded" {
+        t.Fatalf("expected not degraded when model loaded, body=%s", rec.Body.String())
+    }
+    slog.Info("TestHandleReadyz_MLXModelLoaded passed")
+}
+
+func TestHandleModels_LoadedFlag(t *testing.T) {
+    slog.Info("test TestHandleModels_LoadedFlag (#59)")
+    s, srv := newTestServerWithMLX(t, true, []string{"qwen-7b"})
+    defer srv.Close()
+    // add a cloud-only model that is registered but not locally loaded
+    s.pool.Register("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        models: []adapter.ModelInfo{
+            {ID: "gpt-4o", Object: "model", OwnedBy: "openai"},
+        },
+    }, config.BackendConfig{Type: "openai-compatible", BaseURL: "http://localhost:0", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    var body struct {
+        Data []map[string]interface{} `json:"data"`
+    }
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    loaded := map[string]bool{}
+    for _, m := range body.Data {
+        l, _ := m["loaded"].(bool)
+        loaded[m["id"].(string)] = l
+    }
+    if !loaded["qwen-7b"] {
+        t.Errorf("expected qwen-7b loaded=true (in MLX model set), got %v", loaded)
+    }
+    if loaded["gpt-4o"] {
+        t.Errorf("expected gpt-4o loaded=false (cloud-only, not in MLX set), got %v", loaded)
+    }
+    slog.Info("TestHandleModels_LoadedFlag passed")
+}
+
 func TestLivezEndpoint(t *testing.T) {
     s := newTestServer()
     req := httptest.NewRequest(http.MethodGet, "/livez", nil)
