@@ -1,6 +1,7 @@
 package memory
 
 import (
+    "log/slog"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -16,9 +17,10 @@ type MemoryStore struct {
     quota     *QuotaStore
     profit    *ProfitStore
     // A3 fix: sub-stores for teams/orgs/batch/cost
-    teams *TeamsStore
-    batch *BatchSubStore
-    cost  *CostSubStore
+    teams  *TeamsStore
+    batch  *BatchSubStore
+    cost   *CostSubStore
+    persist *Persister
 }
 
 func NewMemoryStore(logMaxLen int) *MemoryStore {
@@ -46,6 +48,38 @@ func NewMemoryStoreWithConfig(logMaxLen int, batchCfg config.BatchConfig) *Memor
     }
     m.batch = NewBatchSubStore(maxBatch)
     return m
+}
+
+func (m *MemoryStore) EnablePersistence(dataDir string) error {
+    if dataDir == "" {
+        return nil
+    }
+    dir := config.ExpandPath(dataDir)
+    if dir == "" {
+        return nil
+    }
+    p := NewPersister(dir, m.keys, m.channels, m.teams)
+    if err := p.Load(); err != nil {
+        return err
+    }
+    m.keys.SetOnMutate(func() {
+        if err := p.SaveKeys(); err != nil {
+            slog.Error("persist: save keys failed", "error", err)
+        }
+    })
+    m.channels.SetOnMutate(func() {
+        if err := p.SaveChannels(); err != nil {
+            slog.Error("persist: save channels failed", "error", err)
+        }
+    })
+    m.teams.SetOnMutate(func() {
+        if err := p.SaveTeams(); err != nil {
+            slog.Error("persist: save teams failed", "error", err)
+        }
+    })
+    m.persist = p
+    slog.Info("store persistence enabled", "data_dir", dir)
+    return nil
 }
 
 func (m *MemoryStore) AppendLog(log *store.RequestLog) error {

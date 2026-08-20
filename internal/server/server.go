@@ -209,6 +209,14 @@ func New(
         slog.Info("using memory store")
     }
 
+    if cfg.Config.Store.DataDir != "" {
+        if ms, ok := s.(*memorystore.MemoryStore); ok {
+            if err := ms.EnablePersistence(cfg.Config.Store.DataDir); err != nil {
+                slog.Error("store persistence init failed, continuing non-persistent", "error", err)
+            }
+        }
+    }
+
     otelShutdown, err := observability.InitTracing(context.Background(), observability.OTelConfig{
         Enabled:     cfg.Config.Observability.OtelEnabled,
         Endpoint:    cfg.Config.Observability.OtelEndpoint,
