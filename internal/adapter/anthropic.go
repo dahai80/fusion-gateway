@@ -261,7 +261,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        p.parseAnthropicSSE(resp.Body, ch, req.Model)
+        p.parseAnthropicSSE(ctx, resp.Body, ch, req.Model)
     })
     return ch, nil
 }
@@ -319,7 +319,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        p.parseAnthropicStreamEvents(resp.Body, ch)
+        p.parseAnthropicStreamEvents(ctx, resp.Body, ch)
     })
     return ch, nil
 }
@@ -348,7 +348,7 @@ func (p *AnthropicProvider) setHeaders(req *http.Request) {
     req.Header.Set("anthropic-version", p.apiVersion)
 }
 
-func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamChunk, model string) {
+func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reader, ch chan<- StreamChunk, model string) {
     var outputTokens int
     var msgID string
     buf := make([]byte, 4096)
@@ -409,8 +409,8 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
                     }
                     select {
                     case ch <- chunk:
-                    default:
-                        slog.Warn("anthropic sse backpressure")
+                    case <-ctx.Done():
+                        slog.Warn("anthropic sse content_block_delta send aborted: client canceled", "error", ctx.Err())
                         return
                     }
                 }
@@ -443,7 +443,9 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
                 }
                 select {
                 case ch <- chunk:
-                default:
+                case <-ctx.Done():
+                    slog.Warn("anthropic sse message_delta send aborted: client canceled", "error", ctx.Err())
+                    return
                 }
             case "message_stop":
                 return
@@ -458,7 +460,7 @@ func (p *AnthropicProvider) parseAnthropicSSE(body io.Reader, ch chan<- StreamCh
     }
 }
 
-func (p *AnthropicProvider) parseAnthropicStreamEvents(body io.Reader, ch chan<- AnthropicStreamEvent) {
+func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body io.Reader, ch chan<- AnthropicStreamEvent) {
     buf := make([]byte, 4096)
     var lineBuf []byte
     const maxLineSize = 1 << 20 // 1 MiB cap per line to prevent unbounded growth
@@ -487,8 +489,8 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(body io.Reader, ch chan<-
             }
             select {
             case ch <- event:
-            default:
-                slog.Warn("anthropic stream event backpressure")
+            case <-ctx.Done():
+                slog.Warn("anthropic stream event send aborted: client canceled", "error", ctx.Err())
                 return
             }
         }

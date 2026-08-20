@@ -317,7 +317,7 @@ func TestAnthropic_ParseSSE(t *testing.T) {
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":10},\"stop_reason\":\"end_turn\"}\n\n" +
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(strings.NewReader(input), ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), strings.NewReader(input), ch, "test-model")
         close(ch)
         var count int
         for range ch {
@@ -330,7 +330,7 @@ func TestAnthropic_ParseSSE(t *testing.T) {
     t.Run("bad_json_line", func(t *testing.T) {
         input := "data: not-json\n\n"
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(strings.NewReader(input), ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), strings.NewReader(input), ch, "test-model")
         close(ch)
         for range ch {
         }
@@ -338,7 +338,7 @@ func TestAnthropic_ParseSSE(t *testing.T) {
     t.Run("no_data_prefix", func(t *testing.T) {
         input := "event: ping\njust some text\n\n"
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(strings.NewReader(input), ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), strings.NewReader(input), ch, "test-model")
         close(ch)
         for range ch {
         }
@@ -346,14 +346,14 @@ func TestAnthropic_ParseSSE(t *testing.T) {
     t.Run("done_signal", func(t *testing.T) {
         input := "data: [DONE]\n\n"
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(strings.NewReader(input), ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), strings.NewReader(input), ch, "test-model")
         close(ch)
         for range ch {
         }
     })
     t.Run("read_error", func(t *testing.T) {
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(&errorReader{}, ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), &errorReader{}, ch, "test-model")
         close(ch)
         for range ch {
         }
@@ -362,7 +362,7 @@ func TestAnthropic_ParseSSE(t *testing.T) {
         input := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg2\",\"usage\":{\"output_tokens\":0}}}\n\n" +
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5},\"stop_reason\":\"\"}\n\n"
         ch := make(chan StreamChunk, 64)
-        p.parseAnthropicSSE(strings.NewReader(input), ch, "test-model")
+        p.parseAnthropicSSE(context.Background(), strings.NewReader(input), ch, "test-model")
         close(ch)
         var count int
         for range ch {
@@ -388,7 +388,7 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
             "data: [DONE]\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(strings.NewReader(input), ch)
+        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         var count int
         for range ch {
@@ -401,7 +401,7 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
     t.Run("bad_json", func(t *testing.T) {
         input := "data: not-json\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(strings.NewReader(input), ch)
+        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         for range ch {
         }
@@ -409,14 +409,14 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
     t.Run("comment_line", func(t *testing.T) {
         input := ": this is a comment\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(strings.NewReader(input), ch)
+        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         for range ch {
         }
     })
     t.Run("read_error", func(t *testing.T) {
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(&errorReader{}, ch)
+        p.parseAnthropicStreamEvents(context.Background(), &errorReader{}, ch)
         close(ch)
         for range ch {
         }

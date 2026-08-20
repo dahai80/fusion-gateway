@@ -3,6 +3,7 @@ package adapter
 import (
     "context"
     "encoding/json"
+    "io"
     "log/slog"
     "net/http"
     "net/http/httptest"
@@ -561,7 +562,7 @@ func TestParseAnthropicSSE(t *testing.T) {
 
     p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost"})
     ch := make(chan StreamChunk, 64)
-    p.parseAnthropicSSE(strings.NewReader(sbuf.String()), ch, "claude-3-5-sonnet-20241022")
+    p.parseAnthropicSSE(context.Background(), strings.NewReader(sbuf.String()), ch, "claude-3-5-sonnet-20241022")
     close(ch)
 
     var chunks []StreamChunk
@@ -601,7 +602,7 @@ func TestParseAnthropicStreamEvents(t *testing.T) {
 
     p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost"})
     ch := make(chan AnthropicStreamEvent, 64)
-    p.parseAnthropicStreamEvents(strings.NewReader(sbuf.String()), ch)
+    p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
     close(ch)
 
     var events []AnthropicStreamEvent
@@ -720,4 +721,115 @@ func TestAnthropicProvider_StreamMessagesNotTruncatedByClientTimeout(t *testing.
     if !sawStop {
         t.Fatal("stream was truncated before message_stop: Client.Timeout is cutting the stream body")
     }
+}
+
+func TestParseAnthropicStreamEvents_SlowConsumerNotTruncated(t *testing.T) {
+    // Regression: parseAnthropicStreamEvents used a non-blocking send
+    // (select { case ch<-e: default: return }) so when the channel buffer
+    // (64) filled under a slow consumer it aborted the whole stream,
+    // dropping every remaining event including message_stop. Claude Code
+    // saw a stream that "stopped arriving" mid-response. A blocking send
+    // lets the producer wait for the consumer instead of truncating.
+    const total = 200 // > 64 buffer
+    var sbuf strings.Builder
+    sbuf.WriteString("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_b\",\"model\":\"glm5.2\"}}\n\n")
+    for i := 0; i < total; i++ {
+        sbuf.WriteString("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n")
+    }
+    sbuf.WriteString("data: {\"type\":\"message_stop\"}\n\n")
+
+    p := NewAnthropicProvider("glm52", config.BackendConfig{BaseURL: "http://localhost"})
+    ch := make(chan AnthropicStreamEvent, 64)
+    done := make(chan struct{})
+    go func() {
+        defer close(done)
+        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
+        close(ch)
+    }()
+
+    var got int
+    var sawStop bool
+    for ev := range ch {
+        if ev.Type == "content_block_delta" {
+            got++
+        }
+        if ev.Type == "message_stop" {
+            sawStop = true
+        }
+        // Slow consumer: backpressure fills the 64-buffer.
+        if got%4 == 0 {
+            time.Sleep(2 * time.Millisecond)
+        }
+    }
+    <-done
+    if got != total {
+        t.Fatalf("stream truncated by backpressure: got %d deltas, want %d", got, total)
+    }
+    if !sawStop {
+        t.Fatal("stream truncated before message_stop: consumer saw no terminal event")
+    }
+}
+
+// Regression: a blocking send on a full buffer deadlocks the producer
+// goroutine when the consumer stops reading on client cancel (no Cancel
+// method on AnthropicProvider). The producer must observe ctx cancellation
+// and exit via select{case <-ctx.Done()} so the goroutine + upstream
+// connection are released — not leaked forever blocked on ch <-.
+func TestParseAnthropicStreamEvents_ContextCancelUnblocksProducer(t *testing.T) {
+    // Build more events than the 64-buffer so the producer blocks on send.
+    const total = 200
+    var sbuf strings.Builder
+    sbuf.WriteString("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_c\",\"model\":\"glm5.2\"}}\n\n")
+    for i := 0; i < total; i++ {
+        sbuf.WriteString("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n")
+    }
+    p := NewAnthropicProvider("glm52", config.BackendConfig{BaseURL: "http://localhost"})
+    ch := make(chan AnthropicStreamEvent, 64)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    done := make(chan struct{})
+    go func() {
+        defer close(done)
+        p.parseAnthropicStreamEvents(ctx, &blockingReader{data: []byte(sbuf.String())}, ch)
+        close(ch)
+    }()
+    // Drain the initial buffer, then cancel mid-stream (consumer stops).
+    var got int
+    for ev := range ch {
+        if ev.Type == "content_block_delta" {
+            got++
+        }
+        if got == 30 {
+            cancel()
+            // Stop reading — emulate client cancel. Discard remainder.
+            for range ch {
+            }
+            break
+        }
+    }
+    select {
+    case <-done:
+        // Producer observed ctx cancellation and exited cleanly.
+    case <-time.After(2 * time.Second):
+        t.Fatal("producer goroutine leaked: blocked on ch<- after client cancel (ctx not honored)")
+    }
+    _ = got
+}
+
+// blockingReader serves data once then blocks on subsequent reads so the
+// parser stays parked in a send; combined with a cancel it exercises the
+// ctx.Done() branch without a real upstream.
+type blockingReader struct {
+    data []byte
+    sent bool
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+    if !b.sent {
+        n := copy(p, b.data)
+        b.sent = true
+        return n, nil
+    }
+    // Stream ended; parser breaks on EOF and returns, closing the channel.
+    return 0, io.EOF
 }
