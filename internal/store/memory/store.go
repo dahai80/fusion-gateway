@@ -64,6 +64,10 @@ func (m *MemoryStore) ExportLogs(filter store.LogFilter, format string) ([]byte,
     return m.logs.Export(filter, format)
 }
 
+func (m *MemoryStore) DistinctLogFilters() (*store.LogFilters, error) {
+    return m.logs.DistinctFilters(), nil
+}
+
 func (m *MemoryStore) ListKeys() ([]*store.APIKeyEntry, error) {
     return m.keys.List()
 }

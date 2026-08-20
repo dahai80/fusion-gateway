@@ -37,6 +37,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/channels/", h.withAuth(h.handleChannelByID))
     mux.HandleFunc("/admin/api/logs", h.withAuth(h.handleLogs))
     mux.HandleFunc("/admin/api/logs/export", h.withAuth(h.handleLogsExport))
+    mux.HandleFunc("/admin/api/logs/filters", h.withAuth(h.handleLogsFilters))
     mux.HandleFunc("/admin/api/analytics", h.withAuth(h.handleAnalyticsOverview))
     mux.HandleFunc("/admin/api/analytics/tokens", h.withAuth(h.handleTokenStats))
     mux.HandleFunc("/admin/api/analytics/cost", h.withAuth(h.handleCostStats))
@@ -424,6 +425,25 @@ func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
         "total": total,
         "page":  filter.Page,
         "limit": filter.PageSize,
+    })
+}
+
+func (h *Handler) handleLogsFilters(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+
+    filters, err := h.store.DistinctLogFilters()
+    if err != nil {
+        slog.Error("distinct log filters failed", "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to query filters")
+        return
+    }
+
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "models":   filters.Models,
+        "channels": filters.Channels,
     })
 }
 

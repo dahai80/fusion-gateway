@@ -86,6 +86,11 @@ type LogFilter struct {
     PageSize  int        `json:"page_size"`
 }
 
+type LogFilters struct {
+    Models   []string `json:"models"`
+    Channels []string `json:"channels"`
+}
+
 type TokenStat struct {
     Time         string `json:"time"`
     InputTokens  int64  `json:"input_tokens"`
@@ -247,6 +252,7 @@ type Store interface {
     QueryLogs(filter LogFilter) ([]*RequestLog, int, error)
     GetLog(id string) (*RequestLog, error)
     ExportLogs(filter LogFilter, format string) ([]byte, error)
+    DistinctLogFilters() (*LogFilters, error)
 
     ListKeys() ([]*APIKeyEntry, error)
     GetKey(name string) (*APIKeyEntry, error)
