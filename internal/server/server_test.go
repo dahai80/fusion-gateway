@@ -9,6 +9,8 @@ import (
     "mime/multipart"
     "net/http"
     "net/http/httptest"
+    "os"
+    "path/filepath"
     "strings"
     "testing"
     "time"
@@ -1062,14 +1064,61 @@ func TestConfigReload_MethodNotAllowed(t *testing.T) {
 
 func TestConfigReload_Success(t *testing.T) {
     s := newTestServer()
+    dir := t.TempDir()
+    cfgFile := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 11432
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+`
+    if err := os.WriteFile(cfgFile, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    s.cfgPath = cfgFile
+
     req := httptest.NewRequest(http.MethodPost, "/admin/config/reload", nil)
     rec := httptest.NewRecorder()
     s.handleConfigReload(rec, req)
 
     if rec.Code != http.StatusOK {
-        t.Fatalf("expected 200, got %d", rec.Code)
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
     }
-    slog.Info("TestConfigReload_Success passed")
+    var resp map[string]any
+    if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+        t.Fatalf("invalid json response: %v body=%s", err, rec.Body.String())
+    }
+    if resp["status"] != "reloaded" {
+        t.Errorf("expected status=reloaded, got %v", resp["status"])
+    }
+    if resp["path"] != cfgFile {
+        t.Errorf("expected path=%s, got %v", cfgFile, resp["path"])
+    }
+    slog.Info("TestConfigReload_Success passed", "status", resp["status"], "version", resp["version"])
+}
+
+func TestConfigReload_MissingPath_500(t *testing.T) {
+    s := newTestServer()
+    // s.cfgPath left empty → Reload fails to read → 500 (not the old no-op 200).
+    req := httptest.NewRequest(http.MethodPost, "/admin/config/reload", nil)
+    rec := httptest.NewRecorder()
+    s.handleConfigReload(rec, req)
+
+    if rec.Code != http.StatusInternalServerError {
+        t.Fatalf("expected 500 for empty cfgPath, got %d", rec.Code)
+    }
+    slog.Info("TestConfigReload_MissingPath_500 passed")
 }
 
 // --- Batches ---
@@ -6653,11 +6702,34 @@ func TestRerank_ClusterNodeProvider(t *testing.T) {
 
 func TestConfigReload_Success2(t *testing.T) {
     s := newTestServer()
+    dir := t.TempDir()
+    cfgFile := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 11432
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+`
+    if err := os.WriteFile(cfgFile, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    s.cfgPath = cfgFile
     req := httptest.NewRequest(http.MethodPost, "/admin/config/reload", nil)
     rec := httptest.NewRecorder()
     s.handleConfigReload(rec, req)
     if rec.Code != http.StatusOK {
-        t.Fatalf("expected 200, got %d", rec.Code)
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
     }
 }
 

@@ -847,7 +847,7 @@ terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
 | 端点 | 方法 | 说明 |
 |----------|--------|-------------|
 | `/admin/gc` | POST | 触发 fusion-mlx GC。在途 > 0 时排队 (返回 202);空闲时立即执行 (返回 200) |
-| `/admin/config/reload` | POST | 触发配置重载 |
+| `/admin/config/reload` | POST | 触发确定性配置重载。返回 `{"status":"reloaded","version":N}`。fsnotify 文件监听在 macOS 上不可靠，此端点是可靠的重载路径 (issue #57)。 |
 | `/debug/pprof/` | GET | Go pprof 性能分析首页 (需 `enable_pprof` + `master_key`) |
 | `/debug/pprof/profile` | GET | CPU profile (需 `enable_pprof` + `master_key`) |
 | `/debug/pprof/trace` | GET | 执行 trace (需 `enable_pprof` + `master_key`) |

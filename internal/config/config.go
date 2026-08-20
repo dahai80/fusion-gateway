@@ -543,6 +543,62 @@ func FireReload(old, newSnap *ConfigSnapshot) {
     }
 }
 
+// Reload re-reads the config file from disk, builds a new ConfigSnapshot, runs
+// all OnReload handlers (C5: before commit), commits the snapshot, and audits
+// the diff. It is the deterministic reload path used by /admin/config/reload —
+// fsnotify file-watching (WatchAndReload) is unreliable on macOS (kqueue misses
+// edits made after process start), so the admin endpoint must trigger reload
+// explicitly rather than relying on the file watch (issue #57).
+func Reload(path string) (*ConfigSnapshot, error) {
+    slog.Info("config reload requested", "path", path)
+    oldSnap := GetSnapshot()
+
+    v := viper.New()
+    v.SetConfigFile(path)
+    v.SetConfigType("yaml")
+    v.AutomaticEnv()
+    if err := v.ReadInConfig(); err != nil {
+        slog.Error("reload: failed to read config", "error", err)
+        return nil, fmt.Errorf("read config: %w", err)
+    }
+
+    var cfg Config
+    if err := v.Unmarshal(&cfg); err != nil {
+        slog.Error("reload: failed to unmarshal config", "error", err)
+        return nil, fmt.Errorf("unmarshal config: %w", err)
+    }
+
+    if err := validate(&cfg); err != nil {
+        slog.Error("reload: config validation failed", "error", err)
+        return nil, fmt.Errorf("validate config: %w", err)
+    }
+
+    ver := configVersion.Add(1)
+    newSnap := &ConfigSnapshot{
+        Config:   cfg,
+        Version:  ver,
+        LoadedAt: time.Now(),
+    }
+
+    // C5 fix: run handlers BEFORE committing new snapshot
+    configMu.RLock()
+    handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
+    copy(handlers, onReloadHandlers)
+    configMu.RUnlock()
+
+    for _, fn := range handlers {
+        fn(oldSnap, newSnap)
+    }
+
+    // commit new snapshot only after all handlers succeed
+    globalConfig.Store(newSnap)
+
+    slog.Info("config reloaded", "version", ver)
+
+    AuditConfigChange(oldSnap, newSnap)
+    return newSnap, nil
+}
+
 func WatchAndReload(path string) {
     snap := GetSnapshot()
     if !snap.Config.HotReload.Enabled {
@@ -562,43 +618,9 @@ func WatchAndReload(path string) {
 
     v.OnConfigChange(func(e fsnotify.Event) {
         slog.Info("config file changed, reloading", "path", watchPath)
-        oldSnap := GetSnapshot()
-
-        var cfg Config
-        if err := v.Unmarshal(&cfg); err != nil {
-            slog.Error("failed to unmarshal reloaded config", "error", err)
-            return
+        if _, err := Reload(watchPath); err != nil {
+            slog.Error("fsnotify reload failed", "error", err)
         }
-
-        if err := validate(&cfg); err != nil {
-            slog.Error("config validation failed on reload", "error", err)
-            return
-        }
-
-        ver := configVersion.Add(1)
-        newSnap := &ConfigSnapshot{
-            Config:   cfg,
-            Version:  ver,
-            LoadedAt: time.Now(),
-        }
-
-        // C5 fix: run handlers BEFORE committing new snapshot
-        configMu.RLock()
-        handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
-        copy(handlers, onReloadHandlers)
-        configMu.RUnlock()
-
-        for _, fn := range handlers {
-            fn(oldSnap, newSnap)
-        }
-
-        // commit new snapshot only after all handlers succeed
-        globalConfig.Store(newSnap)
-
-        slog.Info("config reloaded", "version", ver)
-
-        // Audit: record field-level diff between old and new config
-        AuditConfigChange(oldSnap, newSnap)
     })
 }
 

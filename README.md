@@ -848,7 +848,7 @@ Config changes are also audited when `observability.config_audit_log: true` — 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/admin/gc` | POST | Trigger GC on fusion-mlx. Queues if in-flight > 0 (returns 202). Executes immediately if idle (returns 200). |
-| `/admin/config/reload` | POST | Trigger config reload |
+| `/admin/config/reload` | POST | Trigger deterministic config reload. Returns `{"status":"reloaded","version":N}`. fsnotify file-watch is unreliable on macOS, so this endpoint is the reliable reload path (issue #57). |
 | `/debug/pprof/` | GET | Go pprof profiling index (requires `enable_pprof` + `master_key`) |
 | `/debug/pprof/profile` | GET | CPU profile (requires `enable_pprof` + `master_key`) |
 | `/debug/pprof/trace` | GET | Execution trace (requires `enable_pprof` + `master_key`) |

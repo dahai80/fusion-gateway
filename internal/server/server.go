@@ -686,7 +686,10 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
 // backend's actual model id via routing.fallback.model_mapping. This is what
 // lets SDK model aliases (e.g. claude code's claude-opus-4-7) reach a backend
 // that only serves a different model id (e.g. glm5.2 via LiteLLM). Returns the
-// input unchanged when mapping is disabled or no entry matches.
+// input unchanged when mapping is disabled or no entry matches. s.cfg is
+// swapped on hot-reload via RebuildMiddlewareChain (main.go OnReload), so newly
+// added aliases take effect after /admin/config/reload (which calls
+// config.Reload) — see issue #57.
 func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
     if model == "" {
         return model
@@ -702,6 +705,7 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
         "local_model", model,
         "cloud_model", mapped,
         "cloud_backend", cloudBackend,
+        "config_version", s.cfg.Version,
     )
     return mapped
 }
@@ -1625,8 +1629,18 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
         return
     }
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprint(w, `{"status":"config_reload_is_handled_by_file_watch"}`)
+    snap, err := config.Reload(s.cfgPath)
+    if err != nil {
+        slog.Error("admin config reload failed", "path", s.cfgPath, "error", err)
+        http.Error(w, fmt.Sprintf(`{"error":{"message":"config reload failed: %s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+        return
+    }
+    slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
+    writeJSON(w, http.StatusOK, map[string]any{
+        "status":  "reloaded",
+        "version": snap.Version,
+        "path":    s.cfgPath,
+    })
 }
 
 func (s *Server) buildBackendStatus(ctx context.Context) map[string]interface{} {
