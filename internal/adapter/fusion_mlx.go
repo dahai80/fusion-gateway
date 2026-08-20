@@ -42,7 +42,7 @@ func NewFusionMLXProvider(backendCfg config.BackendConfig, routingCfg config.Rou
     return &FusionMLXProvider{
         baseURL:          backendCfg.BaseURL,
         apiKey:           backendCfg.APIKey,
-        httpClient:       &http.Client{Timeout: timeout},
+        httpClient:       &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
         cfg:              backendCfg.GC,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
         routeHeaderValue: routingCfg.Negotiation.RouteHeaderValue,

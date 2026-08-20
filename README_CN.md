@@ -265,6 +265,23 @@ routing:
 
 > **fusion-mlx 前置条件:**需设 `FUSION_LORA_INPLACE_SWAP=1` 才能实现真正的 ms 级原地 adapter 切换(否则回退为 base 重载);adapter 请求前 base 模型须已预加载(`POST /v1/models/{id}/load`),因为原地切换要求 base 已驻留。
 
+### 出站 UDS 到本地后端
+
+对本地热路径,网关可经 Unix Domain Socket 而非 TCP 与 fusion-mlx 通信——绕过 TCP 栈可从网关端到端开销预算中省去连接建立延迟。在 fusion-mlx 后端设 `socket_path`,并以 `--host unix:/run/fusion-mlx.sock` 启动 fusion-mlx(fusion-mlx#351 起支持)。此时 `base_url` 变为哑主机(约定 `http://unix/`);transport 拨号到 socket,忽略主机。
+
+同一 transport 工厂还为高 QPS 本地流量调优连接池——`MaxIdleConnsPerHost` 64(Go 默认为 2,会饿死繁忙的本地后端并强制重拨)。该池调优在 `socket_path` 为空(纯 TCP)时同样生效,故每个本地后端都受益。
+
+```yaml
+backends:
+  fusion-mlx:
+    type: "fusion-mlx"
+    base_url: "http://unix/"          # 哑主机;transport 拨号到 socket_path
+    socket_path: "/run/fusion-mlx.sock"  # 空(默认)= 纯 TCP 到 base_url
+    enabled: true
+```
+
+> fusion-mlx 须以匹配的 `--host unix:/run/fusion-mlx.sock` 启动,且 socket 文件对网关进程可读写。macOS 上 socket 路径须保持在 ~104 字节 `SUN_LEN` 上限内。
+
 ### 集群负载均衡
 
 当本地无法服务时,网关在回退到云端前先尝试集群节点。

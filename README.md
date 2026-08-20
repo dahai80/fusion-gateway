@@ -266,6 +266,23 @@ The fast path is hot-reload aware: toggling `heuristic_classifier.enabled` takes
 
 > **fusion-mlx prerequisites:** `FUSION_LORA_INPLACE_SWAP=1` for true ms-scale in-place adapter swap (else falls back to a base reload); the base model must be pre-loaded (`POST /v1/models/{id}/load`) before an adapter request, since in-place swap requires a resident base.
 
+### Outbound UDS to Local Backend
+
+For the local hot path, the gateway can talk to fusion-mlx over a Unix Domain Socket instead of TCP — skipping the TCP stack shaves connection-setup latency from the gateway end-to-end overhead budget. Set `socket_path` on the fusion-mlx backend and launch fusion-mlx with `--host unix:/run/fusion-mlx.sock` (supported since fusion-mlx#351). The `base_url` becomes a dummy host (convention: `http://unix/`); the transport dials the socket and ignores the host.
+
+The same transport factory tunes the connection pool for high-QPS local traffic — `MaxIdleConnsPerHost` 64 (vs the Go default of 2, which starves a busy local backend and forces redials). This pool tuning applies even when `socket_path` is empty (plain TCP), so every local backend benefits.
+
+```yaml
+backends:
+  fusion-mlx:
+    type: "fusion-mlx"
+    base_url: "http://unix/"          # dummy host; transport dials socket_path
+    socket_path: "/run/fusion-mlx.sock"  # empty (default) = plain TCP to base_url
+    enabled: true
+```
+
+> fusion-mlx must be launched with the matching `--host unix:/run/fusion-mlx.sock` and the socket file readable/writable by the gateway process. On macOS the socket path must stay under the ~104-byte `SUN_LEN` cap.
+
 ### Cluster Load Balancing
 
 When local can't serve, gateway tries cluster nodes before cloud fallback.

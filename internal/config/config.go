@@ -252,6 +252,10 @@ type BackendConfig struct {
     Enabled             bool          `mapstructure:"enabled"`
     Models              []string      `mapstructure:"models"`
     GC                  GCConfig      `mapstructure:"gc"`
+    // SocketPath enables outbound Unix Domain Socket to this backend. When set,
+    // the adapter transport dials the unix socket instead of TCP; base_url is a
+    // dummy host (convention: http://unix/). Empty (default) = plain TCP.
+    SocketPath          string        `mapstructure:"socket_path"`
 }
 
 type IOKitConfig struct {
@@ -703,6 +707,20 @@ func validate(cfg *Config) error {
     for _, node := range cfg.Cluster.Nodes {
         if node.Address != "" && !strings.HasPrefix(node.Address, "http://") && !strings.HasPrefix(node.Address, "https://") {
             return fmt.Errorf("cluster node %q address must start with http:// or https://, got %q", node.ID, node.Address)
+        }
+    }
+
+    // Outbound UDS: a backend with socket_path dials a unix socket instead of
+    // TCP. base_url is a dummy host then. Warn (not fail) so callers can opt in
+    // without hard requirements; the convention is http://unix/.
+    for name, backend := range cfg.Backends {
+        if backend.Enabled && backend.SocketPath != "" {
+            slog.Warn("backend configured for outbound UDS",
+                "backend", name,
+                "socket_path", backend.SocketPath,
+                "base_url", backend.BaseURL,
+                "note", "base_url is a dummy host; transport dials the unix socket",
+            )
         }
     }
 
