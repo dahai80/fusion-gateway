@@ -907,11 +907,13 @@ All gateway configuration can be managed through the admin dashboard — no manu
 
 ## Retry & Backoff
 
-Exponential backoff retry for non-streaming requests:
-- Configurable `max_retries`, `initial_backoff`, `max_backoff`
+Exponential backoff retry for upstream connection-phase failures:
+- Configurable `max_retries`, `initial_backoff`, `max_backoff` (under `routing.retry`)
 - Default retryable status codes: 429, 500, 502, 503
-- Connection refused / timeout errors are also retryable
+- Connection refused / timeout / deadline-exceeded errors are also retryable
 - Respects context cancellation between retry attempts
+
+Applies to both `/v1/chat/completions` (non-stream) and `/v1/messages` (stream + non-stream). On `/v1/messages`, retry wraps the `StreamMessages` **connection phase** — when the upstream returns a TTFB timeout / 502 / 503 / 429 before any SSE header is written to the client. Once the stream opens (200 headers committed) and an event channel is returned, mid-stream disconnects are NOT retried (SSE is already flushing); the existing synthetic `message_stop` finalization handles that case instead.
 
 ## PII Detection
 
