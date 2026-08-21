@@ -10,10 +10,11 @@ import (
 )
 
 type TeamsStore struct {
-    mu      sync.RWMutex
-    teams   map[string]*store.Team
-    orgs    map[string]*store.Organization
-    keyTeam map[string]string
+    mu       sync.RWMutex
+    teams    map[string]*store.Team
+    orgs     map[string]*store.Organization
+    keyTeam  map[string]string
+    onMutate func()
 }
 
 func NewTeamsStore() *TeamsStore {
@@ -24,6 +25,14 @@ func NewTeamsStore() *TeamsStore {
     }
     s.seedDefaults()
     return s
+}
+
+func (s *TeamsStore) SetOnMutate(fn func()) { s.onMutate = fn }
+
+func (s *TeamsStore) fireOnMutate() {
+    if s.onMutate != nil {
+        s.onMutate()
+    }
 }
 
 func (s *TeamsStore) seedDefaults() {
@@ -43,8 +52,8 @@ func (s *TeamsStore) seedDefaults() {
 
 func (s *TeamsStore) CreateTeam(team *store.Team) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     if _, exists := s.teams[team.ID]; exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s already exists", team.ID)
     }
     now := time.Now()
@@ -54,7 +63,9 @@ func (s *TeamsStore) CreateTeam(team *store.Team) error {
         team.Members = []store.TeamMember{}
     }
     s.teams[team.ID] = team
+    s.mu.Unlock()
     slog.Info("team created", "id", team.ID, "name", team.Name)
+    s.fireOnMutate()
     return nil
 }
 
@@ -80,25 +91,28 @@ func (s *TeamsStore) ListTeams() []*store.Team {
 
 func (s *TeamsStore) UpdateTeam(team *store.Team) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     existing, exists := s.teams[team.ID]
     if !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", team.ID)
     }
     team.CreatedAt = existing.CreatedAt
     team.UpdatedAt = time.Now()
     s.teams[team.ID] = team
+    s.mu.Unlock()
     slog.Info("team updated", "id", team.ID)
+    s.fireOnMutate()
     return nil
 }
 
 func (s *TeamsStore) DeleteTeam(id string) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     if id == "default" {
+        s.mu.Unlock()
         return fmt.Errorf("cannot delete default team")
     }
     if _, exists := s.teams[id]; !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", id)
     }
     delete(s.teams, id)
@@ -107,21 +121,25 @@ func (s *TeamsStore) DeleteTeam(id string) error {
             delete(s.keyTeam, key)
         }
     }
+    s.mu.Unlock()
     slog.Info("team deleted", "id", id)
+    s.fireOnMutate()
     return nil
 }
 
 func (s *TeamsStore) CreateOrg(org *store.Organization) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     if _, exists := s.orgs[org.ID]; exists {
+        s.mu.Unlock()
         return fmt.Errorf("organization %s already exists", org.ID)
     }
     now := time.Now()
     org.CreatedAt = now
     org.UpdatedAt = now
     s.orgs[org.ID] = org
+    s.mu.Unlock()
     slog.Info("org created", "id", org.ID, "name", org.Name)
+    s.fireOnMutate()
     return nil
 }
 
@@ -147,31 +165,37 @@ func (s *TeamsStore) ListOrgs() []*store.Organization {
 
 func (s *TeamsStore) DeleteOrg(id string) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     if id == "default" {
+        s.mu.Unlock()
         return fmt.Errorf("cannot delete default organization")
     }
     if _, exists := s.orgs[id]; !exists {
+        s.mu.Unlock()
         return fmt.Errorf("organization %s not found", id)
     }
     for _, t := range s.teams {
         if t.OrgID == id {
+            s.mu.Unlock()
             return fmt.Errorf("organization %s still has teams", id)
         }
     }
     delete(s.orgs, id)
+    s.mu.Unlock()
     slog.Info("org deleted", "id", id)
+    s.fireOnMutate()
     return nil
 }
 
 func (s *TeamsStore) BindKeyToTeam(apiKey, teamID string) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     if _, exists := s.teams[teamID]; !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", teamID)
     }
     s.keyTeam[apiKey] = teamID
+    s.mu.Unlock()
     slog.Info("key bound to team", "team", teamID)
+    s.fireOnMutate()
     return nil
 }
 
@@ -215,36 +239,42 @@ func (s *TeamsStore) CheckQuota(teamID string) (float64, float64, bool) {
 
 func (s *TeamsStore) AddMember(teamID, userID, role string) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     team, exists := s.teams[teamID]
     if !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", teamID)
     }
     for _, m := range team.Members {
         if m.UserID == userID {
+            s.mu.Unlock()
             return fmt.Errorf("user %s already in team", userID)
         }
     }
     team.Members = append(team.Members, store.TeamMember{UserID: userID, Role: role})
     team.UpdatedAt = time.Now()
+    s.mu.Unlock()
     slog.Info("member added to team", "team", teamID, "user", userID, "role", role)
+    s.fireOnMutate()
     return nil
 }
 
 func (s *TeamsStore) RemoveMember(teamID, userID string) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     team, exists := s.teams[teamID]
     if !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", teamID)
     }
     for i, m := range team.Members {
         if m.UserID == userID {
             team.Members = append(team.Members[:i], team.Members[i+1:]...)
             team.UpdatedAt = time.Now()
+            s.mu.Unlock()
             slog.Info("member removed from team", "team", teamID, "user", userID)
+            s.fireOnMutate()
             return nil
         }
     }
+    s.mu.Unlock()
     return fmt.Errorf("user %s not in team", userID)
 }

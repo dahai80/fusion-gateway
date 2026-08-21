@@ -426,6 +426,23 @@ Keys come from **two sources**, both honored at the auth layer:
 - **Static (config.yaml)**: `auth.api_keys` entries, matched by exact key string.
 - **Admin-managed (dashboard)**: Keys created via `POST /admin/api/keys`. The full `sk-<raw>` key is returned once at creation time; the gateway stores only an 8-char prefix + a SHA-256 hash (`key_hash`). Auth hashes the presented key and looks it up in the Store, so admin-generated keys authenticate identically to static ones (quotas, allowlists, and budget all apply). Non-`active` keys are rejected.
 
+#### Store persistence (admin-generated keys/channels/teams survive restart)
+
+By default the memory store is non-persistent — admin-generated keys, channels, and teams are lost on every process restart. Set `store.data_dir` to enable disk persistence (v0.8.21, #65):
+
+```yaml
+store:
+    backend: memory
+    data_dir: ~/.fusion-gateway/data   # empty = non-persistent (backward compatible)
+```
+
+- **Scope**: admin CRUD on API keys, channels, teams/orgs, and key↔team bindings are flushed to JSON files (`keys.json`, `channels.json`, `teams.json`) on each mutation, and reloaded on boot. **Excluded**: `AddCost` (per-request high-frequency usage/billing) and logs/analytics (ring-buffer, regenerable from logs) — persisting these would write disk on every inference request.
+- **`~` expansion**: `~/x` resolves against the user home dir (`os.UserHomeDir`); absolute paths pass through. Insensitive to the process working directory, so launchd-managed deployments work.
+- **Atomic writes**: each file is written via temp-file + `fsync` + `rename`, so a crash mid-write cannot corrupt `keys.json` (critical for credentials). Files are mode `0o600`, the data dir `0o700`.
+- **Corruption tolerance**: a malformed JSON file is logged and skipped — that sub-store starts empty rather than crashing the gateway.
+- **Redis backend**: not applicable (Redis provides its own persistence); `data_dir` is ignored when `backend: redis`.
+- Static `auth.api_keys` are unaffected — they are read directly from the config snapshot, never from the Store.
+
 ### MasterKey
 
 The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.

@@ -2,6 +2,8 @@ package config
 
 import (
     "fmt"
+	"os"
+	"path/filepath"
 	"strings"
     "sync"
     "sync/atomic"
@@ -489,6 +491,7 @@ type BatchConfig struct {
 
 type StoreConfig struct {
     Backend string      `mapstructure:"backend"`
+    DataDir string      `mapstructure:"data_dir"`
     Redis   RedisConfig `mapstructure:"redis"`
 }
 
@@ -792,6 +795,28 @@ func validate(cfg *Config) error {
     }
 
     return nil
+}
+
+func ExpandPath(p string) string {
+    if p == "" {
+        return ""
+    }
+    if strings.HasPrefix(p, "~" + string(filepath.Separator)) {
+        home, err := os.UserHomeDir()
+        if err != nil {
+            slog.Warn("expandPath: cannot resolve home dir, returning path as-is", "path", p, "error", err)
+            return p
+        }
+        return filepath.Join(home, p[2:])
+    }
+    if p == "~" {
+        home, err := os.UserHomeDir()
+        if err != nil {
+            return p
+        }
+        return home
+    }
+    return p
 }
 
 func DefaultConfig() Config {

@@ -347,6 +347,7 @@ admin:
 # A3 fix: persistent store backend selection (memory | redis)
 store:
     backend: "memory"                  # "memory" for single-instance, "redis" for multi-instance
+    data_dir: "~/.fusion-gateway/data" # memory store persistence dir (~ expanded); empty=non-persistent. keys/channels/teams CRUD survive restart. redis backend ignores this
     redis:
         addr: "localhost:6379"         # Redis address (only used when backend=redis)
         password: ""                   # Redis password

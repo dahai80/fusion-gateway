@@ -1,0 +1,297 @@
+package memory
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/store"
+)
+
+func newPersistTestStore(t *testing.T, dataDir string) *MemoryStore {
+    t.Helper()
+    ms := NewMemoryStore(100)
+    if err := ms.EnablePersistence(dataDir); err != nil {
+        t.Fatalf("EnablePersistence: %v", err)
+    }
+    return ms
+}
+
+func TestEnablePersistence_EmptyDataDir_NoOp(t *testing.T) {
+    ms := NewMemoryStore(100)
+    if err := ms.EnablePersistence(""); err != nil {
+        t.Fatalf("empty data_dir should be no-op, got %v", err)
+    }
+    if ms.persist != nil {
+        t.Fatal("persist should be nil when data_dir empty")
+    }
+}
+
+func TestEnablePersistence_MissingDataDir_Created(t *testing.T) {
+    dir := filepath.Join(t.TempDir(), "nested", "data")
+    ms := newPersistTestStore(t, dir)
+    if ms.persist == nil {
+        t.Fatal("persist should be set when data_dir non-empty")
+    }
+    if _, err := os.Stat(dir); err != nil {
+        t.Fatalf("data dir should exist: %v", err)
+    }
+}
+
+func TestSaveOnMutate_KeyCreate(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    key := &store.APIKeyEntry{
+        Name:      "test-key-1",
+        KeyPrefix: "sk-test1",
+        KeyHash:   "hash-test-1",
+        Status:    "active",
+        QuotaLimit: 1000,
+    }
+    if err := ms.CreateKey(key); err != nil {
+        t.Fatalf("CreateKey: %v", err)
+    }
+
+    data, err := os.ReadFile(filepath.Join(dir, "keys.json"))
+    if err != nil {
+        t.Fatalf("keys.json not written: %v", err)
+    }
+    if len(data) == 0 {
+        t.Fatal("keys.json empty")
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    got, err := ms2.GetKey("test-key-1")
+    if err != nil {
+        t.Fatalf("key not restored after reload: %v", err)
+    }
+    if got.KeyHash != "hash-test-1" {
+        t.Fatalf("restored key hash mismatch: %s", got.KeyHash)
+    }
+    if got.QuotaRemaining != 1000 {
+        t.Fatalf("QuotaRemaining not recomputed on load: %f", got.QuotaRemaining)
+    }
+}
+
+func TestSaveOnMutate_KeyDelete(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    key := &store.APIKeyEntry{Name: "del-key", KeyPrefix: "sk-del", KeyHash: "h-del"}
+    if err := ms.CreateKey(key); err != nil {
+        t.Fatal(err)
+    }
+    if err := ms.DeleteKey("del-key"); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    if _, err := ms2.GetKey("del-key"); err == nil {
+        t.Fatal("deleted key should not be restored")
+    }
+}
+
+func TestSaveOnMutate_KeyUpdate(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    key := &store.APIKeyEntry{Name: "upd-key", KeyPrefix: "sk-upd", KeyHash: "h-upd", QuotaLimit: 500}
+    if err := ms.CreateKey(key); err != nil {
+        t.Fatal(err)
+    }
+    key.QuotaLimit = 2000
+    if err := ms.UpdateKey(key); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    got, err := ms2.GetKey("upd-key")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if got.QuotaLimit != 2000 {
+        t.Fatalf("updated QuotaLimit not persisted: %f", got.QuotaLimit)
+    }
+}
+
+func TestSaveOnMutate_Channel(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    ch := &store.ChannelEntry{Name: "ch-1", Type: "openai-compatible", Provider: "openai", BaseURL: "http://x", Enabled: true}
+    if err := ms.CreateChannel(ch); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    got, err := ms2.GetChannel("ch-1")
+    if err != nil {
+        t.Fatalf("channel not restored: %v", err)
+    }
+    if got.BaseURL != "http://x" {
+        t.Fatalf("channel baseURL mismatch: %s", got.BaseURL)
+    }
+
+    if err := ms.DeleteChannel("ch-1"); err != nil {
+        t.Fatal(err)
+    }
+    ms3 := newPersistTestStore(t, dir)
+    if _, err := ms3.GetChannel("ch-1"); err == nil {
+        t.Fatal("deleted channel should not be restored")
+    }
+}
+
+func TestSaveOnMutate_Team(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    team := &store.Team{ID: "team-x", Name: "Team X", OrgID: "default", QuotaLimit: 100}
+    if err := ms.CreateTeam(team); err != nil {
+        t.Fatal(err)
+    }
+    if err := ms.BindKeyToTeam("sk-bind", "team-x"); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    got, err := ms2.GetTeam("team-x")
+    if err != nil {
+        t.Fatalf("team not restored: %v", err)
+    }
+    if got.Name != "Team X" {
+        t.Fatalf("team name mismatch: %s", got.Name)
+    }
+    bound, err := ms2.GetTeamByKey("sk-bind")
+    if err != nil {
+        t.Fatalf("key-team binding not restored: %v", err)
+    }
+    if bound.ID != "team-x" {
+        t.Fatalf("bound team mismatch: %s", bound.ID)
+    }
+}
+
+func TestSaveOnMutate_Org(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    org := &store.Organization{ID: "org-1", Name: "Org One"}
+    if err := ms.CreateOrg(org); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := newPersistTestStore(t, dir)
+    got, err := ms2.GetOrg("org-1")
+    if err != nil {
+        t.Fatalf("org not restored: %v", err)
+    }
+    if got.Name != "Org One" {
+        t.Fatalf("org name mismatch: %s", got.Name)
+    }
+}
+
+func TestAddCost_NotFlushed(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    if err := ms.AddTeamCost("default", 42.5); err != nil {
+        t.Fatal(err)
+    }
+
+    teamsPath := filepath.Join(dir, "teams.json")
+    _, err := os.Stat(teamsPath)
+    if err == nil {
+        t.Fatal("teams.json should NOT be written by AddCost (high-frequency excluded)")
+    }
+    if !os.IsNotExist(err) {
+        t.Fatalf("unexpected stat error: %v", err)
+    }
+}
+
+func TestTeamsLoad_ReplacesSeed(t *testing.T) {
+    dir := t.TempDir()
+
+    ms1 := NewMemoryStore(100)
+    if err := ms1.EnablePersistence(dir); err != nil {
+        t.Fatal(err)
+    }
+    if err := ms1.CreateTeam(&store.Team{ID: "persisted-team", Name: "P"}); err != nil {
+        t.Fatal(err)
+    }
+
+    ms2 := NewMemoryStore(100)
+    if err := ms2.EnablePersistence(dir); err != nil {
+        t.Fatal(err)
+    }
+    if _, err := ms2.GetTeam("persisted-team"); err != nil {
+        t.Fatalf("persisted team missing: %v", err)
+    }
+    if _, err := ms2.GetTeam("default"); err != nil {
+        t.Fatalf("seeded default team should survive: %v", err)
+    }
+}
+
+func TestTeamsLoad_KeepsSeedWhenNoFile(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+    if _, err := ms.GetTeam("default"); err != nil {
+        t.Fatalf("default team should be seeded when no teams.json: %v", err)
+    }
+    if _, err := ms.GetOrg("default"); err != nil {
+        t.Fatalf("default org should be seeded when no teams.json: %v", err)
+    }
+}
+
+func TestCorruptFile_GracefulEmpty(t *testing.T) {
+    dir := t.TempDir()
+    if err := os.WriteFile(filepath.Join(dir, "keys.json"), []byte("{not valid json"), 0o600); err != nil {
+        t.Fatal(err)
+    }
+
+    ms := NewMemoryStore(100)
+    if err := ms.EnablePersistence(dir); err != nil {
+        t.Fatalf("corrupt keys.json should not crash EnablePersistence: %v", err)
+    }
+    if _, err := ms.ListKeys(); err != nil {
+        t.Fatalf("store should be usable after corrupt load: %v", err)
+    }
+}
+
+func TestAtomicWrite_NoCorrupt(t *testing.T) {
+    dir := t.TempDir()
+    p := NewPersister(dir, NewKeyStore(), NewChannelStore(), NewTeamsStore())
+    payload := []byte(`{"teams":[],"orgs":[],"key_team":{}}`)
+    if err := p.atomicWrite(filepath.Join(dir, "teams.json"), payload); err != nil {
+        t.Fatal(err)
+    }
+    got, err := os.ReadFile(filepath.Join(dir, "teams.json"))
+    if err != nil {
+        t.Fatal(err)
+    }
+    if string(got) != string(payload) {
+        t.Fatalf("atomic write content mismatch")
+    }
+}
+
+func TestExpandPath_Tilde(t *testing.T) {
+    home, err := os.UserHomeDir()
+    if err != nil {
+        t.Skip("no home dir")
+    }
+    cases := []struct {
+        in, want string
+    }{
+        {"~/x/y", filepath.Join(home, "x", "y")},
+        {"~", home},
+        {"", ""},
+        {"/abs/path", "/abs/path"},
+        {"relative/path", "relative/path"},
+    }
+    for _, c := range cases {
+        got := config.ExpandPath(c.in)
+        if got != c.want {
+            t.Errorf("ExpandPath(%q) = %q, want %q", c.in, got, c.want)
+        }
+    }
+}
