@@ -260,3 +260,154 @@ func TestRetryChat_ExhaustsAllRetries(t *testing.T) {
         t.Errorf("expected 3 calls (1 + 2 retries), got %d", calls)
     }
 }
+
+func closedStreamChan() <-chan adapter.AnthropicStreamEvent {
+    ch := make(chan adapter.AnthropicStreamEvent)
+    close(ch)
+    return ch
+}
+
+func TestRetryStreamMessages_ReturnsFnDirectlyWhenMaxRetriesZero(t *testing.T) {
+    t.Parallel()
+    called := false
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        called = true
+        return closedStreamChan(), nil
+    }
+    cfg := config.RetryConfig{MaxRetries: 0}
+    wrapped := RetryStreamMessages(cfg, fn)
+    ch, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if !called {
+        t.Fatal("expected fn to be called")
+    }
+    if ch == nil {
+        t.Fatal("expected non-nil channel")
+    }
+}
+
+func TestRetryStreamMessages_RetriesOn502(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           2,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429, 500, 502, 503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        if calls < 3 {
+            return nil, fmt.Errorf("anthropic stream messages returned status 502: upstream down")
+        }
+        return closedStreamChan(), nil
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    ch, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if calls != 3 {
+        t.Errorf("expected 3 calls (2 retries + 1 success), got %d", calls)
+    }
+    if ch == nil {
+        t.Error("expected non-nil channel after successful retry")
+    }
+}
+
+func TestRetryStreamMessages_RetriesOnTimeout(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           1,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429, 500, 502, 503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        if calls == 1 {
+            return nil, fmt.Errorf("anthropic stream messages failed: timeout awaiting response headers")
+        }
+        return closedStreamChan(), nil
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    _, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if calls != 2 {
+        t.Errorf("expected 2 calls (1 timeout + 1 success), got %d", calls)
+    }
+}
+
+func TestRetryStreamMessages_DoesNotRetryOnNonRetryable(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           3,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429, 500, 502, 503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        return nil, fmt.Errorf("invalid api key")
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    _, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err == nil {
+        t.Fatal("expected error from non-retryable failure")
+    }
+    if calls != 1 {
+        t.Errorf("expected 1 call (no retries for non-retryable), got %d", calls)
+    }
+}
+
+func TestRetryStreamMessages_RespectsContextCancellation(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           5,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{502},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        return nil, fmt.Errorf("anthropic stream messages returned status 502: down")
+    }
+    ctx, cancel := context.WithCancel(context.Background())
+    cancel()
+    wrapped := RetryStreamMessages(cfg, fn)
+    _, err := wrapped(ctx, &adapter.AnthropicRequest{})
+    if err == nil {
+        t.Fatal("expected error due to cancelled context")
+    }
+    if !errors.Is(err, context.Canceled) {
+        t.Errorf("expected context.Canceled, got %v", err)
+    }
+}
+
+func TestRetryStreamMessages_ExhaustsAllRetries(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           2,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        return nil, fmt.Errorf("upstream status 503: overloaded")
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    ch, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err == nil {
+        t.Fatal("expected error after exhausting retries")
+    }
+    if ch != nil {
+        t.Error("expected nil channel on exhausted retries")
+    }
+    if calls != 3 {
+        t.Errorf("expected 3 calls (1 + 2 retries), got %d", calls)
+    }
+}

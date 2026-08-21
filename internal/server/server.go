@@ -2156,7 +2156,11 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
     // untouched (the same req may be inspected elsewhere).
     streamReq := *req
     streamReq.Stream = true
-    ch, err := p.StreamMessages(ctx, &streamReq)
+    msgFn := func(ctx context.Context, r *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        return p.StreamMessages(ctx, r)
+    }
+    msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
+    ch, err := msgFn(ctx, &streamReq)
     if err != nil {
         s.writeMessagesError(w, err)
         return
@@ -2171,7 +2175,11 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
 }
 
 func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
-    ch, err := p.StreamMessages(ctx, req)
+    msgFn := func(ctx context.Context, r *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        return p.StreamMessages(ctx, r)
+    }
+    msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
+    ch, err := msgFn(ctx, req)
     if err != nil {
         s.writeMessagesError(w, err)
         return
