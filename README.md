@@ -493,6 +493,19 @@ Full OpenAI `stream_options` support for chat completions:
 - **Thinking**: Supports `thinking` parameter with `budget_tokens` for extended thinking
 - **Non-stream internal stream+aggregate**: A non-stream `/v1/messages` routed to a `MessagesProvider` is internally streamed upstream (`stream=true`) and aggregated into a single non-stream Anthropic response via `adapter.AggregateAnthropicStreamEvents`. Reasoning upstreams (e.g. glm5.2 behind a LiteLLM proxy) withhold non-stream response headers until full generation completes, which trips `Client.Timeout exceeded while awaiting headers` / client-cancel 502s. The stream path has a ~2s TTFB, so the gateway no longer blocks on the upstream header. Text, `thinking` (+`signature_delta`), and `tool_use` (`input_json_delta`) blocks are all reconstructed.
 
+### Stream Keepalive & Idle Watchdog (issue #69)
+
+Distinct from the connection-phase retry above (which covers TTFB / pre-header failures), the **mid-stream stall** is a different failure: the stream connection is already established (headers flushed, partial deltas already sent to the client) but the upstream then stops pushing deltas without closing the TCP connection — the gateway blocks indefinitely and the client eventually times out with `The response stopped arriving. The response above may be incomplete.` Two mechanisms, configured under `routing.stream`, work together:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `keepalive_interval` | `15s` | Emits an Anthropic-native `event: ping\ndata: {"type":"ping"}` SSE frame every interval. The Anthropic SDK ignores pings, but the client keeps seeing bytes — slow-but-live reasoning (e.g. glm5.2 extended thinking) is no longer mistaken for a dead stream. `0` disables keepalive and falls back to the original pure-blocking forward loop (backward compat). |
+| `idle_timeout` | `180s` | Watchdog: if no upstream event arrives for this long, the gateway cancels the upstream read (via a child context on the provider's `body.Read`, unblocked through Go's transport context watcher) and synthesizes a clean terminal `message_stop`. The client receives a short-but-complete response it can retry, instead of hanging for 16+ minutes. `0` disables the watchdog. |
+
+Both apply to the `/v1/messages` **stream** path (keepalive + watchdog) and the **non-stream internal-stream** path (watchdog only — a non-stream client waits for one JSON body, no SSE to keepalive). The watchdog trip vs a real client disconnect are distinguished by the parent request context: a watchdog trip (parent ctx still alive) synthesizes `message_stop`; a real client cancel (parent ctx canceled) suppresses the synthetic event, preserving the issue #46 fix and avoiding SDK `Content block not found` errors.
+
+The keepalive timer doubles as the watchdog check granularity (at most one interval of latency). Connection-phase TTFB is **not** covered here — it remains governed by `ResponseHeaderTimeout` (120s) plus the v0.8.22 connection-phase retry.
+
 ### Cloud-Signed Providers (AWS Bedrock / GCP Vertex / Azure Foundry)
 
 Beyond the standard `anthropic` backend, the gateway forwards `/v1/messages` to cloud-hosted Claude endpoints that require request signing rather than a static API key. All three implement the same `MessagesProvider` path — native Anthropic format in, native Anthropic SSE out — and are selected by setting a backend's `type:` in `config.yaml`. Credentials are read **only** from gateway-side environment variables and are never echoed back to clients.

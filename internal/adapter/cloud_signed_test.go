@@ -3,9 +3,11 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -146,7 +148,7 @@ func TestAggregateAnthropicStreamEvents_Text(t *testing.T) {
 	evCh <- AnthropicStreamEvent{Type: "message_stop"}
 	close(evCh)
 
-	resp, err := AggregateAnthropicStreamEvents(evCh)
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +177,7 @@ func TestAggregateAnthropicStreamEvents_ThinkingAndSignature(t *testing.T) {
 	evCh <- AnthropicStreamEvent{Type: "message_stop"}
 	close(evCh)
 
-	resp, err := AggregateAnthropicStreamEvents(evCh)
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +200,7 @@ func TestAggregateAnthropicStreamEvents_ToolUse(t *testing.T) {
 	evCh <- AnthropicStreamEvent{Type: "message_stop"}
 	close(evCh)
 
-	resp, err := AggregateAnthropicStreamEvents(evCh)
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +224,7 @@ func TestAggregateAnthropicStreamEvents_ErrorEvent(t *testing.T) {
 	evCh <- AnthropicStreamEvent{Type: "error", Delta: json.RawMessage(`{"error":{"type":"overloaded_error","message":"Upstream overloaded"}}`)}
 	close(evCh)
 
-	_, err := AggregateAnthropicStreamEvents(evCh)
+	_, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
 	if err == nil {
 		t.Fatal("expected error from error event")
 	}
@@ -236,7 +238,7 @@ func TestAggregateAnthropicStreamEvents_EmptyStreamDefaultsEndTurn(t *testing.T)
 	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_5"}}
 	close(evCh)
 
-	resp, err := AggregateAnthropicStreamEvents(evCh)
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,4 +261,86 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// --- issue #69: Aggregate idle watchdog for the non-stream path ---
+
+// TestAggregateAnthropicStreamEvents_IdleTimeout verifies the idle watchdog
+// fires when the upstream stalls without closing the channel: a non-stream
+// /v1/messages request that internally streams must not block forever. With a
+// short idleTimeout and a channel that never receives, Aggregate must return an
+// error referencing the idle cancellation within a bounded time.
+func TestAggregateAnthropicStreamEvents_IdleTimeout(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent)
+	defer close(evCh)
+
+	start := time.Now()
+	_, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected idle watchdog error, got nil")
+	}
+	if !contains(err.Error(), "idle") {
+		t.Fatalf("expected error mentioning idle, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("idle watchdog did not fire promptly, elapsed %v", elapsed)
+	}
+	slog.Info("TestAggregateAnthropicStreamEvents_IdleTimeout passed", "elapsed", elapsed)
+}
+
+// TestAggregateAnthropicStreamEvents_CtxCancel verifies an externally canceled
+// context aborts the aggregate loop even mid-stream (e.g. client gave up on the
+// non-stream request while the upstream is still generating).
+func TestAggregateAnthropicStreamEvents_CtxCancel(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 4)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_c"}}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = AggregateAnthropicStreamEvents(ctx, evCh, 5*time.Second)
+		close(done)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("aggregate did not return after ctx cancel")
+	}
+	if err == nil {
+		t.Fatal("expected canceled error, got nil")
+	}
+	if !contains(err.Error(), "canceled") {
+		t.Fatalf("expected error mentioning canceled, got %v", err)
+	}
+	slog.Info("TestAggregateAnthropicStreamEvents_CtxCancel passed")
+}
+
+// TestAggregateAnthropicStreamEvents_IdleZeroSkips verifies backward compat:
+// idleTimeout=0 disables the watchdog and a normal complete stream aggregates
+// unchanged (the original pure-blocking behavior).
+func TestAggregateAnthropicStreamEvents_IdleZeroSkips(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 8)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_z", Model: "glm5.2"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContentBlock{Type: "text"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: json.RawMessage(`{"type":"text_delta","text":"ok"}`)}
+	evCh <- AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+	evCh <- AnthropicStreamEvent{Type: "message_stop"}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != "msg_z" {
+		t.Fatalf("expected msg_z, got %s", resp.ID)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Text != "ok" {
+		t.Fatalf("unexpected content: %+v", resp.Content)
+	}
+	slog.Info("TestAggregateAnthropicStreamEvents_IdleZeroSkips passed")
 }

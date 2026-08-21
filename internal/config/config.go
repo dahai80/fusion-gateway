@@ -149,6 +149,7 @@ type RoutingConfig struct {
     Negotiation                NegotiationConfig    `mapstructure:"negotiation"`
     RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
     Retry                      RetryConfig          `mapstructure:"retry"`
+    Stream                     StreamConfig         `mapstructure:"stream"`
     IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
     HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
     Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
@@ -231,6 +232,18 @@ type RetryConfig struct {
     InitialBackoff       time.Duration `mapstructure:"initial_backoff"`
     MaxBackoff           time.Duration `mapstructure:"max_backoff"`
     RetryableStatusCodes []int         `mapstructure:"retryable_status_codes"`
+}
+
+// StreamConfig tunes SSE forwarding for /v1/messages against upstreams that
+// stall mid-stream without closing the connection (issue #69: litellm/glm5.2
+// stops pushing delta, gateway blocks indefinitely, client "response stopped
+// arriving"). KeepaliveInterval emits periodic ping events so a slow-but-live
+// upstream keeps the client alive; IdleTimeout cancels a truly dead upstream
+// and synthesizes a clean message_stop so the client gets a short-but-complete
+// response it can retry. Both <=0 disable the hardened path (backward compat).
+type StreamConfig struct {
+    KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
+    IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
 }
 
 type CacheConfig struct {
@@ -879,6 +892,10 @@ func DefaultConfig() Config {
                 ModelHub: ModelHubWebhookConfig{
                     Enabled: false,
                 },
+            },
+            Stream: StreamConfig{
+                KeepaliveInterval: 15 * time.Second,
+                IdleTimeout:       180 * time.Second,
             },
         },
         Hardware: HardwareConfig{

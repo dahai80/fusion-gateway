@@ -2156,16 +2156,24 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
     // untouched (the same req may be inspected elsewhere).
     streamReq := *req
     streamReq.Stream = true
+    // wdCtx is a child of the request ctx so the idle watchdog can cancel the
+    // upstream read (unblocking body.Read via the Go transport context watcher)
+    // without being mistaken for a real client cancel — the parent ctx stays
+    // intact and writeMessagesError can still write a clean status (headers
+    // are not committed yet on the non-stream path). See issue #69.
+    wdCtx, wdCancel := context.WithCancel(ctx)
+    defer wdCancel()
     msgFn := func(ctx context.Context, r *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
         return p.StreamMessages(ctx, r)
     }
     msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
-    ch, err := msgFn(ctx, &streamReq)
+    ch, err := msgFn(wdCtx, &streamReq)
     if err != nil {
         s.writeMessagesError(w, err)
         return
     }
-    resp, err := adapter.AggregateAnthropicStreamEvents(ch)
+    streamCfg := s.cfg.Config.Routing.Stream
+    resp, err := adapter.AggregateAnthropicStreamEvents(wdCtx, ch, streamCfg.IdleTimeout)
     if err != nil {
         s.writeMessagesError(w, err)
         return
@@ -2175,11 +2183,20 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
 }
 
 func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
+    // wdCtx is a child of the request ctx. The idle watchdog cancels wdCtx to
+    // unblock the upstream body.Read (via the Go transport context watcher)
+    // when the upstream stalls mid-stream (issue #69: litellm/glm5.2 stops
+    // pushing delta without closing the connection). Cancelling the child ctx
+    // is distinct from a real client cancel (parent ctx), so the terminal
+    // handling below can synthesize a clean message_stop for a stalled stream
+    // while still suppressing it for a true client disconnect (issue #46).
+    wdCtx, wdCancel := context.WithCancel(ctx)
+    defer wdCancel()
     msgFn := func(ctx context.Context, r *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
         return p.StreamMessages(ctx, r)
     }
     msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
-    ch, err := msgFn(ctx, req)
+    ch, err := msgFn(wdCtx, req)
     if err != nil {
         s.writeMessagesError(w, err)
         return
@@ -2197,26 +2214,78 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // (especially a malformed data:{} with no "type") confuses the client
     // ("Content block not found" / stream-ended errors, issue #46).
     sawMessageStop := false
-    for event := range ch {
-        if event.Type == "message_stop" {
-            sawMessageStop = true
+    streamCfg := s.cfg.Config.Routing.Stream
+    if streamCfg.KeepaliveInterval <= 0 {
+        // Backward-compat: no keepalive/watchdog configured, pure blocking
+        // forward loop (original behavior). Upstream stalls will block until
+        // the client times out — only use when the hardened path is disabled.
+        for event := range ch {
+            if event.Type == "message_stop" {
+                sawMessageStop = true
+            }
+            data, _ := json.Marshal(event)
+            fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+            if flusher != nil { flusher.Flush() }
         }
-        data, _ := json.Marshal(event)
-        fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
-        if flusher != nil { flusher.Flush() }
+    } else {
+        // Hardened forward loop: a single ticker serves two roles. Every tick
+        // it first checks the idle watchdog — if no upstream event arrived for
+        // IdleTimeout, the upstream is dead (not just slow); cancel wdCtx to
+        // unblock body.Read and end the loop so a clean message_stop is
+        // synthesized below. Otherwise emit an Anthropic-native ping event so
+        // the client keeps seeing bytes and does not time out a slow-but-live
+        // upstream. Watchdog granularity equals the keepalive interval.
+        ticker := time.NewTicker(streamCfg.KeepaliveInterval)
+        defer ticker.Stop()
+        lastEventAt := time.Now()
+        watchdogTripped := false
+        done := false
+        for !done {
+            select {
+            case event, ok := <-ch:
+                if !ok {
+                    done = true
+                    break
+                }
+                lastEventAt = time.Now()
+                if event.Type == "message_stop" {
+                    sawMessageStop = true
+                }
+                data, _ := json.Marshal(event)
+                fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+                if flusher != nil { flusher.Flush() }
+            case <-ticker.C:
+                if !watchdogTripped && time.Since(lastEventAt) >= streamCfg.IdleTimeout {
+                    slog.Warn("anthropic stream idle watchdog tripped, cancelling upstream",
+                        "idle", time.Since(lastEventAt), "threshold", streamCfg.IdleTimeout)
+                    watchdogTripped = true
+                    wdCancel()
+                    done = true
+                } else if !watchdogTripped {
+                    fmt.Fprintf(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
+                    if flusher != nil { flusher.Flush() }
+                }
+            case <-ctx.Done():
+                done = true
+            }
+        }
     }
     // Client cancelled mid-stream (context canceled): the upstream goroutine
     // closed the channel early, possibly with content blocks still open.
     // Emitting a terminal message_stop now would hand the SDK an unmatched
     // block ("Content block not found"). The client already gave up, so just
-    // stop writing — do NOT synthesize a closing event.
+    // stop writing — do NOT synthesize a closing event. We check the parent
+    // ctx (not wdCtx): a watchdog trip cancels only the child and must still
+    // synthesize; only a real client disconnect suppresses (issue #46).
     if ctx.Err() != nil {
         slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
         return
     }
-    // Upstream closed the channel without a message_stop (e.g. error/truncation):
-    // synthesize a well-formed one so the SDK can finalize cleanly. Only when
-    // we have not already forwarded one.
+    // Upstream closed the channel without a message_stop (e.g. error/truncation
+    // or the idle watchdog cancelled a stalled stream): synthesize a
+    // well-formed one so the SDK can finalize cleanly. The client gets a
+    // short-but-complete response it can retry. Only when we have not already
+    // forwarded one.
     if !sawMessageStop {
         slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event")
         fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")

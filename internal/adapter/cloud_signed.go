@@ -211,7 +211,7 @@ func b64Decode(s string) ([]byte, error) {
 // TTFB so the gateway no longer blocks on the upstream header and trips
 // Client.Timeout exceeded / client-cancel 502s. Handles text, thinking
 // (thinking_delta + signature_delta), and tool_use (input_json_delta) blocks.
-func AggregateAnthropicStreamEvents(evCh <-chan AnthropicStreamEvent) (*AnthropicResponse, error) {
+func AggregateAnthropicStreamEvents(ctx context.Context, evCh <-chan AnthropicStreamEvent, idleTimeout time.Duration) (*AnthropicResponse, error) {
 	resp := &AnthropicResponse{
 		Type:  "message",
 		Role:  "assistant",
@@ -230,8 +230,33 @@ func AggregateAnthropicStreamEvents(evCh <-chan AnthropicStreamEvent) (*Anthropi
 	}
 	inputBufs = make(map[int][]byte)
 
-	for ev := range evCh {
-		switch ev.Type {
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if idleTimeout > 0 {
+		idleTimer = time.NewTimer(idleTimeout)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+	resetIdle := func() {
+		if idleTimer != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+		}
+	}
+
+	for {
+		select {
+		case ev, ok := <-evCh:
+			if !ok {
+				goto done
+			}
+			resetIdle()
+			switch ev.Type {
 		case "message_start":
 			if ev.Message != nil {
 				resp.ID = ev.Message.ID
@@ -327,7 +352,16 @@ func AggregateAnthropicStreamEvents(evCh <-chan AnthropicStreamEvent) (*Anthropi
 			slog.Error("anthropic aggregate stream error event", "message", msg)
 			return nil, fmt.Errorf("anthropic stream error: %s", msg)
 		}
+		case <-idleC:
+			slog.Warn("anthropic aggregate stream idle watchdog tripped", "idle", idleTimeout)
+			return nil, fmt.Errorf("anthropic aggregate stream idle: %w", context.Canceled)
+		case <-ctx.Done():
+			slog.Warn("anthropic aggregate stream ctx canceled", "error", ctx.Err())
+			return nil, fmt.Errorf("anthropic aggregate stream canceled: %w", ctx.Err())
+		}
 	}
+
+done:
 	resp.Content = blocks
 	if resp.StopReason == "" {
 		resp.StopReason = "end_turn"

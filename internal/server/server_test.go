@@ -8250,3 +8250,192 @@ func TestAnthropicMessages_ModelMappingDisabled(t *testing.T) {
         t.Fatal("upstream did not receive the request within 2s")
     }
 }
+
+// --- issue #69: SSE keepalive + idle watchdog for mid-stream stalls ---
+
+// newStallingBackend spins an httptest server that flushes a partial event
+// stream then blocks forever (simulating litellm/glm5.2 stalling mid-stream
+// without closing the connection). The returned release func unblocks the
+// handler so the test server can shut down cleanly after the gateway's idle
+// watchdog cancels the upstream read.
+func newStallingBackend(t *testing.T, flushBeforeStall bool) (*httptest.Server, func()) {
+    t.Helper()
+    stallCh := make(chan struct{})
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fl := w.(http.Flusher)
+        if flushBeforeStall {
+            fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+            fl.Flush()
+            fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+            fl.Flush()
+            fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+            fl.Flush()
+        }
+        // Simulate the stall: block until released. The gateway's watchdog
+        // cancels the request ctx, which the Go HTTP transport turns into a
+        // client-side connection close, causing this read to error out.
+        <-stallCh
+    }))
+    release := func() { close(stallCh) }
+    return ts, release
+}
+
+// TestHandleStreamMessages_IdleWatchdogTrips is the core regression test for
+// issue #69: an upstream that builds the connection (200 + partial deltas) then
+// stalls forever must NOT hang the gateway for 16 minutes. The idle watchdog
+// cancels the upstream read after IdleTimeout and synthesizes a clean
+// message_stop so the client gets a short-but-complete response it can retry.
+// Asserts: body contains the partial delta already flushed + exactly one
+// synthetic message_stop, and the call returns within a bounded time (no hang).
+func TestHandleStreamMessages_IdleWatchdogTrips(t *testing.T) {
+    ts, release := newStallingBackend(t, true)
+    defer ts.Close()
+    defer release()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 20 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 80 * time.Millisecond
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung — idle watchdog did not trip")
+    }
+
+    body := rec.Body.String()
+    if !strings.Contains(body, "partial") {
+        t.Fatalf("expected partial delta forwarded before watchdog trip, got body:\n%s", body)
+    }
+    stopCount := strings.Count(body, "event: message_stop")
+    if stopCount != 1 {
+        t.Fatalf("expected exactly 1 synthetic message_stop, got %d. body:\n%s", stopCount, body)
+    }
+    if !strings.Contains(body, `data: {"type":"message_stop"}`) {
+        t.Fatalf("synthetic message_stop must carry type field, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamMessages_IdleWatchdogTrips passed", "body_len", len(body), "stop_count", stopCount)
+}
+
+// TestHandleStreamMessages_KeepalivePingBetweenEvents verifies the keepalive
+// pinger emits event: ping frames while waiting for a slow-but-live upstream.
+// The upstream delays between events longer than the keepalive interval, so at
+// least one ping must appear in the forwarded body alongside the real events.
+func TestHandleStreamMessages_KeepalivePingBetweenEvents(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fl := w.(http.Flusher)
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fl.Flush()
+        time.Sleep(120 * time.Millisecond) // slow upstream, > keepalive
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+        fl.Flush()
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 20 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 5 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    if !strings.Contains(body, "event: ping") {
+        t.Fatalf("expected at least one keepalive ping, got body:\n%s", body)
+    }
+    if !strings.Contains(body, "event: message_start") || !strings.Contains(body, "event: message_stop") {
+        t.Fatalf("expected real events alongside ping, got body:\n%s", body)
+    }
+    pingCount := strings.Count(body, "event: ping")
+    slog.Info("TestHandleStreamMessages_KeepalivePingBetweenEvents passed", "ping_count", pingCount)
+}
+
+// TestHandleStreamMessages_ClientCancelSuppressesSynth is a #46 regression
+// guard: a real client disconnect (parent ctx canceled) must NOT synthesize a
+// message_stop, because the SDK may have open content blocks and a terminal
+// event would be unmatched ("Content block not found"). Distinct from the
+// watchdog trip (which cancels only the child wdCtx and SHOULD synthesize).
+func TestHandleStreamMessages_ClientCancelSuppressesSynth(t *testing.T) {
+    ts, release := newStallingBackend(t, true)
+    defer ts.Close()
+    defer release()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 20 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 5 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    ctx, cancel := context.WithCancel(context.Background())
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(ctx, rec, p, req)
+        close(done)
+    }()
+    // Let the partial stream flush, then simulate the client giving up.
+    time.Sleep(60 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handler hung after client cancel")
+    }
+
+    body := rec.Body.String()
+    if strings.Contains(body, "event: message_stop") {
+        t.Fatalf("client cancel must suppress synthetic message_stop, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamMessages_ClientCancelSuppressesSynth passed", "body_len", len(body))
+}
+
+// TestHandleStreamMessages_KeepaliveDisabledBackwardCompat verifies that a
+// zero KeepaliveInterval falls back to the original pure-blocking forward loop
+// — no pings, no watchdog. A normal complete stream must pass through unchanged.
+func TestHandleStreamMessages_KeepaliveDisabledBackwardCompat(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi!\"}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 0
+    s.cfg.Config.Routing.Stream.IdleTimeout = 0
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    if strings.Contains(body, "event: ping") {
+        t.Fatalf("keepalive disabled must not emit ping, got body:\n%s", body)
+    }
+    stopCount := strings.Count(body, "event: message_stop")
+    if stopCount != 1 {
+        t.Fatalf("expected exactly 1 upstream message_stop, got %d. body:\n%s", stopCount, body)
+    }
+    slog.Info("TestHandleStreamMessages_KeepaliveDisabledBackwardCompat passed")
+}
