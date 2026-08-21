@@ -3,12 +3,23 @@ package config
 import (
     "context"
     "testing"
+    "time"
 )
 
 func TestDefaultConfig_Valid(t *testing.T) {
     cfg := DefaultConfig()
     if err := validate(&cfg); err != nil {
         t.Errorf("default config should be valid: %v", err)
+    }
+}
+
+func TestDefaultConfig_StreamDefaults(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Routing.Stream.KeepaliveInterval != 15*time.Second {
+        t.Errorf("expected stream keepalive_interval 15s, got %v", cfg.Routing.Stream.KeepaliveInterval)
+    }
+    if cfg.Routing.Stream.IdleTimeout != 180*time.Second {
+        t.Errorf("expected stream idle_timeout 180s, got %v", cfg.Routing.Stream.IdleTimeout)
     }
 }
 

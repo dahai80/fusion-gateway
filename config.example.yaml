@@ -106,6 +106,9 @@ route:
             - 500
             - 502
             - 503
+    stream:
+        keepalive_interval: 15s             # SSE keepalive ping interval (0 = disabled); Anthropic native `event: ping`, client stays alive during slow reasoning
+        idle_timeout: 180s                  # Mid-stream idle watchdog: no upstream event for this long cancels upstream + synthesizes clean message_stop (0 = disabled)
 
 cache:
     enabled: true
