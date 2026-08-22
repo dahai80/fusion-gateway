@@ -3741,7 +3741,25 @@ func TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop(t *testing.
     if stopCount != 1 {
         t.Fatalf("expected exactly 1 synthesized message_stop, got %d", stopCount)
     }
-    slog.Info("TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop passed", "stop_count", stopCount)
+    // Issue #71: the upstream left content_block_start(index 0) open. The synth
+    // path must emit a matching content_block_stop BEFORE message_stop, else
+    // the SDK sees an unmatched open block → "Content block not found".
+    blockStop := `event: content_block_stop`
+    blockStopCount := strings.Count(body, blockStop)
+    if blockStopCount != 1 {
+        t.Fatalf("expected 1 synthesized content_block_stop for the open block, got %d", blockStopCount)
+    }
+    if !strings.Contains(body, `data: {"type":"content_block_stop","index":0}`) {
+        t.Fatalf("synthesized content_block_stop must carry index 0, got body:\n%s", body)
+    }
+    if strings.Index(body, blockStop) > strings.Index(body, "event: message_stop") {
+        t.Fatalf("content_block_stop must precede message_stop, got body:\n%s", body)
+    }
+    // A message_delta carrying stop_reason should precede message_stop too.
+    if strings.Index(body, "event: message_delta") > strings.Index(body, "event: message_stop") {
+        t.Fatalf("message_delta must precede message_stop, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop passed", "stop_count", stopCount, "block_stop_count", blockStopCount)
 }
 
 // Regression (issue #46): when the client cancels mid-stream (ctx canceled),
@@ -3778,6 +3796,104 @@ func TestHandleStreamAnthropicMessages_ClientCancelSuppressesMessageStop(t *test
         t.Fatalf("on client cancel, must NOT synthesize message_stop (unmatched block risk), got body:\n%s", body)
     }
     slog.Info("TestHandleStreamAnthropicMessages_ClientCancelSuppressesMessageStop passed", "body_len", len(body))
+}
+
+// Regression (issue #71): upstream truncates with MULTIPLE content blocks
+// open (thinking index 0 + text index 1). The synth path must close BOTH in
+// ascending index order before the terminal message_stop, else the SDK sees
+// an unmatched open block → "Content block not found".
+func TestHandleStreamAnthropicMessages_SynthClosesMultipleOpenBlocks(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"partial\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+        // NOTE: neither block closed, no message_stop — upstream truncated mid-stream.
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    stopIdx0 := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    stopIdx1 := strings.Index(body, `{"type":"content_block_stop","index":1}`)
+    msgStop := strings.Index(body, "event: message_stop")
+    if stopIdx0 < 0 || stopIdx1 < 0 || msgStop < 0 {
+        t.Fatalf("expected content_block_stop(index 0) + content_block_stop(index 1) + message_stop, got body:\n%s", body)
+    }
+    if stopIdx0 >= stopIdx1 {
+        t.Fatalf("content_block_stop index 0 must precede index 1, got body:\n%s", body)
+    }
+    if stopIdx1 >= msgStop {
+        t.Fatalf("content_block_stop(index 1) must precede message_stop, got body:\n%s", body)
+    }
+    blockStopCount := strings.Count(body, "event: content_block_stop")
+    if blockStopCount != 2 {
+        t.Fatalf("expected exactly 2 synthesized content_block_stop, got %d", blockStopCount)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 message_stop, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_SynthClosesMultipleOpenBlocks passed", "block_stop_count", blockStopCount)
+}
+
+// Regression (issue #71): the idle watchdog (keepalive enabled path) trips
+// mid-stream with a content block open. wdCtx cancel unblocks body.Read, ch
+// closes with sawMessageStop=false and block open → synth path must close the
+// open block before message_stop. Reuses newStallingBackend (channel-based
+// stall so ts.Close() does not hang) which flushes message_start +
+// content_block_start(index 0) + a delta, then stalls with the block OPEN.
+func TestHandleStreamAnthropicMessages_WatchdogClosesOpenBlocks(t *testing.T) {
+    ts, release := newStallingBackend(t, true)
+    defer ts.Close()
+    defer release()
+
+    s := newTestServer()
+    // Tight watchdog so the test trips quickly via the keepalive-enabled path.
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 20 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 80 * time.Millisecond
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung — idle watchdog did not trip")
+    }
+
+    body := rec.Body.String()
+    blockStopIdx := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    msgStopIdx := strings.Index(body, "event: message_stop")
+    if blockStopIdx < 0 {
+        t.Fatalf("watchdog synth must close open block 0 before message_stop, got body:\n%s", body)
+    }
+    if msgStopIdx < 0 {
+        t.Fatalf("watchdog synth must emit message_stop, got body:\n%s", body)
+    }
+    if blockStopIdx >= msgStopIdx {
+        t.Fatalf("content_block_stop(0) must precede message_stop, got body:\n%s", body)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 message_stop, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_WatchdogClosesOpenBlocks passed", "body_len", len(body))
 }
 
 // --- Transcriptions with transcription provider ---

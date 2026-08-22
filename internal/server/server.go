@@ -2214,6 +2214,13 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // (especially a malformed data:{} with no "type") confuses the client
     // ("Content block not found" / stream-ended errors, issue #46).
     sawMessageStop := false
+    // openBlocks tracks content-block indices that have started but not yet
+    // received their matching content_block_stop. The Anthropic SDK requires
+    // every content_block_start to be closed by content_block_stop before the
+    // terminal message_stop; an open block at stream end yields "Content block
+    // not found" (issue #71). Both forward loops maintain this set so the
+    // synth path below can close any block the upstream left open.
+    openBlocks := make(map[int]bool)
     streamCfg := s.cfg.Config.Routing.Stream
     if streamCfg.KeepaliveInterval <= 0 {
         // Backward-compat: no keepalive/watchdog configured, pure blocking
@@ -2222,6 +2229,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         for event := range ch {
             if event.Type == "message_stop" {
                 sawMessageStop = true
+            } else if event.Type == "content_block_start" {
+                openBlocks[event.Index] = true
+            } else if event.Type == "content_block_stop" {
+                delete(openBlocks, event.Index)
             }
             data, _ := json.Marshal(event)
             fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
@@ -2250,6 +2261,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 lastEventAt = time.Now()
                 if event.Type == "message_stop" {
                     sawMessageStop = true
+                } else if event.Type == "content_block_start" {
+                    openBlocks[event.Index] = true
+                } else if event.Type == "content_block_stop" {
+                    delete(openBlocks, event.Index)
                 }
                 data, _ := json.Marshal(event)
                 fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
@@ -2283,11 +2298,32 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     }
     // Upstream closed the channel without a message_stop (e.g. error/truncation
     // or the idle watchdog cancelled a stalled stream): synthesize a
-    // well-formed one so the SDK can finalize cleanly. The client gets a
-    // short-but-complete response it can retry. Only when we have not already
-    // forwarded one.
+    // well-formed terminal sequence so the SDK can finalize cleanly. Any
+    // content block the upstream left open must be closed FIRST — the SDK
+    // requires content_block_stop for every content_block_start before
+    // message_stop, else "Content block not found" (issue #71). Emit
+    // content_block_stop for each open index (ascending), then a message_delta
+    // carrying stop_reason, then the terminal message_stop.
     if !sawMessageStop {
+        if len(openBlocks) > 0 {
+            indices := make([]int, 0, len(openBlocks))
+            for idx := range openBlocks {
+                indices = append(indices, idx)
+            }
+            for i := 0; i < len(indices); i++ {
+                for j := i + 1; j < len(indices); j++ {
+                    if indices[j] < indices[i] {
+                        indices[i], indices[j] = indices[j], indices[i]
+                    }
+                }
+            }
+            slog.Warn("anthropic stream ended with open content blocks, synthesizing content_block_stop before terminal event", "open_blocks", indices)
+            for _, idx := range indices {
+                fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", idx)
+            }
+        }
         slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event")
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
         fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
         if flusher != nil { flusher.Flush() }
     }
