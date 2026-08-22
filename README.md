@@ -506,6 +506,10 @@ Both apply to the `/v1/messages` **stream** path (keepalive + watchdog) and the 
 
 The keepalive timer doubles as the watchdog check granularity (at most one interval of latency). Connection-phase TTFB is **not** covered here — it remains governed by `ResponseHeaderTimeout` (120s) plus the v0.8.22 connection-phase retry.
 
+#### Open-block finalization (issue #71)
+
+When the stream ends without a terminal `message_stop` — because the upstream truncated (litellm/glm5.2 dropped the connection mid-block) or the idle watchdog cancelled a stalled stream — the gateway synthesizes a closing sequence. The Anthropic SDK requires every `content_block_start` to be closed by a matching `content_block_stop` **before** the terminal `message_stop`; an open block at stream end throws `API Error: Content block not found`. The gateway now tracks open content-block indices across both forward loops (`content_block_start` adds, `content_block_stop` removes) and, on the synthetic path, emits a `content_block_stop` for each still-open index in ascending order, then a `message_delta` carrying `stop_reason: end_turn`, then the terminal `message_stop`. This is defense-in-depth: the gateway closes whatever the upstream left open so the client never sees an unmatched block. The client-cancel suppression path (#46) is unchanged — a real disconnect suppresses all synthesis because the client already gave up.
+
 ### Cloud-Signed Providers (AWS Bedrock / GCP Vertex / Azure Foundry)
 
 Beyond the standard `anthropic` backend, the gateway forwards `/v1/messages` to cloud-hosted Claude endpoints that require request signing rather than a static API key. All three implement the same `MessagesProvider` path — native Anthropic format in, native Anthropic SSE out — and are selected by setting a backend's `type:` in `config.yaml`. Credentials are read **only** from gateway-side environment variables and are never echoed back to clients.
@@ -1129,6 +1133,14 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.8.24 — Synth message_stop now closes open content blocks (#71)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Synthetic terminal sequence closes open content blocks** (#71) | `handleStreamAnthropicMessages` synthesized a bare `message_stop` when the upstream ended without one (upstream truncation or the #69 idle watchdog tripping mid-block). The Anthropic SDK requires every `content_block_start` to be closed by a matching `content_block_stop` **before** `message_stop`; an open block at stream end threw `API Error: Content block not found` after long (28m+) sessions. The forward loops now track open block indices (`content_block_start` adds, `content_block_stop` removes) and the synth path emits a `content_block_stop` per open index (ascending), then a `message_delta` (`stop_reason: end_turn`), then `message_stop`. Defense-in-depth: closes whatever the upstream left open. The client-cancel suppression (#46) is unchanged. |
+| 2 | **Upstream malformed-SSE note** (#71) | Probed litellm→glm5.2 directly: simple + truncating tool_use streams are balanced (2 start / 2 stop), but the defect is intermittent under long-session pressure. Gateway forwards the SSE sequence faithfully (parser + forward loop pure pass-through, `MarshalJSON` preserves `index` even 0, `Delta` is `json.RawMessage` verbatim). Filed as an upstream concern; the gateway-side finalization above covers it regardless. |
+| 3 | **Tests** | Updated `TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop` to assert the open block is closed before `message_stop`. Added `TestHandleStreamAnthropicMessages_SynthClosesMultipleOpenBlocks` (thinking index 0 + text index 1, both closed ascending) and `TestHandleStreamAnthropicMessages_WatchdogClosesOpenBlocks` (watchdog trips with block open → closed). Full suite passes; `go vet` clean. |
 
 ### v0.8.16 — Anthropic /v1/messages path now applies model alias mapping (#52)
 
