@@ -1142,6 +1142,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.29 — Per-stream timing observability for "response stopped arriving" (#81)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **One INFO summary line per `/v1/messages` stream** (#81) | Claude Code surfaces `API Error: The response stopped arriving` when its internal stall-detection judges an upstream stream dead and cancels it. The gateway then logs only the consequence (`client canceled`) — nothing about the stream timing that led CC there. So a recurrence cannot be localized: was the upstream truly stalled (under the 180 s watchdog, so no trip) while the gateway kept pinging, or did CC cancel a still-live stream? Added per-stream counters to `handleStreamAnthropicMessages` that emit one INFO line on every exit path: `anthropic stream summary model=… duration=… events=… deltas=… pings=… first_event_ttfb=… last_event_idle=… last_event_type=… end_reason=…`. `end_reason` is the key discriminator: `clean` (upstream sent message_stop), `client_canceled` (CC gave up), `write_failed` (#79), `watchdog_tripped` (#69), `ch_closed_no_stop` (synth path). Next recurrence with `end_reason=client_canceled` + large `last_event_idle` + `pings>0` → upstream stalled under the watchdog (H-B); small `last_event_idle` → CC cancelled a live stream (H-A). |
+| 2 | **Tests** | `TestHandleStreamAnthropicMessages_StreamSummaryLogged` pins the two most diagnostic paths — a clean stream (`end_reason=clean`, `deltas=1`) and a client-cancelled stall (`end_reason=client_canceled`). Full suite (2652 tests) green; `go vet` clean. |
+| 3 | **Scope** | Observability-only — no change to ping frequency, timeouts, retry, or synth behavior; `anthropic.go` untouched. Pure instrumentation in `handleStreamAnthropicMessages`. Follow-up behavior fix deferred until a recurrence's summary line confirms upstream-stall vs CC-side. |
+
 ### v0.8.28 — Stream forward loop captures client write failures (#79)
 
 | # | Fix | Details |
