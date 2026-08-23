@@ -57,13 +57,16 @@ func RetryChat(cfg config.RetryConfig, fn RetryableFunc) RetryableFunc {
 // RetryableStreamMessagesFunc mirrors RetryableFunc for the /v1/messages path,
 // whose connection phase returns a receive-only Anthropic SSE event channel.
 // Retry covers only the connection phase: when StreamMessages returns an error
-// (TTFB timeout / 502 / 503 / 429) before any response header is written to the
-// client. Once a channel is returned, headers are committed and mid-stream
-// disconnects are NOT retried (SSE is already flushing). Reuses
-// isRetryableError + calculateBackoff unchanged: both AnthropicProvider
-// (fmt.Errorf "...status %d...") and cloud-signed providers (*MessagesHTTPError
-// "upstream status %d...") embed the status code in the error string, so
-// substring detection matches without a typed-error check.
+// (TTFB timeout / 502 / 503 / 429 / EOF / connection reset) before any response
+// header is written to the client. Once a channel is returned, headers are
+// committed and mid-stream disconnects are NOT retried (SSE is already
+// flushing). Reuses isRetryableError + calculateBackoff unchanged: both
+// AnthropicProvider (fmt.Errorf "...status %d...") and cloud-signed providers
+// (*MessagesHTTPError "upstream status %d...") embed the status code in the
+// error string, so substring detection matches without a typed-error check.
+// isRetryableError also matches transport-reset substrings (EOF, connection
+// reset by peer) so an upstream TCP reset during the connection phase retries
+// transparently (issue #73).
 type RetryableStreamMessagesFunc func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error)
 
 func RetryStreamMessages(cfg config.RetryConfig, fn RetryableStreamMessagesFunc) RetryableStreamMessagesFunc {
@@ -123,7 +126,11 @@ func isRetryableError(err error, codes []int) bool {
         }
     }
 
-    if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
+    if strings.Contains(errStr, "connection refused") ||
+        strings.Contains(errStr, "timeout") ||
+        strings.Contains(errStr, "deadline exceeded") ||
+        strings.Contains(errStr, "EOF") ||
+        strings.Contains(errStr, "connection reset by peer") {
         return true
     }
 

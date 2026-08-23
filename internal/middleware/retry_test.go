@@ -191,6 +191,24 @@ func TestIsRetryableError_DeadlineExceeded(t *testing.T) {
     }
 }
 
+func TestIsRetryableError_EOF(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("anthropic stream messages failed: Post \"http://example/v1/messages\": EOF"), nil) {
+        t.Error("EOF (upstream TCP reset) should be retryable")
+    }
+}
+
+func TestIsRetryableError_UnexpectedEOF(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("read: unexpected EOF"), nil) {
+        t.Error("unexpected EOF should be retryable")
+    }
+}
+
+func TestIsRetryableError_ConnectionResetByPeer(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("read tcp: connection reset by peer"), nil) {
+        t.Error("connection reset by peer should be retryable")
+    }
+}
+
 func TestIsRetryableError_DefaultCodes(t *testing.T) {
     if !isRetryableError(fmt.Errorf("server returned 502"), nil) {
         t.Error("502 should be retryable with default codes")
@@ -338,6 +356,34 @@ func TestRetryStreamMessages_RetriesOnTimeout(t *testing.T) {
     }
     if calls != 2 {
         t.Errorf("expected 2 calls (1 timeout + 1 success), got %d", calls)
+    }
+}
+
+func TestRetryStreamMessages_RetriesOnEOF(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           1,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429, 500, 502, 503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        if calls == 1 {
+            return nil, fmt.Errorf("anthropic stream messages failed: Post \"http://113.57.198.109:4000/litellm/v1/messages\": EOF")
+        }
+        return closedStreamChan(), nil
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    ch, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if calls != 2 {
+        t.Errorf("expected 2 calls (1 EOF + 1 success), got %d", calls)
+    }
+    if ch == nil {
+        t.Error("expected non-nil channel after successful retry on EOF")
     }
 }
 
