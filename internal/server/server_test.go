@@ -4098,6 +4098,95 @@ func TestHandleStreamAnthropicMessages_WriteFailureLogged(t *testing.T) {
     slog.Info("TestHandleStreamAnthropicMessages_WriteFailureLogged passed", "log_len", len(logs))
 }
 
+// Observability (issue #81): every /v1/messages stream must emit one INFO
+// "anthropic stream summary" line with per-stream timing (duration, events,
+// deltas, pings, first_event_ttfb, last_event_idle, last_event_type,
+// end_reason). end_reason is the key discriminator for "response stopped
+// arriving" recurrences: clean (upstream sent message_stop), client_canceled
+// (CC gave up), write_failed (#79), watchdog_tripped (#69), ch_closed_no_stop
+// (synth path). This test pins the two most diagnostic paths — clean and
+// client_canceled — so the summary stays correct as the handler evolves.
+func TestHandleStreamAnthropicMessages_StreamSummaryLogged(t *testing.T) {
+    // Clean path: upstream sends a full message_start → delta → message_stop.
+    tsClean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer tsClean.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    pClean := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: tsClean.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    var logBuf bytes.Buffer
+    prev := slog.Default()
+    defer slog.SetDefault(prev)
+    slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, pClean, req)
+
+    cleanLogs := logBuf.String()
+    if !strings.Contains(cleanLogs, "anthropic stream summary") {
+        t.Fatalf("clean path must emit stream summary, got logs:\n%s", cleanLogs)
+    }
+    if !strings.Contains(cleanLogs, "end_reason=clean") {
+        t.Fatalf("clean path end_reason must be clean, got logs:\n%s", cleanLogs)
+    }
+    if !strings.Contains(cleanLogs, "deltas=1") {
+        t.Fatalf("clean path must count 1 delta, got logs:\n%s", cleanLogs)
+    }
+
+    // Client-cancel path: upstream stalls forever; we cancel the request ctx
+    // mid-stream so the loop exits via ctx.Done() (end_reason=client_canceled).
+    tsStall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        w.(http.Flusher).Flush()
+        // Hold the connection open without further events so the client ctx
+        // fires before the watchdog. Select on the request ctx so the goroutine
+        // unblocks when the test server closes the connection at teardown.
+        <-r.Context().Done()
+    }))
+    defer tsStall.Close()
+
+    logBuf.Reset()
+    pStall := adapter.NewAnthropicProvider("test-stall", config.BackendConfig{
+        Type: "anthropic", BaseURL: tsStall.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    cancelCtx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(cancelCtx, rec, pStall, req)
+        close(done)
+    }()
+    // Give the upstream time to push the first delta, then cancel like CC does.
+    time.Sleep(80 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("stall path did not exit after client cancel")
+    }
+
+    stallLogs := logBuf.String()
+    if !strings.Contains(stallLogs, "anthropic stream summary") {
+        t.Fatalf("cancel path must emit stream summary, got logs:\n%s", stallLogs)
+    }
+    if !strings.Contains(stallLogs, "end_reason=client_canceled") {
+        t.Fatalf("cancel path end_reason must be client_canceled, got logs:\n%s", stallLogs)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_StreamSummaryLogged passed")
+}
+
 type mockTranscriptionProvider struct {
     mockProvider
 }

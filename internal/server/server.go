@@ -2240,6 +2240,44 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         return nil
     }
     writeFailed := false
+    // Per-stream timing instrumentation (issue #81). "The response stopped
+    // arriving" is a Claude Code internal judgment that an upstream stream
+    // stopped producing deltas; the gateway previously logged only the
+    // consequence (client canceled) when CC gave up, with no per-stream timing
+    // to tell whether the upstream actually stalled or CC cancelled a live
+    // stream. These counters feed one INFO summary line on every exit path so
+    // the next recurrence is diagnosable: last_event_idle + pings + end_reason
+    // pin whether the stall was upstream (H-B) or CC-side (H-A). Pure
+    // observation — no behavior change.
+    streamStart := time.Now()
+    var firstEventAt time.Time
+    var lastEventAt time.Time
+    var lastEventType string
+    eventCount := 0
+    deltaCount := 0
+    pingCount := 0
+    endReason := "ch_closed_no_stop"
+    streamSummary := func() {
+        dur := time.Since(streamStart)
+        firstTTFB := time.Duration(0)
+        if !firstEventAt.IsZero() {
+            firstTTFB = firstEventAt.Sub(streamStart)
+        }
+        lastIdle := time.Duration(0)
+        if !lastEventAt.IsZero() {
+            lastIdle = time.Since(lastEventAt)
+        }
+        slog.Info("anthropic stream summary",
+            "model", req.Model,
+            "duration", dur,
+            "events", eventCount,
+            "deltas", deltaCount,
+            "pings", pingCount,
+            "first_event_ttfb", firstTTFB,
+            "last_event_idle", lastIdle,
+            "last_event_type", lastEventType,
+            "end_reason", endReason)
+    }
     // closeOpenBlocks emits a content_block_stop for every index still open,
     // in ascending order, then flushes. Returns the closed indices (nil if
     // none). The Anthropic SDK requires every content_block_start to be
@@ -2277,6 +2315,15 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         // forward loop (original behavior). Upstream stalls will block until
         // the client times out — only use when the hardened path is disabled.
         for event := range ch {
+            eventCount++
+            lastEventType = event.Type
+            lastEventAt = time.Now()
+            if firstEventAt.IsZero() {
+                firstEventAt = lastEventAt
+            }
+            if event.Type == "content_block_delta" {
+                deltaCount++
+            }
             if event.Type == "message_stop" {
                 sawMessageStop = true
                 if closed := closeOpenBlocks(); closed != nil {
@@ -2292,6 +2339,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
                 slog.Warn("anthropic stream client write failed", "error", err)
                 writeFailed = true
+                endReason = "write_failed"
                 break
             }
         }
@@ -2315,7 +2363,15 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                     done = true
                     break
                 }
+                eventCount++
+                lastEventType = event.Type
                 lastEventAt = time.Now()
+                if firstEventAt.IsZero() {
+                    firstEventAt = lastEventAt
+                }
+                if event.Type == "content_block_delta" {
+                    deltaCount++
+                }
                 if event.Type == "message_stop" {
                     sawMessageStop = true
                     if closed := closeOpenBlocks(); closed != nil {
@@ -2331,6 +2387,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
                     slog.Warn("anthropic stream client write failed", "error", err)
                     writeFailed = true
+                    endReason = "write_failed"
                     done = true
                 }
             case <-ticker.C:
@@ -2338,16 +2395,21 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                     slog.Warn("anthropic stream idle watchdog tripped, cancelling upstream",
                         "idle", time.Since(lastEventAt), "threshold", streamCfg.IdleTimeout)
                     watchdogTripped = true
+                    endReason = "watchdog_tripped"
                     wdCancel()
                     done = true
                 } else if !watchdogTripped {
                     if err := writeSSE("event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
                         slog.Warn("anthropic stream client write failed", "error", err)
                         writeFailed = true
+                        endReason = "write_failed"
                         done = true
+                    } else {
+                        pingCount++
                     }
                 }
             case <-ctx.Done():
+                endReason = "client_canceled"
                 done = true
             }
         }
@@ -2368,12 +2430,14 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         if !writeFailed {
             slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
         }
+        streamSummary()
         return
     }
     if writeFailed {
         // The client pipe broke mid-stream (logged by the loop). The client is
         // already gone, so synthesizing a terminal to a dead pipe is pointless
         // and risks a second write error. Stop here (issue #79).
+        streamSummary()
         return
     }
     // Upstream closed the channel without a message_stop (e.g. error/truncation
@@ -2397,7 +2461,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         // signals truncation so the client retries or continues (issue #77).
         writeSSE("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
         writeSSE("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+        // endReason stays the default "ch_closed_no_stop" (synth path).
+    } else {
+        endReason = "clean"
     }
+    streamSummary()
 }
 
 func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
