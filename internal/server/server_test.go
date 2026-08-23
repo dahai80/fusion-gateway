@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "log/slog"
     "mime/multipart"
@@ -4013,6 +4014,88 @@ func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop_Har
         t.Fatalf("expected exactly 1 message_stop, got body:\n%s", body)
     }
     slog.Info("TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop_Hardened passed", "body_len", len(body))
+}
+
+// failingResponseWriter is an http.ResponseWriter whose Write returns a
+// broken-pipe error on the first byte, simulating a client that has already
+// gone away mid-response (the "Connection lost mid-response" condition). It
+// also satisfies http.Flusher so the hardened keepalive path compiles.
+type failingResponseWriter struct {
+    header http.Header
+}
+
+func (f *failingResponseWriter) Header() http.Header {
+    if f.header == nil {
+        f.header = make(http.Header)
+    }
+    return f.header
+}
+func (f *failingResponseWriter) Write([]byte) (int, error) {
+    return 0, errors.New("write tcp 127.0.0.1:11432->127.0.0.1:54321: broken pipe")
+}
+func (f *failingResponseWriter) WriteHeader(int) {}
+func (f *failingResponseWriter) Flush() {}
+
+// Regression (issue #79): when the client pipe breaks mid-stream, the forward
+// loop used to discard the fmt.Fprintf write error and keep spinning until the
+// cancelled ctx fired the "client canceled" branch — masking a gateway-side
+// write failure as a client disconnect. The loop must now capture the write
+// error, log "client write failed" distinctly, stop writing, and NOT synthesize
+// a terminal message_stop (the client is already gone) nor log "client canceled".
+func TestHandleStreamAnthropicMessages_WriteFailureLogged(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    // Capture slog output into a buffer so we can assert the distinct log line.
+    var logBuf bytes.Buffer
+    prev := slog.Default()
+    defer slog.SetDefault(prev)
+    slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+    fw := &failingResponseWriter{}
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(context.Background(), fw, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung — write failure did not end the loop")
+    }
+
+    logs := logBuf.String()
+    if !strings.Contains(logs, "anthropic stream client write failed") {
+        t.Fatalf("write failure must log 'client write failed' distinctly, got logs:\n%s", logs)
+    }
+    // The loop logged the write failure; it must NOT also log a client cancel
+    // (the write failure is the real signal, the cancel is a downstream
+    // consequence) — that conflation is exactly the blind spot issue #79 fixes.
+    if strings.Contains(logs, "anthropic stream client canceled") {
+        t.Fatalf("write failure must NOT also log 'client canceled' (conflation blind spot), got logs:\n%s", logs)
+    }
+    // No synthetic message_stop: the client is gone, writing a terminal to a
+    // dead pipe is pointless and would only error again.
+    if strings.Contains(logs, "synthesizing terminal event") {
+        t.Fatalf("must NOT synthesize a terminal after a client write failure, got logs:\n%s", logs)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_WriteFailureLogged passed", "log_len", len(logs))
 }
 
 type mockTranscriptionProvider struct {

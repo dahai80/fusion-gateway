@@ -2222,6 +2222,24 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // synth path below can close any block the upstream left open.
     openBlocks := make(map[int]bool)
     streamCfg := s.cfg.Config.Routing.Stream
+    // writeSSE emits one SSE frame to the client and flushes, returning the
+    // write error. The forward loops used to discard fmt.Fprintf errors, so a
+    // broken pipe (client gone mid-response) was silently dropped: the loop
+    // kept spinning until the cancelled ctx fired the "client canceled"
+    // branch, making a gateway-side write failure indistinguishable from a
+    // CC-side disconnect in the "Connection lost mid-response" logs (issue
+    // #79). Capturing the error lets the loop log "client write failed"
+    // distinctly and stop writing instead of masking the real cause.
+    writeSSE := func(format string, args ...any) error {
+        if _, err := fmt.Fprintf(w, format, args...); err != nil {
+            return err
+        }
+        if flusher != nil {
+            flusher.Flush()
+        }
+        return nil
+    }
+    writeFailed := false
     // closeOpenBlocks emits a content_block_stop for every index still open,
     // in ascending order, then flushes. Returns the closed indices (nil if
     // none). The Anthropic SDK requires every content_block_start to be
@@ -2247,10 +2265,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         }
         for _, idx := range indices {
             delete(openBlocks, idx)
-            fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", idx)
-        }
-        if flusher != nil {
-            flusher.Flush()
+            if err := writeSSE("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", idx); err != nil {
+                writeFailed = true
+                return indices
+            }
         }
         return indices
     }
@@ -2271,8 +2289,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 delete(openBlocks, event.Index)
             }
             data, _ := json.Marshal(event)
-            fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
-            if flusher != nil { flusher.Flush() }
+            if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
+                slog.Warn("anthropic stream client write failed", "error", err)
+                writeFailed = true
+                break
+            }
         }
     } else {
         // Hardened forward loop: a single ticker serves two roles. Every tick
@@ -2307,8 +2328,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                     delete(openBlocks, event.Index)
                 }
                 data, _ := json.Marshal(event)
-                fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
-                if flusher != nil { flusher.Flush() }
+                if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
+                    slog.Warn("anthropic stream client write failed", "error", err)
+                    writeFailed = true
+                    done = true
+                }
             case <-ticker.C:
                 if !watchdogTripped && time.Since(lastEventAt) >= streamCfg.IdleTimeout {
                     slog.Warn("anthropic stream idle watchdog tripped, cancelling upstream",
@@ -2317,8 +2341,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                     wdCancel()
                     done = true
                 } else if !watchdogTripped {
-                    fmt.Fprintf(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
-                    if flusher != nil { flusher.Flush() }
+                    if err := writeSSE("event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
+                        slog.Warn("anthropic stream client write failed", "error", err)
+                        writeFailed = true
+                        done = true
+                    }
                 }
             case <-ctx.Done():
                 done = true
@@ -2333,7 +2360,20 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // ctx (not wdCtx): a watchdog trip cancels only the child and must still
     // synthesize; only a real client disconnect suppresses (issue #46).
     if ctx.Err() != nil {
-        slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
+        // If the loop already logged a write failure, do not also log a client
+        // cancel — the write failure is the real signal and the cancelled ctx
+        // is just the downstream consequence (issue #79). Otherwise this is a
+        // genuine client disconnect (issue #46): suppress synth, the client is
+        // gone.
+        if !writeFailed {
+            slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
+        }
+        return
+    }
+    if writeFailed {
+        // The client pipe broke mid-stream (logged by the loop). The client is
+        // already gone, so synthesizing a terminal to a dead pipe is pointless
+        // and risks a second write error. Stop here (issue #79).
         return
     }
     // Upstream closed the channel without a message_stop (e.g. error/truncation
@@ -2355,9 +2395,8 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         // clients that received partial text then see a false-complete signal
         // and surface "The response stopped arriving / incomplete". "max_tokens"
         // signals truncation so the client retries or continues (issue #77).
-        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
-        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-        if flusher != nil { flusher.Flush() }
+        writeSSE("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
+        writeSSE("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
     }
 }
 

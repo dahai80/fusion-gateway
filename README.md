@@ -1142,6 +1142,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.28 — Stream forward loop captures client write failures (#79)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Client write errors no longer silently dropped** (#79) | `handleStreamAnthropicMessages` forward loops (backward-compat + hardened keepalive) called `fmt.Fprintf(w, ...)` and `flusher.Flush()` without checking the return error. When the client socket broke mid-response (Claude Code gone, broken pipe), the write error was discarded and the loop kept spinning until the cancelled request ctx fired the `client canceled` branch — so a gateway-side write failure was logged identically to a CC-side disconnect. Both are consistent with the recurring `API Error: Connection lost mid-response`, making the fault impossible to locate. Added a `writeSSE` helper that captures the `fmt.Fprintf` error and flushes; on failure it logs `anthropic stream client write failed` (distinct from `client canceled`), stops the loop, and skips the post-loop synth + cancel-log (the client is already gone). The next recurrence is now diagnosable: `client write failed` → gateway side; only `client canceled` → CC side. |
+| 2 | **Tests** | `TestHandleStreamAnthropicMessages_WriteFailureLogged` drives the handler with a `failingResponseWriter` whose `Write` returns a broken-pipe error; asserts the `client write failed` log is emitted, the `client canceled` log is NOT (conflation was the blind spot), and no synthetic `message_stop` is produced. Full suite (2651 tests) green; `go vet` clean. |
+| 3 | **Scope** | Observability-only — no behavior change for healthy writes; the failing-write path now fails visibly instead of silently. The same path in `closeOpenBlocks` is covered. No config change. Follow-up behavior fix deferred until logs confirm whether the recurring "Connection lost mid-response" is gateway-side (H2) or CC-side (H1). |
+
 ### v0.8.27 — Synth terminal stop_reason: end_turn → max_tokens for truncation (#77)
 
 | # | Fix | Details |
