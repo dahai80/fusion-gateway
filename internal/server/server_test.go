@@ -3896,7 +3896,114 @@ func TestHandleStreamAnthropicMessages_WatchdogClosesOpenBlocks(t *testing.T) {
     slog.Info("TestHandleStreamAnthropicMessages_WatchdogClosesOpenBlocks passed", "body_len", len(body))
 }
 
-// --- Transcriptions with transcription provider ---
+// Regression (issue #75): the upstream sends a terminal message_stop while
+// content blocks are still open — i.e. it emits content_block_start(idx 0) +
+// content_block_start(idx 1) + message_stop with NO content_block_stop for
+// either. Pre-fix the gateway forwarded the malformed message_stop verbatim
+// (open-block finalization was gated behind !sawMessageStop and never ran),
+// so the Anthropic SDK saw an unmatched block at message_stop and threw
+// "Content block not found". The forward loop must now close every still-open
+// block (ascending) BEFORE forwarding the upstream message_stop.
+func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"partial\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+        // NOTE: neither block closed, but upstream DOES emit message_stop —
+        // the malformed-terminal case the SDK rejects pre-fix (issue #75).
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 0
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+
+    body := rec.Body.String()
+    stopIdx0 := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    stopIdx1 := strings.Index(body, `{"type":"content_block_stop","index":1}`)
+    msgStop := strings.Index(body, "event: message_stop")
+    if stopIdx0 < 0 || stopIdx1 < 0 || msgStop < 0 {
+        t.Fatalf("expected synthesized content_block_stop(0) + (1) before upstream message_stop, got body:\n%s", body)
+    }
+    if stopIdx0 >= stopIdx1 {
+        t.Fatalf("synthesized content_block_stop(0) must precede (1), got body:\n%s", body)
+    }
+    if stopIdx1 >= msgStop {
+        t.Fatalf("synthesized content_block_stop(1) must precede message_stop, got body:\n%s", body)
+    }
+    blockStopCount := strings.Count(body, "event: content_block_stop")
+    if blockStopCount != 2 {
+        t.Fatalf("expected exactly 2 synthesized content_block_stop (no upstream stops), got %d", blockStopCount)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 message_stop (the upstream one, no duplicate synth), got body:\n%s", body)
+    }
+    if strings.Count(body, "event: message_delta") != 1 {
+        t.Fatalf("expected exactly 1 message_delta (upstream only), got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop passed", "block_stop_count", blockStopCount)
+}
+
+// Regression (issue #75, keepalive-enabled path): same malformed-terminal as
+// above but through the hardened forward loop (KeepaliveInterval>0). The
+// inline message_stop interception must close open blocks there too.
+func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop_Hardened(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+        // Block 0 left open; upstream sends message_stop directly.
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(context.Background(), rec, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung")
+    }
+
+    body := rec.Body.String()
+    stopIdx0 := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    msgStop := strings.Index(body, "event: message_stop")
+    if stopIdx0 < 0 {
+        t.Fatalf("hardened loop must synthesize content_block_stop(0) before message_stop, got body:\n%s", body)
+    }
+    if stopIdx0 >= msgStop {
+        t.Fatalf("synthesized content_block_stop(0) must precede message_stop, got body:\n%s", body)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 message_stop, got body:\n%s", body)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnUpstreamMessageStop_Hardened passed", "body_len", len(body))
+}
 
 type mockTranscriptionProvider struct {
     mockProvider

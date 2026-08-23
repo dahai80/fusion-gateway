@@ -2222,6 +2222,38 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // synth path below can close any block the upstream left open.
     openBlocks := make(map[int]bool)
     streamCfg := s.cfg.Config.Routing.Stream
+    // closeOpenBlocks emits a content_block_stop for every index still open,
+    // in ascending order, then flushes. Returns the closed indices (nil if
+    // none). The Anthropic SDK requires every content_block_start to be
+    // matched by content_block_stop before the terminal message_stop — an
+    // open block at message_stop yields "Content block not found" (issue #71,
+    // #75). Called both inline when an upstream message_stop arrives with
+    // blocks still open (the upstream sent a malformed terminal without
+    // closing its blocks) and on the post-loop synth path.
+    closeOpenBlocks := func() []int {
+        if len(openBlocks) == 0 {
+            return nil
+        }
+        indices := make([]int, 0, len(openBlocks))
+        for idx := range openBlocks {
+            indices = append(indices, idx)
+        }
+        for i := 0; i < len(indices); i++ {
+            for j := i + 1; j < len(indices); j++ {
+                if indices[j] < indices[i] {
+                    indices[i], indices[j] = indices[j], indices[i]
+                }
+            }
+        }
+        for _, idx := range indices {
+            delete(openBlocks, idx)
+            fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", idx)
+        }
+        if flusher != nil {
+            flusher.Flush()
+        }
+        return indices
+    }
     if streamCfg.KeepaliveInterval <= 0 {
         // Backward-compat: no keepalive/watchdog configured, pure blocking
         // forward loop (original behavior). Upstream stalls will block until
@@ -2229,6 +2261,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         for event := range ch {
             if event.Type == "message_stop" {
                 sawMessageStop = true
+                if closed := closeOpenBlocks(); closed != nil {
+                    slog.Warn("anthropic upstream message_stop with open content blocks, closing before terminal",
+                        "open_blocks", closed)
+                }
             } else if event.Type == "content_block_start" {
                 openBlocks[event.Index] = true
             } else if event.Type == "content_block_stop" {
@@ -2261,6 +2297,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 lastEventAt = time.Now()
                 if event.Type == "message_stop" {
                     sawMessageStop = true
+                    if closed := closeOpenBlocks(); closed != nil {
+                        slog.Warn("anthropic upstream message_stop with open content blocks, closing before terminal",
+                            "open_blocks", closed)
+                    }
                 } else if event.Type == "content_block_start" {
                     openBlocks[event.Index] = true
                 } else if event.Type == "content_block_stop" {
@@ -2305,22 +2345,8 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // content_block_stop for each open index (ascending), then a message_delta
     // carrying stop_reason, then the terminal message_stop.
     if !sawMessageStop {
-        if len(openBlocks) > 0 {
-            indices := make([]int, 0, len(openBlocks))
-            for idx := range openBlocks {
-                indices = append(indices, idx)
-            }
-            for i := 0; i < len(indices); i++ {
-                for j := i + 1; j < len(indices); j++ {
-                    if indices[j] < indices[i] {
-                        indices[i], indices[j] = indices[j], indices[i]
-                    }
-                }
-            }
-            slog.Warn("anthropic stream ended with open content blocks, synthesizing content_block_stop before terminal event", "open_blocks", indices)
-            for _, idx := range indices {
-                fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", idx)
-            }
+        if closed := closeOpenBlocks(); closed != nil {
+            slog.Warn("anthropic stream ended with open content blocks, synthesizing content_block_stop before terminal event", "open_blocks", closed)
         }
         slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event")
         fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
