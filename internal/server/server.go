@@ -2348,8 +2348,14 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         if closed := closeOpenBlocks(); closed != nil {
             slog.Warn("anthropic stream ended with open content blocks, synthesizing content_block_stop before terminal event", "open_blocks", closed)
         }
-        slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event")
-        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n")
+        slog.Warn("anthropic stream ended without message_stop, synthesizing terminal event", "stop_reason", "max_tokens")
+        // stop_reason is "max_tokens" (truncation), not "end_turn" (complete).
+        // The upstream dropped mid-generation (EOF, no message_stop) so the
+        // output is truncated. "end_turn" falsely claims the model finished;
+        // clients that received partial text then see a false-complete signal
+        // and surface "The response stopped arriving / incomplete". "max_tokens"
+        // signals truncation so the client retries or continues (issue #77).
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
         fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
         if flusher != nil { flusher.Flush() }
     }
