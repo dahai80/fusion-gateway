@@ -3759,6 +3759,16 @@ func TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop(t *testing.
     if strings.Index(body, "event: message_delta") > strings.Index(body, "event: message_stop") {
         t.Fatalf("message_delta must precede message_stop, got body:\n%s", body)
     }
+    // Issue #77: a synthesized terminal for an upstream truncation (no
+    // message_stop) must carry stop_reason "max_tokens", NOT "end_turn". The
+    // stream was cut mid-generation; "end_turn" falsely claims completion and
+    // makes clients surface "The response stopped arriving / incomplete".
+    if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+        t.Fatalf("synthesized message_delta for truncation must carry stop_reason max_tokens, got body:\n%s", body)
+    }
+    if strings.Contains(body, `"stop_reason":"end_turn"`) {
+        t.Fatalf("synthesized message_delta for truncation must NOT carry stop_reason end_turn (false completion), got body:\n%s", body)
+    }
     slog.Info("TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop passed", "stop_count", stopCount, "block_stop_count", blockStopCount)
 }
 
