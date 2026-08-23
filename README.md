@@ -1142,6 +1142,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.27 — Synth terminal stop_reason: end_turn → max_tokens for truncation (#77)
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **Synthesized terminal signals truncation, not false completion** (#77) | When litellm→glm5.2 dropped a stream mid-generation without a `message_stop` (EOF/truncation), `handleStreamAnthropicMessages` synthesized a terminal `message_delta` carrying a hardcoded `stop_reason:"end_turn"`. `end_turn` means the model finished its turn naturally (a complete response), but this path is reached only on a **truncated** stream. Claude Code had already received partial text; pairing it with a false-complete `end_turn` made it detect the mismatch (content cut off, yet claimed complete) and surface `API Error: The response stopped arriving. The response above may be incomplete.` Changed the shared post-loop synth path (covers both backward-compat and hardened keepalive loops) to emit `stop_reason:"max_tokens"` — the correct Anthropic truncation signal — so the client retries or continues rather than trusting a false completion. Logged the value for traceability. |
+| 2 | **Tests** | `TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop` now asserts the synthesized `message_delta` carries `"stop_reason":"max_tokens"` and does NOT carry `"stop_reason":"end_turn"`. Full suite green; `go vet` clean. |
+| 3 | **Scope** | One-line behavioral change + regression test. No config change. The upstream drop itself is intermittent/transient (direct probes small + large + long up to 119s all healthy — no repro); this is a defensive correctness fix for when a drop does occur. |
+
 ### v0.8.26 — Open-block finalization on upstream message_stop (#75)
 
 | # | Fix | Details |
