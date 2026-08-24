@@ -2074,6 +2074,19 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     budget := s.tokEngine.EstimateBudget(inputTokens, &maxTokens, antReq.Model, len(antReq.Tools) > 0, antReq.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
+    // Strip an orphan tool_choice (present, but no tools). A client web-search
+    // request (Claude Code) carries tool_choice:"auto" + web_search_options:{}
+    // but no tools array — that is Anthropic's server-side-tool protocol.
+    // AnthropicRequest has no web_search_options field so it is dropped, but
+    // tool_choice is forwarded verbatim -> glm5.2/vLLM rejects "tool_choice
+    // requires tools" -> 400 -> gateway 502 (issue #92). Stripping the orphan
+    // lets the request degrade to plain generation instead of a hard 502. A
+    // tool_choice WITH real tools (legitimate client tool-use) is preserved.
+    if antReq.ToolChoice != nil && len(antReq.Tools) == 0 {
+        slog.Info("anthropic messages stripping orphan tool_choice (no tools)", "model", antReq.Model)
+        antReq.ToolChoice = nil
+    }
+
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason, "input_tokens", inputTokens)
 
