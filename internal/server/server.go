@@ -2427,13 +2427,32 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // ctx (not wdCtx): a watchdog trip cancels only the child and must still
     // synthesize; only a real client disconnect suppresses (issue #46).
     if ctx.Err() != nil {
-        // If the loop already logged a write failure, do not also log a client
-        // cancel — the write failure is the real signal and the cancelled ctx
-        // is just the downstream consequence (issue #79). Otherwise this is a
-        // genuine client disconnect (issue #46): suppress synth, the client is
-        // gone.
-        if !writeFailed {
-            slog.Warn("anthropic stream client canceled, suppressing synthetic message_stop", "error", ctx.Err())
+        if writeFailed {
+            // The loop already logged a client write failure — the pipe is
+            // dead and the client is gone. Synthesizing a terminal to a dead
+            // pipe is pointless and risks a second write error. The cancelled
+            // ctx is just the downstream consequence (issue #79); do not also
+            // log a client cancel (conflation blind spot).
+            streamSummary()
+            return
+        }
+        // Client canceled but the write pipe is still alive (writeFailed is
+        // false): the cancel is a request-level signal (CC timeout/retry),
+        // NOT a dead socket — the client may still drain its buffer to
+        // finalize. Any content block the upstream left OPEN must be closed
+        // FIRST, then a well-formed terminal emitted, so the Anthropic SDK
+        // finalizes cleanly. The original #46 suppression assumed
+        // cancel==dead-pipe and skipped ALL terminal events, leaving open
+        // blocks the SDK could not finalize → "API Error: Content block not
+        // found" (issue #90). stop_reason is max_tokens (truncation, #77):
+        // cancel打断上游未完成, end_turn would falsely claim completion.
+        if closed := closeOpenBlocks(); closed != nil {
+            slog.Warn("anthropic stream client canceled with open content blocks, closing before terminal", "open_blocks", closed)
+        }
+        if !sawMessageStop {
+            slog.Warn("anthropic stream client canceled before message_stop, synthesizing terminal", "stop_reason", "max_tokens", "error", ctx.Err())
+            writeSSE("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
+            writeSSE("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
         }
         streamSummary()
         return
