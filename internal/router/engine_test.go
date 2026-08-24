@@ -177,6 +177,101 @@ func TestDecide_ModelAvailableLocally(t *testing.T) {
     }
 }
 
+// issue #83: a model present in the local set but absent from
+// model_mapping is local-exclusive. Even when the output/input ratio
+// exceeds threshold, it must NOT be cloud-diverted (cloud cannot serve
+// it -> 400 "Invalid model name"). The P3.5 guard short-circuits to
+// local before P4.5 ratio.
+func TestDecide_LocalExclusiveModel_RatioNotCloudDiverted(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    // ratio = 2048/132 = 15.52 >> 0.6 — would route cloud without guard
+    budget := tokenizer.TokenBudget{InputTokens: 132, PredictOutputTokens: 2048, TotalBudget: 2180}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.5-9B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for local-exclusive model under high ratio, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "local_exclusive_model" {
+        t.Errorf("expected local_exclusive_model, got %s", dec.Reason)
+    }
+}
+
+// issue #83: same guard must hold against P4 token-budget cloud-divert.
+func TestDecide_LocalExclusiveModel_TokenBudgetNotCloudDiverted(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    cfg.Config.Routing.TokenThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    // input 500 > threshold 100 — would route cloud without guard
+    budget := tokenizer.TokenBudget{InputTokens: 500, TotalBudget: 600}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.5-9B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for local-exclusive model over token threshold, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "local_exclusive_model" {
+        t.Errorf("expected local_exclusive_model, got %s", dec.Reason)
+    }
+}
+
+// issue #83: a model present in local set AND in model_mapping is NOT
+// local-exclusive (cloud can serve it via the mapping). The guard must
+// no-op so the existing P4.5 ratio cloud-divert behavior is preserved.
+func TestDecide_MappedModel_RatioStillCloudDiverts(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"claude-opus-4-7": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 132, PredictOutputTokens: 2048, TotalBudget: 2180}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "claude-opus-4-7", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud for mapped model under high ratio, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "output_input_ratio_exceeded" {
+        t.Errorf("expected output_input_ratio_exceeded, got %s", dec.Reason)
+    }
+}
+
 type mockClusterSelector struct {
     healthy int
     nodeID  string
