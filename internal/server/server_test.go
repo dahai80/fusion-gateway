@@ -3773,12 +3773,13 @@ func TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop(t *testing.
     slog.Info("TestHandleStreamAnthropicMessages_SynthesizesMissingMessageStop passed", "stop_count", stopCount, "block_stop_count", blockStopCount)
 }
 
-// Regression (issue #46): when the client cancels mid-stream (ctx canceled),
-// the upstream goroutine closes the channel early, possibly with content
-// blocks still OPEN. The old code then synthesized a terminal message_stop,
-// handing the SDK an unmatched open block ("Content block not found"). Fix:
-// on ctx cancellation, suppress the synthetic message_stop — the client has
-// already given up, writing more events only risks confusing it.
+// Boundary (issue #46/#90): cancel BEFORE the upstream connection is
+// established (ctx already canceled at handler entry) fails in the connection
+// phase — the forward loop never runs, so no content_block_start is ever seen,
+// no block is OPEN, and no terminal is synthesized. This stays distinct from
+// the mid-stream cancel case (issue #90, _ClosesOpenBlocksOnClientCancel) where
+// a block IS open and the gateway must close it + synthesize a terminal. Here
+// the cancel is pre-loop, so the body carries no message_stop.
 func TestHandleStreamAnthropicMessages_ClientCancelSuppressesMessageStop(t *testing.T) {
     ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
         w.Header().Set("Content-Type", "text/event-stream")
@@ -4096,6 +4097,148 @@ func TestHandleStreamAnthropicMessages_WriteFailureLogged(t *testing.T) {
         t.Fatalf("must NOT synthesize a terminal after a client write failure, got logs:\n%s", logs)
     }
     slog.Info("TestHandleStreamAnthropicMessages_WriteFailureLogged passed", "log_len", len(logs))
+}
+
+// Regression (issue #90): when the client cancels a LIVE stream with a content
+// block still OPEN (content_block_start sent, no matching content_block_stop),
+// the gateway MUST close the open block (content_block_stop) and synthesize a
+// well-formed terminal (message_delta max_tokens + message_stop) so the
+// Anthropic SDK finalizes cleanly. The original #46 suppression assumed
+// cancel==dead-pipe and skipped ALL terminal events, leaving an open block the
+// SDK could not finalize → "API Error: Content block not found". This
+// reproduces the 12 recurring client_canceled streams observed 14:25-14:34
+// (last_event_idle 8-139ms = live stream, block OPEN). pipe stays alive (the
+// recorder never returns a write error), so writeFailed stays false and the
+// new close+synth path must fire.
+func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnClientCancel(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        w.(http.Flusher).Flush()
+        // Block left OPEN; stall without closing the channel so the client
+        // cancels mid-stream (CC cancel of a live stream, block OPEN).
+        <-r.Context().Done()
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    var logBuf bytes.Buffer
+    prev := slog.Default()
+    defer slog.SetDefault(prev)
+    slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+    rec := httptest.NewRecorder()
+    cancelCtx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(cancelCtx, rec, p, req)
+        close(done)
+    }()
+    // Give the upstream a moment to emit the open-block delta, then cancel like
+    // Claude Code cancelling a live stream (block 0 still OPEN).
+    time.Sleep(150 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("client-cancel open-block path did not exit after cancel")
+    }
+
+    body := rec.Body.String()
+    stopIdx0 := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    msgStop := strings.Index(body, "event: message_stop")
+    if stopIdx0 < 0 {
+        t.Fatalf("client cancel with open block must synthesize content_block_stop(0) (was suppressed by #46 → SDK \"Content block not found\"), got body:\n%s", body)
+    }
+    if msgStop < 0 {
+        t.Fatalf("client cancel with open block must synthesize a terminal message_stop, got body:\n%s", body)
+    }
+    if stopIdx0 >= msgStop {
+        t.Fatalf("synthesized content_block_stop(0) must precede message_stop, got body:\n%s", body)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 synthesized message_stop, got body:\n%s", body)
+    }
+    // stop_reason must be max_tokens (truncation, #77), NOT end_turn.
+    if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+        t.Fatalf("client-cancel terminal must carry stop_reason max_tokens (truncation), got body:\n%s", body)
+    }
+    logs := logBuf.String()
+    if !strings.Contains(logs, "client canceled with open content blocks, closing before terminal") {
+        t.Fatalf("must log open-block closure on client cancel, got logs:\n%s", logs)
+    }
+    if !strings.Contains(logs, "client canceled before message_stop, synthesizing terminal") {
+        t.Fatalf("must log synth terminal on client cancel, got logs:\n%s", logs)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnClientCancel passed", "body_len", len(body))
+}
+
+// Regression guard (issue #90): the client-cancel open-block closure must NOT
+// fire when the write pipe already broke (writeFailed==true). That path stays
+// the #79 behavior — no synth to a dead pipe. A failingResponseWriter makes
+// every write error; combined with a live upstream that keeps the channel open,
+// the loop logs "client write failed" and sets writeFailed, so the cancel
+// branch must skip close+synth (no message_stop in the captured logs).
+func TestHandleStreamAnthropicMessages_ClientCancelWriteFailedSkipsSynth(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        w.(http.Flusher).Flush()
+        <-r.Context().Done()
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    var logBuf bytes.Buffer
+    prev := slog.Default()
+    defer slog.SetDefault(prev)
+    slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+    fw := &failingResponseWriter{}
+    cancelCtx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(cancelCtx, fw, p, req)
+        close(done)
+    }()
+    time.Sleep(150 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("write-failed cancel path did not exit")
+    }
+
+    logs := logBuf.String()
+    if !strings.Contains(logs, "anthropic stream client write failed") {
+        t.Fatalf("write failure must log 'client write failed', got logs:\n%s", logs)
+    }
+    // writeFailed branch must NOT synthesize (pipe dead): no synth-terminal log.
+    if strings.Contains(logs, "synthesizing terminal") {
+        t.Fatalf("writeFailed+cancel must NOT synthesize a terminal (#79 path), got logs:\n%s", logs)
+    }
+    if strings.Contains(logs, "client canceled with open content blocks") {
+        t.Fatalf("writeFailed+cancel must NOT take the close-open-block path, got logs:\n%s", logs)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_ClientCancelWriteFailedSkipsSynth passed", "log_len", len(logs))
 }
 
 // Observability (issue #81): every /v1/messages stream must emit one INFO
@@ -8863,7 +9006,9 @@ func TestHandleStreamMessages_ClientCancelSuppressesSynth(t *testing.T) {
         s.handleStreamAnthropicMessages(ctx, rec, p, req)
         close(done)
     }()
-    // Let the partial stream flush, then simulate the client giving up.
+    // Let the partial stream flush (block 0 OPEN), then simulate the client
+    // giving up mid-stream — exactly the 12 recurring client_canceled streams
+    // (issue #90) where CC cancels a live stream with a block OPEN.
     time.Sleep(60 * time.Millisecond)
     cancel()
     select {
@@ -8873,8 +9018,26 @@ func TestHandleStreamMessages_ClientCancelSuppressesSynth(t *testing.T) {
     }
 
     body := rec.Body.String()
-    if strings.Contains(body, "event: message_stop") {
-        t.Fatalf("client cancel must suppress synthetic message_stop, got body:\n%s", body)
+    // issue #90: cancel with an OPEN block must close it (content_block_stop)
+    // and synthesize a terminal (message_stop, stop_reason max_tokens) so the
+    // SDK finalizes cleanly instead of surfacing "Content block not found".
+    // The old #46 behavior (suppress everything → open block) is reversed.
+    stopIdx0 := strings.Index(body, `{"type":"content_block_stop","index":0}`)
+    msgStop := strings.Index(body, "event: message_stop")
+    if stopIdx0 < 0 {
+        t.Fatalf("client cancel with open block must synthesize content_block_stop(0) (#90), got body:\n%s", body)
+    }
+    if msgStop < 0 {
+        t.Fatalf("client cancel with open block must synthesize message_stop (#90), got body:\n%s", body)
+    }
+    if stopIdx0 >= msgStop {
+        t.Fatalf("content_block_stop(0) must precede message_stop, got body:\n%s", body)
+    }
+    if strings.Count(body, "event: message_stop") != 1 {
+        t.Fatalf("expected exactly 1 synthesized message_stop, got body:\n%s", body)
+    }
+    if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+        t.Fatalf("client-cancel terminal must carry stop_reason max_tokens (truncation), got body:\n%s", body)
     }
     slog.Info("TestHandleStreamMessages_ClientCancelSuppressesSynth passed", "body_len", len(body))
 }
