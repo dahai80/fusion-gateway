@@ -3,11 +3,15 @@ package router
 import (
     "context"
     "fmt"
+    "net/http"
+    "net/http/httptest"
+    "strings"
     "testing"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
@@ -1622,4 +1626,75 @@ func TestDecide_CodeIntentAdapterPresentDispatches(t *testing.T) {
     if dec.Reason != "intent:code:lora:lora-code" {
         t.Errorf("expected reason intent:code:lora:lora-code, got %s", dec.Reason)
     }
+}
+
+func TestTrip_PublishesCircuitBreakerMetrics(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("local", "memory_overload")
+
+    body := scrapeMetrics(t)
+    if !strings.Contains(body, "fusion_gateway_circuit_breaker_trips_total") {
+        t.Fatal("expected circuit_breaker_trips_total metric after Trip")
+    }
+    if !strings.Contains(body, "fusion_gateway_circuit_breaker_state") {
+        t.Fatal("expected circuit_breaker_state metric after Trip")
+    }
+    // open = 1; the gauge line for backend=local should carry value 1.
+    if !strings.Contains(body, `fusion_gateway_circuit_breaker_state{backend="local"} 1`) {
+        t.Fatalf("expected circuit_breaker_state{backend=\"local\"} 1 (open) after Trip, got:\n%s", body)
+    }
+}
+
+func TestRecordFailure_OpensBreaker_PublishesStateAndTrip(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.RecordFailure("local")
+    // Not yet open (threshold=2): gauge should still be 0 (closed).
+    body := scrapeMetrics(t)
+    if !strings.Contains(body, `fusion_gateway_circuit_breaker_state{backend="local"} 0`) {
+        t.Fatalf("expected state 0 (closed) after 1 failure, got:\n%s", body)
+    }
+    e.RecordFailure("local")
+    // Now open: gauge 1 + a trip counted (failure_threshold reason).
+    body = scrapeMetrics(t)
+    if !strings.Contains(body, `fusion_gateway_circuit_breaker_state{backend="local"} 1`) {
+        t.Fatalf("expected state 1 (open) after 2 failures, got:\n%s", body)
+    }
+}
+
+func TestPublishBreakerStates_ReflectsCurrentState(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("cloud", "timeout")
+    e.PublishBreakerStates()
+
+    body := scrapeMetrics(t)
+    if !strings.Contains(body, `fusion_gateway_circuit_breaker_state{backend="cloud"} 1`) {
+        t.Fatalf("expected cloud state 1 after PublishBreakerStates, got:\n%s", body)
+    }
+}
+
+func TestLocalInFlight_WithoutWiring(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    if got := e.LocalInFlight(); got != 0 {
+        t.Fatalf("expected 0 local in-flight before wiring, got %d", got)
+    }
+}
+
+func scrapeMetrics(t *testing.T) string {
+    t.Helper()
+    req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec, req)
+    return rec.Body.String()
 }

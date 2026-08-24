@@ -209,6 +209,10 @@ func RecordCircuitBreakerTrip(backend, reason string) {
     circuitBreakerTrips.WithLabelValues(backend, reason).Inc()
 }
 
+func UpdateCircuitBreakerState(backend string, state int) {
+    circuitBreakerState.WithLabelValues(backend).Set(float64(state))
+}
+
 func UpdateHardwareMetrics(
     memRatio float64,
     swapUsed, swapPageInRate, swapPageOutRate uint64,

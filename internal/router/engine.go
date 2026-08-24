@@ -10,6 +10,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
@@ -224,6 +225,18 @@ func (e *Engine) SetLocalInFlight(fn func() int64) {
     e.localInFlight = fn
 }
 
+// LocalInFlight exposes the local backend in-flight count for observability
+// (#96 in_flight_requests gauge). Returns 0 before SetLocalInFlight is wired.
+func (e *Engine) LocalInFlight() int64 {
+    e.mu.RLock()
+    fn := e.localInFlight
+    e.mu.RUnlock()
+    if fn == nil {
+        return 0
+    }
+    return fn()
+}
+
 func (e *Engine) SetLocalModels(fn func() map[string]bool) {
     e.mu.Lock()
     defer e.mu.Unlock()
@@ -239,6 +252,22 @@ func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
     return StateOpen
 }
 
+// PublishBreakerStates pushes every breaker's current state to the Prometheus
+// circuit_breaker_state gauge (#96). Catches lazy half_open transitions
+// (open->half_open happens on State() read after Timeout, not at a call site)
+// that the per-transition publishes in RecordSuccess/RecordFailure/Trip miss.
+func (e *Engine) PublishBreakerStates() {
+    e.mu.RLock()
+    backends := make([]string, 0, len(e.breakers))
+    for backend := range e.breakers {
+        backends = append(backends, backend)
+    }
+    e.mu.RUnlock()
+    for _, backend := range backends {
+        observability.UpdateCircuitBreakerState(backend, int(e.CircuitBreakerState(backend)))
+    }
+}
+
 func (e *Engine) RecordAffinity(spaceID, providerName string) {
     if e.sessionAffinity != nil {
         e.sessionAffinity.Record(spaceID, providerName)
@@ -252,6 +281,9 @@ func (e *Engine) RecordSuccess(backend string) {
     e.mu.RUnlock()
     if ok {
         b.RecordSuccess()
+        // Publish resulting state to Prometheus (#96): half_open->closed is a
+        // real transition the /metrics gauge must reflect.
+        observability.UpdateCircuitBreakerState(backend, int(b.State()))
     }
 }
 
@@ -262,6 +294,15 @@ func (e *Engine) RecordFailure(backend string) {
     e.mu.RUnlock()
     if ok {
         b.RecordFailure()
+        // Publish resulting state to Prometheus (#96): closed->open on failure
+        // threshold must reflect on the gauge, not stay 0.
+        state := b.State()
+        observability.UpdateCircuitBreakerState(backend, int(state))
+        if state == StateOpen {
+            // RecordFailure opened the breaker — count the implicit trip so the
+            // trips counter reflects all open transitions, not just force-Trip.
+            observability.RecordCircuitBreakerTrip(backend, "failure_threshold")
+        }
     }
 }
 
@@ -273,6 +314,8 @@ func (e *Engine) Trip(backend, reason string) {
     if ok {
         b.Trip(reason)
         slog.Warn("circuit breaker tripped", "backend", backend, "reason", reason)
+        observability.RecordCircuitBreakerTrip(backend, reason)
+        observability.UpdateCircuitBreakerState(backend, int(StateOpen))
     }
 }
 

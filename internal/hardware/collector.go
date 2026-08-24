@@ -7,6 +7,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/shirou/gopsutil/v3/mem"
 )
@@ -120,6 +121,21 @@ func (c *Collector) collect() {
     c.mu.Lock()
     c.latest = m
     c.mu.Unlock()
+
+    // Publish to Prometheus (#96): hw* gauges were declared but never set, so
+    // /metrics reported stale zeros while /stats JSON showed live values.
+    observability.UpdateHardwareMetrics(
+        m.MemoryUsedRatio,
+        m.SwapUsed, m.SwapPageInRate, m.SwapPageOutRate,
+        m.GPUDeviceUtilization, m.GPURendererUtilization, m.GPUTilerUtilization,
+        m.GPUInUseMemory, m.GPUAllocMemory,
+        m.MLXActiveMemory,
+        m.MLXModelsLoaded, m.MLXInferenceQueueDepth,
+    )
+    if collectErr != nil {
+        // RecordCollectionError was declared but never called (#96).
+        observability.RecordCollectionError("hardware_collect")
+    }
 }
 
 var memVirtualMemoryFn = mem.VirtualMemory

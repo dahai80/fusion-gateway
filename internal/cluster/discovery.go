@@ -18,6 +18,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
@@ -67,10 +68,12 @@ func (n *Node) InFlight() int64 {
 
 func (n *Node) IncrInFlight() {
     n.inFlight.Add(1)
+    observability.UpdateInFlight("cluster-"+n.ID, n.inFlight.Load())
 }
 
 func (n *Node) DecrInFlight() {
     n.inFlight.Add(-1)
+    observability.UpdateInFlight("cluster-"+n.ID, n.inFlight.Load())
 }
 
 func (n *Node) LastHealth() time.Time {
