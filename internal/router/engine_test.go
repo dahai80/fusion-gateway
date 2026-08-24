@@ -283,6 +283,10 @@ type mockClusterSelector struct {
     // platform-aware fields for D4 dispatch-by-platform tests
     platformNodes map[string]int
     platformNode  map[string]string
+    // model-aware fields for #95 model-aware cluster routing tests
+    modelNodes map[string]int
+    modelNode  map[string]string
+    modelErr   error
 }
 
 func (m *mockClusterSelector) HealthyNodes() int                 { return m.healthy }
@@ -308,6 +312,32 @@ func (m *mockClusterSelector) SelectNodeByPlatform(_, platform string) (string, 
     return m.nodeID, m.err
 }
 
+func (m *mockClusterSelector) HealthyNodesByModel(model string) int {
+    if model == "" {
+        return m.healthy
+    }
+    if m.modelNodes != nil {
+        if c, ok := m.modelNodes[model]; ok {
+            return c
+        }
+        return 0
+    }
+    return m.healthy
+}
+
+func (m *mockClusterSelector) SelectNodeByModel(_, model string) (string, error) {
+    if model == "" {
+        return m.nodeID, m.err
+    }
+    if m.modelNode != nil {
+        if id, ok := m.modelNode[model]; ok {
+            return id, m.modelErr
+        }
+        return "", fmt.Errorf("no healthy node serving model %q", model)
+    }
+    return m.nodeID, m.err
+}
+
 func TestDecide_ClusterFallback(t *testing.T) {
     cfg := defaultTestSnapshot()
     cfg.Config.Cluster.Enabled = true
@@ -326,6 +356,55 @@ func TestDecide_ClusterFallback(t *testing.T) {
     }
     if dec.NodeID != "node-1" {
         t.Errorf("expected node-1, got %s", dec.NodeID)
+    }
+}
+
+func TestDecide_ClusterModelAware(t *testing.T) {
+    t.Log("testing cluster routes to node serving req.Model (#95)")
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("local", "test trip")
+
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:  2,
+        nodeID:   "node-1",
+        modelNode: map[string]string{"served-model": "node-serving"},
+    })
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "served-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != ClusterBackend {
+        t.Errorf("expected cluster, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.NodeID != "node-serving" {
+        t.Errorf("expected node-serving (serves served-model), got %s", dec.NodeID)
+    }
+}
+
+func TestDecide_ClusterNoModelMatch_CloudFallback(t *testing.T) {
+    t.Log("testing cluster falls through to cloud when no node serves req.Model (#95)")
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("local", "test trip")
+
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:  2,
+        nodeID:   "node-1",
+        modelNode: map[string]string{"served-model": "node-1"},
+    })
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "unserved-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when no cluster node serves model, got %s: %s", dec.Backend, dec.Reason)
     }
 }
 

@@ -416,6 +416,106 @@ func TestNode_InFlight_PublishesMetrics(t *testing.T) {
     }
 }
 
+func TestDiscovery_SelectNodeByModel_PrefersServingNode(t *testing.T) {
+    t.Log("testing SelectNodeByModel prefers a node serving the model (#95)")
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-2", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+        config.ClusterNodeConfig{ID: "node-3", Address: "http://localhost:9003", GPU: "M3", MemoryGB: 64},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    for _, id := range []string{"node-1", "node-2", "node-3"} {
+        n, _ := d.GetNode(id)
+        n.markHealthy()
+    }
+
+    // only node-2 serves qwen3
+    n2, _ := d.GetNode("node-2")
+    n2.mu.Lock()
+    n2.models = []string{"qwen3"}
+    n2.mu.Unlock()
+
+    selected, err := d.SelectNodeByModel("least-connections", "qwen3")
+    if err != nil {
+        t.Fatalf("expected node-2, got error: %v", err)
+    }
+    if selected.ID != "node-2" {
+        t.Errorf("expected node-2 (serves qwen3), got %s", selected.ID)
+    }
+
+    // no node serves absent-model
+    if _, err := d.SelectNodeByModel("least-connections", "absent-model"); err == nil {
+        t.Error("expected error when no node serves absent-model")
+    }
+}
+
+func TestDiscovery_SelectNodeByModel_EmptyModel_Legacy(t *testing.T) {
+    t.Log("testing empty model falls back to model-agnostic SelectNode (#95)")
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-2", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n2, _ := d.GetNode("node-2")
+    n1.markHealthy()
+    n2.markHealthy()
+    n1.IncrInFlight()
+
+    selected, err := d.SelectNodeByModel("least-connections", "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    // empty model = legacy SelectNode (any healthy node, least-connections → node-2)
+    if selected.ID != "node-2" {
+        t.Errorf("expected node-2 (legacy least-connections), got %s", selected.ID)
+    }
+}
+
+func TestDiscovery_FetchModels_PopulatesNodeModels(t *testing.T) {
+    t.Log("testing fetchModels GET /v1/models populates node.models (#95)")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/v1/models" {
+            http.NotFound(w, r)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.Write([]byte(`[{"id":"qwen3","object":"model"},{"id":"llama3","object":"model"}]`))
+    }))
+    defer srv.Close()
+
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: srv.URL, GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+    d.fetchModels(n1)
+
+    got := n1.Models()
+    if len(got) != 2 {
+        t.Fatalf("expected 2 models, got %d: %v", len(got), got)
+    }
+    want := map[string]bool{"qwen3": true, "llama3": true}
+    for _, m := range got {
+        if !want[m] {
+            t.Errorf("unexpected model %q", m)
+        }
+    }
+    if !n1.servesModel("qwen3") {
+        t.Error("expected servesModel(qwen3) true after fetchModels")
+    }
+    if n1.servesModel("absent") {
+        t.Error("expected servesModel(absent) false")
+    }
+}
+
 func TestNode_LastHealth(t *testing.T) {
     n := &Node{ID: "test", state: NodeStateUnhealthy}
     if !n.LastHealth().IsZero() {
