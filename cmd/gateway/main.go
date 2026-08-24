@@ -317,6 +317,28 @@ func run(configPath string) error {
 		srv.SetClusterDiscovery(discovery)
 	}
 
+	// Metrics sync loop (#96): publish live state to Prometheus gauges that were
+	// declared but never set — circuit_breaker_state (catches lazy half_open
+	// transitions after Timeout, missed by per-transition publishes) and
+	// in_flight_requests for the local backend. Cluster-node in_flight is
+	// published at Incr/Decr time; hw* at collector.collect() time. This loop
+	// runs on a 5s cadence so a missed transition is corrected within one tick.
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	defer metricsCancel()
+	safeGo("metrics_sync", func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				routerEngine.PublishBreakerStates()
+				observability.UpdateInFlight("local", routerEngine.LocalInFlight())
+			case <-metricsCtx.Done():
+				return
+			}
+		}
+	})
+
 	config.OnReload(func(old, newSnap *config.ConfigSnapshot) {
 		routerEngine.DrainAndApply(newSnap)
 		observability.UpdateConfigVersion(newSnap.Version)

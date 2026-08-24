@@ -6,11 +6,13 @@ import (
     "net/http"
     "net/http/httptest"
     "runtime"
+    "strings"
     "sync/atomic"
     "testing"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -1154,6 +1156,77 @@ func TestCollect_IOKitError_SetsCollectErr(t *testing.T) {
         t.Fatal("expected CollectionError when iokit fails")
     }
     t.Logf("CollectionError: %v", m.CollectionError)
+}
+
+func TestCollect_PublishesHardwareMetrics(t *testing.T) {
+    t.Log("testing collect publishes hw* gauges to Prometheus (#96)")
+    origFn := collectGopsutilFn
+    collectGopsutilFn = func(c *Collector, m *HardwareMetrics) error {
+        m.MemoryUsedRatio = 0.42
+        m.SwapUsed = 2147483648
+        m.MLXActiveMemory = 1073741824
+        m.MLXModelsLoaded = 2
+        m.MLXInferenceQueueDepth = 3
+        return nil
+    }
+    defer func() { collectGopsutilFn = origFn }()
+
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 1 * time.Second,
+        Gopsutil:        config.GopsutilConfig{Enabled: true},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: false},
+        Swap:            config.SwapConfig{PageRateSampling: false},
+    }
+    c := NewCollector(cfg)
+    c.collect()
+
+    req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec, req)
+    body := rec.Body.String()
+    checks := []string{
+        `fusion_gateway_hw_memory_used_ratio 0.42`,
+        `fusion_gateway_hw_swap_used_bytes 2.147483648e+09`,
+        `fusion_gateway_hw_mlx_active_memory_bytes 1.073741824e+09`,
+        `fusion_gateway_hw_mlx_models_loaded 2`,
+        `fusion_gateway_hw_mlx_inference_queue_depth 3`,
+    }
+    for _, want := range checks {
+        if !strings.Contains(body, want) {
+            t.Errorf("metrics missing %s", want)
+        }
+    }
+}
+
+func TestCollect_PublishesCollectionError(t *testing.T) {
+    t.Log("testing collect records hw_collection_errors_total on failure (#96)")
+    origFn := collectGopsutilFn
+    collectGopsutilFn = func(c *Collector, m *HardwareMetrics) error {
+        return fmt.Errorf("gopsutil unavailable")
+    }
+    defer func() { collectGopsutilFn = origFn }()
+
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 1 * time.Second,
+        Gopsutil:        config.GopsutilConfig{Enabled: true},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: false},
+        Swap:            config.SwapConfig{PageRateSampling: false},
+    }
+    c := NewCollector(cfg)
+    c.collect()
+
+    req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec, req)
+    body := rec.Body.String()
+    want := `fusion_gateway_hw_collection_errors_total{source="hardware_collect"}`
+    if !strings.Contains(body, want) {
+        t.Errorf("metrics missing %s\n got: %s", want, body)
+    }
 }
 
 func TestCollect_MLXError_DoesNotSetCollectErr(t *testing.T) {

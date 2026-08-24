@@ -5,11 +5,13 @@ import (
     "encoding/json"
     "net/http"
     "net/http/httptest"
+    "strings"
     "sync/atomic"
     "testing"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
 )
 
 func makeClusterCfg(enabled bool, nodes ...config.ClusterNodeConfig) config.ClusterConfig {
@@ -386,6 +388,31 @@ func TestNode_InFlight(t *testing.T) {
     n.DecrInFlight()
     if n.InFlight() != 1 {
         t.Errorf("expected 1 in-flight, got %d", n.InFlight())
+    }
+}
+
+func TestNode_InFlight_PublishesMetrics(t *testing.T) {
+    t.Log("testing IncrInFlight/DecrInFlight publish to in_flight_requests gauge (#96)")
+    n := &Node{ID: "metric-node", state: NodeStateHealthy}
+    n.IncrInFlight()
+    n.IncrInFlight()
+
+    req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec, req)
+    body := rec.Body.String()
+    want := `fusion_gateway_in_flight_requests{backend="cluster-metric-node"} 2`
+    if !strings.Contains(body, want) {
+        t.Errorf("metrics missing %s\n got: %s", want, body)
+    }
+
+    n.DecrInFlight()
+    rec2 := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec2, req)
+    body2 := rec2.Body.String()
+    want2 := `fusion_gateway_in_flight_requests{backend="cluster-metric-node"} 1`
+    if !strings.Contains(body2, want2) {
+        t.Errorf("metrics missing %s\n got: %s", want2, body2)
     }
 }
 
