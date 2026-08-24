@@ -70,6 +70,13 @@ type ClusterSelector interface {
     // SelectNodeByPlatform selects a healthy node on the given platform.
     // Empty platform falls back to platform-agnostic selection.
     SelectNodeByPlatform(strategy, platform string) (nodeID string, err error)
+    // HealthyNodesByModel returns healthy node count that serve the given
+    // model (model-aware cluster routing, issue #95). Empty model = all nodes.
+    HealthyNodesByModel(model string) int
+    // SelectNodeByModel selects a healthy node that serves the given model.
+    // Empty model falls back to platform-agnostic selection. Error when no
+    // healthy node serves the model (caller falls through to cloud).
+    SelectNodeByModel(strategy, model string) (nodeID string, err error)
 }
 
 type Engine struct {
@@ -340,9 +347,9 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // Fast path: embedding/rerank request type routing
     switch req.Type {
     case RequestTypeEmbedding:
-        return e.decideEmbeddingLocked(ctx, cfg)
+        return e.decideEmbeddingLocked(ctx, cfg, req.Model)
     case RequestTypeRerank:
-        return e.decideRerankLocked(ctx, cfg)
+        return e.decideRerankLocked(ctx, cfg, req.Model)
     }
 
     // Mode fast-path: explicit routing mode overrides all other rules
@@ -352,7 +359,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         slog.Info("routing mode: local, forcing all requests to local backend")
         return &RouteDecision{Backend: LocalBackend, Reason: "mode_local"}
     case "cloud":
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         slog.Info("routing mode: cloud, forcing all requests to cloud backend")
@@ -371,7 +378,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
 
     // P0: Circuit breaker check — local
     if e.breakers["local"].State() == StateOpen {
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "circuit_breaker_open"}
@@ -398,7 +405,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     if hwMetrics.CollectionError != nil && cfg.Config.Hardware.CollectionErrorProtection {
         slog.Error("hardware metrics collection error, refusing local routing",
             "error", hwMetrics.CollectionError)
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "metrics_collection_error"}
@@ -407,7 +414,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // P1: System memory overload
     if hwMetrics.MemoryUsedRatio > cfg.Config.Routing.LocalPriority.MaxSystemMemoryRatio {
         *trips = append(*trips, "memory_overload")
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "memory_overload"}
@@ -417,7 +424,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     if hwMetrics.MLXActiveMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         mlxRatio := float64(hwMetrics.MLXActiveMemory) / float64(hwMetrics.GPUInUseMemory)
         if mlxRatio > cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio {
-            if decision := e.tryClusterLocked(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "mlx_memory_overload"}
@@ -428,7 +435,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     swapThreshold := cfg.Config.Routing.LocalPriority.SwapPageRateThreshold
     if hwMetrics.SwapPageInRate > swapThreshold || hwMetrics.SwapPageOutRate > swapThreshold {
         *trips = append(*trips, "swap_thrashing")
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "swap_thrashing"}
@@ -438,7 +445,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     if hwMetrics.GPUAllocMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         gpuAvail := hwMetrics.GPUAllocMemory - hwMetrics.GPUInUseMemory
         if gpuAvail < uint64(float64(hwMetrics.GPUAllocMemory)*0.2) {
-            if decision := e.tryClusterLocked(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "gpu_memory_low"}
@@ -447,7 +454,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
 
     // P3: Local not ready
     if !e.localReady {
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"}
@@ -559,7 +566,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // P5: Concurrent limit
     maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
     if maxConcurrent > 0 && e.localInFlight() >= int64(maxConcurrent) {
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "concurrent_limit"}
@@ -578,7 +585,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                     return &RouteDecision{Backend: LocalBackend, Reason: "context_window_fallback:" + fallback}
                 }
             }
-            if decision := e.tryClusterLocked(cfg); decision != nil {
+            if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
                 return decision
             }
             return &RouteDecision{Backend: CloudBackend, Reason: "model_not_available_locally"}
@@ -589,7 +596,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     return &RouteDecision{Backend: LocalBackend, Reason: "local_priority"}
 }
 
-func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSnapshot, model string) *RouteDecision {
     // Mode fast-path for embedding
     mode := cfg.Config.Routing.Mode
     switch mode {
@@ -597,7 +604,7 @@ func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSn
         slog.Info("routing mode: local, forcing embedding to local backend")
         return &RouteDecision{Backend: LocalBackend, Reason: "mode_local:embedding"}
     case "cloud":
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, model); decision != nil {
             return decision
         }
         slog.Info("routing mode: cloud, forcing embedding to cloud backend")
@@ -608,7 +615,7 @@ func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSn
 
     // Embedding: local-first if breaker closed + local ready
     if e.breakers["local"].State() == StateOpen || !e.localReady {
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, model); decision != nil {
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "embedding_local_unavailable"}
@@ -616,7 +623,7 @@ func (e *Engine) decideEmbeddingLocked(ctx context.Context, cfg *config.ConfigSn
     return &RouteDecision{Backend: LocalBackend, Reason: "embedding_local_priority"}
 }
 
-func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnapshot, model string) *RouteDecision {
     // Mode fast-path for rerank
     mode := cfg.Config.Routing.Mode
     switch mode {
@@ -624,7 +631,7 @@ func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnaps
         slog.Info("routing mode: local, forcing rerank to local backend")
         return &RouteDecision{Backend: LocalBackend, Reason: "mode_local:rerank"}
     case "cloud":
-        if decision := e.tryClusterLocked(cfg); decision != nil {
+        if decision := e.tryClusterLocked(cfg, model); decision != nil {
             return decision
         }
         slog.Info("routing mode: cloud, forcing rerank to cloud backend")
@@ -644,7 +651,7 @@ func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnaps
         }
     }
 
-    if decision := e.tryClusterLocked(cfg); decision != nil {
+    if decision := e.tryClusterLocked(cfg, model); decision != nil {
         return decision
     }
     return &RouteDecision{Backend: CloudBackend, Reason: "rerank_cloud_default"}
@@ -659,7 +666,7 @@ func isRerankModel(model string) bool {
     return false
 }
 
-func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot) *RouteDecision {
+func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string) *RouteDecision {
     if e.cluster == nil || !cfg.Config.Cluster.Enabled {
         return nil
     }
@@ -679,13 +686,15 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot) *RouteDecision {
         strategy = "least-connections"
     }
 
-    nodeID, err := e.cluster.SelectNode(strategy)
+    nodeID, err := e.cluster.SelectNodeByModel(strategy, model)
     if err != nil {
-        slog.Warn("cluster node selection failed", "error", err)
+        slog.Debug("cluster has no node serving model, falling back to cloud",
+            "model", model, "strategy", strategy)
         return nil
     }
 
-    slog.Info("routing to cluster node", "node_id", nodeID, "strategy", strategy)
+    slog.Info("routing to cluster node",
+        "node_id", nodeID, "strategy", strategy, "model", model)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
 }
 

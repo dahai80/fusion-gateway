@@ -17,6 +17,7 @@ import (
     "sync/atomic"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
@@ -47,6 +48,35 @@ type Node struct {
     lastHealth    time.Time
     inFlight      atomic.Int64
     remoteMetrics NodeRemoteMetrics
+    // models is the per-node model registry polled from GET /v1/models
+    // (#95). Empty when the node hasn't reported or doesn't implement
+    // /v1/models — such a node is never selected by model (cloud fallback).
+    models []string
+}
+
+// Models returns a snapshot of the node's served-model list (#95).
+// Copy-under-lock so callers may iterate without mutating the live slice.
+func (n *Node) Models() []string {
+    n.mu.RLock()
+    defer n.mu.RUnlock()
+    out := make([]string, len(n.models))
+    copy(out, n.models)
+    return out
+}
+
+// servesModel reports whether model is in the node's registry (#95).
+func (n *Node) servesModel(model string) bool {
+    if model == "" {
+        return true
+    }
+    n.mu.RLock()
+    defer n.mu.RUnlock()
+    for _, m := range n.models {
+        if m == model {
+            return true
+        }
+    }
+    return false
 }
 
 type NodeRemoteMetrics struct {
@@ -400,6 +430,7 @@ func (d *Discovery) checkNode(node *Node) {
     if resp.StatusCode == http.StatusOK {
         node.markHealthy()
         d.fetchRemoteMetrics(node)
+        d.fetchModels(node)
     } else {
         slog.Warn("cluster node returned non-200", "node_id", node.ID, "status", resp.StatusCode)
         node.markUnhealthy()
@@ -460,6 +491,58 @@ func (d *Discovery) fetchRemoteMetrics(node *Node) {
         "node_id", node.ID,
         "mem_ratio", statusResp.Hardware.MemoryUsedRatio,
         "queue_depth", statusResp.Backends.FusionMLX.QueueDepth,
+    )
+}
+
+// fetchModels polls the node's GET /v1/models to build the per-node model
+// registry (#95). Non-fatal: a node that doesn't implement /v1/models or
+// returns an error keeps an empty registry and is never selected by model
+// (cloud fallback). Runs on every health-check tick alongside
+// fetchRemoteMetrics.
+func (d *Discovery) fetchModels(node *Node) {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.Address+"/v1/models", nil)
+    if err != nil {
+        slog.Debug("cluster models: create request failed", "node_id", node.ID, "error", err)
+        return
+    }
+
+    resp, err := d.client.Do(req)
+    if err != nil {
+        slog.Debug("cluster models fetch failed", "node_id", node.ID, "error", err)
+        return
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        _, _ = io.Copy(io.Discard, resp.Body)
+        slog.Debug("cluster models: non-200 status", "node_id", node.ID, "status", resp.StatusCode)
+        return
+    }
+
+    var models []adapter.ModelInfo
+    if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+        _, _ = io.Copy(io.Discard, resp.Body)
+        slog.Debug("cluster models decode failed", "node_id", node.ID, "error", err)
+        return
+    }
+
+    ids := make([]string, 0, len(models))
+    for _, m := range models {
+        if m.ID != "" {
+            ids = append(ids, m.ID)
+        }
+    }
+
+    node.mu.Lock()
+    node.models = ids
+    node.mu.Unlock()
+
+    slog.Debug("cluster models updated",
+        "node_id", node.ID,
+        "model_count", len(ids),
     )
 }
 
@@ -539,6 +622,67 @@ func (d *Discovery) SelectNodeByPlatform(strategy, platform string) (*Node, erro
     default:
         return d.selectLeastConnections(healthy), nil
     }
+}
+
+// HealthyNodesByModel returns the count of healthy nodes whose model registry
+// contains the given model. Empty model matches all healthy nodes (legacy
+// behavior). Model-aware cluster routing (#95).
+func (d *Discovery) HealthyNodesByModel(model string) int {
+    if model == "" {
+        return d.HealthyNodes()
+    }
+    d.mu.RLock()
+    defer d.mu.RUnlock()
+    count := 0
+    for _, n := range d.nodes {
+        if n.State() == NodeStateHealthy && n.servesModel(model) {
+            count++
+        }
+    }
+    return count
+}
+
+// SelectNodeByModel selects a healthy node that serves the given model using
+// the configured strategy. Empty model falls back to platform-agnostic
+// SelectNode. Model-aware cluster routing (#95) — prevents the upstream 404
+// when a selected node doesn't serve the requested model.
+func (d *Discovery) SelectNodeByModel(strategy, model string) (*Node, error) {
+    if model == "" {
+        return d.SelectNode(strategy)
+    }
+    d.mu.RLock()
+    var healthy []*Node
+    for _, n := range d.nodes {
+        if n.State() == NodeStateHealthy && n.servesModel(model) {
+            healthy = append(healthy, n)
+        }
+    }
+    d.mu.RUnlock()
+
+    if len(healthy) == 0 {
+        return nil, fmt.Errorf("no healthy cluster nodes serving model %q", model)
+    }
+
+    switch strategy {
+    case "least-connections":
+        return d.selectLeastConnections(healthy), nil
+    case "hardware-aware":
+        return d.selectHardwareAware(healthy), nil
+    case "round-robin":
+        return d.selectRoundRobin(healthy), nil
+    default:
+        return d.selectLeastConnections(healthy), nil
+    }
+}
+
+// SelectNodeIDByModel wraps SelectNodeByModel, returning the node ID string
+// for the router.ClusterSelector interface (#95).
+func (d *Discovery) SelectNodeIDByModel(strategy, model string) (string, error) {
+    node, err := d.SelectNodeByModel(strategy, model)
+    if err != nil {
+        return "", err
+    }
+    return node.ID, nil
 }
 
 func (d *Discovery) AllNodes() []*Node {
@@ -666,6 +810,14 @@ func (a *ClusterSelectorAdapter) SelectNodeByPlatform(strategy, platform string)
         return "", err
     }
     return node.ID, nil
+}
+
+func (a *ClusterSelectorAdapter) HealthyNodesByModel(model string) int {
+    return a.discovery.HealthyNodesByModel(model)
+}
+
+func (a *ClusterSelectorAdapter) SelectNodeByModel(strategy, model string) (string, error) {
+    return a.discovery.SelectNodeIDByModel(strategy, model)
 }
 
 func (d *Discovery) selectRoundRobin(nodes []*Node) *Node {
