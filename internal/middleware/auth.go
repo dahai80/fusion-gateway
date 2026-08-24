@@ -111,6 +111,7 @@ func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool
         RPM:             entry.RPM,
         TPM:             entry.TPM,
         BudgetLimit:     entry.BudgetLimit,
+        DailyBudgetLimit: entry.DailyBudgetLimit,
     }
     if entry.ExpiresAt != nil && !entry.ExpiresAt.IsZero() {
         kc.ExpiresAt = entry.ExpiresAt.Format(time.RFC3339)

@@ -827,6 +827,81 @@ func TestHandleKeys(t *testing.T) {
         }
     })
 
+    t.Run("create_key_negative_daily_budget", func(t *testing.T) {
+        body := map[string]interface{}{
+            "name":         "bad-key-daily",
+            "daily_budget": -5.0,
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/keys", body)
+        rec := httptest.NewRecorder()
+        h.handleKeys(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("create_key_with_daily_budget", func(t *testing.T) {
+        body := map[string]interface{}{
+            "name":         "daily-key",
+            "status":       "active",
+            "budget":       50.0,
+            "daily_budget": 10.0,
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/keys", body)
+        rec := httptest.NewRecorder()
+        h.handleKeys(rec, req)
+        if rec.Code != http.StatusCreated {
+            t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        var created map[string]interface{}
+        if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+            t.Fatalf("failed to decode created key: %v", err)
+        }
+        // verify the key landed in the store with daily_budget_limit set
+        k, err := ms.GetKey("daily-key")
+        if err != nil {
+            t.Fatalf("key not found in store: %v", err)
+        }
+        if k.DailyBudgetLimit != 10.0 {
+            t.Fatalf("expected daily_budget_limit=10, got %f", k.DailyBudgetLimit)
+        }
+        if k.BudgetLimit != 50.0 {
+            t.Fatalf("expected budget_limit=50, got %f", k.BudgetLimit)
+        }
+    })
+
+    t.Run("list_keys_reflects_daily_fields", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/keys", nil)
+        rec := httptest.NewRecorder()
+        h.handleKeys(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        arr := decodeResponseArray(t, rec)
+        var found bool
+        for _, raw := range arr {
+            item, ok := raw.(map[string]interface{})
+            if !ok {
+                continue
+            }
+            if name, _ := item["name"].(string); name == "daily-key" {
+                found = true
+                if db, _ := item["daily_budget"].(float64); db != 10.0 {
+                    t.Fatalf("expected daily_budget=10, got %v", item["daily_budget"])
+                }
+                if _, ok := item["daily_used"]; !ok {
+                    t.Fatalf("daily_used field missing from key list response")
+                }
+                if _, ok := item["daily_date"]; !ok {
+                    t.Fatalf("daily_date field missing from key list response")
+                }
+            }
+        }
+        if !found {
+            t.Fatalf("daily-key not found in list")
+        }
+    })
+
     t.Run("create_key_duplicate_name", func(t *testing.T) {
         body := map[string]interface{}{
             "name":   "test-key",

@@ -67,9 +67,10 @@ type AuthKeyConfig struct {
     ModelModules    []string          `mapstructure:"model_modules"`
     RPM             int               `mapstructure:"rpm"`
     TPM             int               `mapstructure:"tpm"`
-    ExpiresAt       string            `mapstructure:"expires_at"`
-    BudgetLimit     float64           `mapstructure:"budget_limit"`
-    Metadata        map[string]string `mapstructure:"metadata"`
+    ExpiresAt        string            `mapstructure:"expires_at"`
+    BudgetLimit      float64           `mapstructure:"budget_limit"`
+    DailyBudgetLimit float64           `mapstructure:"daily_budget_limit"`
+    Metadata         map[string]string `mapstructure:"metadata"`
 }
 
 type AuthConfig struct {
@@ -790,6 +791,16 @@ func validate(cfg *Config) error {
     for _, node := range cfg.Cluster.Nodes {
         if node.Address != "" && !strings.HasPrefix(node.Address, "http://") && !strings.HasPrefix(node.Address, "https://") {
             return fmt.Errorf("cluster node %q address must start with http:// or https://, got %q", node.ID, node.Address)
+        }
+    }
+
+    // #87: validate auth key budgets non-negative
+    for _, k := range cfg.Auth.APIKeys {
+        if k.BudgetLimit < 0 {
+            return fmt.Errorf("auth key %q budget_limit must be non-negative, got %f", k.Name, k.BudgetLimit)
+        }
+        if k.DailyBudgetLimit < 0 {
+            return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
         }
     }
 

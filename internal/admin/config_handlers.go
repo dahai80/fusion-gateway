@@ -1635,16 +1635,17 @@ func (h *Handler) handleValidationConfig(w http.ResponseWriter, r *http.Request)
 // ─── Auth Config ──────────────────────────────────────────────
 
 type authKeyResponse struct {
-    Key             string            `json:"key"`
-    Name            string            `json:"name"`
-    RPM             int               `json:"rpm"`
-    TPM             int               `json:"tpm"`
-    AllowedModels   []string          `json:"allowed_models"`
-    AllowedBackends []string          `json:"allowed_backends"`
-    ModelModules    []string          `json:"model_modules"`
-    ExpiresAt       string            `json:"expires_at"`
-    BudgetLimit     float64           `json:"budget_limit"`
-    Metadata        map[string]string `json:"metadata"`
+    Key              string            `json:"key"`
+    Name             string            `json:"name"`
+    RPM              int               `json:"rpm"`
+    TPM              int               `json:"tpm"`
+    AllowedModels    []string          `json:"allowed_models"`
+    AllowedBackends  []string          `json:"allowed_backends"`
+    ModelModules     []string          `json:"model_modules"`
+    ExpiresAt        string            `json:"expires_at"`
+    BudgetLimit      float64           `json:"budget_limit"`
+    DailyBudgetLimit float64           `json:"daily_budget_limit"`
+    Metadata         map[string]string `json:"metadata"`
 }
 
 type authConfigResponse struct {
@@ -1673,6 +1674,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                 AllowedModels: k.AllowedModels, AllowedBackends: k.AllowedBackends,
                 ModelModules: k.ModelModules,
                 ExpiresAt: k.ExpiresAt, BudgetLimit: k.BudgetLimit,
+                DailyBudgetLimit: k.DailyBudgetLimit,
                 Metadata: k.Metadata,
             })
         }
@@ -1700,6 +1702,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                         "allowed_backends": stringSliceToInterface(k.AllowedBackends),
                         "model_modules": stringSliceToInterface(k.ModelModules),
                         "expires_at": k.ExpiresAt, "budget_limit": k.BudgetLimit,
+                        "daily_budget_limit": k.DailyBudgetLimit,
                     }
                     if k.Key != "" && !isMaskedValue(k.Key) {
                         entry["key"] = k.Key
@@ -1727,6 +1730,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                         AllowedBackends: interfaceToStringSlice(m["allowed_backends"]),
                         ModelModules: interfaceToStringSlice(m["model_modules"]),
                         ExpiresAt: getString(m, "expires_at"), BudgetLimit: getFloat64(m, "budget_limit"),
+                        DailyBudgetLimit: getFloat64(m, "daily_budget_limit"),
                         Metadata: interfaceToStringMap(m["metadata"]),
                     })
                 }
