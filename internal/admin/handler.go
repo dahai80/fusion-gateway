@@ -126,14 +126,15 @@ func extractBearerToken(r *http.Request) string {
 }
 
 type createKeyRequest struct {
-    Name    string        `json:"name"`
-    Status  interface{}   `json:"status"`
-    Models  []string      `json:"models"`
-    Modules []string      `json:"modules"`
-    Quota   float64       `json:"quota"`
-    RPM     int           `json:"rpm"`
-    TPM     int           `json:"tpm"`
-    Budget  float64       `json:"budget"`
+    Name        string      `json:"name"`
+    Status      interface{} `json:"status"`
+    Models      []string    `json:"models"`
+    Modules     []string    `json:"modules"`
+    Quota       float64     `json:"quota"`
+    RPM         int         `json:"rpm"`
+    TPM         int         `json:"tpm"`
+    Budget      float64     `json:"budget"`
+    DailyBudget float64     `json:"daily_budget"`
 }
 
 type createChannelRequest struct {
@@ -173,15 +174,18 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
         result := make([]keyResponse, 0, len(keys))
         for _, k := range keys {
             result = append(result, keyResponse{
-                ID:        k.Name,
-                Key:       k.KeyPrefix,
-                Name:      k.Name,
-                Status:    statusToNumber(k.Status),
-                Models:    k.AllowedModels,
-                Modules:   k.ModelModules,
-                Quota:     k.QuotaLimit,
-                UsedQuota: k.QuotaUsed,
-                CreatedAt: k.CreatedAt.Format(time.RFC3339),
+                ID:          k.Name,
+                Key:         k.KeyPrefix,
+                Name:        k.Name,
+                Status:      statusToNumber(k.Status),
+                Models:      k.AllowedModels,
+                Modules:     k.ModelModules,
+                Quota:       k.QuotaLimit,
+                UsedQuota:   k.QuotaUsed,
+                DailyBudget: k.DailyBudgetLimit,
+                DailyUsed:   k.DailyUsed,
+                DailyDate:   k.DailyDate,
+                CreatedAt:   k.CreatedAt.Format(time.RFC3339),
             })
         }
         writeJSON(w, http.StatusOK, result)
@@ -193,14 +197,15 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
             return
         }
         key := store.APIKeyEntry{
-            Name:            req.Name,
-            Status:          normalizeStatus(req.Status),
-            AllowedModels:   req.Models,
-            ModelModules:    req.Modules,
-            QuotaLimit:      req.Quota,
-            RPM:             req.RPM,
-            TPM:             req.TPM,
-            BudgetLimit:     req.Budget,
+            Name:             req.Name,
+            Status:           normalizeStatus(req.Status),
+            AllowedModels:    req.Models,
+            ModelModules:     req.Modules,
+            QuotaLimit:       req.Quota,
+            RPM:              req.RPM,
+            TPM:              req.TPM,
+            BudgetLimit:      req.Budget,
+            DailyBudgetLimit: req.DailyBudget,
         }
         // V1 fix: validate key fields
         if key.Name == "" {
@@ -221,6 +226,10 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
         }
         if key.BudgetLimit < 0 {
             writeError(w, http.StatusBadRequest, "budget_limit must be non-negative")
+            return
+        }
+        if key.DailyBudgetLimit < 0 {
+            writeError(w, http.StatusBadRequest, "daily_budget_limit must be non-negative")
             return
         }
         rawKey, err := generateAPIKey()
@@ -276,14 +285,15 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             return
         }
         key := store.APIKeyEntry{
-            Name:          name,
-            Status:        normalizeStatus(req.Status),
-            AllowedModels: req.Models,
-            ModelModules:  req.Modules,
-            QuotaLimit:    req.Quota,
-            RPM:           req.RPM,
-            TPM:           req.TPM,
-            BudgetLimit:   req.Budget,
+            Name:             name,
+            Status:           normalizeStatus(req.Status),
+            AllowedModels:    req.Models,
+            ModelModules:     req.Modules,
+            QuotaLimit:       req.Quota,
+            RPM:              req.RPM,
+            TPM:              req.TPM,
+            BudgetLimit:      req.Budget,
+            DailyBudgetLimit: req.DailyBudget,
         }
         if err := h.store.UpdateKey(&key); err != nil {
             writeError(w, http.StatusNotFound, err.Error())
@@ -845,15 +855,18 @@ func (h *Handler) handleProfitStats(w http.ResponseWriter, r *http.Request) {
 // Frontend response adapters — map backend fields to frontend-expected names
 
 type keyResponse struct {
-    ID        string   `json:"id"`
-    Key       string   `json:"key"`
-    Name      string   `json:"name"`
-    Status    int      `json:"status"`
-    Models    []string `json:"models"`
-    Modules   []string `json:"modules"`
-    Quota     float64  `json:"quota"`
-    UsedQuota float64  `json:"used_quota"`
-    CreatedAt string   `json:"created_at"`
+    ID          string   `json:"id"`
+    Key         string   `json:"key"`
+    Name        string   `json:"name"`
+    Status      int      `json:"status"`
+    Models      []string `json:"models"`
+    Modules     []string `json:"modules"`
+    Quota       float64  `json:"quota"`
+    UsedQuota   float64  `json:"used_quota"`
+    DailyBudget float64  `json:"daily_budget"`
+    DailyUsed   float64  `json:"daily_used"`
+    DailyDate   string   `json:"daily_date"`
+    CreatedAt   string   `json:"created_at"`
 }
 
 type channelResponse struct {

@@ -16,7 +16,7 @@ func BudgetBlock(st store.Store) func(http.Handler) http.Handler {
                 return
             }
 
-            if keyCfg.BudgetLimit <= 0 {
+            if keyCfg.BudgetLimit <= 0 && keyCfg.DailyBudgetLimit <= 0 {
                 next.ServeHTTP(w, r)
                 return
             }

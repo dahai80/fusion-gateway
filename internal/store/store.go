@@ -52,6 +52,9 @@ type APIKeyEntry struct {
     TPM             int               `json:"tpm"`
     ExpiresAt       *time.Time        `json:"expires_at"`
     BudgetLimit     float64           `json:"budget_limit"`
+    DailyBudgetLimit float64          `json:"daily_budget_limit"`
+    DailyUsed       float64           `json:"daily_used"`
+    DailyDate       string            `json:"daily_date"`
     AllowedBackends []string          `json:"allowed_backends"`
     ModelModules    []string          `json:"model_modules"`
     Metadata        map[string]string `json:"metadata"`
