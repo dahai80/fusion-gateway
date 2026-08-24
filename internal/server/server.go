@@ -2188,6 +2188,19 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
     streamCfg := s.cfg.Config.Routing.Stream
     resp, err := adapter.AggregateAnthropicStreamEvents(wdCtx, ch, streamCfg.IdleTimeout)
     if err != nil {
+        // Client canceled the non-stream request (parent ctx gone, not a
+        // watchdog trip — the idle watchdog cancels wdCtx only while the
+        // parent stays alive, see issue #69). A cancel is a request-level
+        // signal, not an upstream fault (issue #46/#90 class, non-stream
+        // variant). Don't log ERROR or write 502 to a dead pipe; headers
+        // are not committed yet on the non-stream path. errors.Is(err,
+        // context.Canceled) is ambiguous here because the idle watchdog
+        // branch also wraps context.Canceled — the parent-ctx check is
+        // deterministic.
+        if ctx.Err() != nil {
+            slog.Info("anthropic messages non-stream client canceled", "error", ctx.Err())
+            return
+        }
         s.writeMessagesError(w, err)
         return
     }
