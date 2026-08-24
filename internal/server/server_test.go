@@ -3709,6 +3709,79 @@ func TestHandleNonStreamAnthropicMessages_Error(t *testing.T) {
     slog.Info("TestHandleNonStreamAnthropicMessages_Error passed")
 }
 
+// stallStreamProvider is a MessagesProvider whose StreamMessages emits one
+// message_start then holds the channel open without closing it (a permanent
+// upstream stall with the connection still alive). This forces
+// AggregateAnthropicStreamEvents to select solely on ctx.Done() once the
+// client cancels — a deterministic client-cancel error, not the flaky race a
+// real httptest backend produces (the transport closes its channel at cancel
+// time, racing ctx.Done). Used by the #94 non-stream cancel regression.
+type stallStreamProvider struct{}
+
+func (stallStreamProvider) Messages(ctx context.Context, req *adapter.AnthropicRequest) (*adapter.AnthropicResponse, error) {
+    return nil, fmt.Errorf("stallStreamProvider: Messages not used")
+}
+
+func (stallStreamProvider) StreamMessages(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+    ch := make(chan adapter.AnthropicStreamEvent, 1)
+    ch <- adapter.AnthropicStreamEvent{Type: "message_start", Message: &adapter.AnthropicResponse{ID: "msg_stall"}}
+    // Never close(ch): the channel stays open so Aggregate blocks on the
+    // select until ctx.Done() fires. The goroutine returns immediately; the
+    // open channel is GC'd after the handler returns.
+    return ch, nil
+}
+
+// TestHandleNonStreamAnthropicMessages_ClientCancelSilent is the core regression
+// for issue #94: a client that cancels a non-stream /v1/messages request
+// mid-generation must NOT log ERROR + 502. The non-stream path forces an
+// internal stream + Aggregate; cancelling the parent ctx propagates to wdCtx
+// and Aggregate returns a cancel error (the stall provider keeps its channel
+// open, so the only ready case is ctx.Done() — deterministic). Pre-fix the
+// handler routed that error to writeMessagesError → ERROR log + 502 body to a
+// dead pipe. Post-fix the parent-ctx check (ctx.Err() != nil) treats it as
+// INFO + silent return.
+//
+// Asserts: nothing written to the response (rec.Code == 0, body empty). The
+// default IdleTimeout is 180s and the cancel lands at 150ms, so the idle
+// watchdog cannot race — this is purely a client cancel, not a watchdog trip
+// (the watchdog keeps the parent ctx alive, ctx.Err() == nil, and would still
+// 502 via writeMessagesError — that path is guarded by _Error above).
+func TestHandleNonStreamAnthropicMessages_ClientCancelSilent(t *testing.T) {
+    s := newTestServer()
+    var p adapter.MessagesProvider = stallStreamProvider{}
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: false}
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleNonStreamAnthropicMessages(ctx, rec, p, req)
+        close(done)
+    }()
+    time.Sleep(150 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("handleNonStreamAnthropicMessages hung after client cancel")
+    }
+
+    // httptest.ResponseRecorder defaults Code to 200 (Go 1.20+) even when
+    // nothing is written, so the body is the deterministic signal: a client
+    // cancel must write NO error body. Pre-fix the handler called
+    // writeMessagesError → http.Error writes a 502 body (Code=502); post-fix
+    // the parent-ctx branch returns before any write (Code stays 200, body
+    // empty). Asserting Code != 502 guards the no-error-write contract too.
+    if rec.Body.Len() != 0 {
+        t.Fatalf("client cancel must write no body, got %d bytes: %s", rec.Body.Len(), rec.Body.String())
+    }
+    if rec.Code == http.StatusBadGateway {
+        t.Fatalf("client cancel must not surface 502, got status %d", rec.Code)
+    }
+    slog.Info("TestHandleNonStreamAnthropicMessages_ClientCancelSilent passed", "code", rec.Code, "body_len", rec.Body.Len())
+}
+
 // --- handleStreamAnthropicMessages directly ---
 
 func TestHandleStreamAnthropicMessages(t *testing.T) {
