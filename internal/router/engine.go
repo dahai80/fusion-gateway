@@ -410,6 +410,36 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"}
     }
 
+    // P3.5: Local-exclusive model guard (issue #83)
+    // A model present in the local model set but absent from
+    // routing.fallback.model_mapping is local-exclusive: no cloud
+    // backend serves it, so a P4/P4.5 token/ratio cloud-divert would
+    // route it to a cloud that rejects the model name with 400
+    // ("Invalid model name ..."). Short-circuit to local before the
+    // token/ratio rules. P0-P2 hardware/breaker cloud-diverts stay
+    // upstream; under those, a local-exclusive 400 is a separate
+    // overload condition (rare). When model_mapping is disabled or
+    // empty, every model in the local set is treated as local-exclusive.
+    if localModels := e.localModels(); localModels != nil {
+        if localModels[req.Model] {
+            mapping := cfg.Config.Routing.Fallback.ModelMapping
+            if !cfg.Config.Routing.Fallback.Enabled || mapping == nil {
+                slog.Info("local-exclusive model, forcing local",
+                    "model", req.Model,
+                    "reason", "model_mapping disabled, cloud cannot serve",
+                )
+                return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
+            }
+            if _, mapped := mapping[req.Model]; !mapped {
+                slog.Info("local-exclusive model, forcing local",
+                    "model", req.Model,
+                    "reason", "not in model_mapping, cloud cannot serve",
+                )
+                return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
+            }
+        }
+    }
+
     // P4: Token budget exceeded
     budget, ok := tokenizer.BudgetFromContext(ctx)
     if !ok {
