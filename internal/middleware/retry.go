@@ -130,7 +130,8 @@ func isRetryableError(err error, codes []int) bool {
         strings.Contains(errStr, "timeout") ||
         strings.Contains(errStr, "deadline exceeded") ||
         strings.Contains(errStr, "EOF") ||
-        strings.Contains(errStr, "connection reset by peer") {
+        strings.Contains(errStr, "connection reset by peer") ||
+        strings.Contains(errStr, "use of closed network connection") {
         return true
     }
 

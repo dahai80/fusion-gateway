@@ -209,6 +209,12 @@ func TestIsRetryableError_ConnectionResetByPeer(t *testing.T) {
     }
 }
 
+func TestIsRetryableError_ClosedNetworkConnection(t *testing.T) {
+    if !isRetryableError(fmt.Errorf("anthropic stream messages failed: Post \"http://113.57.198.109:4000/litellm/v1/messages\": dial tcp 10.0.0.1:420->113.57.198.109:4000: use of closed network connection"), nil) {
+        t.Error("use of closed network connection (idle keep-alive conn closed by peer) should be retryable")
+    }
+}
+
 func TestIsRetryableError_DefaultCodes(t *testing.T) {
     if !isRetryableError(fmt.Errorf("server returned 502"), nil) {
         t.Error("502 should be retryable with default codes")
@@ -384,6 +390,34 @@ func TestRetryStreamMessages_RetriesOnEOF(t *testing.T) {
     }
     if ch == nil {
         t.Error("expected non-nil channel after successful retry on EOF")
+    }
+}
+
+func TestRetryStreamMessages_RetriesOnClosedNetworkConnection(t *testing.T) {
+    cfg := config.RetryConfig{
+        MaxRetries:           1,
+        InitialBackoff:       1 * time.Millisecond,
+        MaxBackoff:           5 * time.Millisecond,
+        RetryableStatusCodes: []int{429, 500, 502, 503},
+    }
+    calls := 0
+    fn := func(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+        calls++
+        if calls == 1 {
+            return nil, fmt.Errorf("anthropic stream messages failed: Post \"http://113.57.198.109:4000/litellm/v1/messages\": dial tcp 10.0.0.1:420->113.57.198.109:4000: use of closed network connection")
+        }
+        return closedStreamChan(), nil
+    }
+    wrapped := RetryStreamMessages(cfg, fn)
+    ch, err := wrapped(context.Background(), &adapter.AnthropicRequest{})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if calls != 2 {
+        t.Errorf("expected 2 calls (1 closed-conn + 1 success), got %d", calls)
+    }
+    if ch == nil {
+        t.Error("expected non-nil channel after successful retry on closed network connection")
     }
 }
 
