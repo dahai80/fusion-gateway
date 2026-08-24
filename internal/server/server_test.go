@@ -9312,3 +9312,74 @@ func TestHandleStreamMessages_KeepaliveDisabledBackwardCompat(t *testing.T) {
     }
     slog.Info("TestHandleStreamMessages_KeepaliveDisabledBackwardCompat passed")
 }
+
+func TestWriteChatFailedError_SurfacesUpstreamDetail(t *testing.T) {
+    t.Parallel()
+    rec := httptest.NewRecorder()
+    upstreamErr := errors.New(`chat returned status 400: {"error":{"message":"Invalid model name passed in model=qwen3.5-9b"}}`)
+    writeChatFailedError(rec, "Chat failed", upstreamErr)
+
+    if rec.Code != http.StatusBadGateway {
+        t.Fatalf("expected 502, got %d", rec.Code)
+    }
+    var got struct {
+        Error struct {
+            Message string `json:"message"`
+            Type    string `json:"type"`
+        } `json:"error"`
+    }
+    if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+        t.Fatalf("response not valid JSON: %v body=%s", err, rec.Body.String())
+    }
+    if got.Error.Type != "server_error" {
+        t.Fatalf("expected type server_error, got %q", got.Error.Type)
+    }
+    if !strings.Contains(got.Error.Message, "Chat failed: ") {
+        t.Fatalf("expected prefix 'Chat failed: ', got %q", got.Error.Message)
+    }
+    if !strings.Contains(got.Error.Message, "Invalid model name") {
+        t.Fatalf("expected upstream detail surfaced, got %q", got.Error.Message)
+    }
+}
+
+func TestWriteChatFailedError_CapsLongDetail(t *testing.T) {
+    t.Parallel()
+    rec := httptest.NewRecorder()
+    longMsg := strings.Repeat("x", 2000)
+    writeChatFailedError(rec, "Chat failed", errors.New(longMsg))
+
+    var got struct {
+        Error struct {
+            Message string `json:"message"`
+        } `json:"error"`
+    }
+    if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+        t.Fatalf("response not valid JSON: %v", err)
+    }
+    maxLen := len("Chat failed: ") + 512
+    if len(got.Error.Message) > maxLen {
+        t.Fatalf("expected message capped at %d chars, got %d", maxLen, len(got.Error.Message))
+    }
+}
+
+func TestWriteChatFailedError_NilErr(t *testing.T) {
+    t.Parallel()
+    rec := httptest.NewRecorder()
+    writeChatFailedError(rec, "Stream chat failed", nil)
+
+    if rec.Code != http.StatusBadGateway {
+        t.Fatalf("expected 502, got %d", rec.Code)
+    }
+    var got struct {
+        Error struct {
+            Message string `json:"message"`
+            Type    string `json:"type"`
+        } `json:"error"`
+    }
+    if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+        t.Fatalf("response not valid JSON: %v", err)
+    }
+    if got.Error.Message != "Stream chat failed: " {
+        t.Fatalf("expected bare prefix, got %q", got.Error.Message)
+    }
+}

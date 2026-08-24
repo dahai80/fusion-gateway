@@ -835,7 +835,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         slog.Error("stream chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
-        http.Error(w, `{"error":{"message":"Stream chat failed","type":"server_error"}}`, http.StatusBadGateway)
+        writeChatFailedError(w, "Stream chat failed", err)
         return
     }
 
@@ -1031,6 +1031,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
 
     resp, err := chatFn(ctx, req)
     if err != nil {
+        failErr := err
         slog.Error("chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.router.RecordFailure(string(decision.Backend))
@@ -1088,10 +1089,11 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                     return
                 }
                 slog.Error("A4 fallback: cloud also failed", "error", fallbackErr)
+                failErr = fallbackErr
             }
         }
 
-        http.Error(w, `{"error":{"message":"Chat failed","type":"server_error"}}`, http.StatusBadGateway)
+        writeChatFailedError(w, "Chat failed", failErr)
         return
     }
 
@@ -2136,6 +2138,40 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
             s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start, tenant)
         }
     }
+}
+
+// writeChatFailedError writes the OpenAI-path chat failure response with the
+// upstream error detail surfaced (issue #91). Previously a generic "Chat
+// failed" / "Stream chat failed" hid the upstream cause — e.g. a cloud 400
+// "Invalid model name" left the client unable to self-diagnose a wrong model
+// name. The /v1/messages path already surfaces upstream detail via
+// writeMessagesError (#40); this mirrors that for /v1/chat/completions. The
+// message is JSON-escaped via json.Marshal and capped so a large upstream
+// body does not flood the client response. No API key material appears in
+// upstream error strings (verified), so surfacing is safe.
+func writeChatFailedError(w http.ResponseWriter, prefix string, err error) {
+    detail := ""
+    if err != nil {
+        detail = err.Error()
+        if len(detail) > 512 {
+            detail = detail[:512]
+        }
+    }
+    body, _ := json.Marshal(struct {
+        Error struct {
+            Message string `json:"message"`
+            Type    string `json:"type"`
+        } `json:"error"`
+    }{
+        Error: struct {
+            Message string `json:"message"`
+            Type    string `json:"type"`
+        }{
+            Message: prefix + ": " + detail,
+            Type:    "server_error",
+        },
+    })
+    http.Error(w, string(body), http.StatusBadGateway)
 }
 
 // writeMessagesError surfaces an upstream error to the client preserving the
