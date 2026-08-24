@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "io"
     "log/slog"
     "mime/multipart"
     "net/http"
@@ -3567,6 +3568,93 @@ func TestAnthropicMessages_StreamAnthropicProvider(t *testing.T) {
     s.handleAnthropicMessages(rec, req)
 
     slog.Info("TestAnthropicMessages_StreamAnthropicProvider", "status", rec.Code, "body_len", rec.Body.Len())
+}
+
+// Regression (issue #92): a client web-search request carries
+// tool_choice:"auto" + web_search_options:{} but no tools array (Anthropic
+// server-side-tool protocol). AnthropicRequest has no web_search_options
+// field so it is dropped, but tool_choice is forwarded verbatim -> glm5.2/vLLM
+// rejects "tool_choice requires tools" -> 400 -> gateway 502. Gateway must
+// strip an orphan tool_choice (present, but tools empty) so the request
+// degrades to plain generation instead of a hard 502.
+func TestAnthropicMessages_StripsOrphanToolChoice(t *testing.T) {
+    var capturedBody []byte
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        capturedBody, _ = io.ReadAll(r.Body)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(adapter.AnthropicResponse{
+            ID:      "msg_1",
+            Type:    "message",
+            Role:    "assistant",
+            Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "Hello!"}},
+            Model:   "claude-3",
+            Usage:   adapter.AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        })
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    antProvider := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    s.pool.Register("test-cloud", antProvider, config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    // web_search-style request: tool_choice set, no tools, no web_search_options
+    // field (AnthropicRequest drops it) -> orphan tool_choice.
+    antBody := `{"model":"claude-3","messages":[{"role":"user","content":"search the web"}],"stream":false,"max_tokens":100,"tool_choice":"auto"}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (degraded to plain gen), got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if bytes.Contains(capturedBody, []byte("tool_choice")) {
+        t.Fatalf("orphan tool_choice must be stripped before forward, captured upstream body contains it: %s", string(capturedBody))
+    }
+    slog.Info("TestAnthropicMessages_StripsOrphanToolChoice passed", "captured_len", len(capturedBody))
+}
+
+// No-regression for #92: tool_choice WITH a real tools array must be preserved
+// (that is a legitimate client tool-use request, not the orphan case).
+func TestAnthropicMessages_PreservesToolChoiceWithTools(t *testing.T) {
+    var capturedBody []byte
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        capturedBody, _ = io.ReadAll(r.Body)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(adapter.AnthropicResponse{
+            ID:      "msg_1",
+            Type:    "message",
+            Role:    "assistant",
+            Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "Hello!"}},
+            Model:   "claude-3",
+            Usage:   adapter.AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        })
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    antProvider := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    s.pool.Register("test-cloud", antProvider, config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    antBody := `{"model":"claude-3","messages":[{"role":"user","content":"use the tool"}],"stream":false,"max_tokens":100,"tool_choice":"auto","tools":[{"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if !bytes.Contains(capturedBody, []byte("tool_choice")) {
+        t.Fatalf("tool_choice with real tools must be preserved, missing from upstream body: %s", string(capturedBody))
+    }
+    slog.Info("TestAnthropicMessages_PreservesToolChoiceWithTools passed", "captured_len", len(capturedBody))
 }
 
 // --- handleNonStreamAnthropicMessages directly with real AnthropicProvider ---
