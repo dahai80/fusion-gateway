@@ -3782,6 +3782,60 @@ func TestHandleNonStreamAnthropicMessages_ClientCancelSilent(t *testing.T) {
     slog.Info("TestHandleNonStreamAnthropicMessages_ClientCancelSilent passed", "code", rec.Code, "body_len", rec.Body.Len())
 }
 
+// slowConnectProvider is a MessagesProvider whose StreamMessages blocks until
+// the ctx is canceled, simulating a reasoning upstream (glm5.2 via LiteLLM)
+// with a slow TTFB — the connection phase before any event is returned. A
+// client cancel during this phase makes msgFn return ctx.Err() (the retry
+// wrapper's <-ctx.Done() branch, or the provider directly), which pre-fix
+// the handler routed to writeMessagesError → ERROR + 502. Used by the #94
+// connection-phase cancel regression.
+type slowConnectProvider struct{}
+
+func (slowConnectProvider) Messages(ctx context.Context, req *adapter.AnthropicRequest) (*adapter.AnthropicResponse, error) {
+    return nil, fmt.Errorf("slowConnectProvider: Messages not used")
+}
+
+func (slowConnectProvider) StreamMessages(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+    <-ctx.Done()
+    return nil, ctx.Err()
+}
+
+// TestHandleNonStreamAnthropicMessages_ClientCancelConnectionPhase is the
+// connection-phase twin of _ClientCancelSilent (issue #94): a client that
+// cancels while the upstream is still establishing the stream (slow TTFB,
+// before any event) must NOT log ERROR + 502 either. The cancel surfaces from
+// msgFn at the first error return (connection phase), distinct from the
+// aggregate error return. Both returns now share the parent-ctx check.
+func TestHandleNonStreamAnthropicMessages_ClientCancelConnectionPhase(t *testing.T) {
+    s := newTestServer()
+    var p adapter.MessagesProvider = slowConnectProvider{}
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: false}
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleNonStreamAnthropicMessages(ctx, rec, p, req)
+        close(done)
+    }()
+    time.Sleep(150 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("handleNonStreamAnthropicMessages hung after client cancel (connection phase)")
+    }
+
+    if rec.Body.Len() != 0 {
+        t.Fatalf("client cancel must write no body, got %d bytes: %s", rec.Body.Len(), rec.Body.String())
+    }
+    if rec.Code == http.StatusBadGateway {
+        t.Fatalf("client cancel must not surface 502, got status %d", rec.Code)
+    }
+    slog.Info("TestHandleNonStreamAnthropicMessages_ClientCancelConnectionPhase passed", "code", rec.Code, "body_len", rec.Body.Len())
+}
+
 // --- handleStreamAnthropicMessages directly ---
 
 func TestHandleStreamAnthropicMessages(t *testing.T) {

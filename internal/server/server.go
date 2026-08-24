@@ -2160,6 +2160,27 @@ func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
     http.Error(w, body, status)
 }
 
+// nonStreamClientCanceled returns true and logs INFO when a non-stream
+// /v1/messages error is a client cancel rather than an upstream fault (issue
+// #94). The non-stream path has two error returns — the connection phase
+// (msgFn/StreamMessages) and the aggregate (AggregateAnthropicStreamEvents) —
+// and a client cancel can surface at either. The parent-ctx check (ctx.Err()
+// != nil) is the deterministic disambiguator: a client cancel cancels the
+// parent ctx; the idle watchdog cancels only the child wdCtx while the parent
+// stays alive (ctx.Err()==nil → still writeMessagesError, a watchdog trip IS
+// a fault). errors.Is(err, context.Canceled) is ambiguous because the
+// watchdog and retry wrapper both wrap context.Canceled. phase labels the log
+// so the two return sites are distinguishable in the logs. The handler must
+// return immediately on true — headers are not committed yet on the non-stream
+// path, so a silent return writes nothing to the (already-abandoned) client.
+func (s *Server) nonStreamClientCanceled(ctx context.Context, w http.ResponseWriter, err error, phase string) bool {
+    if ctx.Err() == nil {
+        return false
+    }
+    slog.Info("anthropic messages non-stream client canceled", "phase", phase, "error", err)
+    return true
+}
+
 func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
     // Internal stream + aggregate: reasoning upstreams (glm5.2 via LiteLLM)
     // withhold non-stream response headers until full generation completes,
@@ -2182,6 +2203,14 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
     msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
     ch, err := msgFn(wdCtx, &streamReq)
     if err != nil {
+        // A client cancel can surface here at the connection phase (msgFn
+        // returns ctx.Err() via the retry wrapper's <-ctx.Done() branch)
+        // before any event is aggregated. Same #94 treatment as the aggregate
+        // error below: a cancel is a request-level signal, not an upstream
+        // fault — don't log ERROR or write 502 to a dead pipe.
+        if s.nonStreamClientCanceled(ctx, w, err, "connection phase") {
+            return
+        }
         s.writeMessagesError(w, err)
         return
     }
@@ -2195,10 +2224,9 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         // variant). Don't log ERROR or write 502 to a dead pipe; headers
         // are not committed yet on the non-stream path. errors.Is(err,
         // context.Canceled) is ambiguous here because the idle watchdog
-        // branch also wraps context.Canceled — the parent-ctx check is
-        // deterministic.
-        if ctx.Err() != nil {
-            slog.Info("anthropic messages non-stream client canceled", "error", ctx.Err())
+        // branch (and the retry wrapper's <-ctx.Done() branch) also wrap
+        // context.Canceled — the parent-ctx check is deterministic.
+        if s.nonStreamClientCanceled(ctx, w, err, "aggregate") {
             return
         }
         s.writeMessagesError(w, err)
