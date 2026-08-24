@@ -4187,6 +4187,74 @@ func TestHandleStreamAnthropicMessages_StreamSummaryLogged(t *testing.T) {
     slog.Info("TestHandleStreamAnthropicMessages_StreamSummaryLogged passed")
 }
 
+// Observability regression (issue #88): last_event_idle must reflect the real
+// gap between the last upstream event and stream end. The hardened forward
+// loop (KeepaliveInterval > 0, the prod path) declared lastEventAt with `:=`,
+// shadowing the outer var that streamSummary reads — so the outer stayed zero
+// and every summary printed last_event_idle=0s (IsZero guard). That made the
+// #81 H-A/H-B discriminator (CC-side cancel vs upstream stall) useless: a
+// stall stream and a live stream both read 0s. This test sends one delta then
+// holds the connection for a measurable gap before canceling; the summary
+// MUST report a non-zero last_event_idle (the gap), proving the field works.
+func TestHandleStreamAnthropicMessages_LastEventIdleNonZeroAfterGap(t *testing.T) {
+    tsStall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+        w.(http.Flusher).Flush()
+        // Hold open: no further upstream events, so lastEventAt stays at the
+        // delta arrival time and last_event_idle grows with the gap.
+        <-r.Context().Done()
+    }))
+    defer tsStall.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    pStall := adapter.NewAnthropicProvider("test-stall", config.BackendConfig{
+        Type: "anthropic", BaseURL: tsStall.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    var logBuf bytes.Buffer
+    prev := slog.Default()
+    defer slog.SetDefault(prev)
+    slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+    rec := httptest.NewRecorder()
+    cancelCtx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(cancelCtx, rec, pStall, req)
+        close(done)
+    }()
+    // Let the delta land, then hold ~150ms (well past KeepaliveInterval) so the
+    // idle gap is unambiguously non-zero before canceling like CC does.
+    time.Sleep(150 * time.Millisecond)
+    cancel()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("gap path did not exit after client cancel")
+    }
+
+    stallLogs := logBuf.String()
+    if !strings.Contains(stallLogs, "anthropic stream summary") {
+        t.Fatalf("gap path must emit stream summary, got logs:\n%s", stallLogs)
+    }
+    // The whole point: after a 150ms gap with no upstream events, last_event_idle
+    // must NOT be 0s. A 0s value means the shadow bug is back — streamSummary
+    // read the never-updated outer lastEventAt (zero) and the IsZero guard
+    // forced 0s, hiding upstream stalls (#81 H-B) as "upstream was live" (H-A).
+    if strings.Contains(stallLogs, "last_event_idle=0s") {
+        t.Fatalf("last_event_idle must be non-zero after a 150ms upstream gap (shadow bug: streamSummary read zero outer lastEventAt), got logs:\n%s", stallLogs)
+    }
+    if !strings.Contains(stallLogs, "last_event_idle=") {
+        t.Fatalf("summary must carry last_event_idle field, got logs:\n%s", stallLogs)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_LastEventIdleNonZeroAfterGap passed")
+}
+
 type mockTranscriptionProvider struct {
     mockProvider
 }

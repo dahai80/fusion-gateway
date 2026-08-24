@@ -2353,7 +2353,12 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         // upstream. Watchdog granularity equals the keepalive interval.
         ticker := time.NewTicker(streamCfg.KeepaliveInterval)
         defer ticker.Stop()
-        lastEventAt := time.Now()
+        // Assign (not declare) to the outer lastEventAt so streamSummary reads
+        // the real last-event time. A `:=` here shadowed the outer var, leaving
+        // it zero — every summary printed last_event_idle=0s and the #81
+        // upstream-stall discriminator (H-A CC cancel vs H-B stall) was useless
+        // (issue #88). Initialize to loop start; the first event overwrites it.
+        lastEventAt = time.Now()
         watchdogTripped := false
         done := false
         for !done {
