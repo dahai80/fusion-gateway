@@ -90,6 +90,67 @@ func TestHandleModels_ModeLocalOnlyReturnsLocal(t *testing.T) {
     }
 }
 
+// TestHandleModels_LocalModelsListedFirst verifies that /v1/models orders
+// local (owned_by="local") models ahead of cloud models, with loaded local
+// models ahead of unloaded local models. Cloud providers are registered first
+// in config (anthropic sits at the top of `backends:`), so without an explicit
+// sort their models would dominate the head of the response and mask which
+// models are actually served locally (#108 observation 2). Cloud model IDs
+// ("a-cloud-1") sort alphabetically before local IDs ("z-local-1"), so a
+// plain alphabetical sort would fail this test — only a local-first rule can
+// put z-local-1 at index 0.
+func TestHandleModels_LocalModelsListedFirst(t *testing.T) {
+    s := newTestServer()
+    // cloud provider registered first; its model IDs sort ahead alphabetically
+    s.pool.Register("glm52", &mockProvider{
+        name: "glm52",
+        models: []adapter.ModelInfo{
+            {ID: "a-cloud-1", OwnedBy: "anthropic"},
+            {ID: "a-cloud-2", OwnedBy: "anthropic"},
+        },
+    }, config.BackendConfig{Type: "anthropic", Enabled: true})
+    s.pool.Register("fusion-mlx", &mockProvider{
+        name: "fusion-mlx",
+        models: []adapter.ModelInfo{
+            {ID: "z-local-unloaded", OwnedBy: "local"},
+            {ID: "z-local-loaded", OwnedBy: "local", Loaded: true},
+        },
+    }, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    var resp struct {
+        Data []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+        t.Fatalf("decode response: %v", err)
+    }
+    if len(resp.Data) != 4 {
+        t.Fatalf("expected 4 models, got %d: %+v", len(resp.Data), resp.Data)
+    }
+    wantOrder := []string{"z-local-loaded", "z-local-unloaded", "a-cloud-1", "a-cloud-2"}
+    for i, want := range wantOrder {
+        if resp.Data[i].ID != want {
+            t.Fatalf("index %d: expected %q (local-first, loaded-first), got %q. full order: %+v",
+                i, want, resp.Data[i].ID, ids(resp.Data))
+        }
+    }
+}
+
+func ids(ms []adapter.ModelInfo) []string {
+    out := make([]string, len(ms))
+    for i, m := range ms {
+        out[i] = m.ID
+    }
+    return out
+}
+
 func TestHandleModels_PerProviderTimeoutSkipsSlow(t *testing.T) {
     s := newTestServer()
     // slow cloud backend blocks until the 3s per-provider timeout fires
