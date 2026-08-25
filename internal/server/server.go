@@ -80,6 +80,11 @@ type Server struct {
     oauth2States      map[string]time.Time
     mcpHandler        *mcp.Handler
     oauth2StatesMu    sync.RWMutex
+    // taskRegistry tracks in-flight inference tasks by id (X-Request-ID) so
+    // the POST /v1/agent/tasks/{id}/cancel endpoint can propagate cancellation
+    // to a running stream's ctx (#102 ADR-001 sub-task 4). Slot release stays
+    // on the stream goroutine's defer — registry only holds the cancel func.
+    taskRegistry *TaskRegistry
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -283,6 +288,7 @@ func New(
         connectorRegistry: newConnectorRegistry(cfg),
         oauth2States:      make(map[string]time.Time),
         mcpHandler:        initMCPHandler(cfg),
+        taskRegistry:      NewTaskRegistry(),
     }
     go srv.evictOAuth2States()
     return srv
@@ -322,6 +328,10 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
     mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))
+    // #102 ADR-001 sub-task 4: agent task cancel endpoint. Prefix-matched so
+    // the {id}/cancel suffix is parsed manually in handleAgentTask (no Go
+    // 1.22 path-pattern dep). Auth via withMiddleware (existing key auth).
+    mux.HandleFunc("/v1/agent/tasks/", s.withMiddleware(s.handleAgentTask))
     mux.HandleFunc("/v1/audio/transcriptions", s.withMiddleware(s.handleTranscriptions))
     mux.HandleFunc("/v1/audio/speech", s.withMiddleware(s.handleSpeech))
     mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
@@ -741,6 +751,34 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         s.router.RecordAffinity(spaceID, provider.Name())
     }
 
+    // #102 ADR-001 sub-task 3: opt-in local wait-queue. Engaged ONLY in
+    // mode=local + queue_enabled — LocalQueue() returns nil otherwise, so the
+    // default hybrid path is untouched. Gate BEFORE forwarding so the slot is
+    // held for the whole inference; 429 on queue_timeout keeps the local box
+    // from being overrun when cloud is off. Engine stays pure (no blocking).
+    if decision.Backend == router.LocalBackend {
+        if release, err := s.acquireLocalSlot(ctx); err != nil {
+            slog.Warn("local slot queue rejected request", "reason", err.Error(), "model", req.Model)
+            writeQueue429(w, err)
+            return
+        } else {
+            defer release()
+        }
+    }
+
+    // #102 ADR-001 sub-task 4: register the in-flight task so the
+    // /v1/agent/tasks/{id}/cancel endpoint can propagate cancellation to this
+    // forward's ctx. task-id = X-Request-ID (middleware-injected). Wrap ctx
+    // with WithCancel so registry.Cancel() signals the stream goroutine; the
+    // slot is released by the existing defer above, NOT here (no double-
+    // release). Release the registry entry on return (idempotent vs Cancel).
+    if taskID := taskIDFromContext(ctx); taskID != "" {
+        streamCtx, cancel := context.WithCancel(ctx)
+        s.taskRegistry.Register(taskID, cancel)
+        defer s.taskRegistry.Release(taskID)
+        ctx = streamCtx
+    }
+
     start := time.Now()
     tenant := "anonymous"
     if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
@@ -752,6 +790,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     } else {
         s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
     }
+}
+
+// acquireLocalSlot gates a local-backend forward on the opt-in wait-queue
+// (#102 ADR-001 sub-task 3). Returns a release closure the caller MUST defer.
+// When the queue is disabled (hybrid/cloud, or mode=local without
+// queue_enabled) it returns a no-op release + nil error immediately — zero
+// behavior change. On timeout returns ErrQueueTimeout (caller writes 429).
+func (s *Server) acquireLocalSlot(ctx context.Context) (func(), error) {
+    q := s.router.LocalQueue()
+    if q == nil {
+        return func() {}, nil
+    }
+    return q.Acquire(ctx, s.router.QueueTimeout())
+}
+
+// writeQueue429 emits the rate-limit error for a queue timeout. Mirrors the
+// OpenAI error envelope shape used by the rest of /v1/chat/completions.
+func writeQueue429(w http.ResponseWriter, err error) {
+    w.Header().Set("Content-Type", "application/json")
+    w.Header().Set("Retry-After", "5")
+    w.WriteHeader(http.StatusTooManyRequests)
+    fmt.Fprintf(w, `{"error":{"message":"local inference queue full: %s","type":"rate_limit_error"}}`, err.Error())
 }
 
 func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapter.ChatRequest, w http.ResponseWriter) adapter.Provider {
@@ -2036,6 +2096,52 @@ func errorString(err error) string {
     return err.Error()
 }
 
+// handleAgentTask implements POST /v1/agent/tasks/{id}/cancel (#102 ADR-001
+// sub-task 4). Path is prefix-registered under "/v1/agent/tasks/" and parsed
+// manually (no Go 1.22 path-pattern dep): expected suffix is "{taskID}/cancel".
+// On a known in-flight task the registry cancel propagates to the stream ctx;
+// the slot is released by the stream goroutine's existing defer (no
+// double-release — see #97/v0.8.40). 200 + {"status":"canceled"} on hit, 404
+// when the task is unknown or already completed. Auth via withMiddleware.
+func (s *Server) handleAgentTask(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Parse path: "/v1/agent/tasks/{taskID}/cancel". Trim the registered
+    // prefix, then expect exactly "id/cancel". Reject malformed paths with 404
+    // (not 400) so a probe sees no distinguishable shape.
+    const prefix = "/v1/agent/tasks/"
+    rest := strings.TrimPrefix(r.URL.Path, prefix)
+    parts := strings.Split(rest, "/")
+    if len(parts) != 2 || parts[1] != "cancel" || parts[0] == "" {
+        slog.Info("agent task cancel: malformed path", "path", r.URL.Path)
+        http.NotFound(w, r)
+        return
+    }
+    taskID := parts[0]
+
+    if s.taskRegistry == nil {
+        slog.Warn("agent task cancel: registry not initialized")
+        http.Error(w, `{"error":{"message":"task registry unavailable","type":"server_error"}}`, http.StatusServiceUnavailable)
+        return
+    }
+
+    if s.taskRegistry.Cancel(taskID) {
+        slog.Info("agent task cancel: canceled in-flight task", "task_id", taskID)
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusOK)
+        fmt.Fprintf(w, `{"status":"canceled","task_id":%q}`, taskID)
+        return
+    }
+
+    slog.Info("agent task cancel: task not found (unknown or completed)", "task_id", taskID)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusNotFound)
+    fmt.Fprintf(w, `{"error":{"message":"task not found","type":"not_found","task_id":%q}}`, taskID)
+}
+
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
@@ -2115,6 +2221,30 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     if provider == nil {
         http.Error(w, `{"error":{"message":"No provider available","type":"server_error"}}`, http.StatusServiceUnavailable)
         return
+    }
+
+    // #102 ADR-001 sub-task 3: opt-in local wait-queue, same gate as
+    // /v1/chat/completions. LocalQueue() is nil unless mode=local +
+    // queue_enabled, so hybrid/cloud is untouched. 429 on queue_timeout.
+    if decision.Backend == router.LocalBackend {
+        if release, err := s.acquireLocalSlot(ctx); err != nil {
+            slog.Warn("anthropic local slot queue rejected request", "reason", err.Error(), "model", antReq.Model)
+            writeQueue429(w, err)
+            return
+        } else {
+            defer release()
+        }
+    }
+
+    // #102 ADR-001 sub-task 4: register in-flight task for cancel endpoint
+    // (mirror /v1/chat/completions). task-id = X-Request-ID; WithCancel wraps
+    // ctx so registry.Cancel() signals the stream; slot released by the
+    // existing defer above (no double-release). Release entry on return.
+    if taskID := taskIDFromContext(ctx); taskID != "" {
+        streamCtx, cancel := context.WithCancel(ctx)
+        s.taskRegistry.Register(taskID, cancel)
+        defer s.taskRegistry.Release(taskID)
+        ctx = streamCtx
     }
 
     if msgProv, ok := provider.(adapter.MessagesProvider); ok {

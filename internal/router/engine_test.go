@@ -325,7 +325,7 @@ func (m *mockClusterSelector) HealthyNodesByModel(model string) int {
     return m.healthy
 }
 
-func (m *mockClusterSelector) SelectNodeByModel(_, model string) (string, error) {
+func (m *mockClusterSelector) SelectNodeByModel(_, model string, _ int) (string, error) {
     if model == "" {
         return m.nodeID, m.err
     }

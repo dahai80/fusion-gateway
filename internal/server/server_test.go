@@ -2240,7 +2240,7 @@ func (m *mockClusterDiscovery) HealthyNodesByModel(_ string) int {
     return 0
 }
 
-func (m *mockClusterDiscovery) SelectNodeByModel(_, _ string) (string, error) {
+func (m *mockClusterDiscovery) SelectNodeByModel(_, _ string, _ int) (string, error) {
     return "", fmt.Errorf("no healthy nodes serving model")
 }
 
@@ -6289,7 +6289,7 @@ func (m *mockClusterDiscoveryWithNode) HealthyNodesByModel(_ string) int {
     return 0
 }
 
-func (m *mockClusterDiscoveryWithNode) SelectNodeByModel(_, _ string) (string, error) {
+func (m *mockClusterDiscoveryWithNode) SelectNodeByModel(_, _ string, _ int) (string, error) {
     if m.node != nil {
         return m.node.ID, nil
     }

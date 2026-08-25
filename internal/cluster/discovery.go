@@ -646,20 +646,37 @@ func (d *Discovery) HealthyNodesByModel(model string) int {
 // the configured strategy. Empty model falls back to platform-agnostic
 // SelectNode. Model-aware cluster routing (#95) — prevents the upstream 404
 // when a selected node doesn't serve the requested model.
-func (d *Discovery) SelectNodeByModel(strategy, model string) (*Node, error) {
+//
+// maxConcurrent (>0) applies a per-node slot cap (#102 ADR-001): a healthy
+// node serving the model whose InFlight >= maxConcurrent is skipped — its
+// slots are full. This reuses routing.local_priority.max_concurrent as the
+// per-node ceiling (a node and local share the same slot-budget notion).
+// maxConcurrent <= 0 disables the cap (legacy behavior).
+func (d *Discovery) SelectNodeByModel(strategy, model string, maxConcurrent int) (*Node, error) {
     if model == "" {
         return d.SelectNode(strategy)
     }
     d.mu.RLock()
     var healthy []*Node
+    var skipped int
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy && n.servesModel(model) {
-            healthy = append(healthy, n)
+        if n.State() != NodeStateHealthy || !n.servesModel(model) {
+            continue
         }
+        if maxConcurrent > 0 && n.InFlight() >= int64(maxConcurrent) {
+            skipped++
+            slog.Debug("cluster node at slot cap, skipping",
+                "node_id", n.ID, "in_flight", n.InFlight(), "max_concurrent", maxConcurrent)
+            continue
+        }
+        healthy = append(healthy, n)
     }
     d.mu.RUnlock()
 
     if len(healthy) == 0 {
+        if skipped > 0 {
+            return nil, fmt.Errorf("no healthy cluster nodes serving model %q below slot cap (max_concurrent=%d, %d node(s) full)", model, maxConcurrent, skipped)
+        }
         return nil, fmt.Errorf("no healthy cluster nodes serving model %q", model)
     }
 
@@ -677,8 +694,8 @@ func (d *Discovery) SelectNodeByModel(strategy, model string) (*Node, error) {
 
 // SelectNodeIDByModel wraps SelectNodeByModel, returning the node ID string
 // for the router.ClusterSelector interface (#95).
-func (d *Discovery) SelectNodeIDByModel(strategy, model string) (string, error) {
-    node, err := d.SelectNodeByModel(strategy, model)
+func (d *Discovery) SelectNodeIDByModel(strategy, model string, maxConcurrent int) (string, error) {
+    node, err := d.SelectNodeByModel(strategy, model, maxConcurrent)
     if err != nil {
         return "", err
     }
@@ -816,8 +833,8 @@ func (a *ClusterSelectorAdapter) HealthyNodesByModel(model string) int {
     return a.discovery.HealthyNodesByModel(model)
 }
 
-func (a *ClusterSelectorAdapter) SelectNodeByModel(strategy, model string) (string, error) {
-    return a.discovery.SelectNodeIDByModel(strategy, model)
+func (a *ClusterSelectorAdapter) SelectNodeByModel(strategy, model string, maxConcurrent int) (string, error) {
+    return a.discovery.SelectNodeIDByModel(strategy, model, maxConcurrent)
 }
 
 func (d *Discovery) selectRoundRobin(nodes []*Node) *Node {
