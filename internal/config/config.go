@@ -88,11 +88,18 @@ type RateLimitConfig struct {
 }
 
 type LocalPriorityConfig struct {
-    Enabled               bool    `mapstructure:"enabled"`
-    MaxSystemMemoryRatio  float64 `mapstructure:"max_system_memory_ratio"`
-    MaxMLXMemoryRatio     float64 `mapstructure:"max_mlx_memory_ratio"`
-    MaxConcurrent         int     `mapstructure:"max_concurrent"`
-    SwapPageRateThreshold uint64  `mapstructure:"swap_page_rate_threshold"`
+    Enabled               bool          `mapstructure:"enabled"`
+    MaxSystemMemoryRatio  float64       `mapstructure:"max_system_memory_ratio"`
+    MaxMLXMemoryRatio     float64       `mapstructure:"max_mlx_memory_ratio"`
+    MaxConcurrent         int           `mapstructure:"max_concurrent"`
+    SwapPageRateThreshold uint64        `mapstructure:"swap_page_rate_threshold"`
+    // QueueEnabled engages a bounded FIFO wait-queue for local inference slots
+    // ONLY when routing.mode=local (cloud disabled). When local is at
+    // max_concurrent, a request waits up to QueueTimeout instead of falling
+    // back to cloud (there is no cloud in mode=local). Default OFF — hybrid
+    // mode behavior is unchanged (#102 ADR-001).
+    QueueEnabled bool          `mapstructure:"queue_enabled"`
+    QueueTimeout time.Duration `mapstructure:"queue_timeout"`
 }
 
 type CircuitBreakerConfig struct {
@@ -780,6 +787,9 @@ func validate(cfg *Config) error {
     if cfg.Routing.LocalPriority.MaxConcurrent < 0 {
         return fmt.Errorf("max_concurrent must be non-negative, got %d", cfg.Routing.LocalPriority.MaxConcurrent)
     }
+    if cfg.Routing.LocalPriority.QueueTimeout < 0 {
+        return fmt.Errorf("queue_timeout must be non-negative, got %d", cfg.Routing.LocalPriority.QueueTimeout)
+    }
     if cfg.Cache.MaxMemoryMB < 0 {
         return fmt.Errorf("cache.max_memory_mb must be non-negative, got %d", cfg.Cache.MaxMemoryMB)
     }
@@ -872,6 +882,8 @@ func DefaultConfig() Config {
                 MaxMLXMemoryRatio:     0.7,
                 MaxConcurrent:         8,
                 SwapPageRateThreshold: 100,
+                QueueEnabled:          false,
+                QueueTimeout:          5 * time.Second,
             },
             CircuitBreaker: CircuitBreakerConfig{
                 FailureThreshold:    5,

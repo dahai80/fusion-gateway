@@ -437,7 +437,7 @@ func TestDiscovery_SelectNodeByModel_PrefersServingNode(t *testing.T) {
     n2.models = []string{"qwen3"}
     n2.mu.Unlock()
 
-    selected, err := d.SelectNodeByModel("least-connections", "qwen3")
+    selected, err := d.SelectNodeByModel("least-connections", "qwen3", 0)
     if err != nil {
         t.Fatalf("expected node-2, got error: %v", err)
     }
@@ -446,7 +446,7 @@ func TestDiscovery_SelectNodeByModel_PrefersServingNode(t *testing.T) {
     }
 
     // no node serves absent-model
-    if _, err := d.SelectNodeByModel("least-connections", "absent-model"); err == nil {
+    if _, err := d.SelectNodeByModel("least-connections", "absent-model", 0); err == nil {
         t.Error("expected error when no node serves absent-model")
     }
 }
@@ -466,13 +466,58 @@ func TestDiscovery_SelectNodeByModel_EmptyModel_Legacy(t *testing.T) {
     n2.markHealthy()
     n1.IncrInFlight()
 
-    selected, err := d.SelectNodeByModel("least-connections", "")
+    selected, err := d.SelectNodeByModel("least-connections", "", 0)
     if err != nil {
         t.Fatal(err)
     }
     // empty model = legacy SelectNode (any healthy node, least-connections → node-2)
     if selected.ID != "node-2" {
         t.Errorf("expected node-2 (legacy least-connections), got %s", selected.ID)
+    }
+}
+
+func TestDiscovery_SelectNodeByModel_SkipsCappedNodes(t *testing.T) {
+    t.Log("testing SelectNodeByModel skips nodes at slot cap (#102 ADR-001)")
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-a", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-b", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    na, _ := d.GetNode("node-a")
+    nb, _ := d.GetNode("node-b")
+    na.markHealthy()
+    nb.markHealthy()
+    // both serve qwen3
+    na.mu.Lock()
+    na.models = []string{"qwen3"}
+    na.mu.Unlock()
+    nb.mu.Lock()
+    nb.models = []string{"qwen3"}
+    nb.mu.Unlock()
+
+    // node-a filled to cap (max_concurrent=2); node-b free → node-b selected
+    na.IncrInFlight()
+    na.IncrInFlight()
+    selected, err := d.SelectNodeByModel("least-connections", "qwen3", 2)
+    if err != nil {
+        t.Fatalf("expected node-b (node-a capped), got error: %v", err)
+    }
+    if selected.ID != "node-b" {
+        t.Errorf("expected node-b (node-a at cap), got %s", selected.ID)
+    }
+
+    // both nodes at cap → error, no node below cap
+    nb.IncrInFlight()
+    nb.IncrInFlight()
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 2); err == nil {
+        t.Error("expected error when all serving nodes are at slot cap")
+    }
+
+    // maxConcurrent <= 0 disables cap → node-a (least-connections tie, first wins) selectable again
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err != nil {
+        t.Errorf("expected no error with cap disabled (maxConcurrent=0), got: %v", err)
     }
 }
 

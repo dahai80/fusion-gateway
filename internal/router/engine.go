@@ -76,7 +76,8 @@ type ClusterSelector interface {
     // SelectNodeByModel selects a healthy node that serves the given model.
     // Empty model falls back to platform-agnostic selection. Error when no
     // healthy node serves the model (caller falls through to cloud).
-    SelectNodeByModel(strategy, model string) (nodeID string, err error)
+    // maxConcurrent (>0) skips nodes whose in-flight slots are full (#102).
+    SelectNodeByModel(strategy, model string, maxConcurrent int) (nodeID string, err error)
 }
 
 type Engine struct {
@@ -100,6 +101,13 @@ type Engine struct {
     // (Stream D). Wired via SetAdapterLookup; nil = no index available, so
     // code-adapter validation is skipped (best-effort, log-only on miss).
     adapterLookup AdapterLookup
+    // localQueue is the opt-in FIFO wait-queue over local inference slots,
+    // engaged ONLY when routing.mode=local AND queue_enabled (#102 ADR-001
+    // sub-task 3). nil in hybrid/cloud mode — the engine falls back to cloud
+    // instead of queueing, so the handler never gates. The handler (not the
+    // engine) calls Acquire before forwarding; the engine stays pure (no
+    // blocking). QueueTimeout lives in config so hot-reload can tune it.
+    localQueue *slotQueue
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
@@ -109,7 +117,7 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
         "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
     }
 
-    return &Engine{
+    e := &Engine{
         cfg:             cfg,
         hwCollector:     hwCollector,
         breakers:        breakers,
@@ -119,6 +127,24 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
         sessionAffinity: NewSessionAffinity(30 * time.Minute),
         classifier:      NoopClassifier{},
     }
+
+    // Sub-task 3 (#102 ADR-001): opt-in local wait-queue, engaged ONLY in
+    // mode=local + queue_enabled. In hybrid/cloud mode the engine falls back
+    // to cloud (no queue), so localQueue stays nil and the handler never
+    // gates — zero behavior change for the default hybrid path.
+    if cfg.Config.Routing.Mode == "local" && cfg.Config.Routing.LocalPriority.QueueEnabled {
+        maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
+        if maxConcurrent <= 0 {
+            maxConcurrent = 8
+        }
+        e.localQueue = newSlotQueue(maxConcurrent)
+        slog.Info("local slot wait-queue enabled",
+            "mode", "local",
+            "max_concurrent", maxConcurrent,
+            "queue_timeout", cfg.Config.Routing.LocalPriority.QueueTimeout)
+    }
+
+    return e
 }
 
 func (e *Engine) SetClusterSelector(cs ClusterSelector) {
@@ -242,6 +268,30 @@ func (e *Engine) LocalInFlight() int64 {
         return 0
     }
     return fn()
+}
+
+// LocalQueue exposes the opt-in local wait-queue (#102 ADR-001 sub-task 3).
+// Returns nil when the queue is disabled (hybrid/cloud mode, or mode=local
+// without queue_enabled) — callers MUST nil-check before Acquire. The handler
+// (not the engine) calls Acquire before forwarding to keep the engine pure.
+func (e *Engine) LocalQueue() *slotQueue {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
+    return e.localQueue
+}
+
+// QueueTimeout returns the configured wait budget for the local queue. Read
+// from the live config snapshot so hot-reload can tune it without rebuilding
+// the engine. Falls back to 5s when unset.
+func (e *Engine) QueueTimeout() time.Duration {
+    e.mu.RLock()
+    cfg := e.cfg
+    e.mu.RUnlock()
+    t := cfg.Config.Routing.LocalPriority.QueueTimeout
+    if t <= 0 {
+        return 5 * time.Second
+    }
+    return t
 }
 
 func (e *Engine) SetLocalModels(fn func() map[string]bool) {
@@ -686,10 +736,10 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string) *Rou
         strategy = "least-connections"
     }
 
-    nodeID, err := e.cluster.SelectNodeByModel(strategy, model)
+    nodeID, err := e.cluster.SelectNodeByModel(strategy, model, cfg.Config.Routing.LocalPriority.MaxConcurrent)
     if err != nil {
-        slog.Debug("cluster has no node serving model, falling back to cloud",
-            "model", model, "strategy", strategy)
+        slog.Debug("cluster has no node serving model below slot cap, falling back to cloud",
+            "model", model, "strategy", strategy, "error", err)
         return nil
     }
 
