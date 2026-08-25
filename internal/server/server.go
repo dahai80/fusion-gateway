@@ -12,6 +12,7 @@ import (
     "net/http"
     "net/http/pprof"
     "os"
+    "sort"
     "strings"
     "sync"
     "time"
@@ -1495,11 +1496,39 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
         models[i].Loaded = loadedSet[models[i].ID]
     }
 
+    // Order models so local (owned_by="local") models precede cloud models,
+    // and within local, loaded models precede unloaded ones; alphabetical by
+    // ID within each tier. Cloud providers sit at the top of config `backends:`,
+    // so without this sort their models dominate the head of the response and
+    // mask which models are actually served locally (#108 observation 2).
+    sort.SliceStable(models, func(i, j int) bool {
+        return modelListLess(models[i], models[j])
+    })
+
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",
         "data":   models,
     })
+}
+
+// modelListLess is the comparator for the /v1/models ordering (#108). Local
+// models (owned_by="local") outrank cloud; loaded local models outrank
+// unloaded local; otherwise alphabetical by ID. It is total only over the
+// (local-vs-cloud, loaded-vs-unloaded, id) key tuple, so sort.SliceStable
+// keeps equal-tier entries in provider-arrival order.
+func modelListLess(a, b adapter.ModelInfo) bool {
+    aLocal := a.OwnedBy == "local"
+    bLocal := b.OwnedBy == "local"
+    if aLocal != bLocal {
+        return aLocal
+    }
+    if aLocal {
+        if a.Loaded != b.Loaded {
+            return a.Loaded
+        }
+    }
+    return a.ID < b.ID
 }
 
 // listModelsConcurrent fans out ListModels across providers with a per-provider
