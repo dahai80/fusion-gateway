@@ -447,30 +447,17 @@ func (p *FusionMLXProvider) proxyDirector(backend *url.URL) func(*http.Request) 
     }
 }
 
+// Cancel signals a stream cancellation. It MUST NOT touch the in-flight
+// counter: StreamChat hands the single release to its forward goroutine via
+// `defer goroutineRelease()`, and ctx-cancel propagates to resp.Body (the
+// request is built with NewRequestWithContext), so the goroutine exits and
+// releases the slot on its own. A manual decrement here would double-release
+// — the counter underflows to negative, silently bypassing the P5
+// max_concurrent gate (negative < max → never limited) on every subsequent
+// cancel (#97/#102 slot-leak root cause). Idle GC after cancel is already
+// covered by StartIdleGCTimer, so this is a no-op signal for traceability.
 func (p *FusionMLXProvider) Cancel(requestID string) {
-    for {
-        current := p.inFlightCounter.Load()
-        if current <= 0 {
-            slog.Warn("cancel called but in-flight counter already zero", "request_id", requestID)
-            return
-        }
-        if p.inFlightCounter.CompareAndSwap(current, current-1) {
-            break
-        }
-    }
-
-    // Optional: safe GC when in-flight reaches zero
-    if p.inFlightCounter.Load() == 0 && p.cfg.Enabled {
-        now := time.Now().Unix()
-        lastGC := p.lastGCTime.Load()
-        minInterval := int64(p.cfg.MinIdleSinceLastGC.Seconds())
-        if minInterval == 0 {
-            minInterval = 300 // default 5 minutes
-        }
-        if now-lastGC > minInterval {
-            safego.Go("fusion_mlx_safe_gc", p.SafeGC)
-        }
-    }
+    slog.Info("fusion-mlx stream cancel signaled", "request_id", requestID, "in_flight", p.inFlightCounter.Load())
 }
 
 func (p *FusionMLXProvider) SafeGC() {

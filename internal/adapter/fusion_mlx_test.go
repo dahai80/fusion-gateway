@@ -504,18 +504,96 @@ func TestFusionMLXProvider_Cancel(t *testing.T) {
 
     p.inFlightCounter.Add(2)
     p.Cancel("req-1")
-    if p.InFlight() != 1 {
-        t.Fatalf("expected 1 in-flight after cancel, got %d", p.InFlight())
+    if p.InFlight() != 2 {
+        t.Fatalf("expected 2 in-flight after no-op cancel, got %d", p.InFlight())
     }
 
     p.Cancel("req-2")
-    if p.InFlight() != 0 {
-        t.Fatalf("expected 0 in-flight after cancel, got %d", p.InFlight())
+    if p.InFlight() != 2 {
+        t.Fatalf("expected 2 in-flight after no-op cancel, got %d", p.InFlight())
     }
 
     p.Cancel("req-3")
-    if p.InFlight() != 0 {
-        t.Fatalf("expected 0 in-flight after cancel on zero, got %d", p.InFlight())
+    if p.InFlight() != 2 {
+        t.Fatalf("expected 2 in-flight after no-op cancel on zero, got %d", p.InFlight())
+    }
+}
+
+// TestFusionMLXProvider_StreamChat_CancelNoDoubleRelease is the #97/#102
+// slot-leak regression: a client cancel during a stream must NOT double-
+// decrement the in-flight counter. Before the fix, Cancel() manually
+// decremented AND the StreamChat goroutine's defer goroutineRelease()
+// decremented on ctx-propagated body close → underflow → P5 max_concurrent
+// silently bypassed. After the fix Cancel is a no-op; the goroutine's defer
+// is the single release. The counter must return to exactly 0 (never
+// negative), and a second stream must still be admitted.
+func TestFusionMLXProvider_StreamChat_CancelNoDoubleRelease(t *testing.T) {
+    slog.Info("test FusionMLXProvider_StreamChat_CancelNoDoubleRelease")
+    chunk := StreamChunk{
+        ID:      "chunk-1",
+        Object:  "chat.completion.chunk",
+        Created: time.Now().Unix(),
+        Model:   "qwen-7b",
+        Choices: []ChoiceDelta{{Index: 0, Delta: map[string]string{"content": "hel"}}},
+    }
+    b, _ := json.Marshal(chunk)
+
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+        // Flush headers + first chunk so httpClient.Do returns immediately;
+        // without this the 30-byte body sits in the server's 4KB bufio
+        // buffer, nothing hits the wire, and Do blocks until the 120s client
+        // timeout — the test would hang. Standard SSE-test practice.
+        if f, ok := w.(http.Flusher); ok {
+            f.Flush()
+        }
+        // Block until the client disconnects so the body read only ends on
+        // ctx-cancel propagation, mirroring a real mid-stream cancel.
+        <-r.Context().Done()
+    }))
+    defer srv.Close()
+
+    p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL}, config.RoutingConfig{})
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    ch, err := p.StreamChat(ctx, &ChatRequest{
+        Model:    "qwen-7b",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    if p.InFlight() != 1 {
+        t.Fatalf("expected 1 in-flight during stream, got %d", p.InFlight())
+    }
+
+    sawFirst := false
+    for range ch {
+        if !sawFirst {
+            sawFirst = true
+            // Cancel mid-stream (like a client abort), then mirror the
+            // server's cancel-signal call (handleStreamChat:864).
+            cancel()
+            p.Cancel("req-1")
+        }
+        // Drain remaining chunks until the goroutine closes the channel.
+    }
+
+    // Poll briefly: the goroutine's defer goroutineRelease() must run on
+    // ctx-propagated body close. Counter returns to 0, never negative.
+    deadline := time.Now().Add(3 * time.Second)
+    for time.Now().Before(deadline) {
+        if p.InFlight() == 0 {
+            break
+        }
+        time.Sleep(10 * time.Millisecond)
+    }
+    if got := p.InFlight(); got != 0 {
+        t.Fatalf("expected 0 in-flight after cancel (no double-release), got %d (underflow?)", got)
     }
 }
 
