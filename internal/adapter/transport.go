@@ -2,6 +2,8 @@ package adapter
 
 import (
     "context"
+    "fmt"
+    "io"
     "log/slog"
     "net"
     "net/http"
@@ -9,6 +11,41 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
+
+// maxErrorBodyBytes caps how much of an upstream error response body we read
+// into memory for surfacing in error messages. Error bodies are diagnostics
+// (status text, upstream message), not model output — 1 MiB is far beyond any
+// legitimate diagnostic and bounds memory when a misbehaving backend streams
+// a huge body on a non-200. Mirrors the SSE line cap (maxLineSize = 1<<20).
+const maxErrorBodyBytes = 1 << 20 // 1 MiB
+
+// readErrorBody reads a capped slice of resp.Body for inclusion in an error
+// message. It is the bounded replacement for the bare `io.ReadAll(resp.Body)`
+// pattern on non-200 paths: an unbounded read lets a hostile or buggy upstream
+// exhaust gateway memory by streaming gigabytes on an error status. The cap is
+// advisory for diagnostics — truncation only loses trailing error detail,
+// never a model payload. Always called on the error path where the body is
+// about to be discarded anyway, so Close is the caller's responsibility.
+func readErrorBody(resp *http.Response) []byte {
+    b, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+    if err != nil {
+        slog.Debug("failed to read capped upstream error body", "error", err)
+        return nil
+    }
+    return b
+}
+
+// truncateForError trims a body slice for safe embedding in an error string,
+// keeping the leading window that usually holds the upstream's own error
+// message. Kept separate from readErrorBody so callers that already hold a
+// slice (e.g. a partially-read buffer) can still bound it.
+func truncateForError(b []byte) string {
+    const maxEmbed = 512
+    if len(b) <= maxEmbed {
+        return string(b)
+    }
+    return fmt.Sprintf("%s... (truncated %d bytes)", b[:maxEmbed], len(b)-maxEmbed)
+}
 
 // TransportForBackend builds an http.RoundTripper tuned for a backend.
 //

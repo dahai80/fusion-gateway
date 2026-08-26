@@ -5,7 +5,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -49,7 +48,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
     if err != nil { return nil, fmt.Errorf("deepseek chat failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("deepseek chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -66,7 +65,7 @@ func (p *DeepSeekProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("deepseek stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("deepseek stream status %d: %s", resp.StatusCode, string(b))
     }

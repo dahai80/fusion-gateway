@@ -9,7 +9,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -66,7 +65,7 @@ func (p *StepFunProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResp
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("stepfun chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -87,7 +86,7 @@ func (p *StepFunProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
         return nil, fmt.Errorf("stepfun stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("stepfun stream status %d: %s", resp.StatusCode, string(b))
     }

@@ -9,7 +9,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -66,7 +65,7 @@ func (p *YiProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse,
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("yi chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -87,7 +86,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
         return nil, fmt.Errorf("yi stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("yi stream status %d: %s", resp.StatusCode, string(b))
     }

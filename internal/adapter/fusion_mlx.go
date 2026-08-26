@@ -5,7 +5,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
     "log/slog"
     "net/http"
     "net/http/httputil"
@@ -216,7 +215,7 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("chat request returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -263,7 +262,7 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     }
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("stream chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -312,7 +311,7 @@ func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -354,7 +353,7 @@ func (p *FusionMLXProvider) Rerank(ctx context.Context, req *RerankRequest) (*Re
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -386,7 +385,7 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("list models returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
     }
 

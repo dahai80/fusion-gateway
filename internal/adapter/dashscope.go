@@ -5,7 +5,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -62,7 +61,7 @@ func (p *DashScopeProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("dashscope chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -83,7 +82,7 @@ func (p *DashScopeProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         return nil, fmt.Errorf("dashscope stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("dashscope stream status %d: %s", resp.StatusCode, string(b))
     }
@@ -108,7 +107,7 @@ func (p *DashScopeProvider) Embedding(ctx context.Context, req *EmbeddingRequest
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("dashscope embedding status %d: %s", resp.StatusCode, string(b))
     }
     var embResp EmbeddingResponse

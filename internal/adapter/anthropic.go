@@ -226,7 +226,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
@@ -254,7 +254,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         return nil, fmt.Errorf("anthropic stream request failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("anthropic stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -285,7 +285,7 @@ func (p *AnthropicProvider) Messages(ctx context.Context, req *AnthropicRequest)
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         return nil, fmt.Errorf("anthropic messages returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
@@ -312,7 +312,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
         return nil, fmt.Errorf("anthropic stream messages failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("anthropic stream messages returned status %d: %s", resp.StatusCode, string(respBody))
     }

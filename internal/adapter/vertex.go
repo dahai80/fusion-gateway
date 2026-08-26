@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -176,7 +175,7 @@ func (p *VertexProvider) accessToken(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b := readErrorBody(resp)
 		return "", fmt.Errorf("token exchange status %d: %s", resp.StatusCode, string(b))
 	}
 	var tokResp struct {

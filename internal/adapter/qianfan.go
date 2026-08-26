@@ -5,7 +5,6 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -44,7 +43,7 @@ func (p *QianfanProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResp
     if err != nil { return nil, fmt.Errorf("qianfan chat failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("qianfan chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -61,7 +60,7 @@ func (p *QianfanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("qianfan stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("qianfan stream status %d: %s", resp.StatusCode, string(b))
     }
@@ -84,7 +83,7 @@ func (p *QianfanProvider) Embedding(ctx context.Context, req *EmbeddingRequest) 
     if err != nil { return nil, fmt.Errorf("qianfan embedding failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b, _ := io.ReadAll(resp.Body)
+        b := readErrorBody(resp)
         return nil, fmt.Errorf("qianfan embedding status %d: %s", resp.StatusCode, string(b))
     }
     var embResp EmbeddingResponse
