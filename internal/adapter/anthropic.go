@@ -183,22 +183,36 @@ func NewAnthropicProvider(name string, backendCfg config.BackendConfig) *Anthrop
     if timeout == 0 {
         timeout = 120 * time.Second
     }
+    // B5: both clients route through TransportForBackend so Anthropic inherits
+    // the same pool tuning (MaxIdleConnsPerHost 64) and UDS dialing as the
+    // other providers. The prior hand-rolled transports bypassed this: the
+    // non-stream client got http.DefaultTransport (MaxIdleConnsPerHost=2,
+    // redialing TLS on every 3rd concurrent request) and the stream transport
+    // had no idle pool at all. With socket_path set (UDS convention) the old
+    // code silently ignored it and dialed TCP at http://unix/, failing.
+    //
     // streamHTTPClient: no overall Timeout (http.Client.Timeout caps the full
     // request incl. body read, which truncates long reasoning streams at 120s).
-    // Transport.ResponseHeaderTimeout bounds time-to-first-byte so a dead
-    // upstream still fails fast, while the streamed body runs unbounded until
-    // the upstream closes it naturally. Client cancellation (ctx) still applies.
-    // Non-stream Messages keeps the bounded httpClient.
-    streamTransport := &http.Transport{
-        ResponseHeaderTimeout: timeout,
-        Proxy:                 http.ProxyFromEnvironment,
+    // We clone TransportForBackend's *http.Transport and set
+    // ResponseHeaderTimeout so a dead upstream still fails fast at TTFB, while
+    // the streamed body runs unbounded until the upstream closes it naturally.
+    // Client cancellation (ctx) still applies. Non-stream Messages keeps the
+    // bounded httpClient.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport, ok := baseTransport.(*http.Transport)
+    if !ok {
+        slog.Warn("TransportForBackend not *http.Transport, stream client cannot set ResponseHeaderTimeout", "backend", backendCfg.BaseURL)
+        streamTransport = &http.Transport{ResponseHeaderTimeout: timeout, Proxy: http.ProxyFromEnvironment}
+    } else {
+        streamTransport = streamTransport.Clone()
+        streamTransport.ResponseHeaderTimeout = timeout
     }
     return &AnthropicProvider{
         name:             name,
         baseURL:          backendCfg.BaseURL,
         apiKey:           backendCfg.APIKey,
         apiVersion:       "2023-06-01",
-        httpClient:       &http.Client{Timeout: timeout},
+        httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
         streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
     }
 }
