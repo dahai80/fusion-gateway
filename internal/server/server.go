@@ -1547,6 +1547,19 @@ func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
 // single unreachable cloud backend cannot stall the /v1/models endpoint.
 const listModelsPerProviderTimeout = 3 * time.Second
 
+// maxAdminBodySize caps request bodies on admin/connector/oauth2 CRUD paths.
+// B10: those handlers decode JSON directly off r.Body with no MaxBytesReader,
+// so an authenticated key (or anonymous when auth.enabled=false) could OOM the
+// gateway with an unbounded body. Admin payloads are small structured JSON
+// (team/org/connector config) — 2 MiB is far beyond any legitimate request.
+const maxAdminBodySize int64 = 2 << 20
+
+// maxLegacyBodySize caps /v1/completions request bodies, matching the 10 MiB
+// limit already applied to its sibling /v1/chat/completions and /v1/messages
+// decode paths. B10: this legacy endpoint was the only inference path missing
+// the cap.
+const maxLegacyBodySize int64 = 10 << 20
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     snap := config.SnapshotFromContext(ctx)
@@ -2087,7 +2100,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         Stop        []string `json:"stop,omitempty"`
         TopP        *float64 `json:"top_p,omitempty"`
     }
-    if err := json.NewDecoder(r.Body).Decode(&legacyReq); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLegacyBodySize)).Decode(&legacyReq); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
         return
     }
@@ -3060,7 +3073,7 @@ func (s *Server) handleAdminTeams(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, teams)
     case http.MethodPost:
         var team store.Team
-        if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&team); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
@@ -3094,7 +3107,7 @@ func (s *Server) handleAdminTeamsCRUD(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, team)
     case http.MethodPut:
         var team store.Team
-        if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&team); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
@@ -3126,7 +3139,7 @@ func (s *Server) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, orgs)
     case http.MethodPost:
         var org store.Organization
-        if err := json.NewDecoder(r.Body).Decode(&org); err != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&org); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
@@ -3185,7 +3198,7 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
             Endpoint         string               `json:"endpoint"`
             CompletionWindow string               `json:"completion_window"`
         }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&req); err != nil {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
@@ -3254,7 +3267,7 @@ func (s *Server) handleConnectorTest(w http.ResponseWriter, r *http.Request) {
         return
     }
     var req connector.ActionRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&req); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
         return
     }
@@ -3282,7 +3295,7 @@ func (s *Server) handleConnectorAction(w http.ResponseWriter, r *http.Request) {
         Params       map[string]interface{} `json:"params"`
         ConnectionID string                 `json:"connectionId"`
     }
-    if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&body); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
         return
     }
@@ -3312,7 +3325,7 @@ func (s *Server) handleConnectionList(w http.ResponseWriter, r *http.Request) {
         })
     case http.MethodPost:
         var conn connector.Connection
-        if err := json.NewDecoder(r.Body).Decode(&conn); err != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&conn); err != nil {
             http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
             return
         }
@@ -3405,7 +3418,7 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
         ConnectorKey string `json:"connectorKey"`
         State        string `json:"state"`
     }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodySize)).Decode(&req); err != nil {
         http.Error(w, `{"error":{"message":"Invalid JSON"}}`, http.StatusBadRequest)
         return
     }
