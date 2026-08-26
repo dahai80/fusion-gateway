@@ -1,6 +1,7 @@
 package redis
 
 import (
+    "context"
     "encoding/json"
     "fmt"
     "log/slog"
@@ -883,7 +884,7 @@ func TestRedisStore_ListKeys_InvalidData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, apiKeyPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), apiKeyPrefix+"bad", "not-json", 0)
     _ = rs.CreateKey(&store.APIKeyEntry{Name: "good"})
     keys, err := rs.ListKeys()
     if err != nil {
@@ -898,7 +899,7 @@ func TestRedisStore_ListChannels_InvalidData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, channelPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), channelPrefix+"bad", "not-json", 0)
     _ = rs.CreateChannel(&store.ChannelEntry{Name: "good"})
     channels, err := rs.ListChannels()
     if err != nil {
@@ -913,7 +914,7 @@ func TestRedisStore_ListTeams_InvalidData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, teamPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), teamPrefix+"bad", "not-json", 0)
     _ = rs.CreateTeam(&store.Team{ID: "good", Name: "Good"})
     teams, err := rs.ListTeams()
     if err != nil {
@@ -928,7 +929,7 @@ func TestRedisStore_ListOrgs_InvalidData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, orgPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), orgPrefix+"bad", "not-json", 0)
     _ = rs.CreateOrg(&store.Organization{ID: "good", Name: "Good"})
     orgs, err := rs.ListOrgs()
     if err != nil {
@@ -943,7 +944,7 @@ func TestRedisStore_ListBatches_InvalidData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, batchPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), batchPrefix+"bad", "not-json", 0)
     b, _ := rs.CreateBatch([]store.BatchRequest{{CustomID: "r1"}}, "", "")
     batches, err := rs.ListBatches()
     if err != nil {
@@ -964,7 +965,7 @@ func TestRedisStore_GetKey_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, apiKeyPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), apiKeyPrefix+"bad", "not-json", 0)
     _, err := rs.GetKey("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -975,7 +976,7 @@ func TestRedisStore_GetChannel_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, channelPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), channelPrefix+"bad", "not-json", 0)
     _, err := rs.GetChannel("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -986,7 +987,7 @@ func TestRedisStore_GetTeam_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, teamPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), teamPrefix+"bad", "not-json", 0)
     _, err := rs.GetTeam("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -997,7 +998,7 @@ func TestRedisStore_GetOrg_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, orgPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), orgPrefix+"bad", "not-json", 0)
     _, err := rs.GetOrg("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -1008,7 +1009,7 @@ func TestRedisStore_GetBatch_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, batchPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), batchPrefix+"bad", "not-json", 0)
     _, err := rs.GetBatch("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -1019,7 +1020,7 @@ func TestRedisStore_GetLog_InvalidJSON(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.Set(rs.ctx, logPrefix+"bad", "not-json", 0)
+    rs.client.Set(context.Background(), logPrefix+"bad", "not-json", 0)
     _, err := rs.GetLog("bad")
     if err == nil {
         t.Fatal("expected error for invalid JSON")
@@ -1030,8 +1031,8 @@ func TestRedisStore_QueryLogs_InvalidLogData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.ZAdd(rs.ctx, logPrefix+"index", redis.Z{Score: 1, Member: "bad"})
-    rs.client.Set(rs.ctx, logPrefix+"bad", "not-json", 0)
+    rs.client.ZAdd(context.Background(), logPrefix+"index", redis.Z{Score: 1, Member: "bad"})
+    rs.client.Set(context.Background(), logPrefix+"bad", "not-json", 0)
     logs, total, err := rs.QueryLogs(store.LogFilter{Page: 0, PageSize: 10})
     if err != nil {
         t.Fatalf("QueryLogs failed: %v", err)
@@ -1048,7 +1049,7 @@ func TestRedisStore_QueryLogs_MissingLogData(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.ZAdd(rs.ctx, logPrefix+"index", redis.Z{Score: 1, Member: "ghost"})
+    rs.client.ZAdd(context.Background(), logPrefix+"index", redis.Z{Score: 1, Member: "ghost"})
     logs, total, err := rs.QueryLogs(store.LogFilter{Page: 0, PageSize: 10})
     if err != nil {
         t.Fatalf("QueryLogs failed: %v", err)
@@ -1085,8 +1086,8 @@ func TestRedisStore_GetCostSummary_InvalidRecord(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.ZAdd(rs.ctx, costByTime, redis.Z{Score: 1, Member: "bad"})
-    rs.client.Set(rs.ctx, costPrefix+"rec:bad", "not-json", 0)
+    rs.client.ZAdd(context.Background(), costByTime, redis.Z{Score: 1, Member: "bad"})
+    rs.client.Set(context.Background(), costPrefix+"rec:bad", "not-json", 0)
     summary, err := rs.GetCostSummary("")
     if err != nil {
         t.Fatalf("GetCostSummary failed: %v", err)
@@ -1100,7 +1101,7 @@ func TestRedisStore_GetCostSummary_MissingRecord(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
-    rs.client.ZAdd(rs.ctx, costByTime, redis.Z{Score: 1, Member: "ghost"})
+    rs.client.ZAdd(context.Background(), costByTime, redis.Z{Score: 1, Member: "ghost"})
     summary, err := rs.GetCostSummary("")
     if err != nil {
         t.Fatalf("GetCostSummary failed: %v", err)
