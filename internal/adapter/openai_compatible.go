@@ -285,8 +285,14 @@ func parseSSEStream(ctx context.Context, body io.Reader, ch chan<- StreamChunk) 
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("sse line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: returning (not lineBuf=nil) closes the channel — the
+                // client observes truncation rather than the parser silently
+                // dropping buffered bytes and resyncing mid-JSON. The old
+                // lineBuf=nil kept reading from an arbitrary byte offset,
+                // producing half-JSON "data:" lines forever with no resync
+                // marker (SSE has no length framing).
+                slog.Error("sse line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {

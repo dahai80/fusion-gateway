@@ -360,8 +360,11 @@ func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reade
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("anthropic sse line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: close the stream on over-limit instead of silently
+                // dropping buffered bytes (lineBuf=nil) and resyncing
+                // mid-JSON. See openai_compatible.go parseSSEStream B6 note.
+                slog.Error("anthropic sse line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {
@@ -472,8 +475,15 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("anthropic stream event line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: returning (not lineBuf=nil) closes the channel — the
+                // client observes truncation rather than the parser silently
+                // dropping buffered bytes and resyncing mid-JSON. The old
+                // lineBuf=nil kept reading from an arbitrary byte offset,
+                // producing half-JSON "data:" lines forever with no resync
+                // marker (SSE has no length framing).
+                // Mirrors openai_compatible.go:287 parseSSEStream.
+                slog.Error("anthropic stream event line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {
