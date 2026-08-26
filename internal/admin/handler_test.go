@@ -1002,6 +1002,32 @@ func TestHandleKeyByID(t *testing.T) {
         }
     })
 
+    // F8: DELETE soft-deletes — key record survives as Status=disabled, not
+    // removed. lookupKeyByHash rejects non-active keys, so the revoked key
+    // still fails auth, but the record is recoverable + auditable.
+    t.Run("delete_key_soft_deletes_record_survives", func(t *testing.T) {
+        ms2 := newMockStore()
+        _ = ms2.CreateKey(&store.APIKeyEntry{Name: "soft-del", Status: "active", KeyHash: "hash-xyz", QuotaUsed: 50})
+        h2 := newTestHandler(t, ms2, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/keys/soft-del", nil)
+        rec := httptest.NewRecorder()
+        h2.handleKeyByID(rec, req)
+        if rec.Code != http.StatusNoContent {
+            t.Fatalf("expected 204, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        got, err := ms2.GetKey("soft-del")
+        if err != nil {
+            t.Fatalf("soft-deleted key record should still exist (not hard-removed): %v", err)
+        }
+        if got.Status != "disabled" {
+            t.Fatalf("soft-deleted key should be Status=disabled, got %q", got.Status)
+        }
+        // F8 preserves the full record — hash + usage survive for audit
+        if got.KeyHash != "hash-xyz" || got.QuotaUsed != 50 {
+            t.Fatalf("soft-delete must preserve existing fields, got hash=%q used=%v", got.KeyHash, got.QuotaUsed)
+        }
+    })
+
     t.Run("delete_key_not_found", func(t *testing.T) {
         req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/keys/nonexistent", nil)
         rec := httptest.NewRecorder()
@@ -1038,6 +1064,76 @@ func TestHandleKeyByID(t *testing.T) {
             t.Fatalf("expected 405, got %d", rec.Code)
         }
     })
+}
+
+// F8: keys/channels/quota are privilege write surfaces. A non-admin
+// authenticated user must NOT be able to create/update/delete keys or
+// deduct quota. requireAdminRole (which these routes now use) rejects
+// non-admin roles on write methods while still passing GET.
+func TestHandleKeyByID_NonAdminWriteRejected(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+    ms := newMockStore()
+    _ = ms.CreateKey(&store.APIKeyEntry{Name: "existing-key", Status: "active"})
+    h := newTestHandler(t, ms, auth, "")
+
+    mux := http.NewServeMux()
+    h.RegisterRoutes(mux)
+
+    nonAdminToken, err := auth.GenerateToken("viewer", "viewer")
+    if err != nil {
+        t.Fatalf("generate non-admin token: %v", err)
+    }
+
+    cases := []struct {
+        name   string
+        method string
+        path   string
+    }{
+        {"post_keys_create", http.MethodPost, "/admin/api/keys"},
+        {"put_key_update", http.MethodPut, "/admin/api/keys/existing-key"},
+        {"delete_key", http.MethodDelete, "/admin/api/keys/existing-key"},
+        {"post_quota_deduct", http.MethodPost, "/admin/api/quota/existing-key"},
+        {"post_channels_create", http.MethodPost, "/admin/api/channels"},
+        {"delete_channel", http.MethodDelete, "/admin/api/channels/any"},
+    }
+    for _, c := range cases {
+        t.Run(c.name, func(t *testing.T) {
+            var body *bytes.Reader
+            if c.method == http.MethodPost || c.method == http.MethodPut {
+                body = bytes.NewReader([]byte(`{}`))
+            } else {
+                body = bytes.NewReader(nil)
+            }
+            req := httptest.NewRequest(c.method, c.path, body)
+            req.Header.Set("Authorization", "Bearer "+nonAdminToken)
+            rec := httptest.NewRecorder()
+            mux.ServeHTTP(rec, req)
+            if rec.Code != http.StatusForbidden {
+                t.Fatalf("non-admin %s %s should be 403, got %d; body: %s", c.method, c.path, rec.Code, rec.Body.String())
+            }
+        })
+    }
+
+    // sanity: admin token still succeeds on GET (requireAdminRole passes GET)
+    adminToken, _ := auth.GenerateToken("admin", "admin")
+    req := httptest.NewRequest(http.MethodGet, "/admin/api/keys/existing-key", nil)
+    req.Header.Set("Authorization", "Bearer "+adminToken)
+    rec := httptest.NewRecorder()
+    mux.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("admin GET should be 200, got %d", rec.Code)
+    }
+
+    // sanity: non-admin GET still passes (read allowed)
+    req2 := httptest.NewRequest(http.MethodGet, "/admin/api/keys/existing-key", nil)
+    req2.Header.Set("Authorization", "Bearer "+nonAdminToken)
+    rec2 := httptest.NewRecorder()
+    mux.ServeHTTP(rec2, req2)
+    if rec2.Code != http.StatusOK {
+        t.Fatalf("non-admin GET should be 200, got %d", rec2.Code)
+    }
 }
 
 func TestHandleChannels(t *testing.T) {

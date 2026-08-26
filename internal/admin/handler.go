@@ -31,10 +31,10 @@ func NewHandler(st store.Store, auth *AdminAuth, configPath string) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-    mux.HandleFunc("/admin/api/keys", h.withAuth(h.handleKeys))
-    mux.HandleFunc("/admin/api/keys/", h.withAuth(h.handleKeyByID))
-    mux.HandleFunc("/admin/api/channels", h.withAuth(h.handleChannels))
-    mux.HandleFunc("/admin/api/channels/", h.withAuth(h.handleChannelByID))
+    mux.HandleFunc("/admin/api/keys", h.requireAdminRole(h.handleKeys))
+    mux.HandleFunc("/admin/api/keys/", h.requireAdminRole(h.handleKeyByID))
+    mux.HandleFunc("/admin/api/channels", h.requireAdminRole(h.handleChannels))
+    mux.HandleFunc("/admin/api/channels/", h.requireAdminRole(h.handleChannelByID))
     mux.HandleFunc("/admin/api/logs", h.withAuth(h.handleLogs))
     mux.HandleFunc("/admin/api/logs/export", h.withAuth(h.handleLogsExport))
     mux.HandleFunc("/admin/api/logs/filters", h.withAuth(h.handleLogsFilters))
@@ -46,7 +46,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/analytics/errors", h.withAuth(h.handleErrorStats))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
-    mux.HandleFunc("/admin/api/quota/", h.withAuth(h.handleQuota))
+    mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))
     mux.HandleFunc("/admin/api/config/routing", h.requireAdminRole(h.handleRoutingConfig))
     mux.HandleFunc("/admin/api/config/backends", h.requireAdminRole(h.handleBackendsConfig))
     mux.HandleFunc("/admin/api/config/backends/", h.requireAdminRole(h.handleBackendByName))
@@ -302,10 +302,27 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, key)
 
     case http.MethodDelete:
-        if err := h.store.DeleteKey(name); err != nil {
+        // F8: soft-delete — revoke the key (Status=disabled) instead of
+        // hard-removing it. lookupKeyByHash (middleware/auth.go) rejects any
+        // non-active key, so a disabled key fails auth identically to a
+        // deleted one, but the record survives for audit/quota forensics and
+        // can be re-enabled. Hard delete destroyed recovery + history.
+        key, err := h.store.GetKey(name)
+        if err != nil {
             writeError(w, http.StatusNotFound, err.Error())
             return
         }
+        if key.Status == "disabled" {
+            writeJSON(w, http.StatusNoContent, nil)
+            return
+        }
+        key.Status = "disabled"
+        if err := h.store.UpdateKey(key); err != nil {
+            slog.Error("admin: soft-delete key failed", "key", name, "error", err)
+            writeError(w, http.StatusInternalServerError, "failed to disable key")
+            return
+        }
+        slog.Info("admin: key soft-deleted (disabled)", "key", name)
         writeJSON(w, http.StatusNoContent, nil)
 
     default:
