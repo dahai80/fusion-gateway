@@ -22,20 +22,32 @@ func taskIDFromContext(ctx context.Context) string {
 // the registry NEVER touches the in-flight counter, so cancel cannot
 // double-release. Register on stream start, Release on stream exit (defer),
 // Cancel on endpoint hit. Thread-safe.
+//
+// B12: each entry also records OwnerKey — the auth-key name that enqueued the
+// task — so the cancel endpoint can refuse a cross-tenant cancel (key A
+// guessing/replaying key B's X-Request-ID to kill a rival's long-run agent
+// task). Empty OwnerKey (no auth principal, e.g. auth disabled) is treated as
+// unowned and cancelable by anyone; the master key bypasses the check.
+type taskEntry struct {
+    cancel   context.CancelFunc
+    ownerKey string
+}
+
 type TaskRegistry struct {
     mu    sync.RWMutex
-    tasks map[string]context.CancelFunc
+    tasks map[string]*taskEntry
 }
 
 // NewTaskRegistry builds an empty registry.
 func NewTaskRegistry() *TaskRegistry {
-    return &TaskRegistry{tasks: make(map[string]context.CancelFunc)}
+    return &TaskRegistry{tasks: make(map[string]*taskEntry)}
 }
 
-// Register associates taskID with its cancel func. If taskID is empty or
-// already registered, the prior entry is overwritten (logged) — the caller is
-// expected to use a unique id (X-Request-ID from middleware).
-func (r *TaskRegistry) Register(taskID string, cancel context.CancelFunc) {
+// Register associates taskID with its cancel func and ownerKey (the enqueuing
+// auth-key name, for B12 per-key ownership). If taskID is empty the call is a
+// no-op. An already-registered id is overwritten (logged) — callers use a
+// unique X-Request-ID.
+func (r *TaskRegistry) Register(taskID, ownerKey string, cancel context.CancelFunc) {
     if taskID == "" {
         slog.Debug("task registry: skip register of empty task id")
         return
@@ -45,28 +57,43 @@ func (r *TaskRegistry) Register(taskID string, cancel context.CancelFunc) {
     if _, exists := r.tasks[taskID]; exists {
         slog.Warn("task registry: overwriting existing task id", "task_id", taskID)
     }
-    r.tasks[taskID] = cancel
-    slog.Debug("task registry: registered in-flight task", "task_id", taskID, "active", len(r.tasks))
+    r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey}
+    slog.Debug("task registry: registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", len(r.tasks))
 }
 
 // Cancel invokes the cancel func for taskID and evicts the entry. Returns true
 // if the task was found and canceled, false if not found (caller writes 404).
 // Cancel is immediate — it signals the ctx; the stream goroutine observes
 // ctx.Err() and exits on its own, releasing the slot via its defer.
-func (r *TaskRegistry) Cancel(taskID string) bool {
+//
+// B12 ownership: requester is the canceling auth-key name; isMaster bypasses
+// the check. A task with no owner (ownerKey == "", e.g. enqueued with auth
+// disabled) is cancelable by anyone. A mismatch returns false with
+// denied=true so the caller can write 403 rather than 404 (a 404 would let an
+// attacker probe whether a guessed task-id exists).
+func (r *TaskRegistry) Cancel(taskID, requester string, isMaster bool) (canceled, denied bool) {
     r.mu.Lock()
-    cancel, ok := r.tasks[taskID]
+    entry, ok := r.tasks[taskID]
     if ok {
         delete(r.tasks, taskID)
     }
     r.mu.Unlock()
     if !ok {
         slog.Info("task registry: cancel for unknown task id", "task_id", taskID)
-        return false
+        return false, false
     }
-    cancel()
-    slog.Info("task registry: canceled in-flight task", "task_id", taskID, "active", len(r.tasks))
-    return true
+    if !isMaster && entry.ownerKey != "" && entry.ownerKey != requester {
+        slog.Warn("task registry: cancel denied, owner mismatch",
+            "task_id", taskID, "owner", entry.ownerKey, "requester", requester)
+        // Re-insert: the task is still in-flight, only the cancel was refused.
+        r.mu.Lock()
+        r.tasks[taskID] = entry
+        r.mu.Unlock()
+        return false, true
+    }
+    entry.cancel()
+    slog.Info("task registry: canceled in-flight task", "task_id", taskID, "owner", entry.ownerKey, "requester", requester, "active", len(r.tasks))
+    return true, false
 }
 
 // Release evicts a completed task's entry. Called from the stream goroutine's

@@ -791,7 +791,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     // release). Release the registry entry on return (idempotent vs Cancel).
     if taskID := taskIDFromContext(ctx); taskID != "" {
         streamCtx, cancel := context.WithCancel(ctx)
-        s.taskRegistry.Register(taskID, cancel)
+        // B12: bind the enqueuing auth-key name so the cancel endpoint can
+        // refuse a cross-tenant cancel. Empty when no principal (auth off).
+        owner := ""
+        if kc := middleware.GetAuthKeyConfig(ctx); kc != nil {
+            owner = kc.Name
+        }
+        s.taskRegistry.Register(taskID, owner, cancel)
         defer s.taskRegistry.Release(taskID)
         ctx = streamCtx
     }
@@ -2284,8 +2290,30 @@ func (s *Server) handleAgentTask(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if s.taskRegistry.Cancel(taskID) {
-        slog.Info("agent task cancel: canceled in-flight task", "task_id", taskID)
+    // B12: per-key ownership. Resolve the canceling principal; the master key
+    // bypasses the check, a regular key may only cancel tasks it enqueued.
+    // A task enqueued with no owner (auth off) is cancelable by anyone. A
+    // mismatch returns 403, not 404, so a guessed task-id does not leak
+    // existence — but the 403 path intentionally does not echo the owner.
+    requester := ""
+    isMaster := false
+    if p := middleware.PrincipalFromContext(r.Context()); p != nil {
+        isMaster = p.IsMaster
+        if p.KeyConfig != nil {
+            requester = p.KeyConfig.Name
+        }
+    }
+
+    canceled, denied := s.taskRegistry.Cancel(taskID, requester, isMaster)
+    if denied {
+        slog.Warn("agent task cancel: ownership denied", "task_id", taskID, "requester", requester, "is_master", isMaster)
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusForbidden)
+        fmt.Fprintf(w, `{"error":{"message":"task not owned by this key","type":"forbidden","task_id":%q}}`, taskID)
+        return
+    }
+    if canceled {
+        slog.Info("agent task cancel: canceled in-flight task", "task_id", taskID, "requester", requester)
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusOK)
         fmt.Fprintf(w, `{"status":"canceled","task_id":%q}`, taskID)
@@ -2438,7 +2466,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     // existing defer above (no double-release). Release entry on return.
     if taskID := taskIDFromContext(ctx); taskID != "" {
         streamCtx, cancel := context.WithCancel(ctx)
-        s.taskRegistry.Register(taskID, cancel)
+        // B12: bind the enqueuing auth-key name (mirror /v1/chat/completions).
+        owner := ""
+        if kc := middleware.GetAuthKeyConfig(ctx); kc != nil {
+            owner = kc.Name
+        }
+        s.taskRegistry.Register(taskID, owner, cancel)
         defer s.taskRegistry.Release(taskID)
         ctx = streamCtx
     }
