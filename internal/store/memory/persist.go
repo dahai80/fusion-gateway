@@ -2,9 +2,11 @@ package memory
 
 import (
     "encoding/json"
+    "fmt"
     "log/slog"
     "os"
     "path/filepath"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -40,6 +42,25 @@ func (p *Persister) Load() error {
         slog.Error("persist: load teams.json failed, keeping seeded defaults", "error", err)
     }
     return nil
+}
+
+// quarantine renames a corrupt persistence file to <path>.corrupt.<unix-ts>
+// so (a) the operator can recover the data, and (b) the next Save*() does NOT
+// silently overwrite the only copy. The original load already failed, so the
+// store continues empty — but the corrupted bytes are preserved on disk for
+// forensic inspection. F6: without this, a truncated keys.json write or a
+// half-rename left an unparseable file that the next SaveKeys() would
+// overwrite with the now-empty in-memory store, destroying recovery evidence
+// and leaving all auth 401 with no clue why.
+func (p *Persister) quarantine(path string, loadErr error) {
+    q := fmt.Sprintf("%s.corrupt.%d", path, time.Now().Unix())
+    if err := os.Rename(path, q); err != nil {
+        slog.Error("persist: failed to quarantine corrupt file, original left in place",
+            "path", path, "quarantine", q, "rename_error", err, "load_error", loadErr)
+        return
+    }
+    slog.Error("persist: quarantined corrupt persistence file for forensic recovery",
+        "original", path, "quarantine", q, "load_error", loadErr)
 }
 
 func (p *Persister) SaveKeys() error {
@@ -121,6 +142,7 @@ func (p *Persister) loadKeys() error {
     }
     var entries []*store.APIKeyEntry
     if err := json.Unmarshal(data, &entries); err != nil {
+        p.quarantine(path, err)
         return err
     }
     p.keys.mu.Lock()
@@ -147,6 +169,7 @@ func (p *Persister) loadChannels() error {
     }
     var entries []*store.ChannelEntry
     if err := json.Unmarshal(data, &entries); err != nil {
+        p.quarantine(path, err)
         return err
     }
     p.chans.mu.Lock()
@@ -173,6 +196,7 @@ func (p *Persister) loadTeams() error {
         KeyTeam map[string]string     `json:"key_team"`
     }
     if err := json.Unmarshal(data, &payload); err != nil {
+        p.quarantine(path, err)
         return err
     }
     p.teams.mu.Lock()

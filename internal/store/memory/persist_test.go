@@ -258,6 +258,63 @@ func TestCorruptFile_GracefulEmpty(t *testing.T) {
     }
 }
 
+// F6: a corrupt keys.json must be quarantined to <name>.corrupt.<ts> so the
+// next SaveKeys() does not overwrite the only (corrupt) copy with the empty
+// in-memory store — preserving the bytes for forensic recovery. The store
+// continues empty (soft contract), but the original file no longer sits at
+// the canonical path.
+func TestCorruptFile_QuarantinedNotOverwritten(t *testing.T) {
+    dir := t.TempDir()
+    corruptPayload := []byte("{not valid json")
+    if err := os.WriteFile(filepath.Join(dir, "keys.json"), corruptPayload, 0o600); err != nil {
+        t.Fatal(err)
+    }
+
+    ms := NewMemoryStore(100)
+    if err := ms.EnablePersistence(dir); err != nil {
+        t.Fatalf("corrupt keys.json should not crash EnablePersistence: %v", err)
+    }
+
+    // canonical path no longer holds the corrupt file
+    if _, err := os.Stat(filepath.Join(dir, "keys.json")); !os.IsNotExist(err) {
+        t.Fatalf("corrupt keys.json should have been renamed away, stat err=%v", err)
+    }
+    // a quarantine copy exists and holds the original corrupt bytes
+    matches, err := filepath.Glob(filepath.Join(dir, "keys.json.corrupt.*"))
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(matches) != 1 {
+        t.Fatalf("expected exactly 1 quarantine file, got %d: %v", len(matches), matches)
+    }
+    got, err := os.ReadFile(matches[0])
+    if err != nil {
+        t.Fatal(err)
+    }
+    if string(got) != string(corruptPayload) {
+        t.Fatalf("quarantine file content mismatch: want %q got %q", corruptPayload, got)
+    }
+
+    // subsequent SaveKeys() writes a fresh valid keys.json, not a silent overwrite
+    if err := ms.CreateKey(&store.APIKeyEntry{Name: "recovery-key", Status: "active"}); err != nil {
+        t.Fatalf("CreateKey after corrupt load: %v", err)
+    }
+    if err := ms.persist.SaveKeys(); err != nil {
+        t.Fatalf("SaveKeys after corrupt load: %v", err)
+    }
+    fresh, err := os.ReadFile(filepath.Join(dir, "keys.json"))
+    if err != nil {
+        t.Fatal(err)
+    }
+    if string(fresh) == string(corruptPayload) {
+        t.Fatal("SaveKeys overwrote the quarantine path instead of writing a fresh valid file")
+    }
+    // quarantine file still intact after save
+    if _, err := os.Stat(matches[0]); err != nil {
+        t.Fatalf("quarantine file should survive SaveKeys: %v", err)
+    }
+}
+
 func TestAtomicWrite_NoCorrupt(t *testing.T) {
     dir := t.TempDir()
     p := NewPersister(dir, NewKeyStore(), NewChannelStore(), NewTeamsStore())
