@@ -77,9 +77,27 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
             slog.Error("persist: save teams failed", "error", err)
         }
     })
+    // F2/P1: high-frequency AddCost persists through a debounced SaveTeams so
+    // quota/cost survive restart (F2 billing bypass) without a full-JSON rewrite
+    // per billed request (P1 write amplification). Same SaveTeams writer, just
+    // coalesced. FlushQuota is wired into the store shutdown path.
+    m.teams.SetQuotaPersist(func() {
+        if err := p.SaveTeams(); err != nil {
+            slog.Error("persist: save teams (quota) failed", "error", err)
+        }
+    })
     m.persist = p
     slog.Info("store persistence enabled", "data_dir", dir)
     return nil
+}
+
+// FlushQuota synchronously flushes any pending debounced team quota/cost write
+// so the last burst of AddCost before shutdown reaches disk (F2). Called from
+// Server.Shutdown via a type assertion on the Store interface.
+func (m *MemoryStore) FlushQuota() {
+    if m.teams != nil {
+        m.teams.FlushQuota()
+    }
 }
 
 func (m *MemoryStore) AppendLog(log *store.RequestLog) error {
