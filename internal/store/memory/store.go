@@ -59,6 +59,10 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
         return nil
     }
     p := NewPersister(dir, m.keys, m.channels, m.teams)
+    // A2: quota store must be wired onto the persister BEFORE Load() so
+    // loadQuota can SeedUsage from the persisted quota.json into the maps
+    // Check/Deduct read (otherwise restart zeroes per-key quota).
+    p.quota = m.quota
     if err := p.Load(); err != nil {
         return err
     }
@@ -86,6 +90,14 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
             slog.Error("persist: save teams (quota) failed", "error", err)
         }
     })
+    // A2: debounced per-key quota persistence — coalesces a burst of Deduct
+    // calls into a single atomic quota.json write, surviving restart without
+    // per-request write amplification. Mirrors the F2 team-quota debounce.
+    m.quota.SetKeyPersist(func() {
+        if err := p.SaveQuota(); err != nil {
+            slog.Error("persist: save quota failed", "error", err)
+        }
+    })
     m.persist = p
     slog.Info("store persistence enabled", "data_dir", dir)
     return nil
@@ -97,6 +109,11 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
 func (m *MemoryStore) FlushQuota() {
     if m.teams != nil {
         m.teams.FlushQuota()
+    }
+    // A2: drain the per-key quota debounce too so the last burst of Deduct
+    // reaches quota.json before shutdown.
+    if m.quota != nil {
+        m.quota.FlushKey()
     }
 }
 

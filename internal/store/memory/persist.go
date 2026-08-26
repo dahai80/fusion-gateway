@@ -16,6 +16,7 @@ type Persister struct {
     keys    *KeyStore
     chans   *ChannelStore
     teams   *TeamsStore
+    quota   *QuotaStore
 }
 
 func NewPersister(dataDir string, ks *KeyStore, cs *ChannelStore, ts *TeamsStore) *Persister {
@@ -40,6 +41,9 @@ func (p *Persister) Load() error {
     }
     if err := p.loadTeams(); err != nil {
         slog.Error("persist: load teams.json failed, keeping seeded defaults", "error", err)
+    }
+    if err := p.loadQuota(); err != nil {
+        slog.Error("persist: load quota.json failed, starting with zeroed per-key usage", "error", err)
     }
     return nil
 }
@@ -220,6 +224,59 @@ func (p *Persister) loadTeams() error {
     }
     p.teams.mu.Unlock()
     slog.Info("persist: loaded teams from disk", "teams", len(payload.Teams), "orgs", len(payload.Orgs), "dir", p.dataDir)
+    return nil
+}
+
+// SaveQuota atomically writes the authoritative per-key quota maps
+// (usage/dailyUsage/dailyDate) to quota.json. A2: these maps are the source of
+// truth for cumulative-budget enforcement (Check reads q.usage, not the key
+// entry), and BudgetLimit-only keys never write k.QuotaUsed, so keys.json
+// alone cannot restore usage. A dedicated file + the QuotaStore debounce avoid
+// per-request write amplification.
+func (p *Persister) SaveQuota() error {
+    if p.dataDir == "" || p.quota == nil {
+        return nil
+    }
+    usage, dailyUsage, dailyDate := p.quota.SnapshotQuota()
+    payload := struct {
+        Usage      map[string]float64 `json:"usage"`
+        DailyUsage map[string]float64 `json:"daily_usage"`
+        DailyDate  map[string]string  `json:"daily_date"`
+    }{
+        Usage:      usage,
+        DailyUsage: dailyUsage,
+        DailyDate:  dailyDate,
+    }
+    data, err := json.MarshalIndent(payload, "", "  ")
+    if err != nil {
+        return err
+    }
+    return p.atomicWrite(filepath.Join(p.dataDir, "quota.json"), data)
+}
+
+func (p *Persister) loadQuota() error {
+    path := filepath.Join(p.dataDir, "quota.json")
+    data, err := os.ReadFile(path)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return nil
+        }
+        return err
+    }
+    var payload struct {
+        Usage      map[string]float64 `json:"usage"`
+        DailyUsage map[string]float64 `json:"daily_usage"`
+        DailyDate  map[string]string  `json:"daily_date"`
+    }
+    if err := json.Unmarshal(data, &payload); err != nil {
+        p.quarantine(path, err)
+        return err
+    }
+    if p.quota != nil {
+        p.quota.SeedUsage(payload.Usage, payload.DailyUsage, payload.DailyDate)
+    }
+    slog.Info("persist: loaded quota from disk",
+        "usage_keys", len(payload.Usage), "dir", p.dataDir)
     return nil
 }
 

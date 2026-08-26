@@ -352,3 +352,89 @@ func TestExpandPath_Tilde(t *testing.T) {
         }
     }
 }
+
+// A2: per-key quota usage must survive restart. Pre-fix, QuotaStore.usage was
+// pure in-memory — a BudgetLimit key burned to the limit reset to 0 on reload
+// (billing bypass, same class as F2 for team quota). Deduct persists the
+// authoritative maps to quota.json (debounced); a fresh store loads + seeds
+// them so Check reads the pre-restart usage. Covers BudgetLimit-only keys
+// (QuotaLimit==0, so k.QuotaUsed is never written by Deduct — keys.json alone
+// could never restore this).
+func TestPerKeyQuota_SurvivesRestart(t *testing.T) {
+    dir := t.TempDir()
+    ms := newPersistTestStore(t, dir)
+
+    // BudgetLimit-only key: QuotaLimit==0 so Deduct never writes k.QuotaUsed.
+    // Cumulative usage lives only in QuotaStore.usage.
+    key := &store.APIKeyEntry{Name: "budget-key", Status: "active", BudgetLimit: 100.0}
+    if err := ms.CreateKey(key); err != nil {
+        t.Fatal(err)
+    }
+    if err := ms.DeductQuota("budget-key", 42.0); err != nil {
+        t.Fatal(err)
+    }
+    // flush the debounced quota.json write (shutdown path does this)
+    ms.FlushQuota()
+
+    quotaPath := filepath.Join(dir, "quota.json")
+    if _, err := os.Stat(quotaPath); err != nil {
+        t.Fatalf("quota.json not written after FlushQuota: %v", err)
+    }
+
+    // fresh store from the same data_dir: usage must be restored
+    ms2 := newPersistTestStore(t, dir)
+    used, limit, exceeded, err := ms2.CheckQuota("budget-key")
+    if err != nil {
+        t.Fatalf("CheckQuota after reload: %v", err)
+    }
+    if used != 42.0 {
+        t.Fatalf("per-key quota not restored after restart: used=%f want 42.0", used)
+    }
+    if limit != 100.0 {
+        t.Fatalf("cumulative budget limit mismatch: limit=%f want 100.0", limit)
+    }
+    if exceeded {
+        t.Fatal("42/100 should not be exceeded after reload")
+    }
+
+    // deducting again accumulates on the restored baseline (not reset to 0)
+    if err := ms2.DeductQuota("budget-key", 8.0); err != nil {
+        t.Fatal(err)
+    }
+    ms2.FlushQuota()
+    used2, _, _, _ := ms2.CheckQuota("budget-key")
+    if used2 != 50.0 {
+        t.Fatalf("post-reload deduct did not accumulate on restored baseline: used=%f want 50.0", used2)
+    }
+}
+
+// A2: quota.json corruption is quarantined (not silently overwritten) and the
+// store starts with zeroed usage rather than crashing — mirrors the F6 keys
+// quarantine contract.
+func TestQuotaCorrupt_QuarantinedZeroed(t *testing.T) {
+    dir := t.TempDir()
+    if err := os.WriteFile(filepath.Join(dir, "quota.json"), []byte("{not valid json"), 0o600); err != nil {
+        t.Fatal(err)
+    }
+
+    ms := NewMemoryStore(100)
+    if err := ms.EnablePersistence(dir); err != nil {
+        t.Fatalf("corrupt quota.json should not crash EnablePersistence: %v", err)
+    }
+    // store usable with zeroed usage
+    used, _, _, _ := ms.CheckQuota("any-key")
+    if used != 0 {
+        t.Fatalf("usage should be zeroed after corrupt load: got %f", used)
+    }
+    // corrupt file quarantined, canonical path cleared
+    if _, err := os.Stat(filepath.Join(dir, "quota.json")); !os.IsNotExist(err) {
+        t.Fatalf("corrupt quota.json should be renamed away, stat err=%v", err)
+    }
+    matches, err := filepath.Glob(filepath.Join(dir, "quota.json.corrupt.*"))
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(matches) != 1 {
+        t.Fatalf("expected 1 quarantine file, got %d: %v", len(matches), matches)
+    }
+}
