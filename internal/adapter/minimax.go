@@ -65,7 +65,7 @@ func (p *MinimaxProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResp
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("minimax chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -86,7 +86,7 @@ func (p *MinimaxProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
         return nil, fmt.Errorf("minimax stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("minimax stream status %d: %s", resp.StatusCode, string(b))
     }

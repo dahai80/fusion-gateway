@@ -65,7 +65,7 @@ func (p *BaichuanProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("baichuan chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -86,7 +86,7 @@ func (p *BaichuanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
         return nil, fmt.Errorf("baichuan stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("baichuan stream status %d: %s", resp.StatusCode, string(b))
     }

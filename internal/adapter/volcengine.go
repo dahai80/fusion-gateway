@@ -62,7 +62,7 @@ func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
     if err != nil { return nil, fmt.Errorf("chat request failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("volcengine chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var chatResp ChatResponse
@@ -81,7 +81,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("volcengine stream request failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("volcengine stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -106,7 +106,7 @@ func (p *VolcengineProvider) Embedding(ctx context.Context, req *EmbeddingReques
     if err != nil { return nil, fmt.Errorf("embedding request failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("volcengine embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var embResp EmbeddingResponse

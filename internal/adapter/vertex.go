@@ -175,7 +175,7 @@ func (p *VertexProvider) accessToken(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b := readErrorBody(resp)
+		b := ReadErrorBody(resp)
 		return "", fmt.Errorf("token exchange status %d: %s", resp.StatusCode, string(b))
 	}
 	var tokResp struct {

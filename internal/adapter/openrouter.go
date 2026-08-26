@@ -48,7 +48,7 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
     if err != nil { return nil, fmt.Errorf("openrouter chat failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("openrouter chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -65,7 +65,7 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("openrouter stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("openrouter stream status %d: %s", resp.StatusCode, string(b))
     }
@@ -88,7 +88,7 @@ func (p *OpenRouterProvider) Embedding(ctx context.Context, req *EmbeddingReques
     if err != nil { return nil, fmt.Errorf("openrouter embedding failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("openrouter embedding status %d: %s", resp.StatusCode, string(b))
     }
     var embResp EmbeddingResponse

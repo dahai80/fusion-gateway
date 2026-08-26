@@ -65,7 +65,7 @@ func (p *ZhipuProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespon
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("zhipu chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
@@ -86,7 +86,7 @@ func (p *ZhipuProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-cha
         return nil, fmt.Errorf("zhipu stream failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("zhipu stream status %d: %s", resp.StatusCode, string(b))
     }
@@ -111,7 +111,7 @@ func (p *ZhipuProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        b := readErrorBody(resp)
+        b := ReadErrorBody(resp)
         return nil, fmt.Errorf("zhipu embedding status %d: %s", resp.StatusCode, string(b))
     }
     var embResp EmbeddingResponse

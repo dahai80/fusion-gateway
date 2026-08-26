@@ -87,7 +87,7 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req *ChatRequest) (
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -122,7 +122,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
     }
 
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("stream chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -163,7 +163,7 @@ func (p *OpenAICompatibleProvider) Embedding(ctx context.Context, req *Embedding
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -199,7 +199,7 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
@@ -264,7 +264,7 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("image request returned status %d: %s", resp.StatusCode, string(respBody))
     }
 

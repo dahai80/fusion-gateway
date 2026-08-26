@@ -26,7 +26,7 @@ const maxErrorBodyBytes = 1 << 20 // 1 MiB
 // advisory for diagnostics — truncation only loses trailing error detail,
 // never a model payload. Always called on the error path where the body is
 // about to be discarded anyway, so Close is the caller's responsibility.
-func readErrorBody(resp *http.Response) []byte {
+func ReadErrorBody(resp *http.Response) []byte {
     b, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
     if err != nil {
         slog.Debug("failed to read capped upstream error body", "error", err)
@@ -35,11 +35,11 @@ func readErrorBody(resp *http.Response) []byte {
     return b
 }
 
-// truncateForError trims a body slice for safe embedding in an error string,
+// TruncateForError trims a body slice for safe embedding in an error string,
 // keeping the leading window that usually holds the upstream's own error
-// message. Kept separate from readErrorBody so callers that already hold a
+// message. Kept separate from ReadErrorBody so callers that already hold a
 // slice (e.g. a partially-read buffer) can still bound it.
-func truncateForError(b []byte) string {
+func TruncateForError(b []byte) string {
     const maxEmbed = 512
     if len(b) <= maxEmbed {
         return string(b)

@@ -74,7 +74,7 @@ func (p *FusionKBProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("kb chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var chatResp ChatResponse
@@ -103,7 +103,7 @@ func (p *FusionKBProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
         return nil, fmt.Errorf("kb stream request failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("kb stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -136,7 +136,7 @@ func (p *FusionKBProvider) Embedding(ctx context.Context, req *EmbeddingRequest)
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("kb embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var embResp EmbeddingResponse
@@ -166,7 +166,7 @@ func (p *FusionKBProvider) Rerank(ctx context.Context, req *RerankRequest) (*Rer
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody := readErrorBody(resp)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("kb rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var rerankResp RerankResponse
