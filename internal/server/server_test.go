@@ -29,7 +29,37 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
     memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
+    "sync"
 )
+
+// lockedBuffer is a concurrency-safe bytes.Buffer for capturing slog output in
+// stream tests. The Anthropic/OpenAI stream handlers spawn a detached parser
+// goroutine (safego.Go) that keeps emitting slog.Debug after the handler
+// returns; a plain bytes.Buffer raced under -race (test reading logBuf.String()
+// while the parser goroutine still wrote via slog). All access goes through a
+// mutex so concurrent Write/String/Reset are safe.
+type lockedBuffer struct {
+    mu  sync.Mutex
+    buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.buf.Reset()
+}
 
 type mockProvider struct {
     name       string
@@ -4235,7 +4265,7 @@ func TestHandleStreamAnthropicMessages_WriteFailureLogged(t *testing.T) {
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
     // Capture slog output into a buffer so we can assert the distinct log line.
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4302,7 +4332,7 @@ func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnClientCancel(t *testing
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4378,7 +4408,7 @@ func TestHandleStreamAnthropicMessages_ClientCancelWriteFailedSkipsSynth(t *test
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4438,7 +4468,7 @@ func TestHandleStreamAnthropicMessages_StreamSummaryLogged(t *testing.T) {
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4530,7 +4560,7 @@ func TestHandleStreamAnthropicMessages_LastEventIdleNonZeroAfterGap(t *testing.T
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))

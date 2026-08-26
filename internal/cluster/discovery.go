@@ -274,7 +274,9 @@ func (d *Discovery) UpdateConfig(cfg config.ClusterConfig) {
 }
 
 func (d *Discovery) healthCheckLoop(ctx context.Context) {
+    d.mu.RLock()
     interval := d.cfg.HealthCheckInterval
+    d.mu.RUnlock()
     if interval == 0 {
         interval = 10 * time.Second
     }
@@ -370,7 +372,9 @@ func (d *Discovery) syncFromMaster() {
 }
 
 func (d *Discovery) masterSyncLoop(ctx context.Context) {
+    d.mu.RLock()
     interval := d.cfg.HealthCheckInterval
+    d.mu.RUnlock()
     if interval == 0 {
         interval = 10 * time.Second
     }
@@ -569,7 +573,13 @@ func (d *Discovery) fetchModels(node *Node) {
 }
 
 func (d *Discovery) checkFailureThreshold(node *Node) {
+    // d.cfg is written by UpdateConfig under d.mu; read it under RLock so a
+    // hot-reload does not race the health-check goroutine (caught by -race in
+    // TestRun_OnReloadCallback). config.ClusterConfig is a value type copied
+    // on assignment, so snapshotting the one field under RLock is safe.
+    d.mu.RLock()
     threshold := d.cfg.FailureThreshold
+    d.mu.RUnlock()
     if threshold == 0 {
         threshold = 3
     }

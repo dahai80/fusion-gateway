@@ -29,8 +29,20 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # A5 CI gate: ban bare `go func()`/`go call()` launches outside the
+      # safeGo wrapper. A bare goroutine has no panic recovery; a single
+      # panic in a background worker crashes the process. CLAUDE.md mandate:
+      # "Background goroutines always go through safeGo". Runs before Build so
+      # a violation fails fast.
+      - name: Bare-goroutine gate
+        run: bash scripts/check_bare_goroutines.sh
+
       - name: Build
         run: go build ./...
 
-      - name: Test
-        run: go test ./... -count=1
+      # A5 CI gate: -race catches the concurrency bugs the audit flagged
+      # (RWMutex-across-I/O, circuit-breaker lazy half_open, slot double-
+      # release). macOS runners support -race. -count=1 disables test result
+      # caching so a previously-passing-but-racy run re-runs fresh.
+      - name: Test (race)
+        run: go test ./... -count=1 -race
