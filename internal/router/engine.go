@@ -635,9 +635,25 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         }
     }
 
-    // P5: Concurrent limit
+    // P5: Concurrent limit (advisory soft cap — B2).
+    // This is a TOCTOU soft check, NOT a hard semaphore: localInFlight is
+    // read here under RLock, but the counter is incremented later in the
+    // adapter (fusion_mlx.go inFlightAcquire) inside Chat/StreamChat, after
+    // Decide returns. N concurrent Decide calls can each observe
+    // inFlight == maxConcurrent-1 and all route local, overshooting by up to
+    // N-1 before any of them increments the counter. The hard concurrency
+    // gate is the opt-in slotQueue (engine.go, engaged only when
+    // routing.mode=local AND routing.local_priority.queue_enabled — #102
+    // ADR-001), which Acquires a real slot in the handler before forwarding;
+    // in hybrid mode (the default) fusion-mlx itself queues the excess on its
+    // own request queue. This advisory check only diverts to the cluster/cloud
+    // early when local already LOOKS saturated, shedding load before the
+    // adapter is reached. Overshoot here is bounded and self-correcting: the
+    // next Decide sees the now-incremented counter and diverts.
     maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
     if maxConcurrent > 0 && e.localInFlight() >= int64(maxConcurrent) {
+        slog.Debug("advisory concurrent limit reached, diverting from local",
+            "in_flight", e.localInFlight(), "max_concurrent", maxConcurrent, "model", req.Model)
         if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
