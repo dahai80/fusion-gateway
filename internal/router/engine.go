@@ -280,6 +280,22 @@ func (e *Engine) LocalQueue() *slotQueue {
     return e.localQueue
 }
 
+// Shutdown releases engine-owned background goroutines. B9: the session
+// affinity evict loop is a long-lived worker launched in NewSessionAffinity;
+// without an explicit Stop it survives process exit as a dangling goroutine
+// (matters under graceful shutdown / config-reload test harnesses that reuse
+// the engine). Called from cmd/gateway/main.go after srv.Shutdown + discovery
+// stop, mirroring the F7 shutdown order.
+func (e *Engine) Shutdown() {
+    e.mu.RLock()
+    sa := e.sessionAffinity
+    e.mu.RUnlock()
+    if sa != nil {
+        sa.Stop()
+    }
+    slog.Info("router engine shutdown complete")
+}
+
 // QueueTimeout returns the configured wait budget for the local queue. Read
 // from the live config snapshot so hot-reload can tune it without rebuilding
 // the engine. Falls back to 5s when unset.

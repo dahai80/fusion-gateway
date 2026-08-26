@@ -292,7 +292,7 @@ func New(
         mcpHandler:        initMCPHandler(cfg),
         taskRegistry:      NewTaskRegistry(),
     }
-    go srv.evictOAuth2States()
+    safego.Go("server_evict_oauth2_states", srv.evictOAuth2States)
     return srv
 }
 
@@ -1637,7 +1637,7 @@ func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []ada
 
     for _, name := range names {
         wg.Add(1)
-        go func(name string) {
+        safego.Go("server_list_models_fanout", func() {
             defer wg.Done()
             provider, ok := s.pool.Get(name)
             if !ok {
@@ -1648,7 +1648,7 @@ func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []ada
             defer cancel()
             providerModels, err := provider.ListModels(pCtx)
             results <- providerResult{name: name, models: providerModels, err: err}
-        }(name)
+        })
     }
 
     wg.Wait()
@@ -1983,13 +1983,13 @@ func (s *Server) handleAdminGC(w http.ResponseWriter, r *http.Request) {
     }
 
     if mlxProvider.InFlight() != 0 {
-        go mlxProvider.TriggerGCWhenIdle()
+        safego.Go("mlx_trigger_gc_when_idle", mlxProvider.TriggerGCWhenIdle)
         w.WriteHeader(http.StatusAccepted)
         fmt.Fprintf(w, `{"status":"gc_queued","in_flight":%d,"message":"GC will execute when in-flight requests reach zero"}`, mlxProvider.InFlight())
         return
     }
 
-    go mlxProvider.SafeGC()
+    safego.Go("mlx_safe_gc", mlxProvider.SafeGC)
     w.WriteHeader(http.StatusOK)
     fmt.Fprint(w, `{"status":"gc_triggered"}`)
 }

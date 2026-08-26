@@ -428,6 +428,9 @@ func run(configPath string) error {
 		discovery.Stop()
 	}
 
+	// B9: stop engine-owned background workers (session affinity evict loop).
+	routerEngine.Shutdown()
+
 	slog.Info("server stopped")
 	return nil
 }

@@ -7,6 +7,7 @@ import (
     "sync"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/gorilla/websocket"
 )
 
@@ -94,7 +95,13 @@ func (p *Proxy) UpgradeAndProxy(w http.ResponseWriter, r *http.Request, backendU
         })
     }
 
-    go p.relay(ctx, "client_to_backend", clientConn, backendConn, closeBoth)
+    // B9: relay is a long-lived websocket pump (runs until one side closes).
+    // A bare `go` with no panic recovery would, on a panic in the read/write
+    // loop, crash only that goroutine silently — the peer's relay would hang
+    // waiting on a dead pipe. safego recovers + logs so closeBoth still fires.
+    safego.Go("realtime_relay_client_to_backend", func() {
+        p.relay(ctx, "client_to_backend", clientConn, backendConn, closeBoth)
+    })
     p.relay(ctx, "backend_to_client", backendConn, clientConn, closeBoth)
 }
 

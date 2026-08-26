@@ -4,6 +4,8 @@ import (
     "log/slog"
     "sync"
     "time"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type affinityEntry struct {
@@ -27,7 +29,7 @@ func NewSessionAffinity(ttl time.Duration) *SessionAffinity {
         ttl:     ttl,
         done:    make(chan struct{}),
     }
-    go sa.evictLoop()
+    safego.Go("session_affinity_evict_loop", sa.evictLoop)
     slog.Info("session affinity initialized", "ttl", ttl)
     return sa
 }
