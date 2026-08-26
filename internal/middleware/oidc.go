@@ -101,7 +101,23 @@ func (a *OIDCAuthenticator) Middleware(authCfg *config.AuthConfig) func(http.Han
                 return
             }
 
-            // L8 fix: check both Authorization header and cookie for token
+            // F10: OIDC middleware must ONLY accept OIDC tokens — never collapse
+            // API-key/master-key equality into this path. The prior code compared
+            // the raw bearer token against every API key and master_key (oidc.go
+            // 116-127) and short-circuited before validateToken, so any API key
+            // bypassed OIDC signature/iss/aud checks AND leaked timing via `==`.
+            // Dual-mode auth is preserved the safe way: the upstream APIKeyAuth
+            // middleware already authenticated the Principal (AuthMethod=="apikey",
+            // KeyConfig!=nil or IsMaster). Trust that fully-authenticated identity
+            // rather than re-comparing raw credentials across auth domains.
+            alreadyAuthed := p != nil && p.AuthMethod != "" && (p.IsMaster || p.KeyConfig != nil)
+            if alreadyAuthed {
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
+            _ = authCfg // API-key auth is handled by a separate middleware; OIDC validates only OIDC tokens.
+
             var tokenStr string
             auth := r.Header.Get("Authorization")
             if strings.HasPrefix(auth, "Bearer ") {
@@ -111,19 +127,6 @@ func (a *OIDCAuthenticator) Middleware(authCfg *config.AuthConfig) func(http.Han
             } else {
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
-            }
-
-            if authCfg.Enabled && !authCfg.Passthrough {
-                for i := range authCfg.APIKeys {
-                    if authCfg.APIKeys[i].Key == tokenStr {
-                        next.ServeHTTP(w, r.WithContext(ctx))
-                        return
-                    }
-                }
-                if authCfg.MasterKey != "" && authCfg.MasterKey == tokenStr {
-                    next.ServeHTTP(w, r.WithContext(ctx))
-                    return
-                }
             }
 
             claims, err := a.provider.validateToken(tokenStr)

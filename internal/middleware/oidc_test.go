@@ -722,8 +722,15 @@ func TestOIDCMiddleware_InvalidToken_401(t *testing.T) {
     }
 }
 
-func TestOIDCMiddleware_APIKeyPassthrough(t *testing.T) {
-    slog.Info("test OIDCMiddleware_APIKeyPassthrough")
+// TestOIDCMiddleware_PassesAlreadyAuthedAPIKeyPrincipal verifies F10's safe
+// dual-mode model: when the upstream APIKeyAuth middleware has already
+// authenticated the request (Principal.AuthMethod=="apikey", KeyConfig!=nil),
+// the OIDC middleware trusts that identity and passes through — it does NOT
+// re-compare the raw bearer token against API keys (the old F10 bypass) and
+// does NOT try to validate the API key as an OIDC token (which would 401).
+// The upstream auth is simulated by injecting a populated Principal.
+func TestOIDCMiddleware_PassesAlreadyAuthedAPIKeyPrincipal(t *testing.T) {
+    slog.Info("test OIDCMiddleware_PassesAlreadyAuthedAPIKeyPrincipal")
     srv, _, _ := newOIDCTestServer(t)
     defer srv.Close()
 
@@ -748,15 +755,21 @@ func TestOIDCMiddleware_APIKeyPassthrough(t *testing.T) {
 
     req := httptest.NewRequest(http.MethodGet, "/test", nil)
     req.Header.Set("Authorization", "Bearer sk-test-key")
+    req = req.WithContext(ContextWithPrincipal(req.Context(), &Principal{
+        AuthMethod: "apikey",
+        KeyConfig:  &config.AuthKeyConfig{Key: "sk-test-key", Name: "test"},
+    }))
     rec := httptest.NewRecorder()
     handler.ServeHTTP(rec, req)
     if !called {
-        t.Error("should pass through for valid API key")
+        t.Error("should pass through for an API-key-authenticated Principal")
     }
 }
 
-func TestOIDCMiddleware_MasterKeyPassthrough(t *testing.T) {
-    slog.Info("test OIDCMiddleware_MasterKeyPassthrough")
+// TestOIDCMiddleware_PassesAlreadyAuthedMasterPrincipal — same as above but for
+// a master-key identity (Principal.IsMaster=true, AuthMethod=="apikey").
+func TestOIDCMiddleware_PassesAlreadyAuthedMasterPrincipal(t *testing.T) {
+    slog.Info("test OIDCMiddleware_PassesAlreadyAuthedMasterPrincipal")
     srv, _, _ := newOIDCTestServer(t)
     defer srv.Close()
 
@@ -781,10 +794,53 @@ func TestOIDCMiddleware_MasterKeyPassthrough(t *testing.T) {
 
     req := httptest.NewRequest(http.MethodGet, "/test", nil)
     req.Header.Set("Authorization", "Bearer master-secret")
+    req = req.WithContext(ContextWithPrincipal(req.Context(), &Principal{
+        AuthMethod: "apikey",
+        IsMaster:   true,
+    }))
     rec := httptest.NewRecorder()
     handler.ServeHTTP(rec, req)
     if !called {
-        t.Error("should pass through for master key")
+        t.Error("should pass through for a master-authenticated Principal")
+    }
+}
+
+// TestOIDCMiddleware_RejectsRawAPIKeyAsOIDC verifies the F10 regression: a raw
+// API key presented as a bearer token WITHOUT an upstream-authenticated
+// Principal (i.e. OIDC middleware reached directly, or APIKeyAuth disabled) is
+// NOT treated as a valid credential — it must fail OIDC signature validation
+// and 401. The old code short-circuited on API-key equality and let it through.
+func TestOIDCMiddleware_RejectsRawAPIKeyAsOIDC(t *testing.T) {
+    slog.Info("test OIDCMiddleware_RejectsRawAPIKeyAsOIDC")
+    srv, _, _ := newOIDCTestServer(t)
+    defer srv.Close()
+
+    auth, err := NewOIDCAuthenticator(OIDCConfig{
+        Enabled:  true,
+        Issuer:   srv.URL,
+        ClientID: "test-client",
+    })
+    if err != nil {
+        t.Skipf("cannot create OIDC authenticator: %v", err)
+    }
+
+    handler := auth.Middleware(&config.AuthConfig{
+        Enabled:    true,
+        Passthrough: false,
+        APIKeys:    []config.AuthKeyConfig{{Key: "sk-test-key", Name: "test"}},
+        MasterKey:  "master-secret",
+    })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler — raw API key is not an OIDC token")
+    }))
+
+    for _, raw := range []string{"sk-test-key", "master-secret"} {
+        req := httptest.NewRequest(http.MethodGet, "/test", nil)
+        req.Header.Set("Authorization", "Bearer "+raw)
+        rec := httptest.NewRecorder()
+        handler.ServeHTTP(rec, req)
+        if rec.Code != http.StatusUnauthorized {
+            t.Fatalf("raw bearer %q must 401 (not a valid OIDC token), got %d", raw, rec.Code)
+        }
     }
 }
 

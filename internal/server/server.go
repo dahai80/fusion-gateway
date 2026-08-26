@@ -3,6 +3,7 @@ package server
 import (
     "context"
     "crypto/rand"
+    "crypto/subtle"
     "encoding/hex"
     "encoding/json"
     "fmt"
@@ -593,7 +594,7 @@ func (s *Server) withMasterKey(handler http.HandlerFunc) http.HandlerFunc {
             return
         }
         apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-        if apiKey != masterKey {
+        if subtle.ConstantTimeCompare([]byte(apiKey), []byte(masterKey)) != 1 {
             slog.Warn("invalid master_key for protected endpoint", "path", r.URL.Path, "remote", r.RemoteAddr)
             http.Error(w, `{"error":{"message":"Unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
             return
