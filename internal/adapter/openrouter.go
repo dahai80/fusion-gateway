@@ -5,12 +5,12 @@ import (
     "context"
     "encoding/json"
     "fmt"
-
-	"github.com/fusion-gateway/fusion-gateway/internal/safego"
+    "log/slog"
     "net/http"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type OpenRouterProvider struct {
@@ -23,7 +23,7 @@ type OpenRouterProvider struct {
 func NewOpenRouterProvider(name string, backendCfg config.BackendConfig) *OpenRouterProvider {
     timeout := backendCfg.Timeout
     if timeout == 0 { timeout = 120 * time.Second }
-    return &OpenRouterProvider{name: name, baseURL: backendCfg.BaseURL, apiKey: backendCfg.APIKey, httpClient: &http.Client{Timeout: timeout}}
+    return &OpenRouterProvider{name: name, baseURL: backendCfg.BaseURL, apiKey: backendCfg.APIKey, httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)}}
 }
 
 func (p *OpenRouterProvider) Name() string { return p.name }
@@ -52,7 +52,7 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
         return nil, fmt.Errorf("openrouter chat status %d: %s", resp.StatusCode, string(b))
     }
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode openrouter response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode openrouter response: %w", err) }
     return &chatResp, nil
 }
 
@@ -73,6 +73,22 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     safego.Go("openrouter_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseSSEStream. A stalled upstream keeps Read
+        // blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection. Closing
+        // the body forces an immediate read error and a clean exit. Mirrors
+        // node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("openrouter_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("openrouter stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
@@ -92,7 +108,7 @@ func (p *OpenRouterProvider) Embedding(ctx context.Context, req *EmbeddingReques
         return nil, fmt.Errorf("openrouter embedding status %d: %s", resp.StatusCode, string(b))
     }
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode openrouter embedding: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode openrouter embedding: %w", err) }
     return &embResp, nil
 }
 
@@ -108,7 +124,7 @@ func (p *OpenRouterProvider) ListModels(ctx context.Context) ([]ModelInfo, error
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("openrouter list models status %d", resp.StatusCode) }
     var lr struct { Data []ModelInfo `json:"data"` }
-    if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil { return nil, fmt.Errorf("decode openrouter models: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&lr); err != nil { return nil, fmt.Errorf("decode openrouter models: %w", err) }
     return lr.Data, nil
 }
 

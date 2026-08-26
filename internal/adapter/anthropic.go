@@ -184,10 +184,11 @@ func NewAnthropicProvider(name string, backendCfg config.BackendConfig) *Anthrop
         timeout = 120 * time.Second
     }
     // B5: both clients route through TransportForBackend so Anthropic inherits
-    // the same pool tuning (MaxIdleConnsPerHost 64) and UDS dialing as the
-    // other providers. The prior hand-rolled transports bypassed this: the
-    // non-stream client got http.DefaultTransport (MaxIdleConnsPerHost=2,
-    // redialing TLS on every 3rd concurrent request) and the stream transport
+    // the same pool tuning (MaxIdleConnsPerHost 64, RR11 MaxConnsPerHost cap)
+    // and UDS dialing as the other providers. The prior hand-rolled transports
+    // bypassed this: the non-stream client got http.DefaultTransport
+    // (MaxIdleConnsPerHost=2, MaxConnsPerHost=0/unlimited — redialing TLS on
+    // every 3rd concurrent request AND no FD bound) and the stream transport
     // had no idle pool at all. With socket_path set (UDS convention) the old
     // code silently ignored it and dialed TCP at http://unix/, failing.
     //
@@ -244,7 +245,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
         return nil, fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
-    if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
         return nil, fmt.Errorf("decode anthropic response: %w", err)
     }
     return AnthropicToOpenAI(&antResp), nil
@@ -276,6 +277,22 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseAnthropicSSE. A stalled upstream keeps Read
+        // blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection + slot
+        // until the 180s watchdog. Closing the body forces an immediate read
+        // error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("anthropic_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("anthropic stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         p.parseAnthropicSSE(ctx, resp.Body, ch, req.Model)
     })
     return ch, nil
@@ -303,7 +320,7 @@ func (p *AnthropicProvider) Messages(ctx context.Context, req *AnthropicRequest)
         return nil, fmt.Errorf("anthropic messages returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
-    if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
         return nil, fmt.Errorf("decode anthropic messages response: %w", err)
     }
     return &antResp, nil
@@ -334,6 +351,22 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseAnthropicStreamEvents. A stalled upstream keeps
+        // Read blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection + slot
+        // until the 180s watchdog. Closing the body forces an immediate read
+        // error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("anthropic_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("anthropic stream messages canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         p.parseAnthropicStreamEvents(ctx, resp.Body, ch)
     })
     return ch, nil

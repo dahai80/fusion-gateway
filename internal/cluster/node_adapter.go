@@ -91,12 +91,14 @@ func (p *ClusterNodeProvider) Chat(ctx context.Context, req *adapter.ChatRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("chat to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var chatResp adapter.ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode chat response from node %s: %w", p.node.ID, err)
     }
 
@@ -225,12 +227,14 @@ func (p *ClusterNodeProvider) Embedding(ctx context.Context, req *adapter.Embedd
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("embedding to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var embResp adapter.EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode embedding response from node %s: %w", p.node.ID, err)
     }
 
@@ -264,12 +268,14 @@ func (p *ClusterNodeProvider) Rerank(ctx context.Context, req *adapter.RerankReq
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("rerank to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var rerankResp adapter.RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode rerank response from node %s: %w", p.node.ID, err)
     }
 
@@ -299,7 +305,8 @@ func (p *ClusterNodeProvider) ListModels(ctx context.Context) ([]adapter.ModelIn
     var listResp struct {
         Data []adapter.ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         return nil, fmt.Errorf("decode models from node %s: %w", p.node.ID, err)
     }
 

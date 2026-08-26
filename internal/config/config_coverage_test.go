@@ -622,6 +622,58 @@ backends:
     t.Logf("loaded %d backends", len(snap.Config.Backends))
 }
 
+// TestLoad_RR11_MaxConnsPerHost verifies the RR11 per-backend FD-cap fields
+// (max_conns_per_host, max_idle_conns_per_host) map from YAML into BackendConfig.
+// Without this mapping the transport factory never sees an operator's override
+// and silently applies the default — the FD cap would be unconfigurable.
+func TestLoad_RR11_MaxConnsPerHost(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+routing:
+  token_threshold: 8000
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+backends:
+  local:
+    type: "mlx"
+    base_url: "http://localhost:11434"
+    enabled: true
+    max_conns_per_host: 24
+    max_idle_conns_per_host: 8
+  cloud:
+    type: "openai"
+    base_url: "https://api.openai.com"
+    enabled: true
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    snap, err := Load(f)
+    if err != nil {
+        t.Fatalf("expected successful load: %v", err)
+    }
+    local := snap.Config.Backends["local"]
+    if local.MaxConnsPerHost != 24 {
+        t.Errorf("local MaxConnsPerHost: want 24, got %d", local.MaxConnsPerHost)
+    }
+    if local.MaxIdleConnsPerHost != 8 {
+        t.Errorf("local MaxIdleConnsPerHost: want 8, got %d", local.MaxIdleConnsPerHost)
+    }
+    // cloud omits the keys — must default to 0 (factory applies safe default).
+    cloud := snap.Config.Backends["cloud"]
+    if cloud.MaxConnsPerHost != 0 {
+        t.Errorf("cloud MaxConnsPerHost: want 0 (unset, factory defaults), got %d", cloud.MaxConnsPerHost)
+    }
+}
+
 // TestReload_RereadsFileAndUpdatesSnapshot verifies config.Reload re-reads the
 // file from disk, bumps the version, commits the new global snapshot, and fires
 // OnReload handlers. This is the deterministic path behind /admin/config/reload

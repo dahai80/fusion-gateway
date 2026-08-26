@@ -63,18 +63,29 @@ func TestRBACAuth_AdminCanMutate(t *testing.T) {
     }
 }
 
-func TestRBACAuth_MasterKeyGetsAdmin(t *testing.T) {
+func TestRBACAuth_MasterKeyGetsInferenceNotAdmin(t *testing.T) {
+    // RR3 (audit P0): the inference MasterKey gets the inference role, NOT
+    // admin. Previously this asserted "master key should get admin role". The
+    // inference role still permits inference requests (a POST to
+    // /v1/chat/completions is an inference call, not an admin mutation), so the
+    // handler is still called — but the role on the Principal must be
+    // RoleInference, never RoleAdmin. This is the plane-separation invariant.
     cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
-    called := false
+    var gotRole Role
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        called = true
+        if p := PrincipalFromContext(r.Context()); p != nil {
+            gotRole = p.Role
+        }
     }))
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
     ctx := ContextWithPrincipal(req.Context(), &Principal{IsMaster: true})
     req = req.WithContext(ctx)
     handler.ServeHTTP(httptest.NewRecorder(), req)
-    if !called {
-        t.Fatal("master key should get admin role")
+    if gotRole != RoleInference {
+        t.Fatalf("master key should get inference role, got %s", gotRole)
+    }
+    if gotRole == RoleAdmin {
+        t.Fatal("master key must NOT get admin role (RR3 plane crossing)")
     }
 }
 

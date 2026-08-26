@@ -193,18 +193,24 @@ func TestBudgetBlock_Exceeded(t *testing.T) {
 }
 
 func TestBudgetBlock_StoreError(t *testing.T) {
-    slog.Info("test BudgetBlock_StoreError")
+    // AH5 (audit P0): fail-closed. A quota-store error must refuse the request,
+    // not allow it through. Previously this asserted 200 (fail-open) — the exact
+    // defect: a BudgetLimit key could consume unboundedly during a store outage
+    // (billing bypass). Now a store error returns 503 (transient infrastructure
+    // fault, retryable), distinct from a hard quota-exceeded 403.
+    slog.Info("test BudgetBlock_StoreError (AH5: fail-closed, expect 503)")
     st := &mockBudgetStore{err: errors.New("db down")}
     p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "test", BudgetLimit: 100}}
     ctx := ContextWithPrincipal(context.Background(), p)
     handler := BudgetBlock(st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Error("handler must NOT be called on store error (fail-closed)")
         w.WriteHeader(http.StatusOK)
     }))
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
     req = req.WithContext(ctx)
     rec := httptest.NewRecorder()
     handler.ServeHTTP(rec, req)
-    if rec.Code != http.StatusOK {
-        t.Fatalf("expected 200 on store error (fail open), got %d", rec.Code)
+    if rec.Code != http.StatusServiceUnavailable {
+        t.Fatalf("expected 503 on store error (fail-closed), got %d", rec.Code)
     }
 }

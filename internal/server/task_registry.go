@@ -4,6 +4,7 @@ import (
     "context"
     "log/slog"
     "sync"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
 )
@@ -29,36 +30,76 @@ func taskIDFromContext(ctx context.Context) string {
 // task). Empty OwnerKey (no auth principal, e.g. auth disabled) is treated as
 // unowned and cancelable by anyone; the master key bypasses the check.
 type taskEntry struct {
-    cancel   context.CancelFunc
-    ownerKey string
+    cancel       context.CancelFunc
+    ownerKey     string
+    registeredAt time.Time
 }
 
 type TaskRegistry struct {
     mu    sync.RWMutex
     tasks map[string]*taskEntry
+    // RR7 backstop: TTL force-cancels+evicts hung entries, maxEntries caps the
+    // map. Set once via SetLimits before the reaper starts. ttl<=0 disables
+    // reaping (cap-only). maxEntries<=0 disables the cap (unbounded, legacy).
+    ttl        time.Duration
+    maxEntries int
 }
 
-// NewTaskRegistry builds an empty registry.
+// NewTaskRegistry builds an empty registry with no limits (legacy callers /
+// tests). Production wires limits via SetLimits from routing.agent_tasks.
 func NewTaskRegistry() *TaskRegistry {
     return &TaskRegistry{tasks: make(map[string]*taskEntry)}
+}
+
+// SetLimits configures the RR7 backstop. ttl is the max age before a hung entry
+// is force-canceled+evicted by the reaper (<=0 disables reaping). maxEntries
+// caps the live map size (<=0 disables the cap). Must be called before the
+// reaper goroutine starts and before any Register; not safe to call
+// concurrently with Register.
+func (r *TaskRegistry) SetLimits(ttl time.Duration, maxEntries int) {
+    r.mu.Lock()
+    r.ttl = ttl
+    r.maxEntries = maxEntries
+    r.mu.Unlock()
+    slog.Info("task registry: limits set",
+        "ttl", ttl.String(), "max_entries", maxEntries,
+        "reaper_enabled", ttl > 0, "cap_enabled", maxEntries > 0)
 }
 
 // Register associates taskID with its cancel func and ownerKey (the enqueuing
 // auth-key name, for B12 per-key ownership). If taskID is empty the call is a
 // no-op. An already-registered id is overwritten (logged) — callers use a
 // unique X-Request-ID.
+//
+// RR7: when the cap is set and the map is full, a NEW id is refused (logged
+// WARN) and the task runs unregistered — it still executes, just cannot be
+// canceled via the endpoint until an entry frees. Refusing (vs evicting the
+// oldest) avoids killing an arbitrary in-flight task; the TTL reaper reclaims
+// space over time. An OVERWRITE of an existing id is allowed regardless of the
+// cap (it does not grow the map).
 func (r *TaskRegistry) Register(taskID, ownerKey string, cancel context.CancelFunc) {
     if taskID == "" {
         slog.Debug("task registry: skip register of empty task id")
         return
     }
     r.mu.Lock()
-    defer r.mu.Unlock()
     if _, exists := r.tasks[taskID]; exists {
         slog.Warn("task registry: overwriting existing task id", "task_id", taskID)
+        r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey, registeredAt: time.Now()}
+        r.mu.Unlock()
+        slog.Debug("task registry: re-registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", len(r.tasks))
+        return
     }
-    r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey}
-    slog.Debug("task registry: registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", len(r.tasks))
+    if r.maxEntries > 0 && len(r.tasks) >= r.maxEntries {
+        r.mu.Unlock()
+        slog.Warn("task registry: full, skipping register (task runs uncancelable via endpoint)",
+            "task_id", taskID, "owner", ownerKey, "active", len(r.tasks), "max", r.maxEntries)
+        return
+    }
+    r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey, registeredAt: time.Now()}
+    active := len(r.tasks)
+    r.mu.Unlock()
+    slog.Debug("task registry: registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", active)
 }
 
 // Cancel invokes the cancel func for taskID and evicts the entry. Returns true
@@ -127,4 +168,38 @@ func (r *TaskRegistry) Len() int {
     r.mu.RLock()
     defer r.mu.RUnlock()
     return len(r.tasks)
+}
+
+// ReapExpired force-cancels and evicts entries older than the TTL, returning
+// the count reaped. A no-op (returns 0) when ttl<=0. now is injected so tests
+// are deterministic; the reaper goroutine passes time.Now(). Entries reaped
+// here are hung tasks whose stream goroutine never called Release — canceling
+// their ctx signals them to exit (releasing their local slot via the stream's
+// own defer), which is exactly the recovery an explicit cancel endpoint hit
+// would trigger.
+func (r *TaskRegistry) ReapExpired(now time.Time) int {
+    if r.ttl <= 0 {
+        return 0
+    }
+    deadline := now.Add(-r.ttl)
+    r.mu.Lock()
+    reaped := 0
+    for id, entry := range r.tasks {
+        if entry.registeredAt.Before(deadline) || entry.registeredAt.Equal(deadline) {
+            delete(r.tasks, id)
+            reaped++
+            // Cancel outside the lock would be cleaner, but the Cancel path
+            // also deletes under the lock; canceling here is safe because the
+            // entry is already removed — a concurrent Cancel will 404 and a
+            // concurrent Release will no-op. CancelFunc is safe to call with
+            // the mutex held (it never blocks on this registry).
+            entry.cancel()
+        }
+    }
+    r.mu.Unlock()
+    if reaped > 0 {
+        slog.Warn("task registry: reaped expired hung tasks",
+            "reaped", reaped, "ttl", r.ttl.String())
+    }
+    return reaped
 }

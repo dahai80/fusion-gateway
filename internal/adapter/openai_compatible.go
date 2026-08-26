@@ -92,7 +92,11 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req *ChatRequest) (
     }
 
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    // RR9 (audit P0): bound the success-path read. A misbehaving or MITM
+    // backend returning a multi-GB 200 JSON drove the unbounded Decode to OOM
+    // the gateway. 10 MiB cap via LimitResponseReader; truncation surfaces as a
+    // decode error rather than silent OOM.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode chat response: %w", err)
     }
 
@@ -133,6 +137,24 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
         defer close(ch)
         defer resp.Body.Close()
 
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseSSEStream. Without this, a quiet/stalled
+        // upstream keeps Read blocked indefinitely — ctx.Done() is only
+        // checked on the send arm (after a Read returns), so a stall that
+        // never delivers a byte hangs the goroutine, leaks the connection,
+        // and holds the slot until the 180s watchdog. Closing the body forces
+        // an immediate read error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("openai_compatible_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("openai compatible stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
         parseSSEStream(ctx, resp.Body, ch)
     })
 
@@ -168,7 +190,8 @@ func (p *OpenAICompatibleProvider) Embedding(ctx context.Context, req *Embedding
     }
 
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode embedding response: %w", err)
     }
 
@@ -204,7 +227,8 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
     }
 
     var rerankResp RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode rerank response: %w", err)
     }
 
@@ -234,7 +258,8 @@ func (p *OpenAICompatibleProvider) ListModels(ctx context.Context) ([]ModelInfo,
     var listResp struct {
         Data []ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         return nil, fmt.Errorf("decode models response: %w", err)
     }
 
@@ -269,7 +294,8 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     }
 
     var imgResp ImageResponse
-    if err := json.NewDecoder(resp.Body).Decode(&imgResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&imgResp); err != nil {
         return nil, fmt.Errorf("decode image response: %w", err)
     }
     return &imgResp, nil

@@ -11,6 +11,7 @@ import (
     "log/slog"
     "math"
     "sync"
+    "sync/atomic"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -32,9 +33,14 @@ type SemanticCache struct {
     threshold  float64
     maxEntries int
     ttl        time.Duration
-    hits       int64
-    misses     int64
-    embedFn    EmbedFunc
+    // EI2: hits/misses are atomic counters, NOT plain int64. Search runs under
+    // RLock (concurrent readers), so a `hits++` RMW would be a data race — two
+    // readers both read+write the same int64, lost increments + race detector
+    // failure. atomic.Int64 makes the increment lock-free and race-free while
+    // keeping the RLock for the entries slice scan.
+    hits   atomic.Int64
+    misses atomic.Int64
+    embedFn EmbedFunc
 }
 
 type EmbedFunc func(text string) ([]float64, error)
@@ -93,7 +99,7 @@ func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, b
     embedding, err := sc.embedFn(prompt)
     if err != nil {
         slog.Warn("semantic cache embedding failed", "error", err)
-        sc.misses++
+        sc.misses.Add(1)
         return nil, false
     }
     sc.mu.RLock()
@@ -112,14 +118,14 @@ func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, b
     }
     if bestEntry != nil && bestSim >= sc.threshold {
         if time.Since(bestEntry.Timestamp) > sc.ttl {
-            sc.misses++
+            sc.misses.Add(1)
             return nil, false
         }
-        sc.hits++
+        sc.hits.Add(1)
         slog.Debug("semantic cache hit", "similarity", bestSim, "model", model)
         return bestEntry.Response, true
     }
-    sc.misses++
+    sc.misses.Add(1)
     slog.Debug("semantic cache miss", "best_similarity", bestSim, "threshold", sc.threshold)
     return nil, false
 }
@@ -159,7 +165,10 @@ func (sc *SemanticCache) Stats() (hits, misses int64, size int) {
     }
     sc.mu.RLock()
     defer sc.mu.RUnlock()
-    return sc.hits, sc.misses, len(sc.entries)
+    // EI2: hits/misses are atomic.Int64 — Load() is the race-free read. The
+    // RLock stays for len(sc.entries) (the slice header is guarded by the
+    // mutex); the counters do not need it.
+    return sc.hits.Load(), sc.misses.Load(), len(sc.entries)
 }
 
 func (sc *SemanticCache) evictExpired() {

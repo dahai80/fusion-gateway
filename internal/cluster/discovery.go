@@ -196,6 +196,10 @@ func (d *Discovery) Start(ctx context.Context) {
 
     if mode == config.ClusterModeMaster {
         d.syncFromMaster()
+        // AH3: populate per-node model registries so master-mode deployments
+        // don't silently degrade every request to cloud (servesModel empty →
+        // SelectNodeByModel finds no node → cloud fallback, no warning).
+        d.syncNodeModels()
         safego.Go("cluster_master_sync", func() { d.masterSyncLoop(ctx) })
     } else {
         d.loadNodesFromConfig()
@@ -380,6 +384,8 @@ func (d *Discovery) masterSyncLoop(ctx context.Context) {
     }
 
     d.syncFromMaster()
+    // AH3: keep per-node model registries fresh on every master sync.
+    d.syncNodeModels()
 
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
@@ -392,6 +398,8 @@ func (d *Discovery) masterSyncLoop(ctx context.Context) {
             return
         case <-ticker.C:
             d.syncFromMaster()
+            // AH3: refresh model registries after the node list may have changed.
+            d.syncNodeModels()
         }
     }
 }
@@ -428,6 +436,48 @@ func (d *Discovery) checkAll() {
         }(node)
     }
     wg.Wait()
+}
+
+// syncNodeModels populates each healthy node's model registry in master mode
+// (AH3, audit P1). Master mode skips healthCheckLoop (the master owns node
+// liveness), so fetchModels — which only runs inside checkNode — never fires
+// and every node's servesModel stays empty. SelectNodeByModel then finds no
+// node serving the requested model and silently degrades every request to
+// cloud, with no error or warning. This method closes that gap by polling
+// each healthy node's /v1/models after every master sync, concurrent + panic
+// recovered like checkAll. Non-fatal: a node whose /v1/models fails keeps an
+// empty registry and is skipped by SelectNodeByModel (cloud fallback).
+func (d *Discovery) syncNodeModels() {
+    d.mu.RLock()
+    nodes := make([]*Node, 0, len(d.nodes))
+    for _, n := range d.nodes {
+        if n.State() == NodeStateHealthy {
+            nodes = append(nodes, n)
+        }
+    }
+    d.mu.RUnlock()
+
+    if len(nodes) == 0 {
+        slog.Warn("master mode: no healthy cluster nodes to sync models from")
+        return
+    }
+
+    var wg sync.WaitGroup
+    for _, node := range nodes {
+        wg.Add(1)
+        go func(n *Node) {
+            defer wg.Done()
+            defer func() {
+                if r := recover(); r != nil {
+                    slog.Error("cluster model sync panic recovered",
+                        "node_id", n.ID, "panic", r, "stack", string(debug.Stack()))
+                }
+            }()
+            d.fetchModels(n)
+        }(node)
+    }
+    wg.Wait()
+    slog.Info("master mode node model registries synced", "node_count", len(nodes))
 }
 
 func (d *Discovery) checkNode(node *Node) {
@@ -498,7 +548,8 @@ func (d *Discovery) fetchRemoteMetrics(node *Node) {
             } `json:"fusion_mlx"`
         } `json:"backends"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&statusResp); err != nil {
         // R2 fix: drain remaining body to allow connection reuse
         _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster metrics decode failed", "node_id", node.ID, "error", err)
@@ -549,7 +600,8 @@ func (d *Discovery) fetchModels(node *Node) {
     }
 
     var models []adapter.ModelInfo
-    if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&models); err != nil {
         _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster models decode failed", "node_id", node.ID, "error", err)
         return

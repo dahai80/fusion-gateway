@@ -154,6 +154,22 @@ type MultimodalConfig struct {
     LocalModel string `mapstructure:"local_model"`
 }
 
+// AgentTaskConfig governs the TaskRegistry backstop against unbounded growth
+// from hung agent tasks (RR7 audit P1). An agent task registered for the
+// /v1/agent/tasks/{id}/cancel endpoint is normally Released when its stream
+// goroutine exits; but an upstream hang (network half-open, model stuck) never
+// exits → the entry, its CancelFunc-held ctx, and the goroutine leak forever.
+// Two layers bound this: MaxEntries caps the map (a full registry skips new
+// Register calls — the task still runs, just uncancelable via the endpoint,
+// logged WARN); TTL + ReaperInterval drive a background reaper that force-
+// cancels and evicts entries older than TTL. TTL=0 disables reaping (cap-only
+// protection). Set once at construction; tuning needs a restart.
+type AgentTaskConfig struct {
+    TTL            time.Duration `mapstructure:"ttl"`
+    MaxEntries     int           `mapstructure:"max_entries"`
+    ReaperInterval time.Duration `mapstructure:"reaper_interval"`
+}
+
 type RoutingConfig struct {
     Mode                      string               `mapstructure:"mode"`
     DefaultModel              string               `mapstructure:"default_model"`
@@ -173,6 +189,7 @@ type RoutingConfig struct {
     HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
     Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
     Multimodal                 MultimodalConfig       `mapstructure:"multimodal"`
+    AgentTasks                 AgentTaskConfig        `mapstructure:"agent_tasks"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -325,6 +342,18 @@ type BackendConfig struct {
     // the adapter transport dials the unix socket instead of TCP; base_url is a
     // dummy host (convention: http://unix/). Empty (default) = plain TCP.
     SocketPath          string        `mapstructure:"socket_path"`
+    // MaxConnsPerHost caps the number of active (in-flight) connections the
+    // gateway will open to this single backend host at once. 0 = use the
+    // transport-factory default. RR11 (audit P2): without this cap Go's
+    // transport treats MaxConnsPerHost=0 as unlimited — a concurrent burst to a
+    // single-host backend (local fusion-mlx, or one cloud vendor) opens hundreds
+    // of simultaneous connections, exhausts file descriptors, and takes down the
+    // whole gateway process (accept, logs, other backends all fail).
+    MaxConnsPerHost     int           `mapstructure:"max_conns_per_host"`
+    // MaxIdleConnsPerHost caps idle keep-alive connections cached per host. 0 =
+    // use the transport-factory default (64). Lowering it shrinks the idle pool
+    // (and the idle FD footprint) for low-QPS backends.
+    MaxIdleConnsPerHost int           `mapstructure:"max_idle_conns_per_host"`
 }
 
 type IOKitConfig struct {
@@ -592,7 +621,18 @@ func Load(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("read config: %w", err)
     }
 
-    var cfg Config
+    // Seed with DefaultConfig so fields a YAML omits land on sane defaults, not
+    // zero values that validate() then rejects (e.g. circuit_breaker thresholds
+    // default to 5/3/30s, not 0). Matches the GetSnapshot() fallback behavior.
+    // v.Unmarshal overwrites only the keys present in the YAML; absent keys keep
+    // their seeded default. EI8: validate() now enforces positive thresholds,
+    // so seeding defaults is required for minimal-but-valid YAMLs to load.
+    cfg := DefaultConfig()
+    // Clear the baked-in default JWT secret before unmarshaling — the loaded
+    // config must supply its own (RR1 rejects the known-insecure default).
+    if cfg.Admin != nil {
+        cfg.Admin.JWTSecret = ""
+    }
     if err := v.Unmarshal(&cfg); err != nil {
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
@@ -662,7 +702,14 @@ func Reload(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("read config: %w", err)
     }
 
-    var cfg Config
+    // Seed with DefaultConfig (same as Load) so omitted YAML keys keep sane
+    // defaults, not zero values that validate() rejects. EI8 made validate()
+    // enforce positive circuit-breaker thresholds, so minimal YAMLs need the
+    // seed. Clear the baked-in default JWT secret (RR1 rejects it).
+    cfg := DefaultConfig()
+    if cfg.Admin != nil {
+        cfg.Admin.JWTSecret = ""
+    }
     if err := v.Unmarshal(&cfg); err != nil {
         slog.Error("reload: failed to unmarshal config", "error", err)
         return nil, fmt.Errorf("unmarshal config: %w", err)
@@ -781,9 +828,16 @@ func validate(cfg *Config) error {
     }
 
     // V1 fix: validate admin config security
+    // RR1 (audit P0): reject the baked-in default JWT secret — an unchanged
+    // deployment ships with a publicly-known signing key, allowing anyone who
+    // reads the source to forge admin JWTs. Fail-closed at startup rather than
+    // relying on operators to override an already-effective default.
     if cfg.Admin != nil && cfg.Admin.Enabled {
         if cfg.Admin.JWTSecret == "" {
             return fmt.Errorf("admin.jwt_secret is required when admin is enabled")
+        }
+        if isKnownInsecureJWTSecret(cfg.Admin.JWTSecret) {
+            return fmt.Errorf("admin.jwt_secret must not be a known placeholder/default; set a unique secret of at least 32 characters")
         }
         if len(cfg.Admin.JWTSecret) < 32 {
             return fmt.Errorf("admin.jwt_secret must be at least 32 characters, got %d", len(cfg.Admin.JWTSecret))
@@ -802,11 +856,61 @@ func validate(cfg *Config) error {
     if cfg.Routing.LocalPriority.QueueTimeout < 0 {
         return fmt.Errorf("queue_timeout must be non-negative, got %d", cfg.Routing.LocalPriority.QueueTimeout)
     }
+    if cfg.Routing.AgentTasks.TTL < 0 {
+        return fmt.Errorf("agent_tasks.ttl must be non-negative, got %d", cfg.Routing.AgentTasks.TTL)
+    }
+    if cfg.Routing.AgentTasks.MaxEntries < 0 {
+        return fmt.Errorf("agent_tasks.max_entries must be non-negative, got %d", cfg.Routing.AgentTasks.MaxEntries)
+    }
+    if cfg.Routing.AgentTasks.ReaperInterval < 0 {
+        return fmt.Errorf("agent_tasks.reaper_interval must be non-negative, got %d", cfg.Routing.AgentTasks.ReaperInterval)
+    }
     if cfg.Cache.MaxMemoryMB < 0 {
         return fmt.Errorf("cache.max_memory_mb must be non-negative, got %d", cfg.Cache.MaxMemoryMB)
     }
     if cfg.Cache.MaxEntries < 0 {
         return fmt.Errorf("cache.max_entries must be non-negative, got %d", cfg.Cache.MaxEntries)
+    }
+
+    // EI8 (audit P3): validate the remaining numeric knobs that the prior
+    // validate() left bare. A typo like max_mlx_memory_ratio: -1 or a circuit
+    // breaker timeout of 0 silently passes validate and produces runtime
+    // behavior opposite to intent (0 timeout = immediate/open-or-never-open
+    // depending on the comparison; negative ratio never trips). validate exists
+    // to catch these at startup, not let them surface as "routing never goes
+    // cloud" mysteries.
+    if cfg.Routing.LocalPriority.MaxMLXMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxMLXMemoryRatio > 1 {
+        return fmt.Errorf("max_mlx_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxMLXMemoryRatio)
+    }
+    if cfg.Routing.CircuitBreaker.FailureThreshold <= 0 {
+        return fmt.Errorf("circuit_breaker.failure_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.FailureThreshold)
+    }
+    if cfg.Routing.CircuitBreaker.SuccessThreshold <= 0 {
+        return fmt.Errorf("circuit_breaker.success_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.SuccessThreshold)
+    }
+    if cfg.Routing.CircuitBreaker.Timeout < 0 {
+        return fmt.Errorf("circuit_breaker.timeout must be non-negative, got: %s", cfg.Routing.CircuitBreaker.Timeout)
+    }
+    if cfg.Routing.CircuitBreaker.HalfOpenMaxRequests <= 0 {
+        return fmt.Errorf("circuit_breaker.half_open_max_requests must be positive, got: %d", cfg.Routing.CircuitBreaker.HalfOpenMaxRequests)
+    }
+    // RR11 MaxConnsPerHost: 0 means unlimited (Go transport default), which is
+    // exactly the FD-exhaustion vector RR11 closed. Reject negative (invalid);
+    // 0 is allowed only as the explicit "unlimited" opt-out the operator typed
+    // knowingly — but we surface it as a warning so a missing/zero value is not
+    // silently unlimited. Negative is a hard error.
+    for name, backend := range cfg.Backends {
+        if backend.Enabled {
+            if backend.MaxConnsPerHost < 0 {
+                return fmt.Errorf("backends.%s.max_conns_per_host must be non-negative, got: %d", name, backend.MaxConnsPerHost)
+            }
+            if backend.MaxIdleConnsPerHost < 0 {
+                return fmt.Errorf("backends.%s.max_idle_conns_per_host must be non-negative, got: %d", name, backend.MaxIdleConnsPerHost)
+            }
+            if backend.MaxConnsPerHost == 0 {
+                slog.Warn("backend max_conns_per_host is 0 (unlimited); set a positive cap to bound FDs", "backend", name)
+            }
+        }
     }
 
     // V2 fix: validate cluster node addresses
@@ -817,7 +921,17 @@ func validate(cfg *Config) error {
     }
 
     // #87: validate auth key budgets non-negative
+    // RR2 (audit P0): reject empty Key entries. A configured api_keys entry
+    // with an empty key creates a key that authenticates nothing yet still
+    // occupies a config slot (and a name/index the admin UI references). The
+    // runtime auth middleware already rejects an empty *submitted* key, but a
+    // config-side reject fails fast at startup so the operator learns before a
+    // request is ever attempted. Only enforced when auth is enabled; a disabled
+    // auth block has no live keys to validate.
     for _, k := range cfg.Auth.APIKeys {
+        if cfg.Auth.Enabled && strings.TrimSpace(k.Key) == "" {
+            return fmt.Errorf("auth key %q has an empty key; set a non-empty key or remove the entry", k.Name)
+        }
         if k.BudgetLimit < 0 {
             return fmt.Errorf("auth key %q budget_limit must be non-negative, got %f", k.Name, k.BudgetLimit)
         }
@@ -863,6 +977,29 @@ func ExpandPath(p string) string {
         return home
     }
     return p
+}
+
+// defaultJWTSecret is the placeholder secret baked into DefaultConfig so a
+// from-scratch config parses. RR1 (audit P0): Validate rejects this value when
+// admin is enabled — operators MUST override it before enabling the admin
+// dashboard. Keeping a named constant (not a literal at both sites) prevents
+// the default and the validator from silently diverging.
+const defaultJWTSecret = "default-dev-secret-change-in-production-32ch"
+
+// knownInsecureJWTSecrets is the denylist of JWT secrets that Validate rejects
+// when admin is enabled. RR1 (audit P0): besides the built-in default, the
+// shipped config.yaml carries obvious placeholder strings ("change-me-*") that
+// a careless operator may leave in place. A publicly-known or self-describing
+// placeholder is equivalent to no secret at all — anyone reading the repo can
+// forge admin JWTs. Fail-closed at startup forces a real secret.
+var knownInsecureJWTSecrets = map[string]bool{
+    defaultJWTSecret:                          true,
+    "change-me-at-least-32-chars-long-random-secret": true,
+    "change-me-to-a-random-secret-32-chars-min":      true,
+}
+
+func isKnownInsecureJWTSecret(s string) bool {
+    return knownInsecureJWTSecrets[s]
 }
 
 func DefaultConfig() Config {
@@ -932,6 +1069,11 @@ func DefaultConfig() Config {
                 KeepaliveInterval: 15 * time.Second,
                 IdleTimeout:       180 * time.Second,
             },
+            AgentTasks: AgentTaskConfig{
+                TTL:            30 * time.Minute,
+                MaxEntries:     10000,
+                ReaperInterval: 5 * time.Minute,
+            },
         },
         Hardware: HardwareConfig{
             Enabled:         true,
@@ -962,8 +1104,13 @@ func DefaultConfig() Config {
             },
         },
         Admin: &AdminConfig{
-            Enabled:   true,
-            JWTSecret: "default-dev-secret-change-in-production-32ch",
+            // RR1 (audit P0): admin dashboard disabled by default. Enabling
+            // requires a unique jwt_secret (>=32 chars, not the built-in default),
+            // enforced by Validate. Defaulting off is fail-closed: an out-of-box
+            // deployment exposes no admin surface until an operator consciously
+            // turns it on with a real secret.
+            Enabled:   false,
+            JWTSecret: defaultJWTSecret,
             LogMaxLen: 10000,
         },
     }

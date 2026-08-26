@@ -25,6 +25,17 @@ const (
     apiKeyPrefix     = "fusion:key:"
     apiKeyHashPrefix = "fusion:keyhash:"
     channelPrefix = "fusion:channel:"
+    // AH1 (audit P1): dedicated quota usage counter, kept OUTSIDE the key JSON
+    // blob. The prior DeductQuota was a GetKey -> mutate QuotaUsed -> UpdateKey
+    // RMW on the blob — non-atomic, so two concurrent gateway instances both
+    // read the same QuotaUsed, each adds its amount, each writes back: one
+    // increment is lost. Across N instances the budget is overshot N-fold
+    // (billing bypass / quota double-spend). A dedicated float counter
+    // incremented by atomic INCRBYFLOAT fixes the lost-increment defect.
+    // Match the memory store contract: DeductQuota is additive (limit
+    // enforcement lives in CheckQuota, not the deduction), so no Lua
+    // check-then-deduct is needed.
+    quotaUsedPrefix = "fusion:quota:used:"
 )
 
 type RedisStore struct {
@@ -285,6 +296,14 @@ func (r *RedisStore) CreateKey(key *store.APIKeyEntry) error {
             slog.Warn("failed to index key hash", "key", key.Name, "error", err)
         }
     }
+    // AH1 (audit P1): seed the usage counter from the blob's QuotaUsed only if
+    // the counter is absent (SetNX never overwrites) — the counter is the
+    // source of truth once any deduction ran; never overwrite it with a stale
+    // blob value. The budget limit stays read from the blob in CheckQuota; no
+    // separate limit key is needed.
+    if _, err := r.client.SetNX(ctx, quotaUsedPrefix+key.Name, key.QuotaUsed, 0).Result(); err != nil {
+        slog.Warn("failed to seed quota used counter", "key", key.Name, "error", err)
+    }
     return nil
 }
 
@@ -393,21 +412,49 @@ func (r *RedisStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitSt
 // --- Quota ---
 
 func (r *RedisStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
-    key, kerr := r.GetKey(keyName)
-    if kerr != nil {
-        return 0, 0, false, kerr
+    // AH1 (audit P1): read the authoritative usage COUNTER, not the QuotaUsed
+    // field baked into the key blob. The blob is a non-atomic RMW victim; the
+    // counter is incremented by DeductQuota atomically. Missing key is a hard
+    // error (matches the memory store + admin contract) — fail visibly, never
+    // silently gate an unknown key open.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    key, err := r.GetKey(keyName)
+    if err != nil {
+        return 0, 0, false, fmt.Errorf("quota check: key %s not found", keyName)
     }
-    return key.QuotaUsed, key.QuotaLimit, key.QuotaUsed >= key.QuotaLimit, nil
+    usedStr, err := r.client.Get(ctx, quotaUsedPrefix+keyName).Result()
+    if err != nil && err != redis.Nil {
+        return 0, 0, false, fmt.Errorf("quota used read failed: %w", err)
+    }
+    used, _ = strconv.ParseFloat(usedStr, 64)
+    limit = key.BudgetLimit
+    if limit <= 0 {
+        limit = key.QuotaLimit
+    }
+    exceeded = limit > 0 && used >= limit
+    return used, limit, exceeded, nil
 }
 
 func (r *RedisStore) DeductQuota(keyName string, amount float64) error {
-    key, err := r.GetKey(keyName)
-    if err != nil {
-        return err
+    // AH1 (audit P1): atomic INCRBYFLOAT on the dedicated usage counter, NOT a
+    // GetKey -> QuotaUsed += amount -> UpdateKey blob RMW. The RMW lost an
+    // increment on every concurrent deduction across gateway instances (quota
+    // double-spend): both read the same QuotaUsed, each adds its amount, each
+    // writes back — one increment lost. INCRBYFLOAT is a single atomic Redis
+    // op, so no increment is lost even across N instances. Additive only —
+    // limit enforcement lives in CheckQuota (matches the memory store
+    // contract); DeductQuota is admin-manual, fail visibly on missing key.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    if _, err := r.client.Get(ctx, apiKeyPrefix+keyName).Result(); err != nil {
+        return fmt.Errorf("quota deduct: key %s not found", keyName)
     }
-    key.QuotaUsed += amount
-    key.QuotaRemaining = key.QuotaLimit - key.QuotaUsed
-    return r.UpdateKey(key)
+    if err := r.client.IncrByFloat(ctx, quotaUsedPrefix+keyName, amount).Err(); err != nil {
+        return fmt.Errorf("quota deduct failed: %w", err)
+    }
+    slog.Debug("quota deducted atomically", "key", keyName, "amount", amount)
+    return nil
 }
 
 // --- Teams ---

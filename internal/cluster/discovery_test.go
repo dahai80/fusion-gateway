@@ -1320,3 +1320,99 @@ func TestDiscovery_SelectNodeByPlatform_NoHealthy(t *testing.T) {
         t.Fatal("expected error when no healthy nodes on platform")
     }
 }
+
+// TestDiscovery_MasterMode_ModelAwareRouting (AH3, audit P1): master mode skips
+// healthCheckLoop, so without syncNodeModels a node's servesModel stays empty
+// and SelectNodeByModel silently degrades every request to cloud. This test
+// proves the AH3 fix — after master sync + model sync, SelectNodeByModel finds
+// the node serving the requested model.
+func TestDiscovery_MasterMode_ModelAwareRouting(t *testing.T) {
+    t.Log("AH3: master mode populates per-node model registry so model-aware routing works")
+    // One server serves both the master /api/nodes list and the worker's
+    // /v1/models registry (the node's Address points back at this server).
+    var srv *httptest.Server
+    srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch r.URL.Path {
+        case "/api/nodes":
+            resp := MasterNodesResponse{
+                Total:  1,
+                Online: 1,
+                Nodes: []MasterNodeInfo{
+                    {NodeID: "worker-1", Address: srv.URL, GPU: "M2", MemoryGB: 32, Status: "online"},
+                },
+            }
+            _ = json.NewEncoder(w).Encode(resp)
+        case "/v1/models":
+            // The worker exposes this model in its registry.
+            _ = json.NewEncoder(w).Encode([]map[string]string{{"id": "served-model"}})
+        default:
+            http.NotFound(w, r)
+        }
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    // Wait for master sync + model sync to run.
+    time.Sleep(300 * time.Millisecond)
+
+    // AH3 core assertion: the node's model registry is populated, so
+    // SelectNodeByModel finds worker-1 for served-model instead of returning
+    // "no healthy node serving model" (the pre-fix silent cloud fallback).
+    selected, err := d.SelectNodeByModel("least-connections", "served-model", 0)
+    if err != nil {
+        t.Fatalf("expected worker-1 serving served-model, got error: %v (AH3 model sync did not populate registry)", err)
+    }
+    if selected.ID != "worker-1" {
+        t.Errorf("expected worker-1, got %s", selected.ID)
+    }
+
+    // A model no worker exposes still has no serving node (correct cloud fallback).
+    if _, err := d.SelectNodeByModel("least-connections", "absent-model", 0); err == nil {
+        t.Error("expected error when no node serves absent-model")
+    }
+}
+
+// TestDiscovery_MasterMode_NoHealthyNodes_ModelSyncNoOp (AH3): syncNodeModels
+// logs + returns when master reports no online nodes, without erroring.
+func TestDiscovery_MasterMode_NoHealthyNodes_ModelSyncNoOp(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        resp := MasterNodesResponse{Total: 1, Online: 0, Nodes: []MasterNodeInfo{
+            {NodeID: "worker-1", Address: "http://10.0.0.1:8100", Status: "offline"},
+        }}
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    time.Sleep(300 * time.Millisecond)
+
+    all := d.AllNodes()
+    if len(all) != 1 {
+        t.Fatalf("expected 1 node synced (offline), got %d", len(all))
+    }
+    for _, n := range all {
+        if n.State() == NodeStateHealthy {
+            t.Errorf("expected all nodes offline, %s is healthy", n.ID)
+        }
+    }
+}

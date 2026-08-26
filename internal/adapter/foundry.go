@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -47,7 +48,7 @@ func NewFoundryProvider(name string, backendCfg config.BackendConfig) *FoundryPr
 	return &FoundryProvider{
 		name:        name,
 		baseURL:     backendCfg.BaseURL,
-		httpClient:  &http.Client{Timeout: timeout},
+		httpClient:  &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
 		apiKey:      apiKey,
 		accessToken: accessToken,
 	}
@@ -102,7 +103,7 @@ func (p *FoundryProvider) Messages(ctx context.Context, req *AnthropicRequest) (
 		return nil, extractUpstreamError(resp)
 	}
 	var antResp AnthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+	if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
 		return nil, fmt.Errorf("decode foundry messages response: %w", err)
 	}
 	return &antResp, nil
@@ -135,6 +136,21 @@ func (p *FoundryProvider) StreamMessages(ctx context.Context, req *AnthropicRequ
 	safego.Go("foundry_stream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		// RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+		// body.Read inside parseAnthropicEventStreamRaw (which takes no ctx).
+		// A stalled upstream keeps Read blocked indefinitely, hanging the
+		// goroutine + connection. Closing the body forces an immediate read
+		// error and a clean exit. Mirrors node_adapter.go.
+		stopBodyWatch := make(chan struct{})
+		defer close(stopBodyWatch)
+		safego.Go("foundry_stream_cancel_watch", func() {
+			select {
+			case <-ctx.Done():
+				slog.Debug("foundry stream canceled by client, closing body", "error", ctx.Err())
+				resp.Body.Close()
+			case <-stopBodyWatch:
+			}
+		})
 		parseAnthropicEventStreamRaw(resp.Body, ch)
 	})
 	return ch, nil

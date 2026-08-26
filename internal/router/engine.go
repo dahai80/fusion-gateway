@@ -85,6 +85,15 @@ type Engine struct {
     cfg             *config.ConfigSnapshot
     hwCollector     *hardware.Collector
     breakers        map[string]*CircuitBreaker
+    // nodeBreakers holds a per-node circuit breaker keyed by node ID (RR5,
+    // audit P1). The prior design had a single "cluster" breaker: one bad
+    // node's failures accumulated into it and tripped the whole cluster,
+    // poisoning the N-1 healthy nodes (all traffic forced to cloud). Per-node
+    // breakers isolate a failing node — it trips itself and traffic bypasses
+    // it, while healthy nodes keep serving. The cluster breaker stays as an
+    // aggregate view (cluster-wide conditions), never tripped by a single
+    // node's failures. Lazy-created on first record/lookup.
+    nodeBreakers    map[string]*CircuitBreaker
     localReady      bool
     localInFlight   func() int64
     localModels     func() map[string]bool
@@ -121,6 +130,7 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
         cfg:             cfg,
         hwCollector:     hwCollector,
         breakers:        breakers,
+        nodeBreakers:    make(map[string]*CircuitBreaker),
         localReady:      false,
         localInFlight:   func() int64 { return 0 },
         localModels:     func() map[string]bool { return nil },
@@ -132,19 +142,41 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
     // mode=local + queue_enabled. In hybrid/cloud mode the engine falls back
     // to cloud (no queue), so localQueue stays nil and the handler never
     // gates — zero behavior change for the default hybrid path.
-    if cfg.Config.Routing.Mode == "local" && cfg.Config.Routing.LocalPriority.QueueEnabled {
-        maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
-        if maxConcurrent <= 0 {
-            maxConcurrent = 8
-        }
-        e.localQueue = newSlotQueue(maxConcurrent)
-        slog.Info("local slot wait-queue enabled",
-            "mode", "local",
-            "max_concurrent", maxConcurrent,
-            "queue_timeout", cfg.Config.Routing.LocalPriority.QueueTimeout)
-    }
+    e.localQueue = buildLocalQueue(cfg)
 
     return e
+}
+
+// buildLocalQueue constructs the opt-in local wait-queue from a config
+// snapshot: a *slotQueue when routing.mode=local AND
+// local_priority.queue_enabled, else nil. Shared between NewEngine (initial
+// build) and DrainAndApply (hot-reload rebuild, RR6) so both sites stay in
+// sync — the queue is NEVER silently left stale across a config change.
+// max_concurrent<=0 defaults to 8 (same as the original inline build).
+func buildLocalQueue(cfg *config.ConfigSnapshot) *slotQueue {
+    if cfg.Config.Routing.Mode != "local" || !cfg.Config.Routing.LocalPriority.QueueEnabled {
+        return nil
+    }
+    maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
+    if maxConcurrent <= 0 {
+        maxConcurrent = 8
+    }
+    q := newSlotQueue(maxConcurrent)
+    slog.Info("local slot wait-queue built",
+        "mode", "local",
+        "max_concurrent", maxConcurrent,
+        "queue_timeout", cfg.Config.Routing.LocalPriority.QueueTimeout)
+    return q
+}
+
+// queueStateString renders a localQueue for the RR6 hot-reload transition
+// log: "disabled" (nil) or "cap=N" so an operator sees a queue flip or
+// capacity change explicitly rather than a generic "config applied".
+func queueStateString(q *slotQueue) string {
+    if q == nil {
+        return "disabled"
+    }
+    return fmt.Sprintf("cap=%d", cap(q.sem))
 }
 
 func (e *Engine) SetClusterSelector(cs ClusterSelector) {
@@ -222,15 +254,58 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
         slog.Warn("drain timeout: in-flight requests remain", "in_flight", e.localInFlight())
     }
 
-    // Phase 2: Apply - update config reference and rebuild breakers
+    // Phase 2: Apply - update config reference and rebuild breakers.
+    // EI3: inherit the OLD breakers' trip state onto the NEW ones. Without
+    // inheritance, a hot-reload swaps e.breakers for brand-new closed breakers
+    // — an already-open (failing) backend looks healthy to the new breaker, so
+    // requests keep hitting it until the new breaker re-accumulates enough
+    // failures to trip again. A concurrent RecordFailure landing on the old
+    // breaker (GC'd post-swap) was the original race; inheriting state means the
+    // new breaker opens immediately and the operator sees WHY (tripReason),
+    // not a blank "config applied". Snapshot under Lock BEFORE the swap (the
+    // old map is read here, not concurrently by RecordFailure which holds RLock
+    // — but we hold the exclusive Lock so the snapshot+swap is atomic).
     e.mu.Lock()
     e.cfg = cfg
+    inheritedLocal := snapshotBreakerLocked(e.breakers, "local")
+    inheritedCloud := snapshotBreakerLocked(e.breakers, "cloud")
+    inheritedCluster := snapshotBreakerLocked(e.breakers, "cluster")
+    inheritedNodes := make(map[string]BreakerSnapshot, len(e.nodeBreakers))
+    for nodeID := range e.nodeBreakers {
+        inheritedNodes[nodeID] = snapshotBreakerLocked(e.nodeBreakers, nodeID)
+    }
     e.breakers = map[string]*CircuitBreaker{
         "local":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
         "cloud":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
         "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
     }
+    e.breakers["local"].InheritSnapshot(inheritedLocal)
+    e.breakers["cloud"].InheritSnapshot(inheritedCloud)
+    e.breakers["cluster"].InheritSnapshot(inheritedCluster)
+    // RR5: per-node breakers rebuilt fresh (lazy-recreated on next access via
+    // nodeBreakerLocked) but inherit prior trip state so a known-bad node is
+    // still seen as bad right after reload, not rediscovered by failure.
+    e.nodeBreakers = make(map[string]*CircuitBreaker, len(inheritedNodes))
+    for nodeID, snap := range inheritedNodes {
+        nb := NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
+        nb.InheritSnapshot(snap)
+        e.nodeBreakers[nodeID] = nb
+    }
+    // RR6: rebuild localQueue from the new config. Without this, an operator
+    // flipping queue_enabled false→true or raising max_concurrent via admin
+    // saw breakers rebuilt but the queue left stale (nil or old capacity) —
+    // the toggle was a silent no-op while logs claimed "config applied". The
+    // queue is a fresh semaphore; in-flight holds on the old queue keep their
+    // own release closures (Phase 1 drained in-flight to ~0 first). A change
+    // in queue state is logged explicitly so operators see what actually took
+    // effect, not a blanket "config applied".
+    oldQueueState := queueStateString(e.localQueue)
+    e.localQueue = buildLocalQueue(cfg)
+    newQueueState := queueStateString(e.localQueue)
     e.mu.Unlock()
+    if oldQueueState != newQueueState {
+        slog.Info("config applied: local queue rebuilt", "version", cfg.Version, "before", oldQueueState, "after", newQueueState)
+    }
     slog.Info("config applied: circuit breakers rebuilt", "version", cfg.Version)
 
     // Phase 3: Warmup - set local breaker to half_open for gradual recovery
@@ -335,9 +410,18 @@ func (e *Engine) PublishBreakerStates() {
     for backend := range e.breakers {
         backends = append(backends, backend)
     }
+    nodeIDs := make([]string, 0, len(e.nodeBreakers))
+    for nodeID := range e.nodeBreakers {
+        nodeIDs = append(nodeIDs, nodeID)
+    }
     e.mu.RUnlock()
     for _, backend := range backends {
         observability.UpdateCircuitBreakerState(backend, int(e.CircuitBreakerState(backend)))
+    }
+    // RR5: also publish per-node breaker states so /metrics surfaces an
+    // individual node tripping without it being hidden inside the aggregate.
+    for _, nodeID := range nodeIDs {
+        observability.UpdateCircuitBreakerState("node:"+nodeID, int(e.NodeBreakerState(nodeID)))
     }
 }
 
@@ -377,6 +461,95 @@ func (e *Engine) RecordFailure(backend string) {
             observability.RecordCircuitBreakerTrip(backend, "failure_threshold")
         }
     }
+}
+
+// nodeBreakerLocked returns the per-node circuit breaker for nodeID, creating
+// it lazily under e.mu (RR5). Caller MUST hold e.mu (or use the public
+// record/nodeState helpers that lock internally).
+func (e *Engine) nodeBreakerLocked(nodeID string, cbCfg config.CircuitBreakerConfig) *CircuitBreaker {
+    b, ok := e.nodeBreakers[nodeID]
+    if !ok {
+        b = NewCircuitBreaker(cbCfg)
+        e.nodeBreakers[nodeID] = b
+    }
+    return b
+}
+
+// snapshotBreakerLocked returns the trip-state snapshot of the breaker keyed by
+// k in m, or a zero (StateClosed) snapshot if absent. Used by DrainAndApply
+// (EI3) to capture prior trip state before swapping the breaker map. Caller
+// MUST hold e.mu so the map read + breaker snapshot are atomic w.r.t. the swap.
+func snapshotBreakerLocked(m map[string]*CircuitBreaker, k string) BreakerSnapshot {
+    if b, ok := m[k]; ok {
+        return b.Snapshot()
+    }
+    return BreakerSnapshot{}
+}
+
+// RecordNodeSuccess records a success on the per-node breaker for nodeID (RR5).
+// Used instead of RecordSuccess("cluster") when a request was served by a
+// specific cluster node, so one node's failures never accumulate into the
+// shared cluster breaker. No-op for empty nodeID.
+func (e *Engine) RecordNodeSuccess(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    e.mu.Lock()
+    b := e.nodeBreakerLocked(nodeID, e.cfg.Config.Routing.CircuitBreaker)
+    e.mu.Unlock()
+    b.RecordSuccess()
+    observability.UpdateCircuitBreakerState("node:"+nodeID, int(b.State()))
+}
+
+// RecordNodeFailure records a failure on the per-node breaker for nodeID (RR5).
+// When the node's breaker opens, tryCluster* bypasses it (the node trips
+// itself; healthy nodes keep serving). No-op for empty nodeID.
+func (e *Engine) RecordNodeFailure(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    e.mu.Lock()
+    b := e.nodeBreakerLocked(nodeID, e.cfg.Config.Routing.CircuitBreaker)
+    e.mu.Unlock()
+    b.RecordFailure()
+    state := b.State()
+    observability.UpdateCircuitBreakerState("node:"+nodeID, int(state))
+    if state == StateOpen {
+        slog.Warn("per-node circuit breaker opened", "node_id", nodeID)
+        observability.RecordCircuitBreakerTrip("node:"+nodeID, "failure_threshold")
+    }
+}
+
+// NodeBreakerOpen reports whether the per-node breaker for nodeID is open (RR5).
+// tryCluster* consults this to bypass a tripped node instead of poisoning the
+// whole cluster. False for unknown/empty nodeID (no failures recorded yet).
+func (e *Engine) NodeBreakerOpen(nodeID string) bool {
+    if nodeID == "" {
+        return false
+    }
+    e.mu.RLock()
+    b, ok := e.nodeBreakers[nodeID]
+    e.mu.RUnlock()
+    if !ok {
+        return false
+    }
+    return b.State() == StateOpen
+}
+
+// NodeBreakerState returns the per-node breaker's state (RR5). Used by
+// PublishBreakerStates to push each node's state to the /metrics gauge.
+// StateClosed for unknown/empty nodeID (no failures recorded yet).
+func (e *Engine) NodeBreakerState(nodeID string) CircuitBreakerState {
+    if nodeID == "" {
+        return StateClosed
+    }
+    e.mu.RLock()
+    b, ok := e.nodeBreakers[nodeID]
+    e.mu.RUnlock()
+    if !ok {
+        return StateClosed
+    }
+    return b.State()
 }
 
 func (e *Engine) Trip(backend, reason string) {
@@ -651,21 +824,22 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         }
     }
 
-    // P5: Concurrent limit (advisory soft cap — B2).
-    // This is a TOCTOU soft check, NOT a hard semaphore: localInFlight is
-    // read here under RLock, but the counter is incremented later in the
-    // adapter (fusion_mlx.go inFlightAcquire) inside Chat/StreamChat, after
+    // P5: Concurrent limit (advisory early-shed — B2 / RR4).
+    // This is a TOCTOU soft read: localInFlight is read here under RLock, but
+    // the counter is incremented later in the adapter (fusion_mlx.go
+    // tryInFlightAcquire) inside Chat/StreamChat/Embedding/Rerank, after
     // Decide returns. N concurrent Decide calls can each observe
     // inFlight == maxConcurrent-1 and all route local, overshooting by up to
-    // N-1 before any of them increments the counter. The hard concurrency
-    // gate is the opt-in slotQueue (engine.go, engaged only when
-    // routing.mode=local AND routing.local_priority.queue_enabled — #102
-    // ADR-001), which Acquires a real slot in the handler before forwarding;
-    // in hybrid mode (the default) fusion-mlx itself queues the excess on its
-    // own request queue. This advisory check only diverts to the cluster/cloud
-    // early when local already LOOKS saturated, shedding load before the
-    // adapter is reached. Overshoot here is bounded and self-correcting: the
-    // next Decide sees the now-incremented counter and diverts.
+    // N-1 before any of them increments the counter. RR4 closes that window:
+    // the adapter's tryInFlightAcquire is now an atomic CAS hard cap — when
+    // local is actually full it returns ErrLocalSlotFull and the handler
+    // diverts the request to cloud (no breaker failure recorded). So this P5
+    // read is now purely an advisory early-shed: it diverts to cluster/cloud
+    // BEFORE reaching the adapter when local already LOOKS saturated, saving
+    // a round-trip. Any overshoot that slips past P5 is caught and corrected
+    // by the adapter CAS + cloud diversion. The opt-in slotQueue (#102
+    // ADR-001, mode=local + queue_enabled) remains a separate handler-side
+    // gate that blocks/queues instead of diverting.
     maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
     if maxConcurrent > 0 && e.localInFlight() >= int64(maxConcurrent) {
         slog.Debug("advisory concurrent limit reached, diverting from local",
@@ -797,6 +971,15 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string) *Rou
         return nil
     }
 
+    // RR5: bypass a node whose per-node breaker is open — it tripped itself on
+    // repeated failure, so routing to it would just fail again. Fall through to
+    // cloud for this request; the node's health-check will reconcile its state.
+    if e.NodeBreakerOpen(nodeID) {
+        slog.Info("cluster node breaker open, bypassing to cloud",
+            "node_id", nodeID, "model", model)
+        return nil
+    }
+
     slog.Info("routing to cluster node",
         "node_id", nodeID, "strategy", strategy, "model", model)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
@@ -825,6 +1008,12 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
     nodeID, err := e.cluster.SelectNodeByPlatform(strategy, platform)
     if err != nil {
         slog.Warn("platform cluster node selection failed", "platform", platform, "error", err)
+        return nil
+    }
+    // RR5: bypass a node whose per-node breaker is open (see tryClusterLocked).
+    if e.NodeBreakerOpen(nodeID) {
+        slog.Info("cluster node breaker open, bypassing platform dispatch to cloud",
+            "node_id", nodeID, "platform", platform)
         return nil
     }
     slog.Info("routing to cluster node by platform", "node_id", nodeID, "platform", platform, "strategy", strategy)

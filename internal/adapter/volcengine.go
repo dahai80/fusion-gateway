@@ -33,7 +33,7 @@ func NewVolcengineProvider(name string, backendCfg config.BackendConfig) *Volcen
         name:       name,
         baseURL:    backendCfg.BaseURL,
         apiKey:     backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout},
+        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
     }
 }
 
@@ -66,7 +66,7 @@ func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
         return nil, fmt.Errorf("volcengine chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode chat response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode chat response: %w", err) }
     return &chatResp, nil
 }
 
@@ -110,7 +110,7 @@ func (p *VolcengineProvider) Embedding(ctx context.Context, req *EmbeddingReques
         return nil, fmt.Errorf("volcengine embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode embedding response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode embedding response: %w", err) }
     return &embResp, nil
 }
 
@@ -127,7 +127,7 @@ func (p *VolcengineProvider) ListModels(ctx context.Context) ([]ModelInfo, error
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("list models returned status %d", resp.StatusCode) }
     var listResp struct { Data []ModelInfo `json:"data"` }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil { return nil, fmt.Errorf("decode models response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil { return nil, fmt.Errorf("decode models response: %w", err) }
     return listResp.Data, nil
 }
 

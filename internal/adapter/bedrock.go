@@ -62,7 +62,7 @@ func NewBedrockProvider(name string, backendCfg config.BackendConfig) *BedrockPr
 		name:       name,
 		region:     region,
 		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
 		accessKey:  os.Getenv("AWS_ACCESS_KEY_ID"),
 		secretKey:  os.Getenv("AWS_SECRET_ACCESS_KEY"),
 		sessionTok: os.Getenv("AWS_SESSION_TOKEN"),
@@ -118,7 +118,7 @@ func (p *BedrockProvider) Messages(ctx context.Context, req *AnthropicRequest) (
 		return nil, extractUpstreamError(resp)
 	}
 	var antResp AnthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+	if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
 		return nil, fmt.Errorf("decode bedrock messages response: %w", err)
 	}
 	return &antResp, nil
@@ -151,6 +151,21 @@ func (p *BedrockProvider) StreamMessages(ctx context.Context, req *AnthropicRequ
 	safego.Go("bedrock_stream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		// RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+		// body.Read inside parseBedrockEventStream (which takes no ctx). A
+		// stalled upstream keeps Read blocked indefinitely, hanging the
+		// goroutine + connection. Closing the body forces an immediate read
+		// error and a clean exit. Mirrors node_adapter.go.
+		stopBodyWatch := make(chan struct{})
+		defer close(stopBodyWatch)
+		safego.Go("bedrock_stream_cancel_watch", func() {
+			select {
+			case <-ctx.Done():
+				slog.Debug("bedrock stream canceled by client, closing body", "error", ctx.Err())
+				resp.Body.Close()
+			case <-stopBodyWatch:
+			}
+		})
 		p.parseBedrockEventStream(resp.Body, ch)
 	})
 	return ch, nil
@@ -171,8 +186,15 @@ func (p *BedrockProvider) parseBedrockEventStream(body io.Reader, ch chan<- Anth
 		if n > 0 {
 			lineBuf = append(lineBuf, buf[:n]...)
 			if len(lineBuf) > maxLineSize {
-				slog.Error("bedrock stream line exceeded max size, discarding", "size", len(lineBuf))
-				lineBuf = nil
+				// B6/RR12: returning (not lineBuf=nil) closes the channel — the
+				// client observes truncation rather than the parser silently
+				// discarding buffered bytes and resyncing mid-JSON. The old
+				// lineBuf=nil kept reading from an arbitrary byte offset,
+				// producing half-JSON "data:" lines forever with no resync
+				// marker (SSE has no length framing) — the stream never
+				// terminated, the client just spun with no valid content.
+				slog.Error("bedrock stream line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+				return
 			}
 		}
 		for {

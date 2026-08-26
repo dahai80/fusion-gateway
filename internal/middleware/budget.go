@@ -28,8 +28,21 @@ func BudgetBlock(st store.Store) func(http.Handler) http.Handler {
 
             used, _, exceeded, err := st.CheckQuota(keyCfg.Name)
             if err != nil {
-                slog.Warn("budget check failed, allowing request", "key", keyCfg.Name, "error", err)
-                next.ServeHTTP(w, r)
+                // AH5 (audit P0): fail-closed. A quota-store error (Redis
+                // disconnect, memory-store corruption) previously allowed the
+                // request through ("budget check failed, allowing request"), so
+                // a BudgetLimit=100 key could consume unboundedly during a
+                // store outage — billing bypass. Commercial safety gates must
+                // fail closed: when we cannot verify the budget, refuse rather
+                // than risk unlimited spend. 503 (not 403) signals a transient
+                // infrastructure fault the client may retry, distinct from a
+                // hard quota-exceeded 403. The master key is unaffected — it
+                // has no keyCfg.Name budget path (Name=="master" has no
+                // BudgetLimit, so the BudgetLimit<=0 guard above already passed
+                // it through before reaching here for non-budgeted keys).
+                slog.Error("budget check failed, refusing request (fail-closed)",
+                    "key", keyCfg.Name, "error", err)
+                http.Error(w, `{"error":{"message":"Budget quota check unavailable","type":"quota_error"}}`, http.StatusServiceUnavailable)
                 return
             }
 

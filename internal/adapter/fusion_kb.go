@@ -29,7 +29,7 @@ func NewFusionKBProvider(name string, backendCfg config.BackendConfig) *FusionKB
         name:       name,
         baseURL:    backendCfg.BaseURL,
         apiKey:     backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout},
+        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
     }
 }
 
@@ -78,7 +78,7 @@ func (p *FusionKBProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRes
         return nil, fmt.Errorf("kb chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode kb chat response: %w", err)
     }
     return &chatResp, nil
@@ -111,6 +111,22 @@ func (p *FusionKBProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     safego.Go("kb-stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseSSEStream. A stalled upstream keeps Read
+        // blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection. Closing
+        // the body forces an immediate read error and a clean exit. Mirrors
+        // node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("kb_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("fusion-kb stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
@@ -140,7 +156,7 @@ func (p *FusionKBProvider) Embedding(ctx context.Context, req *EmbeddingRequest)
         return nil, fmt.Errorf("kb embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode kb embedding response: %w", err)
     }
     return &embResp, nil
@@ -170,7 +186,7 @@ func (p *FusionKBProvider) Rerank(ctx context.Context, req *RerankRequest) (*Rer
         return nil, fmt.Errorf("kb rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var rerankResp RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode kb rerank response: %w", err)
     }
     return &rerankResp, nil
@@ -195,7 +211,7 @@ func (p *FusionKBProvider) ListModels(ctx context.Context) ([]ModelInfo, error) 
     var listResp struct {
         Data []ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         slog.Debug("kb list models decode failed", "error", err)
         return nil, nil
     }

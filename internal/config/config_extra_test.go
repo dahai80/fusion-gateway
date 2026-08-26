@@ -163,6 +163,42 @@ func TestValidate_Admin_Valid(t *testing.T) {
     }
 }
 
+// RR2 (audit P0): an api_keys entry with an empty Key is rejected when auth is
+// enabled. A key that authenticates nothing but still occupies a config slot is
+// a misconfiguration the operator must learn at startup, not from a 401 at
+// request time.
+func TestValidate_APIKey_EmptyKeyRejectedWhenAuthEnabled(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Auth.Enabled = true
+    cfg.Auth.APIKeys = []AuthKeyConfig{
+        {Name: "empty-key-entry", Key: ""},
+        {Name: "whitespace-only", Key: "   "},
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("expected error for empty api_keys entry when auth enabled")
+    }
+}
+
+// RR2: empty Key is allowed when auth is disabled (no live keys to validate).
+func TestValidate_APIKey_EmptyKeyOKWhenAuthDisabled(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Auth.Enabled = false
+    cfg.Auth.APIKeys = []AuthKeyConfig{{Name: "empty-key-entry", Key: ""}}
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("empty api_keys entry should pass when auth disabled: %v", err)
+    }
+}
+
+// RR2: a non-empty Key passes validation.
+func TestValidate_APIKey_NonEmptyKeyAccepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Auth.Enabled = true
+    cfg.Auth.APIKeys = []AuthKeyConfig{{Name: "real-key", Key: "sk-real-key-value"}}
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("non-empty api_keys entry should pass: %v", err)
+    }
+}
+
 func TestValidate_MaxConcurrent_Negative(t *testing.T) {
     cfg := DefaultConfig()
     cfg.Routing.LocalPriority.MaxConcurrent = -1
@@ -437,5 +473,106 @@ func TestIsSensitivePath(t *testing.T) {
         if got != tc.expected {
             t.Errorf("isSensitivePath(%q) = %v, want %v", tc.path, got, tc.expected)
         }
+    }
+}
+
+// EI8 (audit P3): validate() must reject numeric knobs that prior validation
+// left bare. Each subtest mutates one field to an illegal value on an
+// otherwise-valid DefaultConfig and asserts validate() returns an error. The
+// guard direction: on the BUG (field unvalidated) these pass silently → test
+// FAILS ("expected error"); on the FIX validate() rejects them → PASS.
+
+func TestEI8_MaxMLXMemoryRatio_Zero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.LocalPriority.MaxMLXMemoryRatio = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for zero max_mlx_memory_ratio")
+    }
+}
+
+func TestEI8_MaxMLXMemoryRatio_OverOne(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.LocalPriority.MaxMLXMemoryRatio = 1.5
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for max_mlx_memory_ratio > 1")
+    }
+}
+
+func TestEI8_MaxMLXMemoryRatio_Negative(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.LocalPriority.MaxMLXMemoryRatio = -0.1
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for negative max_mlx_memory_ratio")
+    }
+}
+
+func TestEI8_CircuitBreaker_FailureThresholdZero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.CircuitBreaker.FailureThreshold = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for zero circuit_breaker.failure_threshold")
+    }
+}
+
+func TestEI8_CircuitBreaker_SuccessThresholdZero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.CircuitBreaker.SuccessThreshold = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for zero circuit_breaker.success_threshold")
+    }
+}
+
+func TestEI8_CircuitBreaker_HalfOpenMaxRequestsZero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.CircuitBreaker.HalfOpenMaxRequests = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for zero circuit_breaker.half_open_max_requests")
+    }
+}
+
+func TestEI8_CircuitBreaker_TimeoutNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.CircuitBreaker.Timeout = -1 * time.Second
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for negative circuit_breaker.timeout")
+    }
+}
+
+func TestEI8_Backend_MaxConnsPerHostNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Backends == nil {
+        cfg.Backends = make(map[string]BackendConfig)
+    }
+    cfg.Backends["local"] = BackendConfig{
+        BaseURL:         "http://127.0.0.1:11434",
+        Enabled:         true,
+        MaxConnsPerHost: -5,
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for negative backends.local.max_conns_per_host")
+    }
+}
+
+func TestEI8_Backend_MaxIdleConnsPerHostNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Backends == nil {
+        cfg.Backends = make(map[string]BackendConfig)
+    }
+    cfg.Backends["local"] = BackendConfig{
+        BaseURL:             "http://127.0.0.1:11434",
+        Enabled:             true,
+        MaxIdleConnsPerHost: -3,
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("EI8: expected error for negative backends.local.max_idle_conns_per_host")
+    }
+}
+
+// TestEI8_DefaultConfigStillValid guards against the new checks making the
+// shipped DefaultConfig fail to validate (e.g. a default ratio outside (0,1]).
+func TestEI8_DefaultConfigStillValid(t *testing.T) {
+    cfg := DefaultConfig()
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("EI8: DefaultConfig must still validate after EI8 checks, got: %v", err)
     }
 }

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -343,4 +344,87 @@ func TestAggregateAnthropicStreamEvents_IdleZeroSkips(t *testing.T) {
 		t.Fatalf("unexpected content: %+v", resp.Content)
 	}
 	slog.Info("TestAggregateAnthropicStreamEvents_IdleZeroSkips passed")
+}
+
+// TestRR12_ParseAnthropicEventStreamRaw_OversizeLineClosesStream verifies the
+// B6/RR12 fix: a single SSE line exceeding the 1 MiB cap must make the parser
+// RETURN (close the stream), not set lineBuf=nil and keep reading. The old
+// lineBuf=nil path resumed reading at an arbitrary mid-line byte offset,
+// producing half-JSON "data:" lines forever (SSE has no length framing) — the
+// stream never terminated, the client spun with no valid content and no error.
+// Returning is the only correct recovery: the byte position is already
+// desynchronized, resync is impossible.
+func TestRR12_ParseAnthropicEventStreamRaw_OversizeLineClosesStream(t *testing.T) {
+	// A single "data: " line with >1MiB of payload and NO trailing newline.
+	// The parser appends every Read into lineBuf; with no '\n' it never flushes
+	// a line, so lineBuf grows past maxLineSize in one shot.
+	oversize := bytes.Repeat([]byte("x"), (1<<20)+4096)
+	body := bytesReader(append([]byte("data: "), oversize...))
+
+	ch := make(chan AnthropicStreamEvent, 16)
+	done := make(chan struct{})
+	go func() {
+		parseAnthropicEventStreamRaw(body, ch)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// parser returned on oversize line — correct (RR12 fix)
+	case <-time.After(3 * time.Second):
+		t.Fatal("parseAnthropicEventStreamRaw hung on oversize line; lineBuf=nil path kept reading instead of returning")
+	}
+	// Channel should be closeable (parser exited); drain anything buffered.
+	close(ch)
+	for range ch {
+	}
+}
+
+// TestRR12_ParseBedrockEventStream_OversizeLineClosesStream is the same guard
+// for the Bedrock event-stream parser, which had the identical lineBuf=nil bug.
+func TestRR12_ParseBedrockEventStream_OversizeLineClosesStream(t *testing.T) {
+	oversize := bytes.Repeat([]byte("x"), (1<<20)+4096)
+	body := bytesReader(append([]byte("data: "), oversize...))
+
+	p := &BedrockProvider{name: "bedrock"}
+	ch := make(chan AnthropicStreamEvent, 16)
+	done := make(chan struct{})
+	go func() {
+		p.parseBedrockEventStream(body, ch)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// parser returned on oversize line — correct (RR12 fix)
+	case <-time.After(3 * time.Second):
+		t.Fatal("parseBedrockEventStream hung on oversize line; lineBuf=nil path kept reading instead of returning")
+	}
+	close(ch)
+	for range ch {
+	}
+}
+
+// TestRR12_OversizeLine_HalfJSONNotEmitted proves the desync symptom is gone:
+// after the oversize line triggers return, NO half-JSON event leaks onto the
+// channel. The old bug would keep parsing mid-line bytes as "data:" lines and
+// emit junk. With the fix the channel receives zero events (parser returned
+// before any line completed).
+func TestRR12_OversizeLine_HalfJSONNotEmitted(t *testing.T) {
+	// Oversize line, then (unreachable in the fixed parser) a valid event. If
+	// the parser wrongly continued past the cap, it might emit a malformed
+	// event from the tail. The fix returns before reaching the valid event.
+	oversize := bytes.Repeat([]byte("x"), (1<<20)+4096)
+	body := bytesReader(append(append([]byte("data: "), oversize...), []byte("\n\ndata: {\"type\":\"message_stop\"}\n\n")...))
+
+	ch := make(chan AnthropicStreamEvent, 16)
+	parseAnthropicEventStreamRaw(body, ch)
+	close(ch)
+	var count int
+	for range ch {
+		count++
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 events (parser returns on oversize, never reaches tail), got %d — half-JSON leaked", count)
+	}
 }

@@ -108,10 +108,19 @@ func collectIOKitGPU(m *HardwareMetrics) error {
     return collectIOKitGPUViaIoreg(m)
 }
 
-func collectIOKitGPUPurego(m *HardwareMetrics) error {
+func collectIOKitGPUPurego(m *HardwareMetrics) (err error) {
+    // AH5 (audit P0): named return so the panic recover can set err. Previously
+    // the recover only logged — the unnamed `error` return stayed nil even after
+    // a panic, so the caller (collectIOKitGPU) saw err==nil, skipped the ioreg
+    // fallback, and returned zero GPU fields with CollectionError==nil. The
+    // router then read "GPU idle" and kept routing to an overloaded local node
+    // — hardware overload protection silently disabled on a collection panic.
+    // Setting err here makes the fallback run and propagates a non-nil
+    // CollectionError so the router can divert to cloud.
     defer func() {
         if r := recover(); r != nil {
-            slog.Error("iokit purego panic recovered", "error", r)
+            slog.Error("iokit purego panic recovered, falling back to ioreg", "error", r)
+            err = fmt.Errorf("iokit purego panic: %v", r)
         }
     }()
 

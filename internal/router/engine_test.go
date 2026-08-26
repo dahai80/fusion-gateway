@@ -467,6 +467,174 @@ func TestDrainAndApply(t *testing.T) {
     }
 }
 
+// TestRR6_DrainAndApply_RebuildsLocalQueue_DisabledToEnabled verifies the RR6
+// fix: DrainAndApply must rebuild localQueue from the new config. A hybrid
+// engine starts with localQueue==nil (queue off); after a hot-reload that
+// switches mode=local + queue_enabled=true with max_concurrent=4, the queue
+// must become a non-nil semaphore of cap 4. Before RR6 the queue stayed nil
+// (silent no-op while logs claimed "config applied").
+func TestRR6_DrainAndApply_DisabledToEnabled(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "hybrid"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    if e.LocalQueue() != nil {
+        t.Fatalf("hybrid engine should start with nil localQueue, got %v", e.LocalQueue())
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.Routing.Mode = "local"
+    newCfg.Config.Routing.LocalPriority.QueueEnabled = true
+    newCfg.Config.Routing.LocalPriority.MaxConcurrent = 4
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+
+    e.DrainAndApply(newCfg)
+
+    q := e.LocalQueue()
+    if q == nil {
+        t.Fatal("RR6: localQueue still nil after DrainAndApply enabled queue — hot-reload no-op")
+    }
+    if got := cap(q.sem); got != 4 {
+        t.Fatalf("RR6: expected queue cap 4, got %d", got)
+    }
+}
+
+// TestRR6_DrainAndApply_EnabledToDisabled verifies the reverse: an enabled
+// queue (mode=local, queue_enabled) becomes nil after a hot-reload that turns
+// queue_enabled off.
+func TestRR6_DrainAndApply_EnabledToDisabled(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "local"
+    cfg.Config.Routing.LocalPriority.QueueEnabled = true
+    cfg.Config.Routing.LocalPriority.MaxConcurrent = 8
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    if e.LocalQueue() == nil {
+        t.Fatal("enabled engine should start with non-nil localQueue")
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.Routing.Mode = "local"
+    newCfg.Config.Routing.LocalPriority.QueueEnabled = false
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+
+    e.DrainAndApply(newCfg)
+
+    if q := e.LocalQueue(); q != nil {
+        t.Fatalf("RR6: localQueue should be nil after DrainAndApply disabled queue, got %v", q)
+    }
+}
+
+// TestRR6_DrainAndApply_CapacityChange verifies raising max_concurrent on
+// hot-reload produces a queue with the new capacity (not the stale old cap).
+func TestRR6_DrainAndApply_CapacityChange(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Mode = "local"
+    cfg.Config.Routing.LocalPriority.QueueEnabled = true
+    cfg.Config.Routing.LocalPriority.MaxConcurrent = 8
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    before := e.LocalQueue()
+    if before == nil || cap(before.sem) != 8 {
+        t.Fatalf("expected initial queue cap 8, got %v", before)
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.Routing.Mode = "local"
+    newCfg.Config.Routing.LocalPriority.QueueEnabled = true
+    newCfg.Config.Routing.LocalPriority.MaxConcurrent = 16
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+
+    e.DrainAndApply(newCfg)
+
+    after := e.LocalQueue()
+    if after == nil {
+        t.Fatal("RR6: queue nil after capacity-change reload")
+    }
+    if got := cap(after.sem); got != 16 {
+        t.Fatalf("RR6: expected queue cap 16 after reload, got %d (stale old cap)", got)
+    }
+}
+
+// TestEI3_DrainAndApply_InheritsCloudBreakerOpenState verifies the EI3 fix:
+// DrainAndApply rebuilds the breaker map, but an already-open cloud breaker
+// must stay open on the NEW breaker (trip state inherited), not reset to
+// closed. Without inheritance a hot-reload makes a failing cloud backend look
+// healthy — requests keep hitting it until the new breaker re-trips. We test
+// the cloud breaker (Phase 3 warmup only resets the LOCAL breaker, so the
+// cloud breaker's inherited state is observable). The local breaker is tested
+// separately below because warmup overrides it to half_open.
+func TestEI3_DrainAndApply_InheritsCloudBreakerOpenState(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    // Force the cloud breaker open before the reload.
+    e.Trip("cloud", "upstream_502_storm")
+    if got := e.CircuitBreakerState("cloud"); got != StateOpen {
+        t.Fatalf("precondition: cloud breaker should be open after Trip, got %s", got)
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+    e.DrainAndApply(newCfg)
+
+    // EI3: the rebuilt cloud breaker must inherit the open state + reason.
+    if got := e.CircuitBreakerState("cloud"); got != StateOpen {
+        t.Fatalf("EI3: cloud breaker reset to %s after reload — open state NOT inherited (failing backend looks healthy)", got)
+    }
+}
+
+// TestEI3_DrainAndApply_InheritsClusterBreakerOpenState mirrors the cloud test
+// for the cluster breaker (also untouched by Phase 3 warmup).
+func TestEI3_DrainAndApply_InheritsClusterBreakerOpenState(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.Trip("cluster", "node_unreachable")
+    if got := e.CircuitBreakerState("cluster"); got != StateOpen {
+        t.Fatalf("precondition: cluster breaker should be open after Trip, got %s", got)
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+    e.DrainAndApply(newCfg)
+
+    if got := e.CircuitBreakerState("cluster"); got != StateOpen {
+        t.Fatalf("EI3: cluster breaker reset to %s after reload — open state NOT inherited", got)
+    }
+}
+
+// TestEI3_DrainAndApply_ClosedBreakerStaysClosed confirms inheritance does not
+// falsely open a healthy (closed) breaker on reload — a closed snapshot is a
+// no-op in InheritSnapshot.
+func TestEI3_DrainAndApply_ClosedBreakerStaysClosed(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    // Cloud breaker never tripped → closed. Reload must keep it closed (not
+    // spuriously inherited open).
+    if got := e.CircuitBreakerState("cloud"); got != StateClosed {
+        t.Fatalf("precondition: cloud breaker should start closed, got %s", got)
+    }
+
+    newCfg := defaultTestSnapshot()
+    newCfg.Version = 2
+    newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
+    e.DrainAndApply(newCfg)
+
+    if got := e.CircuitBreakerState("cloud"); got != StateClosed {
+        t.Fatalf("EI3: closed cloud breaker spuriously became %s after reload (inheritance over-applied)", got)
+    }
+}
+
 func TestDecide_Embedding_LocalPriority(t *testing.T) {
     cfg := defaultTestSnapshot()
     hw := hardware.NewCollector(&cfg.Config.Hardware)
@@ -1776,4 +1944,99 @@ func scrapeMetrics(t *testing.T) string {
     rec := httptest.NewRecorder()
     observability.Handler().ServeHTTP(rec, req)
     return rec.Body.String()
+}
+
+// TestRecordNodeFailure_IsolatesNode (RR5): recording failures against one
+// cluster node trips only that node's breaker; a second healthy node's breaker
+// stays closed. This is the core RR5 defect — one bad node no longer poisons
+// the whole cluster through a shared breaker.
+func TestRecordNodeFailure_IsolatesNode(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    // Trip node-b with 2 failures (threshold=2). node-a records nothing.
+    e.RecordNodeFailure("node-b")
+    e.RecordNodeFailure("node-b")
+
+    if !e.NodeBreakerOpen("node-b") {
+        t.Errorf("expected node-b breaker open after threshold failures")
+    }
+    if e.NodeBreakerOpen("node-a") {
+        t.Errorf("node-a breaker must stay closed; one bad node must not poison the cluster")
+    }
+    // Empty/unknown nodeID never reports open (defensive).
+    if e.NodeBreakerOpen("") {
+        t.Errorf("empty nodeID must not report breaker open")
+    }
+}
+
+// TestRecordNodeSuccess_HalfOpenRecovery (RR5): a tripped node breaker recovers
+// via success records after the timeout window elapses, proving the per-node
+// breaker uses the same half_open->closed lifecycle as the per-backend one.
+func TestRecordNodeSuccess_HalfOpenRecovery(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    cfg.Config.Routing.CircuitBreaker.Timeout = 10 * time.Millisecond
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.RecordNodeFailure("node-x")
+    e.RecordNodeFailure("node-x")
+    if !e.NodeBreakerOpen("node-x") {
+        t.Fatalf("expected node-x open before timeout")
+    }
+    time.Sleep(20 * time.Millisecond)
+    // After timeout, State() read flips to half_open; a success closes it.
+    _ = e.NodeBreakerState("node-x")
+    e.RecordNodeSuccess("node-x")
+    if e.NodeBreakerOpen("node-x") {
+        t.Errorf("expected node-x closed after half_open success")
+    }
+}
+
+// TestDecide_ClusterTrippedNode_BypassedToCloud (RR5): when the only selectable
+// cluster node has its per-node breaker open, tryCluster* bypasses it and
+// falls back to cloud instead of routing into a known-bad node.
+func TestDecide_ClusterTrippedNode_BypassedToCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.Trip("local", "test trip")
+
+    // Selector returns node-bad as the only node serving the model.
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:   1,
+        nodeID:    "node-bad",
+        modelNode: map[string]string{"served-model": "node-bad"},
+    })
+
+    // Trip node-bad's per-node breaker.
+    e.RecordNodeFailure("node-bad")
+    e.RecordNodeFailure("node-bad")
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "served-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud (bypass tripped node-bad), got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// TestRecordNodeSuccess_NoOp_EmptyNodeID (RR5): the per-node record helpers
+// are no-ops on empty nodeID so non-cluster call paths never create stray
+// breakers keyed by "".
+func TestRecordNodeSuccess_NoOp_EmptyNodeID(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.RecordNodeSuccess("")
+    e.RecordNodeFailure("")
+    if e.NodeBreakerOpen("") {
+        t.Errorf("empty nodeID must not create or open a breaker")
+    }
 }
