@@ -407,18 +407,25 @@ func run(configPath string) error {
 	slog.Info("shutting down", "signal", sig.String())
 	close(stopCh)
 
-	// Auto-stop local inference backend if it was auto-started
-	autoStopLocal(snap.Config.Server.AutoStart)
-
-	if discovery != nil {
-		discovery.Stop()
-	}
-
+	// F7 fix: shutdown order must be (1) stop accepting new connections +
+	// drain in-flight requests, (2) THEN kill the local inference backend,
+	// (3) THEN stop cluster discovery. The prior order killed fusion-mlx
+	// (autoStopLocal) and discovery BEFORE srv.Shutdown drained in-flight
+	// traffic, so any local in-flight request lost its upstream mid-drain
+	// and 502'd for up to the 30s drain window on every restart/upgrade.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("server shutdown error", "error", err)
 		return err
+	}
+
+	// Local backend + discovery only stop after in-flight requests have drained.
+	autoStopLocal(snap.Config.Server.AutoStart)
+
+	if discovery != nil {
+		discovery.Stop()
 	}
 
 	slog.Info("server stopped")

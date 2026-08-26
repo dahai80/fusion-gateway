@@ -2244,6 +2244,20 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         antReq.ToolChoice = nil
     }
 
+    // F5 fix: /v1/messages bypassed the per-key model allowlist (every other
+    // /v1/* inference handler gates on CheckModelAllowlist: 646/1227/1346/2024).
+    // A key configured with allowed_models could send ANY model name through
+    // /v1/messages and reach the upstream — the Anthropic endpoint is exactly
+    // the path Claude Code uses. Check the ORIGINAL requested model (before any
+    // multimodal rewrite) since that is the model the caller is authorized for;
+    // the forced local vision model is an internal gateway override, not a
+    // tenant-chosen model, and must not be filtered out.
+    if !middleware.CheckModelAllowlist(r, antReq.Model) {
+        slog.Warn("anthropic messages model not allowed for this key", "model", antReq.Model)
+        http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
+
     // Multimodal guard: an image/audio content block is invisible to the
     // router's text-only signal (RouteRequest carries Model/Text/Stream), so
     // without this guard a multimodal payload is mapped to the text-only cloud
