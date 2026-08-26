@@ -1931,58 +1931,6 @@ func TestWriteJSON(t *testing.T) {
     slog.Info("TestWriteJSON passed")
 }
 
-// --- Stream chat with degraded fallback ---
-
-func TestHandleStreamChat_DegradedFallback(t *testing.T) {
-    ch := make(chan adapter.StreamChunk, 2)
-    ch <- adapter.StreamChunk{
-        ID:      "chatcmpl-d",
-        Object:  "chat.completion.chunk",
-        Created: time.Now().Unix(),
-        Model:   "gpt-4",
-        Choices: []adapter.ChoiceDelta{
-            {Index: 0, Delta: map[string]string{"content": "partial"}},
-        },
-        Degraded: true,
-    }
-    close(ch)
-
-    // The degraded path tries to call provider.Chat as fallback
-    s := newTestServerWithProvider("test-cloud", &mockProvider{
-        name:    "test-cloud",
-        healthy: true,
-        streamCh: ch,
-        chatResp: &adapter.ChatResponse{
-            ID:      "chatcmpl-d-fb",
-            Object:  "chat.completion",
-            Created: time.Now().Unix(),
-            Model:   "gpt-4",
-            Choices: []adapter.ChatChoice{
-                {
-                    Index:        0,
-                    Message:      map[string]string{"role": "assistant", "content": "Fallback!"},
-                    FinishReason: "stop",
-                },
-            },
-            Usage: adapter.UsageResponse{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8},
-        },
-    })
-
-    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
-    decision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "test"}
-    req := &adapter.ChatRequest{
-        Model:    "gpt-4",
-        Messages: []adapter.ChatMessage{{Role: "user", Content: "hello"}},
-        Stream:   true,
-    }
-
-    rec := httptest.NewRecorder()
-    provider, _ := s.pool.Get("test-cloud")
-    s.handleStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now())
-
-    slog.Info("TestHandleStreamChat_DegradedFallback", "status", rec.Code, "body_len", rec.Body.Len())
-}
-
 // --- Non-stream chat with cache hit ---
 
 func TestHandleNonStreamChat_CacheHit(t *testing.T) {

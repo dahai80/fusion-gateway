@@ -902,7 +902,14 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
 }
 
 func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
-    ch, err := provider.StreamChat(ctx, req)
+    // F4: wdCtx is a child of the request ctx so the idle watchdog can cancel
+    // ONLY the child to unblock an upstream body.Read (stalled stream, issue
+    // #69) while the parent ctx stays clean — ctx.Err()==nil after a watchdog
+    // trip distinguishes it from a real client cancel (which cancels parent).
+    // StreamChat receives wdCtx so the upstream goroutine honors the cancel.
+    wdCtx, wdCancel := context.WithCancel(ctx)
+    defer wdCancel()
+    ch, err := provider.StreamChat(wdCtx, req)
     if err != nil {
         slog.Error("stream chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
@@ -925,45 +932,163 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     var lastChunkModel string
     var lastChunkCreated int64
 
-    for chunk := range ch {
-        // F2 fix: check for client cancel to propagate downstream and release KV cache
-        select {
-        case <-ctx.Done():
-            slog.Info("stream chat cancelled by client", "provider", provider.Name(), "error", ctx.Err())
-            // Try to cancel on the provider if supported
-            if canceller, ok := provider.(interface{ Cancel(string) }); ok {
-                canceller.Cancel(lastChunkID)
-            }
-            return
-        default:
-        }
+    // F4 fix: idle watchdog + keepalive + timing summary, mirroring
+    // handleStreamAnthropicMessages (issue #69/#81). The prior plain
+    // `for chunk := range ch` blocked on body.Read forever when an upstream
+    // stalled without closing the connection — the same mid-stream stall class
+    // issue #69 fixed for /v1/messages but left absent on the OpenAI-compat
+    // path, which carries the larger share of traffic (local + multi-cloud).
+    // wdCtx is a child of the request ctx: the idle watchdog cancels only the
+    // child to unblock body.Read, while the parent ctx distinguishes a real
+    // client cancel (suppress terminal) from a watchdog trip (end honestly).
+    // OpenAI-compat SSE has no native ping event, so keepalive emits an SSE
+    // comment line (`: keepalive\n\n`) the client ignores but that keeps bytes
+    // flowing so a slow-but-live upstream is not timed out.
+    streamCfg := s.cfg.Config.Routing.Stream
+    streamStart := time.Now()
+    var firstChunkAt time.Time
+    var lastChunkAt time.Time
+    chunkCount := 0
+    endReason := "ch_closed_no_done"
 
-        if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
-            outputTokens += chunk.Usage.CompletionTokens
-        }
-        lastChunkID = chunk.ID
-        lastChunkModel = chunk.Model
-        lastChunkCreated = chunk.Created
-
-        // F3 fix: the Degraded non-streaming fallback is removed. parseSSEStream
-        // no longer emits a Degraded sentinel (cancel is a silent stop via
-        // ctx.Done(), not false backpressure), so this branch was dead code.
-        // Keeping it would have re-run the full prompt non-streamed against an
-        // already-overloaded local engine whenever a real upstream degradation
-        // ever surfaced — exactly the double-GPU-load hazard F3 flags. If a
-        // future upstream signals degradation, the correct response is to end
-        // the stream honestly, not to silently double the work.
-
+    writeChunk := func(chunk adapter.StreamChunk) bool {
         data, err := json.Marshal(chunk)
         if err != nil {
             slog.Error("marshal stream chunk failed", "error", err)
-            continue
+            return true
         }
-
-        fmt.Fprintf(w, "data: %s\n\n", data)
+        if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+            slog.Warn("stream chat client write failed", "provider", provider.Name(), "error", err)
+            return false
+        }
         if canFlush {
             flusher.Flush()
         }
+        return true
+    }
+
+    if streamCfg.KeepaliveInterval <= 0 {
+        // Backward-compat: no keepalive/watchdog configured, pure blocking
+        // forward loop (original behavior, plus the F2 client-cancel check).
+        for chunk := range ch {
+            select {
+            case <-ctx.Done():
+                slog.Info("stream chat cancelled by client", "provider", provider.Name(), "error", ctx.Err())
+                if canceller, ok := provider.(interface{ Cancel(string) }); ok {
+                    canceller.Cancel(lastChunkID)
+                }
+                endReason = "client_canceled"
+                goto streamDone
+            default:
+            }
+            if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+                outputTokens += chunk.Usage.CompletionTokens
+            }
+            lastChunkID = chunk.ID
+            lastChunkModel = chunk.Model
+            lastChunkCreated = chunk.Created
+            chunkCount++
+            lastChunkAt = time.Now()
+            if firstChunkAt.IsZero() {
+                firstChunkAt = lastChunkAt
+            }
+            if !writeChunk(chunk) {
+                endReason = "write_failed"
+                goto streamDone
+            }
+        }
+    } else {
+        ticker := time.NewTicker(streamCfg.KeepaliveInterval)
+        defer ticker.Stop()
+        lastChunkAt = time.Now()
+        watchdogTripped := false
+        done := false
+        for !done {
+            select {
+            case chunk, ok := <-ch:
+                if !ok {
+                    done = true
+                    break
+                }
+                if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+                    outputTokens += chunk.Usage.CompletionTokens
+                }
+                lastChunkID = chunk.ID
+                lastChunkModel = chunk.Model
+                lastChunkCreated = chunk.Created
+                chunkCount++
+                lastChunkAt = time.Now()
+                if firstChunkAt.IsZero() {
+                    firstChunkAt = lastChunkAt
+                }
+                if !writeChunk(chunk) {
+                    endReason = "write_failed"
+                    done = true
+                }
+            case <-ticker.C:
+                if !watchdogTripped && time.Since(lastChunkAt) >= streamCfg.IdleTimeout {
+                    slog.Warn("stream chat idle watchdog tripped, cancelling upstream",
+                        "provider", provider.Name(), "model", req.Model,
+                        "idle", time.Since(lastChunkAt), "threshold", streamCfg.IdleTimeout)
+                    watchdogTripped = true
+                    endReason = "watchdog_tripped"
+                    wdCancel()
+                    done = true
+                } else if !watchdogTripped {
+                    // SSE comment keepalive — client ignores, bytes keep flowing.
+                    if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+                        slog.Warn("stream chat keepalive write failed", "provider", provider.Name(), "error", err)
+                        endReason = "write_failed"
+                        done = true
+                    } else if canFlush {
+                        flusher.Flush()
+                    }
+                }
+            case <-ctx.Done():
+                slog.Info("stream chat cancelled by client", "provider", provider.Name(), "error", ctx.Err())
+                if canceller, ok := provider.(interface{ Cancel(string) }); ok {
+                    canceller.Cancel(lastChunkID)
+                }
+                endReason = "client_canceled"
+                done = true
+            }
+        }
+    }
+
+streamDone:
+    // F4 timing summary (mirrors /v1/messages #81): one INFO per stream so a
+    // "response stopped arriving" recurrence is diagnosable as upstream stall
+    // (watchdog_tripped / long last_chunk_idle) vs client cancel (H-A vs H-B).
+    func() {
+        dur := time.Since(streamStart)
+        firstTTFB := time.Duration(0)
+        if !firstChunkAt.IsZero() {
+            firstTTFB = firstChunkAt.Sub(streamStart)
+        }
+        lastIdle := time.Duration(0)
+        if !lastChunkAt.IsZero() {
+            lastIdle = time.Since(lastChunkAt)
+        }
+        slog.Info("stream chat summary",
+            "model", req.Model,
+            "provider", provider.Name(),
+            "duration", dur,
+            "chunks", chunkCount,
+            "first_event_ttfb", firstTTFB,
+            "last_event_idle", lastIdle,
+            "end_reason", endReason)
+    }()
+
+    // F4: terminal handling by exit reason. client_canceled (ctx.Err()!=nil on
+    // the PARENT ctx) or write_failed means the client is gone — do NOT write a
+    // terminal the client won't read and do NOT record success (mirrors the
+    // /v1/messages cancel suppression, issue #46; broken pipe, issue #79).
+    // watchdog_tripped means the upstream stalled: fall through to write [DONE]
+    // so the client finalizes a short-but-complete response it can retry, but
+    // record a stall + RecordFailure below so a repeatedly-dead local trips its
+    // breaker. clean completion falls through to usage + [DONE] + success.
+    if ctx.Err() != nil || endReason == "write_failed" {
+        return
     }
 
     // Send usage chunk if stream_options.include_usage was requested
@@ -993,10 +1118,18 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     }
 
     duration := time.Since(start).Seconds()
-    observability.RecordRequest(string(decision.Backend), req.Model, "success")
+    // F4: record by exit reason. watchdog_tripped is a stall, not a success —
+    // RecordFailure nudges the breaker so a dead local trips; the metric status
+    // reflects the real outcome rather than masking every exit as "success".
+    if endReason == "watchdog_tripped" {
+        observability.RecordRequest(string(decision.Backend), req.Model, "stall")
+        s.router.RecordFailure(string(decision.Backend))
+    } else {
+        observability.RecordRequest(string(decision.Backend), req.Model, "success")
+        s.router.RecordSuccess(string(decision.Backend))
+    }
     observability.RecordDuration(string(decision.Backend), req.Model, duration)
     observability.RecordTokens("input", string(decision.Backend), budget.InputTokens)
-    s.router.RecordSuccess(string(decision.Backend))
 
     // Update request log with model/channel/token details
     if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
