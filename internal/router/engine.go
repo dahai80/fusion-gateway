@@ -379,10 +379,28 @@ func (e *Engine) Trip(backend, reason string) {
 func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     cfg := config.SnapshotFromContext(ctx)
 
+    // B1: classify intent OUTSIDE the RLock. The LLM classifier
+    // (RouterLightClassifier.Classify) does a blocking HTTP call with a 2s
+    // timeout. Running it under e.mu.RLock (as decideIntentLocked did) blocks
+    // every writer — SetLocalReady/UpdateConfig/DrainAndApply/Trip/
+    // RecordFailure/RecordSuccess — for up to 2s per slow classification,
+    // starving circuit-breaker transitions. Snapshot the classifier + adapter
+    // lookup pointers under RLock (the same safe pointer read the body did),
+    // release, then run the (possibly network) classification lock-free. The
+    // IntentResult is threaded back into decideLocked, so the dispatch side
+    // (tryClusterByPlatformLocked / tryClusterLocked, which DO need the lock)
+    // still runs under RLock. Heuristic classifier is in-process sub-ms but is
+    // moved out too for uniformity — it never blocks meaningfully.
+    e.mu.RLock()
+    llmClassifier := e.classifier
+    heuristicClassifier := e.heuristicClassifier
+    e.mu.RUnlock()
+    intentResult := e.classifyIntentUnlocked(ctx, cfg, req, llmClassifier, heuristicClassifier)
+
     // L1 fix: collect trip reasons during RLock, apply Trip after unlock
     var trips []string
     e.mu.RLock()
-    decision := e.decideLocked(ctx, cfg, req, &trips)
+    decision := e.decideLocked(ctx, cfg, req, &trips, intentResult)
     e.mu.RUnlock()
 
     // Apply deferred trip calls outside read lock (use e.Trip for proper locking)
@@ -392,7 +410,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     return decision
 }
 
-func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string) *RouteDecision {
+func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string, intent *IntentResult) *RouteDecision {
 
     // Fast path: embedding/rerank request type routing
     switch req.Type {
@@ -422,7 +440,11 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // rule chain so semantic dispatch wins, with the rule chain as fallback.
     // Disabled by default (intent_classifier.enabled); NoopClassifier makes
     // this a no-op so existing P0-P7 behavior is unchanged.
-    if decision := e.decideIntentLocked(ctx, cfg, req); decision != nil {
+    // B1: the intent classification itself (heuristic + LLM HTTP call) runs
+    // lock-free in classifyIntentUnlocked before Decide takes the RLock; this
+    // branch consumes the precomputed result and only does lock-protected
+    // dispatch (tryCluster*Locked).
+    if decision := e.decideIntentLocked(ctx, cfg, req, intent); decision != nil {
         return decision
     }
 
@@ -777,52 +799,33 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_platform:" + platform, NodeID: nodeID}
 }
 
-// decideIntentLocked is the D4 semantic intent layer (issue #22/#23/#25).
-// It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
-// (intent unknown, low confidence, disabled, or no target platform available).
-func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest) *RouteDecision {
+// classifyIntentUnlocked runs the heuristic and (if enabled) the LLM intent
+// classifier LOCK-FREE. B1: the LLM classifier is a blocking HTTP call (2s
+// timeout); doing it under e.mu.RLock starved every engine writer (breaker
+// transitions, config updates) for the duration of one slow classification.
+// The caller snapshots e.classifier / e.heuristicClassifier under RLock and
+// passes the pointer values here, so a concurrent SetIntentClassifier cannot
+// race the read (the classifier it points at remains valid — implementations
+// are safe for concurrent use per the interface doc). Returns the IntentResult
+// the dispatch side should act on, or nil to defer to the rule chain. No
+// shared engine state is read here; the adapter lookup is consulted under lock
+// in decideIntentLocked.
+func (e *Engine) classifyIntentUnlocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, llmClassifier, heuristicClassifier IntentClassifier) *IntentResult {
     // Heuristic-first: the in-process sub-ms classifier runs before the LLM
     // classifier on every request (latency lever for <20ms gateway overhead).
-    // When it returns IntentCode with sufficient confidence, dispatch straight
-    // to LocalBackend + LoRA hot-swap, skipping the sync LLM classifier
-    // entirely (the dominant latency killer on the code path).
+    // When it returns IntentCode with sufficient confidence, it short-circuits
+    // the sync LLM classifier entirely (the dominant latency killer on the
+    // code path). The result is tagged so the dispatch side logs the heuristic
+    // source label rather than the LLM one.
     hc := cfg.Config.Routing.HeuristicClassifier
-    if hc.Enabled && e.heuristicClassifier != nil {
-        hRes := classifyAndLog(ctx, e.heuristicClassifier, req)
+    if hc.Enabled && heuristicClassifier != nil {
+        hRes := classifyAndLog(ctx, heuristicClassifier, req)
         if hRes.Intent == IntentCode && hRes.Confidence >= hc.MinConfidence {
-            adapter := hRes.Params["code_adapter"]
-            if adapter == "" {
-                adapter = hc.CodeAdapter
+            if hRes.Params == nil {
+                hRes.Params = map[string]string{}
             }
-            if adapter == "" {
-                slog.Info("heuristic: code intent but no code_adapter configured, deferring to rule chain",
-                    "confidence", hRes.Confidence, "model", req.Model)
-                return nil
-            }
-            // Best-effort adapter validation (Stream D): if an adapter index is
-            // wired and does not list this adapter, log a warning but still
-            // dispatch — the index may be stale or not yet refreshed, and
-            // suppressing a valid code intent is worse than a possibly-missing
-            // adapter (fusion-mlx will error on hot-swap if truly absent).
-            if e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
-                slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
-                    "adapter", adapter, "model", req.Model)
-            }
-            // Resolve the bare adapter name to the absolute adapter directory
-            // path that fusion-mlx's per-request "adapters" field requires (a
-            // bare name is rejected with AdapterPathError). When the index has
-            // no path (nil lookup or stale entry), fall back to the bare name
-            // so dispatch still proceeds (best-effort); fusion-mlx surfaces the
-            // error if the adapter is truly unresolvable.
-            adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
-            slog.Info("heuristic: code intent routed to local + lora hot-swap",
-                "adapter", adapter, "adapter_path", adapterPath,
-                "confidence", hRes.Confidence, "model", req.Model)
-            return &RouteDecision{
-                Backend: LocalBackend,
-                Reason:  "intent:code:lora:" + adapter,
-                Adapter: adapterPath,
-            }
+            hRes.Params["_source"] = "heuristic"
+            return hRes
         }
         if hRes.Intent != IntentUnknown {
             slog.Debug("heuristic classified non-code intent, falling through to LLM classifier/rule chain",
@@ -834,7 +837,7 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
     if !ic.Enabled {
         return nil
     }
-    classifier := e.classifier
+    classifier := llmClassifier
     if classifier == nil {
         classifier = NoopClassifier{}
     }
@@ -847,6 +850,24 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
             "intent", res.Intent, "confidence", res.Confidence, "min", ic.MinConfidence)
         return nil
     }
+    if res.Params == nil {
+        res.Params = map[string]string{}
+    }
+    res.Params["_source"] = "llm"
+    return res
+}
+
+// decideIntentLocked is the D4 semantic intent layer (issue #22/#23/#25).
+// It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
+// (intent unknown, low confidence, disabled, or no target platform available).
+// B1: the intent classification (heuristic + LLM HTTP) now runs lock-free in
+// classifyIntentUnlocked before Decide takes the RLock; this method only does
+// lock-protected dispatch (adapter lookup + tryCluster*Locked) from the
+// precomputed result. Must be called under e.mu.RLock.
+func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, res *IntentResult) *RouteDecision {
+    if res == nil {
+        return nil
+    }
 
     // IntentLightweight: prefer Mac local. Don't force — let the rule chain
     // apply hardware/circuit-breaker protections; it already routes to local
@@ -855,23 +876,41 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
         return nil
     }
 
-    // IntentCode (LLM-classifier path): the sync LLM classifier also recognized
-    // a coding intent. Dispatch to LocalBackend + LoRA hot-swap using the
-    // configured code_adapter, mirroring the heuristic-first path. The adapter
-    // comes from the classifier Params (if it set one) or the heuristic config
-    // fallback. With no adapter configured, defer to the rule chain (bare base).
+    source := res.Params["_source"]
+
+    // IntentCode (heuristic or LLM path): dispatch to LocalBackend + LoRA
+    // hot-swap using the configured code_adapter. The adapter comes from the
+    // classifier Params (if it set one) or the heuristic config fallback. With
+    // no adapter configured, defer to the rule chain (bare base).
     if res.Intent == IntentCode {
         adapter := res.Params["code_adapter"]
         if adapter == "" {
             adapter = cfg.Config.Routing.HeuristicClassifier.CodeAdapter
         }
         if adapter == "" {
-            slog.Info("llm classifier: code intent but no code_adapter configured, deferring to rule chain",
+            slog.Info(source+": code intent but no code_adapter configured, deferring to rule chain",
                 "confidence", res.Confidence, "model", req.Model)
             return nil
         }
+        // Best-effort adapter validation (heuristic path only — the LLM path
+        // preserved the original behavior of no pre-dispatch index check): if
+        // an adapter index is wired and does not list this adapter, log a
+        // warning but still dispatch — the index may be stale or not yet
+        // refreshed, and suppressing a valid code intent is worse than a
+        // possibly-missing adapter (fusion-mlx will error on hot-swap if truly
+        // absent).
+        if source == "heuristic" && e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
+            slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
+                "adapter", adapter, "model", req.Model)
+        }
+        // Resolve the bare adapter name to the absolute adapter directory path
+        // that fusion-mlx's per-request "adapters" field requires (a bare name
+        // is rejected with AdapterPathError). When the index has no path (nil
+        // lookup or stale entry), fall back to the bare name so dispatch still
+        // proceeds (best-effort); fusion-mlx surfaces the error if the adapter
+        // is truly unresolvable.
         adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
-        slog.Info("llm classifier: code intent routed to local + lora hot-swap",
+        slog.Info(source+": code intent routed to local + lora hot-swap",
             "adapter", adapter, "adapter_path", adapterPath,
             "confidence", res.Confidence, "model", req.Model)
         return &RouteDecision{

@@ -2,7 +2,9 @@ package router
 
 import (
     "context"
+    "sync"
     "testing"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
@@ -236,5 +238,89 @@ func TestPlatformForIntent(t *testing.T) {
     }
     if got := PlatformForIntent(IntentUnknown, "x", "y"); got != "" {
         t.Fatalf("unknown platform = %q, want empty", got)
+    }
+}
+
+// blockingClassifier sleeps inside Classify to simulate the LLM classifier's
+// blocking HTTP call. Used by TestDecideIntent_ClassifierRunsOutsideLock (B1)
+// to assert the engine does not hold e.mu while classifying: a writer
+// (SetLocalReady) must be able to complete DURING the classification.
+type blockingClassifier struct {
+    inClassify  *sync.WaitGroup // signal: Classify has started
+    releaseClassify chan struct{} // blocked until released by the test
+    writerDone  *sync.WaitGroup // signal: the writer finished
+    engine      *Engine
+}
+
+func (b *blockingClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentResult, error) {
+    b.inClassify.Done()
+    // While blocked here, the test launches SetLocalReady. If Decide still
+    // held e.mu.RLock across Classify, the writer's e.mu.Lock() would stall
+    // until releaseClassify closed — writerDone would not fire before the
+    // outer timeout, failing the test.
+    <-b.releaseClassify
+    return &IntentResult{Intent: IntentUnknown, Confidence: 0}, nil
+}
+
+// TestDecideIntent_ClassifierRunsOutsideLock (B1) guards the RLock-across-I/O
+// regression: the LLM classifier is a blocking HTTP call (2s timeout). If it
+// runs under e.mu.RLock, every writer (SetLocalReady/UpdateConfig/Trip/...) is
+// starved for the duration. We assert a writer completes concurrently with the
+// in-flight classification, which is only possible if the lock was released
+// before Classify is invoked.
+func TestDecideIntent_ClassifierRunsOutsideLock(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.IntentClassifier.Enabled = true
+    e := newIntentEngine(t, cfg, nil) // classifier wired below
+
+    inClassify := &sync.WaitGroup{}
+    inClassify.Add(1)
+    releaseClassify := make(chan struct{})
+    writerDone := &sync.WaitGroup{}
+    writerDone.Add(1)
+    bc := &blockingClassifier{
+        inClassify:     inClassify,
+        releaseClassify: releaseClassify,
+        writerDone:     writerDone,
+        engine:         e,
+    }
+    e.SetIntentClassifier(bc)
+
+    // Run Decide on a goroutine — it will block inside Classify until released.
+    decDone := make(chan *RouteDecision, 1)
+    go func() {
+        req := &RouteRequest{Model: "test-model", Text: "any", Stream: false}
+        decDone <- e.Decide(intentCtx(cfg), req)
+    }()
+
+    // Wait until Classify is actually executing, then fire a writer. The writer
+    // must NOT be blocked behind the (released) RLock.
+    inClassify.Wait()
+    go func() {
+        e.SetLocalReady(false)
+        writerDone.Done()
+    }()
+
+    writerFinished := make(chan struct{})
+    go func() {
+        writerDone.Wait()
+        close(writerFinished)
+    }()
+    select {
+    case <-writerFinished:
+        // pass — writer completed while Classify was still blocked => lock free
+    case <-time.After(2 * time.Second):
+        t.Fatalf("B1 regression: SetLocalReady blocked for >2s during intent classification — classifier still holds e.mu.RLock")
+    }
+
+    // Unblock Classify so Decide can finish and the test goroutine exits.
+    close(releaseClassify)
+    select {
+    case dec := <-decDone:
+        if dec == nil {
+            t.Fatalf("expected a route decision, got nil")
+        }
+    case <-time.After(2 * time.Second):
+        t.Fatalf("Decide did not return after Classify released")
     }
 }
