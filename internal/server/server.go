@@ -390,8 +390,13 @@ func (s *Server) Start() error {
         slog.Info("registered inbound model-hub webhook receiver", "path", "/webhooks/model-hub")
     }
 
-    mux.HandleFunc("/admin/gc", s.withMiddleware(s.handleAdminGC))
-    mux.HandleFunc("/admin/config/reload", s.withMiddleware(s.handleConfigReload))
+    // B11: admin ops behind withAdminOnly (admin JWT role), not withMiddleware
+    // (API-key auth). The prior wiring let any low-privilege inference key
+    // (even one restricted by allowed_models) force a GC pause or trigger a
+    // config reload racing in-flight requests. /admin/teams + /admin/orgs
+    // already use withAdminOnly; gc/reload were the outliers.
+    mux.HandleFunc("/admin/gc", s.withAdminOnly(s.handleAdminGC))
+    mux.HandleFunc("/admin/config/reload", s.withAdminOnly(s.handleConfigReload))
     mux.HandleFunc("/admin/teams", s.withAdminOnly(s.handleAdminTeams))
     mux.HandleFunc("/admin/teams/", s.withAdminOnly(s.handleAdminTeamsCRUD))
     mux.HandleFunc("/admin/orgs", s.withAdminOnly(s.handleAdminOrgs))
