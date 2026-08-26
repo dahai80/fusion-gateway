@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -284,6 +285,63 @@ func TestSanitizeNodeID(t *testing.T) {
 		if result != tt.expected {
 			t.Errorf("sanitizeNodeID(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
+	}
+}
+
+// TestForwardToNode_RejectsNonAllowlistedNode verifies the F1 SSRF fix: a
+// non-localhost AssignedNode that is not in the dial allowlist must be rejected
+// BEFORE forwardToNode performs any outbound dial. The default gateway
+// allowlist is localhost-only, so an attacker-influenced node id cannot coerce
+// an outbound request to an arbitrary host. The test asserts no dial occurs
+// (error returned, no HTTP attempt) even though no server is listening.
+func TestForwardToNode_RejectsNonAllowlistedNode(t *testing.T) {
+	gw := NewMCPClusterGateway(DefaultGatewayConfig())
+	tool := &MCPTool{Name: "t", Parameters: map[string]interface{}{}}
+	req := &MCPRequest{
+		RequestID:    "mcp_evil",
+		AssignedNode: "evil-attacker-host",
+	}
+	_, err := gw.forwardToNode(context.Background(), req, tool)
+	if err == nil {
+		t.Fatal("expected rejection of non-allowlisted node, got nil error (SSRF)")
+	}
+	if !strings.Contains(err.Error(), "not an allowed MCP target") {
+		t.Fatalf("expected allowlist rejection error, got: %v", err)
+	}
+}
+
+// TestForwardToNode_AllowlistedRemoteNode verifies that after SetAllowedNodes,
+// a configured remote node passes the gate (dial may then fail on connection,
+// but it must NOT fail with the allowlist rejection — proving the gate opened).
+func TestForwardToNode_AllowlistedRemoteNode(t *testing.T) {
+	gw := NewMCPClusterGateway(DefaultGatewayConfig())
+	// point at a port nothing listens on so the dial fails fast, but AFTER the
+	// allowlist gate passes — the error must be a dial error, not a rejection.
+	gw.SetAllowedNodes([]string{"node-a"})
+	tool := &MCPTool{Name: "t", Parameters: map[string]interface{}{}, Timeout: 1}
+	req := &MCPRequest{
+		RequestID:    "mcp_nodea",
+		AssignedNode: "node-a",
+	}
+	_, err := gw.forwardToNode(context.Background(), req, tool)
+	if err == nil {
+		t.Fatal("expected dial error for unreachable allowlisted node, got nil")
+	}
+	if strings.Contains(err.Error(), "not an allowed MCP target") {
+		t.Fatalf("allowlisted node was rejected by the gate: %v", err)
+	}
+}
+
+// TestNewMCPClusterGateway_ConfigPortsHonored verifies the F1 fix: configured
+// NodePort/LocalPort are stored and used, not the dead hardcoded 9000/11445.
+func TestNewMCPClusterGateway_ConfigPortsHonored(t *testing.T) {
+	cfg := GatewayConfig{NodePort: 22222, LocalPort: 33333}
+	gw := NewMCPClusterGateway(cfg)
+	if gw.nodePort != 22222 {
+		t.Errorf("nodePort = %d, want 22222", gw.nodePort)
+	}
+	if gw.localPort != 33333 {
+		t.Errorf("localPort = %d, want 33333", gw.localPort)
 	}
 }
 

@@ -346,9 +346,12 @@ func (s *Server) Start() error {
     // Model-hub reverse proxy routes
     s.setupModelHubRoutes(mux)
 
-    // MCP cluster gateway routes
+    // MCP cluster gateway routes. F1 fix: route through withMiddleware so MCP
+    // endpoints share the gateway auth/rate-limit/budget gate — previously
+    // mounted on the bare mux, /mcp/v1/call was reachable unauthenticated and
+    // could trigger forwardToNode's outbound dial (SSRF amplifier).
     if s.mcpHandler != nil {
-        s.mcpHandler.RegisterRoutes(mux)
+        s.mcpHandler.RegisterRoutesWithMiddleware(mux, s.withMiddleware)
     }
 
     // Connector plugin framework routes

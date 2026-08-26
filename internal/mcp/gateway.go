@@ -51,6 +51,19 @@ type NodeSelectorFunc func(tool *MCPTool) (nodeID string, err error)
 type MCPClusterGateway struct {
 	host            string
 	port            int
+	// F1 fix: node/local ports come from config (GatewayConfig), not hardcoded
+	// literals inside forwardToNode. Dead config is a footgun — the operator
+	// sets NodePort/LocalPort expecting them to take effect; honoring them
+	// keeps the dial target honest and auditable.
+	nodePort        int
+	localPort       int
+	// F1 fix: allowlist of node IDs forwardToNode may dial. nil = localhost
+	// only (the only wired deployment — SetNodeSelector is never called in
+	// production). A non-localhost AssignedNode not in this set is rejected
+	// before any dial, closing the SSRF-amplification vector: an unauthenticated
+	// /mcp/v1/call can no longer coerce the gateway into an outbound request to
+	// an attacker-chosen host even if a node selector were ever installed.
+	allowedNodes    map[string]bool
 	tools          map[string]*MCPTool
 	toolsMu        sync.RWMutex
 	requests       map[string]*MCPRequest
@@ -91,15 +104,38 @@ func NewMCPClusterGateway(cfg GatewayConfig) *MCPClusterGateway {
 	if cfg.MaxRequests <= 0 {
 		cfg.MaxRequests = 10000
 	}
+	if cfg.NodePort <= 0 {
+		cfg.NodePort = 11445
+	}
+	if cfg.LocalPort <= 0 {
+		cfg.LocalPort = 9000
+	}
 	return &MCPClusterGateway{
 		host:         cfg.Host,
 		port:         cfg.Port,
+		nodePort:     cfg.NodePort,
+		localPort:    cfg.LocalPort,
+		// F1 fix: localhost is always permitted; remote nodes must be
+		// explicitly allowlisted via SetAllowedNodes before forwardToNode will
+		// dial them. Default = localhost-only (fail-closed for SSRF).
+		allowedNodes: map[string]bool{"localhost": true},
 		tools:        make(map[string]*MCPTool),
 		requests:     make(map[string]*MCPRequest),
 		maxRequests:  cfg.MaxRequests,
 		tokenBudget:  cfg.TokenBudget,
 		httpClient:   &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// SetAllowedNodes replaces the forwardToNode dial allowlist. "localhost" is
+// always retained. Call this once during wiring if remote MCP nodes are
+// deployed; absent a call, forwardToNode rejects every non-localhost node.
+func (g *MCPClusterGateway) SetAllowedNodes(nodes []string) {
+	set := map[string]bool{"localhost": true}
+	for _, n := range nodes {
+		set[sanitizeNodeID(n)] = true
+	}
+	g.allowedNodes = set
 }
 
 func (g *MCPClusterGateway) RegisterTool(tool *MCPTool) {
@@ -249,13 +285,26 @@ func (g *MCPClusterGateway) forwardToNode(ctx context.Context, req *MCPRequest, 
 		return nil, fmt.Errorf("marshal forward payload: %w", err)
 	}
 
+	// F1 fix: validate the assigned node against the dial allowlist BEFORE
+	// building any URL. Non-localhost nodes require an explicit SetAllowedNodes
+	// entry; the default allowlist is localhost-only, so an attacker-influenced
+	// AssignedNode (e.g. via a future node selector) cannot coerce an outbound
+	// dial to an arbitrary host — SSRF amplification closed.
+	node := sanitizeNodeID(req.AssignedNode)
+	if !g.allowedNodes[node] {
+		slog.Warn("MCP forward rejected: node not allowlisted",
+			"node", req.AssignedNode,
+			"sanitized", node,
+			"request_id", req.RequestID,
+		)
+		return nil, fmt.Errorf("node %s is not an allowed MCP target", req.AssignedNode)
+	}
+
 	var targetURL string
-	if req.AssignedNode == "localhost" {
-		localPort := 9000
-		targetURL = fmt.Sprintf("http://localhost:%d/api/mcp/tools/%s", localPort, tool.Name)
+	if node == "localhost" {
+		targetURL = fmt.Sprintf("http://localhost:%d/api/mcp/tools/%s", g.localPort, tool.Name)
 	} else {
-		nodePort := 11445
-		targetURL = fmt.Sprintf("http://%s:%d/api/mcp/execute", sanitizeNodeID(req.AssignedNode), nodePort)
+		targetURL = fmt.Sprintf("http://%s:%d/api/mcp/execute", node, g.nodePort)
 	}
 
 	timeout := time.Duration(tool.Timeout) * time.Second
@@ -276,7 +325,9 @@ func (g *MCPClusterGateway) forwardToNode(ctx context.Context, req *MCPRequest, 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// F1 fix: cap the response body so a malicious/buggy node cannot exhaust
+	// gateway memory with an unbounded stream. Mirrors the SSE hardening cap.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read response from node %s: %w", req.AssignedNode, err)
 	}
