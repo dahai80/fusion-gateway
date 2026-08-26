@@ -12,6 +12,7 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "runtime/debug"
     "sort"
     "sync"
     "sync/atomic"
@@ -399,9 +400,30 @@ func (d *Discovery) checkAll() {
     }
     d.mu.RUnlock()
 
+    // B7: check nodes concurrently. checkNode is a 5s-timeout HTTP call per
+    // node; a sequential loop over N nodes where a few are down takes up to
+    // N*5s to complete a single health tick, stalling routing-decision reads
+    // of node state and delaying eviction of dead nodes. Each node's state
+    // mutations (markHealthy/markUnhealthy/failures) are guarded by the
+    // per-node mutex, so parallel checks are safe. Each worker carries panic
+    // recovery (checkNode → fetchRemoteMetrics/fetchModels decode upstream
+    // JSON; a malformed payload must not abort the whole health round) and
+    // still signals the WaitGroup so the barrier is honored on any exit.
+    var wg sync.WaitGroup
     for _, node := range nodes {
-        d.checkNode(node)
+        wg.Add(1)
+        go func(n *Node) {
+            defer wg.Done()
+            defer func() {
+                if r := recover(); r != nil {
+                    slog.Error("cluster health check panic recovered",
+                        "node_id", n.ID, "panic", r, "stack", string(debug.Stack()))
+                }
+            }()
+            d.checkNode(n)
+        }(node)
     }
+    wg.Wait()
 }
 
 func (d *Discovery) checkNode(node *Node) {
