@@ -2111,6 +2111,25 @@ func extractAnthropicTextContent(messages []adapter.AnthropicMessage) string {
     return sb.String()
 }
 
+// anthropicRequestHasImage reports whether any message carries a non-text
+// content block that the router's text-only signal cannot see (RouteRequest
+// carries only Model/Text/Stream). A multimodal payload routed to a text-only
+// cloud model (e.g. glm5.2 via model_mapping) is rejected upstream with 400
+// multimodal_not_supported -> gateway 502 (Claude Code screenshot 502). The
+// handler uses this to force the request to a local vision model before Decide.
+// "image" is the Anthropic block type for vision input; "audio"/"document"
+// are also non-text but image is the reported case.
+func anthropicRequestHasImage(messages []adapter.AnthropicMessage) bool {
+    for _, msg := range messages {
+        for _, block := range msg.Content {
+            if block.Type != "text" && block.Type != "" {
+                return true
+            }
+        }
+    }
+    return false
+}
+
 func healthStatus(healthy bool) string {
     if healthy {
         return "ok"
@@ -2224,7 +2243,33 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         antReq.ToolChoice = nil
     }
 
-    decision := s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
+    // Multimodal guard: an image/audio content block is invisible to the
+    // router's text-only signal (RouteRequest carries Model/Text/Stream), so
+    // without this guard a multimodal payload is mapped to the text-only cloud
+    // model (e.g. glm5.2) and rejected upstream with 400 multimodal_not_supported
+    // -> gateway 502 (Claude Code screenshot 502). Force the request to a local
+    // vision model (local-first) when configured; otherwise reject with a clear
+    // 400 naming the missing knob instead of a masked cloud-400-as-502. Runs
+    // before Decide so the rule chain cannot divert the payload to cloud.
+    multimodalForced := false
+    if anthropicRequestHasImage(antReq.Messages) {
+        vlModel := strings.TrimSpace(s.cfg.Config.Routing.Multimodal.LocalModel)
+        if vlModel == "" {
+            slog.Warn("anthropic multimodal request rejected: no routing.multimodal.local_model configured", "model", antReq.Model)
+            http.Error(w, `{"error":{"message":"multimodal requests require routing.multimodal.local_model to be set to a local vision model; the routed cloud model is text-only","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        slog.Info("anthropic multimodal request forced to local vision model", "client_model", antReq.Model, "vision_model", vlModel)
+        antReq.Model = vlModel
+        multimodalForced = true
+    }
+
+    var decision *router.RouteDecision
+    if multimodalForced {
+        decision = &router.RouteDecision{Backend: router.LocalBackend, Reason: "multimodal_local_vision"}
+    } else {
+        decision = s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
+    }
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason, "input_tokens", inputTokens)
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {

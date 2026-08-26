@@ -143,6 +143,17 @@ type RatioTierConfig struct {
     Rules   []RatioTierRule `mapstructure:"rules"`
 }
 
+// MultimodalConfig governs how image/audio-bearing /v1/messages requests
+// are routed. Without it a multimodal payload has no router signal (RouteRequest
+// carries only Model/Text/Stream) so the text-only routing chain maps it to a
+// text-only cloud model (e.g. glm5.2) that rejects images with 400 -> gateway
+// 502 (Claude Code screenshot 502). LocalModel is the local vision model id to
+// force-route multimodal requests to (local-first); empty rejects with a clear
+// 400 instead of a masked cloud-400-as-502.
+type MultimodalConfig struct {
+    LocalModel string `mapstructure:"local_model"`
+}
+
 type RoutingConfig struct {
     Mode                      string               `mapstructure:"mode"`
     DefaultModel              string               `mapstructure:"default_model"`
@@ -161,6 +172,7 @@ type RoutingConfig struct {
     IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
     HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
     Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
+    Multimodal                 MultimodalConfig       `mapstructure:"multimodal"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).

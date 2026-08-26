@@ -6,6 +6,8 @@ import (
     "fmt"
     "net/http"
     "net/http/httptest"
+    "strings"
+    "sync/atomic"
     "testing"
     "time"
 
@@ -149,6 +151,85 @@ func ids(ms []adapter.ModelInfo) []string {
         out[i] = m.ID
     }
     return out
+}
+
+// TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel verifies
+// that a multimodal /v1/messages request (carrying an image content block)
+// is forced to the local backend with its model rewritten to the configured
+// local vision model, instead of being mapped to the text-only cloud model
+// (glm5.2) that rejects images with 400 -> gateway 502. The handler detects
+// the image before Decide so the router's text-only signal cannot divert a
+// multimodal payload to a text-only cloud backend (issue: CC screenshot 502).
+// FusionMLXProvider is NOT a MessagesProvider, so the local path takes the
+// AnthropicToOpenAIChatRequest conversion branch (real MLX behavior); the
+// mock here uses mockProvider (same non-MessagesProvider shape) and records
+// the rewritten model the handler forwards.
+func TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit"
+    // Register a local fusion-mlx provider that records the forwarded model.
+    local := &modelRecordingProvider{mockProvider: mockProvider{
+        name:      "fusion-mlx",
+        chatResp:  &adapter.ChatResponse{ID: "mm-local", Choices: []adapter.ChatChoice{{Message: adapter.ChatMessage{Role: "assistant", Content: "seen"}}}},
+    }}
+    s.pool.Register("fusion-mlx", local, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
+    s.router.SetLocalReady(true)
+
+    body := `{"model":"claude-fable-5","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (local vision served), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if got := local.lastModel.Load(); got != "mlx-community--Qwen2.5-VL-7B-Instruct-4bit" {
+        t.Fatalf("expected model rewritten to local VL model, got %q", got)
+    }
+}
+
+// TestHandleAnthropicMessages_MultimodalRejectsWhenNoLocalModel verifies that
+// when an image-bearing request arrives but no routing.multimodal.local_model
+// is configured, the gateway rejects with a clear 400 (invalid_request) naming
+// the misconfiguration — NOT a cloud 400 (multimodal_not_supported) wrapped to
+// 502. A masked 502 leaves the client unable to self-diagnose; an honest 400
+// tells the operator exactly which knob to set.
+func TestHandleAnthropicMessages_MultimodalRejectsWhenNoLocalModel(t *testing.T) {
+    s := newTestServer()
+    // No multimodal.local_model configured. Cloud glm5.2 is text-only.
+    s.pool.Register("glm52", &mockProvider{name: "glm52"}, config.BackendConfig{Type: "anthropic", Enabled: true})
+
+    body := `{"model":"claude-fable-5","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"x"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("expected 400 (clear multimodal rejection), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if !strings.Contains(rec.Body.String(), "multimodal") {
+        t.Fatalf("error body should name multimodal misconfiguration, got: %s", rec.Body.String())
+    }
+}
+
+// modelRecordingProvider is a non-MessagesProvider (matches FusionMLXProvider
+// shape) that atomically records the model id the handler forwards, so the
+// multimodal rewrite assertion can read it after the handler returns.
+type modelRecordingProvider struct {
+    mockProvider
+    lastModel atomic.Value
+}
+
+func (m *modelRecordingProvider) Chat(_ context.Context, req *adapter.ChatRequest) (*adapter.ChatResponse, error) {
+    m.lastModel.Store(req.Model)
+    return m.chatResp, m.chatErr
+}
+
+func (m *modelRecordingProvider) StreamChat(_ context.Context, req *adapter.ChatRequest) (<-chan adapter.StreamChunk, error) {
+    m.lastModel.Store(req.Model)
+    return m.streamCh, m.streamErr
 }
 
 func TestHandleModels_PerProviderTimeoutSkipsSlow(t *testing.T) {
