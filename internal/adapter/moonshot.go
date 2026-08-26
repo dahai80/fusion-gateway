@@ -91,7 +91,7 @@ func (p *MoonshotProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     safego.Go("moonshot_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

@@ -95,7 +95,7 @@ func (p *ZhipuProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-cha
     safego.Go("zhipu_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

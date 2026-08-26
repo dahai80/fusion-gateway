@@ -74,7 +74,7 @@ func (p *DeepSeekProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-
     safego.Go("deepseek_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

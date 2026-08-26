@@ -69,7 +69,7 @@ func (p *QianfanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     safego.Go("qianfan_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

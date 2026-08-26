@@ -348,7 +348,7 @@ func TestParseSSEStream(t *testing.T) {
     b, _ := json.Marshal(chunk)
     sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 64)
-    parseSSEStream(bytesReader([]byte(sseData)), ch)
+    parseSSEStream(context.Background(), bytesReader([]byte(sseData)), ch)
     if len(ch) != 1 {
         t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
     }
@@ -361,5 +361,34 @@ func TestParseSSEStream_Backpressure(t *testing.T) {
     sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 1)
     ch <- StreamChunk{ID: "filler"}
-    parseSSEStream(bytesReader([]byte(sseData)), ch)
+
+    // F3 fix: with the ctx-bounded send, a full buffer blocks until the
+    // consumer reads OR ctx is canceled. The old test called
+    // parseSSEStream synchronously with a background ctx and relied on the
+    // deleted Degraded fallback to return — that now hangs forever. Drive it
+    // in a goroutine and cancel ctx to prove cancel unblocks the producer
+    // without emitting a Degraded sentinel (cancel is a silent stop, not
+    // false backpressure that would trigger a non-stream re-run).
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        parseSSEStream(ctx, bytesReader([]byte(sseData)), ch)
+        close(done)
+    }()
+    cancel()
+    select {
+    case <-done:
+        // producer returned on cancel — correct
+    case <-time.After(2 * time.Second):
+        t.Fatal("parseSSEStream hung on full buffer; ctx cancel did not unblock it")
+    }
+    // no Degraded sentinel should have been emitted on cancel
+    select {
+    case extra := <-ch:
+        if extra.Degraded {
+            t.Fatal("cancel must not emit a Degraded chunk (false backpressure -> double GPU load)")
+        }
+    default:
+        // only the filler is present; nothing added on cancel
+    }
 }

@@ -277,7 +277,7 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         defer goroutineRelease()
         defer resp.Body.Close()
 
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
 
     return ch, nil

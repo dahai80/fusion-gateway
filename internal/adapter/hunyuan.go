@@ -95,7 +95,7 @@ func (p *HunyuanProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
     safego.Go("hunyuan_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

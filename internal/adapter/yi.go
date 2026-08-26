@@ -95,7 +95,7 @@ func (p *YiProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan S
     safego.Go("yi_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }

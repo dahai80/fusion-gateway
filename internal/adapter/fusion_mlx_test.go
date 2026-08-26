@@ -706,7 +706,7 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
         b, _ := json.Marshal(chunk)
         sseData := "data: " + string(b) + "\n\n"
         ch := make(chan StreamChunk, 64)
-        parseSSEStream(bytesReader([]byte(sseData)), ch)
+        parseSSEStream(context.Background(), bytesReader([]byte(sseData)), ch)
         if len(ch) != 1 {
             t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
         }
@@ -720,7 +720,31 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
         ch := make(chan StreamChunk, 1)
         ch <- StreamChunk{ID: "filler"}
 
-        parseSSEStream(bytesReader([]byte(sseData)), ch)
+        // F3 fix: a full buffer now blocks until the consumer reads OR ctx is
+        // canceled (the old Degraded fallback that returned on a full buffer
+        // is deleted — it mistook client cancel for slow-upstream backpressure
+        // and re-ran the prompt non-streamed, double-loading the GPU). Run the
+        // producer in a goroutine and cancel ctx to prove cancel unblocks it
+        // silently (no Degraded sentinel).
+        ctx, cancel := context.WithCancel(context.Background())
+        done := make(chan struct{})
+        go func() {
+            parseSSEStream(ctx, bytesReader([]byte(sseData)), ch)
+            close(done)
+        }()
+        cancel()
+        select {
+        case <-done:
+        case <-time.After(2 * time.Second):
+            t.Fatal("parseSSEStream hung on full buffer; ctx cancel did not unblock it")
+        }
+        select {
+        case extra := <-ch:
+            if extra.Degraded {
+                t.Fatal("cancel must not emit a Degraded chunk (false backpressure -> double GPU load)")
+            }
+        default:
+        }
     })
 }
 

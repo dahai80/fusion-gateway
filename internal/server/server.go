@@ -919,7 +919,6 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     w.Header().Set("X-Fusion-Degraded", "false")
 
     flusher, canFlush := w.(http.Flusher)
-    var degraded bool
     var outputTokens int
     includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
     var lastChunkID string
@@ -946,63 +945,14 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         lastChunkModel = chunk.Model
         lastChunkCreated = chunk.Created
 
-        if chunk.Degraded {
-            degraded = true //nolint:ineffassign
-            w.Header().Set("X-Fusion-Degraded", "true")
-            slog.Warn("stream degraded: backpressure triggered, falling back to non-streaming")
-
-            warningEvt := map[string]string{"type": "warning", "message": "stream degraded, falling back to non-streaming"}
-            warningData, _ := json.Marshal(warningEvt)
-            if _, err := fmt.Fprintf(w, "event: warning\ndata: %s\n\n", warningData); err != nil {
-                slog.Error("failed to write warning event", "error", err)
-                return
-            }
-            if canFlush {
-                flusher.Flush()
-            }
-
-            // L5 fix: deep copy request to avoid shared slice race
-            nonStreamReq := *req
-            nonStreamReq.Stream = false
-            nonStreamReq.Messages = make([]adapter.ChatMessage, len(req.Messages))
-            copy(nonStreamReq.Messages, req.Messages)
-            resp, fallbackErr := provider.Chat(ctx, &nonStreamReq)
-            if fallbackErr != nil {
-                slog.Error("non-streaming fallback failed", "error", fallbackErr)
-                errEvt := map[string]string{"type": "error", "message": "non-streaming fallback also failed"}
-                errData, _ := json.Marshal(errEvt)
-                if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData); err != nil {
-                    slog.Error("failed to write error event", "error", err)
-                }
-                if canFlush {
-                    flusher.Flush()
-                }
-                return
-            }
-
-            finalChunk := adapter.StreamChunk{
-                ID:      resp.ID,
-                Object:  "chat.completion.chunk",
-                Created: resp.Created,
-                Model:   resp.Model,
-                Choices: make([]adapter.ChoiceDelta, len(resp.Choices)),
-            }
-            for i, c := range resp.Choices {
-                finishReason := c.FinishReason
-                finalChunk.Choices[i] = adapter.ChoiceDelta{
-                    Index:        c.Index,
-                    Delta:        c.Message,
-                    FinishReason: &finishReason,
-                }
-            }
-
-            data, _ := json.Marshal(finalChunk)
-            fmt.Fprintf(w, "data: %s\n\n", data)
-            if canFlush {
-                flusher.Flush()
-            }
-            return
-        }
+        // F3 fix: the Degraded non-streaming fallback is removed. parseSSEStream
+        // no longer emits a Degraded sentinel (cancel is a silent stop via
+        // ctx.Done(), not false backpressure), so this branch was dead code.
+        // Keeping it would have re-run the full prompt non-streamed against an
+        // already-overloaded local engine whenever a real upstream degradation
+        // ever surfaced — exactly the double-GPU-load hazard F3 flags. If a
+        // future upstream signals degradation, the correct response is to end
+        // the stream honestly, not to silently double the work.
 
         data, err := json.Marshal(chunk)
         if err != nil {
@@ -1043,11 +993,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     }
 
     duration := time.Since(start).Seconds()
-    if degraded {
-        observability.RecordRequest(string(decision.Backend), req.Model, "degraded")
-    } else {
-        observability.RecordRequest(string(decision.Backend), req.Model, "success")
-    }
+    observability.RecordRequest(string(decision.Backend), req.Model, "success")
     observability.RecordDuration(string(decision.Backend), req.Model, duration)
     observability.RecordTokens("input", string(decision.Backend), budget.InputTokens)
     s.router.RecordSuccess(string(decision.Backend))

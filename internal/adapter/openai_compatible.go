@@ -133,7 +133,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
         defer close(ch)
         defer resp.Body.Close()
 
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
 
     return ch, nil
@@ -275,7 +275,7 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     return &imgResp, nil
 }
 
-func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
+func parseSSEStream(ctx context.Context, body io.Reader, ch chan<- StreamChunk) {
     // F1 fix: proper SSE line-by-line parsing — json.Decoder.Decode() fails on "data: " prefix
     buf := make([]byte, 4096)
     var lineBuf []byte
@@ -311,15 +311,17 @@ func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
                 slog.Warn("sse unmarshal error", "error", err, "data", data)
                 continue
             }
+            // F3 fix: block on send but bail on ctx cancel. The prior non-blocking
+            // `default` arm fired whenever the 64-buffer filled — including when the
+            // CONSUMER had stopped reading because the client canceled. It then emitted
+            // a Degraded sentinel that the handler mistook for slow-upstream backpressure
+            // and re-ran the full prompt non-streamed (double GPU load on fusion-mlx).
+            // ctx.Done() makes cancel a silent stop, not a false backpressure signal.
+            // Mirrors anthropic.go:411-416.
             select {
             case ch <- chunk:
-            default:
-                slog.Warn("sse backpressure: channel full, degrading to non-streaming")
-                degradedChunk := StreamChunk{Degraded: true}
-                select {
-                case ch <- degradedChunk:
-                default:
-                }
+            case <-ctx.Done():
+                slog.Debug("sse stream send canceled by client", "error", ctx.Err())
                 return
             }
         }
