@@ -9331,3 +9331,55 @@ func TestWriteChatFailedError_NilErr(t *testing.T) {
         t.Fatalf("expected bare prefix, got %q", got.Error.Message)
     }
 }
+
+// TestServer_OAuth2_B13_CrossConnectorStateReplay covers audit finding B13: an
+// OAuth2 state issued for connector_key "conn-A" must NOT be usable against
+// connector_key "conn-B"'s callback. The callback must reject the mismatch
+// (cross-connector state replay → token exfiltration into wrong connector)
+// with 400 before reaching ExchangeCode. authorize stores state before
+// calling AuthorizationURL, so even though "conn-A" is not registered (the
+// authorize call itself returns 400), the state binding persists and the
+// callback path exercises the B13 guard without needing a live connector.
+func TestServer_OAuth2_B13_CrossConnectorStateReplay(t *testing.T) {
+    s := newTestServer()
+    s.oauth2States = make(map[string]oauth2StateEntry)
+
+    // authorize for conn-A with a fixed state; registry has no registered
+    // connector so AuthorizationURL errors, but the state→connector binding
+    // is persisted before that call.
+    authBody := strings.NewReader(`{"connectorKey":"conn-A","state":"st-replay"}`)
+    authReq := httptest.NewRequest(http.MethodPost, "/gateway/v1/oauth2/authorize", authBody)
+    authRec := httptest.NewRecorder()
+    s.handleOAuth2Authorize(authRec, authReq)
+    // authorize returns 400 (connector not registered) — that's fine; the
+    // important precondition is the state was stored.
+    if authRec.Code != http.StatusBadRequest {
+        t.Fatalf("expected authorize 400 (unregistered connector), got %d", authRec.Code)
+    }
+
+    // callback with the SAME state but a DIFFERENT connector_key → must 400.
+    cbReq := httptest.NewRequest(http.MethodGet,
+        "/gateway/v1/oauth2/callback?code=c&state=st-replay&connector_key=conn-B", nil)
+    cbRec := httptest.NewRecorder()
+    s.handleOAuth2Callback(cbRec, cbReq)
+    if cbRec.Code != http.StatusBadRequest {
+        t.Fatalf("cross-connector replay must be 400, got %d body=%s", cbRec.Code, cbRec.Body.String())
+    }
+    if !strings.Contains(cbRec.Body.String(), "state does not match connector_key") {
+        t.Fatalf("expected mismatch error, got %s", cbRec.Body.String())
+    }
+
+    // matching connector_key on a fresh state would proceed past the guard —
+    // verify the guard does NOT reject a legitimate same-connector callback
+    // (state consumed once, so re-issue a second state for conn-A).
+    s.oauth2States["st-legit"] = oauth2StateEntry{connectorKey: "conn-A", issuedAt: time.Now().UTC()}
+    cbReq2 := httptest.NewRequest(http.MethodGet,
+        "/gateway/v1/oauth2/callback?code=c&state=st-legit&connector_key=conn-A", nil)
+    cbRec2 := httptest.NewRecorder()
+    s.handleOAuth2Callback(cbRec2, cbReq2)
+    // Past the B13 guard it reaches ExchangeCode on an unregistered connector
+    // → 400 from the connector layer, NOT the mismatch guard.
+    if cbRec2.Code == http.StatusBadRequest && strings.Contains(cbRec2.Body.String(), "state does not match connector_key") {
+        t.Fatalf("same-connector callback must not trip the B13 mismatch guard, got %s", cbRec2.Body.String())
+    }
+}

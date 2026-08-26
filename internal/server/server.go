@@ -40,6 +40,16 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
+// oauth2StateEntry binds an issued OAuth2 state to the connector_key that
+// initiated the flow (B13). The callback verifies stored.connectorKey matches
+// the connector_key in the redirect — without this, a state issued for
+// connector A could be replayed against connector B's callback (cross-connector
+// state replay), exfiltrating a token into the wrong connector.
+type oauth2StateEntry struct {
+    connectorKey string
+    issuedAt     time.Time
+}
+
 type Server struct {
     cfg             *config.ConfigSnapshot
     cfgPath         string
@@ -79,7 +89,7 @@ type Server struct {
     // adapter events but skips the refresh (nothing to refresh).
     adapterIndexRefresher adapterIndexRefresher
     connectorRegistry *connector.Registry
-    oauth2States      map[string]time.Time
+    oauth2States      map[string]oauth2StateEntry
     mcpHandler        *mcp.Handler
     oauth2StatesMu    sync.RWMutex
     // taskRegistry tracks in-flight inference tasks by id (X-Request-ID) so
@@ -288,7 +298,7 @@ func New(
         oidcAuth:          oidcAuth,
         adminAuth:         adminAuthObj,
         connectorRegistry: newConnectorRegistry(cfg),
-        oauth2States:      make(map[string]time.Time),
+        oauth2States:      make(map[string]oauth2StateEntry),
         mcpHandler:        initMCPHandler(cfg),
         taskRegistry:      NewTaskRegistry(),
     }
@@ -3438,8 +3448,8 @@ func (s *Server) evictOAuth2States() {
     for range ticker.C {
         s.oauth2StatesMu.Lock()
         now := time.Now()
-        for state, issuedAt := range s.oauth2States {
-            if now.Sub(issuedAt) > 10*time.Minute {
+        for state, entry := range s.oauth2States {
+            if now.Sub(entry.issuedAt) > 10*time.Minute {
                 delete(s.oauth2States, state)
             }
         }
@@ -3479,7 +3489,7 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
         return
     }
     s.oauth2StatesMu.Lock()
-    s.oauth2States[req.State] = time.Now().UTC()
+    s.oauth2States[req.State] = oauth2StateEntry{connectorKey: req.ConnectorKey, issuedAt: time.Now().UTC()}
     s.oauth2StatesMu.Unlock()
     authURL, err := s.connectorRegistry.OAuth2().AuthorizationURL(req.ConnectorKey, req.State)
     if err != nil {
@@ -3509,7 +3519,7 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
         return
     }
     s.oauth2StatesMu.Lock()
-    issuedAt, ok := s.oauth2States[state]
+    entry, ok := s.oauth2States[state]
     if ok {
         delete(s.oauth2States, state)
     }
@@ -3518,8 +3528,18 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"invalid or expired state parameter"}}`, http.StatusBadRequest)
         return
     }
-    if time.Since(issuedAt) > 10*time.Minute {
+    if time.Since(entry.issuedAt) > 10*time.Minute {
         http.Error(w, `{"error":{"message":"state parameter expired"}}`, http.StatusBadRequest)
+        return
+    }
+    // B13: the state was issued for a specific connector_key during authorize.
+    // Reject a callback whose connector_key does not match — this stops
+    // cross-connector state replay (a state minted for connector A replayed
+    // against connector B's callback to exfiltrate a token into the wrong one).
+    if entry.connectorKey != connectorKey {
+        slog.Warn("oauth2 callback: state/connector_key mismatch (cross-connector replay)",
+            "expected_connector", entry.connectorKey, "callback_connector", connectorKey, "state", state)
+        http.Error(w, `{"error":{"message":"state does not match connector_key"}}`, http.StatusBadRequest)
         return
     }
 
