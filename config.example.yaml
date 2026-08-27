@@ -84,6 +84,18 @@ route:
     negotiation:
         route_header: "X-Fusion-Route"
         route_header_value: "gateway-decision"
+    multimodal:
+        # Local vision model to force-route image/audio content blocks to
+        # (local-first). Multimodal payloads are invisible to the router's
+        # text-only signal; without this they map to a text-only cloud model
+        # -> upstream 400 -> gateway 502. Empty = no local vision path.
+        local_model: ""
+        # #120 cloud VLM fallback: when the local node has no vision model
+        # loaded, route multimodal /v1/chat/completions to this cloud backend
+        # + model. e.g. fusion-browser Visual Grounding when local mlx lacks a
+        # VLM. Empty cloud_backend = local-only (reject if no local VLM).
+        cloud_backend: ""
+        cloud_model: ""
     circuit_breaker:
         memory_overload: true
         swap_triggered: true

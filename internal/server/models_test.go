@@ -380,3 +380,184 @@ func TestHandleModels_PerProviderTimeoutSkipsSlow(t *testing.T) {
         t.Fatalf("handleModels blocked too long: %v (per-provider timeout should cap at ~3s)", elapsed)
     }
 }
+
+// TestChatRequestHasImage_BlockTypeDetection verifies #120's chat-side
+// multimodal guard: an OpenAI image_url / input_audio content block is
+// detected, but a plain-string text message and a text-typed block are not.
+// extractTextContent drops non-string Content, so without this guard the
+// router's text-only signal is blind to a multimodal /v1/chat/completions.
+func TestChatRequestHasImage_BlockTypeDetection(t *testing.T) {
+    cases := []struct {
+        name string
+        req  *adapter.ChatRequest
+        want bool
+    }{
+        {
+            name: "plain string text is not multimodal",
+            req:  &adapter.ChatRequest{Messages: []adapter.ChatMessage{{Role: "user", Content: "hello"}}},
+            want: false,
+        },
+        {
+            name: "text block array is not multimodal",
+            req: &adapter.ChatRequest{Messages: []adapter.ChatMessage{
+                {Role: "user", Content: []any{map[string]any{"type": "text", "text": "hi"}}},
+            }},
+            want: false,
+        },
+        {
+            name: "image_url block is multimodal",
+            req: &adapter.ChatRequest{Messages: []adapter.ChatMessage{
+                {Role: "user", Content: []any{
+                    map[string]any{"type": "text", "text": "describe"},
+                    map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,iVBOR"}},
+                }},
+            }},
+            want: true,
+        },
+        {
+            name: "input_audio block is multimodal",
+            req: &adapter.ChatRequest{Messages: []adapter.ChatMessage{
+                {Role: "user", Content: []any{
+                    map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "uw=="}},
+                }},
+            }},
+            want: true,
+        },
+        {
+            name: "nil request is not multimodal",
+            req:  nil,
+            want: false,
+        },
+    }
+    for _, tc := range cases {
+        if got := chatRequestHasImage(tc.req); got != tc.want {
+            t.Fatalf("chatRequestHasImage(%s) = %v, want %v", tc.name, got, tc.want)
+        }
+    }
+}
+
+// newMultimodalMLXServer builds a test server whose fusion-mlx /v1/models mock
+// returns the given model ids (so RefreshModelSet populates ModelSet). The chat
+// endpoint returns a fixed OK so the handler can complete the forward.
+func newMultimodalMLXServer(t *testing.T, mlxModels []string) (*Server, *httptest.Server) {
+    t.Helper()
+    modelsData := make([]map[string]string, 0, len(mlxModels))
+    for _, id := range mlxModels {
+        modelsData = append(modelsData, map[string]string{"id": id, "object": "model", "owned_by": "mlx"})
+    }
+    modelsBody, _ := json.Marshal(map[string]any{"object": "list", "data": modelsData})
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch r.URL.Path {
+        case "/v1/models":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write(modelsBody)
+        case "/v1/chat/completions":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write([]byte(`{"id":"mlx-ok","choices":[{"message":{"role":"assistant","content":"seen"}}]}`))
+        default:
+            w.WriteHeader(http.StatusNotFound)
+        }
+    }))
+    s := newTestServer()
+    mlx := adapter.NewFusionMLXProvider(config.BackendConfig{
+        Type:    "fusion-mlx",
+        BaseURL: srv.URL,
+        Enabled: true,
+    }, config.RoutingConfig{})
+    s.pool.Register("fusion-mlx", mlx, config.BackendConfig{Type: "fusion-mlx", BaseURL: srv.URL, Enabled: true})
+    mlx.RefreshModelSet(context.Background())
+    return s, srv
+}
+
+// TestHandleChatCompletions_MultimodalLocalFirst routes a multimodal chat
+// request to the local vision model when it is loaded (LocalModel in ModelSet).
+// Verifies the request model is rewritten to the vision model and forwarded
+// to the local fusion-mlx provider (not a cloud text-only model).
+func TestHandleChatCompletions_MultimodalLocalFirst(t *testing.T) {
+    s, srv := newMultimodalMLXServer(t, []string{"mlx-community--Qwen2.5-VL-7B-Instruct-4bit"})
+    defer srv.Close()
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit"
+    s.router.SetLocalReady(true)
+
+    body := `{"model":"qwen-7b","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    // allowlist must permit the forced vision model (handler checks before rewrite)
+    req.Header.Set("X-Fusion-Allowed-Models", "*")
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (local vision served), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if got := rec.Header().Get("X-Route-Decision"); !strings.HasPrefix(got, "local:multimodal_local_vision") {
+        t.Fatalf("expected X-Route-Decision local:multimodal_local_vision, got %q", got)
+    }
+}
+
+// TestHandleChatCompletions_MultimodalCloudVLMFallback is the #120 core case:
+// the local node has NO vision model loaded (ModelSet empty), but
+// routing.multimodal.cloud_backend + cloud_model are configured. A multimodal
+// /v1/chat/completions must route to the cloud VLM backend with the request
+// model rewritten to the cloud VLM model — NOT a text-only local model that
+// would reject the image with 400 -> 502. This is the fusion-browser Visual
+// Grounding fallback path.
+func TestHandleChatCompletions_MultimodalCloudVLMFallback(t *testing.T) {
+    s, srv := newMultimodalMLXServer(t, []string{}) // local has NO vision model
+    defer srv.Close()
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit" // configured but not loaded
+    s.cfg.Config.Routing.Multimodal.CloudBackend = "openai"
+    s.cfg.Config.Routing.Multimodal.CloudModel = "gpt-4o"
+    s.cfg.Config.Routing.Fallback.Enabled = true
+    s.router.SetLocalReady(true)
+
+    // cloud VLM provider records the forwarded model
+    cloud := &modelRecordingProvider{mockProvider: mockProvider{
+        name:     "openai",
+        chatResp: &adapter.ChatResponse{ID: "vlm-cloud", Choices: []adapter.ChatChoice{{Message: adapter.ChatMessage{Role: "assistant", Content: "coords"}}}},
+    }}
+    s.pool.Register("openai", cloud, config.BackendConfig{Type: "openai-compatible", Enabled: true})
+
+    body := `{"model":"qwen-7b","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"click"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    req.Header.Set("X-Fusion-Allowed-Models", "*")
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (cloud VLM served), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if got := cloud.lastModel.Load(); got != "gpt-4o" {
+        t.Fatalf("expected model rewritten to cloud VLM gpt-4o, got %v", got)
+    }
+    if got := rec.Header().Get("X-Route-Decision"); !strings.HasPrefix(got, "cloud:multimodal_cloud_vlm") {
+        t.Fatalf("expected X-Route-Decision cloud:multimodal_cloud_vlm, got %q", got)
+    }
+}
+
+// TestHandleChatCompletions_MultimodalRejectsWhenUnconfigured verifies the #120
+// clear-400 path: a multimodal request with no loaded local vision model AND no
+// cloud VLM configured is rejected with a 400 naming the missing knobs, not
+// forwarded to a text-only model that would mask the failure as 502.
+func TestHandleChatCompletions_MultimodalRejectsWhenUnconfigured(t *testing.T) {
+    s, srv := newMultimodalMLXServer(t, []string{}) // no vision model loaded
+    defer srv.Close()
+    // LocalModel configured but not loaded; no cloud_backend/cloud_model
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit"
+    s.router.SetLocalReady(true)
+
+    body := `{"model":"qwen-7b","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    req.Header.Set("X-Fusion-Allowed-Models", "*")
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req)
+
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("expected 400 (unconfigured multimodal), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if !strings.Contains(rec.Body.String(), "multimodal") {
+        t.Fatalf("expected 400 body to name the multimodal knob, got %s", rec.Body.String())
+    }
+}

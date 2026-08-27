@@ -143,15 +143,27 @@ type RatioTierConfig struct {
     Rules   []RatioTierRule `mapstructure:"rules"`
 }
 
-// MultimodalConfig governs how image/audio-bearing /v1/messages requests
-// are routed. Without it a multimodal payload has no router signal (RouteRequest
-// carries only Model/Text/Stream) so the text-only routing chain maps it to a
-// text-only cloud model (e.g. glm5.2) that rejects images with 400 -> gateway
-// 502 (Claude Code screenshot 502). LocalModel is the local vision model id to
-// force-route multimodal requests to (local-first); empty rejects with a clear
-// 400 instead of a masked cloud-400-as-502.
+// MultimodalConfig governs how image/audio-bearing /v1/messages and
+// /v1/chat/completions requests are routed. Without it a multimodal payload
+// has no router signal (RouteRequest carries only Model/Text/Stream) so the
+// text-only routing chain maps it to a text-only cloud model (e.g. glm5.2)
+// that rejects images with 400 -> gateway 502 (Claude Code screenshot 502).
+// LocalModel is the local vision model id to force-route multimodal requests
+// to (local-first); empty rejects with a clear 400 instead of a masked
+// cloud-400-as-502.
+//
+// CloudBackend + CloudModel (#120): the cloud fallback when the local node
+// has no vision model loaded (e.g. fusion-browser Visual Grounding, where the
+// local fusion-mlx serves text-only). CloudBackend is the provider name in the
+// backends: pool (e.g. "openai"); CloudModel is the cloud VLM model id (e.g.
+// "gpt-4o"). When both are set and LocalModel is unavailable, a multimodal
+// /v1/chat/completions is routed to CloudBackend with Model rewritten to
+// CloudModel — local-first when a VLM is loaded, cloud fallback otherwise.
+// Empty CloudBackend leaves the prior behavior (LocalModel-only).
 type MultimodalConfig struct {
-    LocalModel string `mapstructure:"local_model"`
+    LocalModel  string `mapstructure:"local_model"`
+    CloudBackend string `mapstructure:"cloud_backend"`
+    CloudModel  string `mapstructure:"cloud_model"`
 }
 
 // AgentTaskConfig governs the TaskRegistry backstop against unbounded growth
