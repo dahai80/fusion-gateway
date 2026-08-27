@@ -343,10 +343,25 @@ cluster:
     master:
         address: "http://127.0.0.1:9753"  # fusion-multi-node Master address
         shared_token: ""                   # authentication token
+        ignore_strategy: false             # #119 opt-out: true keeps the LOCAL
+                                           # load_balancer strategy authoritative for
+                                           # inference node selection even in master
+                                           # mode. Default false — the gateway honors
+                                           # the strategy the master owns
+                                           # (master.RoutingSummary.Strategy), so a
+                                           # strategy set in fusion-studio is the
+                                           # single source of truth. Fallback to
+                                           # load_balancer on fetch failure or opt-out.
     load_balancer: "least-connections"   # least-connections | hardware-aware | round-robin
+                                           # In master mode this is the FALLBACK when
+                                           # ignore_strategy=true or the master strategy
+                                           # fetch fails.
     health_check_interval: 10s
     failure_threshold: 3
     recovery_interval: 30s
+# Env: FUSION_CLUSTER_BACKEND=multi-node forces master mode (cluster.master.address
+# must be set) without a config edit — 12-factor promotion for production. With an
+# empty master.address the env var is a no-op (stays in the configured mode).
 
 realtime:
     enabled: false

@@ -486,8 +486,17 @@ const (
 )
 
 type ClusterMasterConfig struct {
-    Address    string `mapstructure:"address"`
+    Address     string `mapstructure:"address"`
     SharedToken string `mapstructure:"shared_token"`
+    // IgnoreMasterStrategy is the #119 opt-out: when true, master mode still
+    // syncs node membership from the master but keeps the LOCAL load_balancer
+    // strategy for inference node selection (the gateway's own strategy wins).
+    // Default false (zero value) → the gateway HONORS the strategy the master
+    // owns (master.RoutingSummary.Strategy), so a strategy set in fusion-studio
+    // is authoritative for both task.* and /v1/chat/completions. Zero-value
+    // safe: no DefaultConfig seed needed, no mapstructure "omitted vs false"
+    // ambiguity — false means "honor master" which is the desired default.
+    IgnoreMasterStrategy bool `mapstructure:"ignore_strategy"`
 }
 
 type ClusterConfig struct {
@@ -993,6 +1002,15 @@ func validate(cfg *Config) error {
     // with a dedicated listener, Host/Port must be set (the listener must bind
     // somewhere). When MCP is enabled at all, an MCP credential must exist —
     // either mcp.token or auth.master_key — so the MCP auth gate can enforce
+    // #119: cluster master mode makes the fusion-multi-node master the single
+    // source of inference node membership + strategy. A master-mode config with
+    // no master address would silently fall back to an empty node set (every
+    // request cloud-degrades). Fail at load so the misconfig is loud, not a
+    // silent cloud-only gateway masquerading as clustered.
+    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" {
+        return fmt.Errorf("cluster.mode=master requires cluster.master.address (the fusion-multi-node master API URL); got empty — set it or use mode=standalone")
+    }
+
     // access independent of the main auth chain (auth.enabled=false must NOT
     // open MCP). Fail-closed: an enabled MCP with no credential is rejected at
     // config load, not silently exposed.
