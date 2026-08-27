@@ -573,7 +573,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
     // F2: flush any pending debounced team quota/cost write so the last burst
     // of AddCost before shutdown reaches disk (memory store only; redis
     // persists per-call). Done after HTTP drain so in-flight billed requests
-    // have already recorded their cost.
+    // have already recorded their cost. #117: the memory/redis write-profile
+    // asymmetry (memory coalesces via debouncedPersister, redis per-call SET)
+    // is the documented parity contract — see persistParityNote in
+    // internal/store/memory/persist_debounce.go.
     if ms, ok := s.store.(*memorystore.MemoryStore); ok {
         ms.FlushQuota()
     }
