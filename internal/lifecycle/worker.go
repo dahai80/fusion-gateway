@@ -59,14 +59,3 @@ func (w *Worker) Stop() {
         slog.Info("lifecycle worker stopped", "worker", w.name)
     })
 }
-
-// Done returns a channel closed when the goroutine exits. Useful for ordered
-// shutdown or tests that want to observe exit without calling Stop.
-func (w *Worker) Done() <-chan struct{} {
-    d := make(chan struct{})
-    go func() {
-        w.wg.Wait()
-        close(d)
-    }()
-    return d
-}

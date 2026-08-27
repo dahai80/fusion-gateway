@@ -91,21 +91,6 @@ func TestWorker_EI10_NilParentSafe(t *testing.T) {
     }
 }
 
-// Done channel must close when the goroutine exits on its own (not via Stop) —
-// lets ordered-shutdown / tests observe natural exit.
-func TestWorker_EI10_DoneClosesOnNaturalExit(t *testing.T) {
-    t.Parallel()
-    w := Start(context.Background(), "test_natural_exit", func(ctx context.Context) {
-        // return immediately, no ctx wait
-    })
-    select {
-    case <-w.Done():
-        // good
-    case <-time.After(time.Second):
-        t.Fatal("EI10: Done channel did not close after goroutine exited naturally")
-    }
-}
-
 func waitCond(max time.Duration, cond func() bool) bool {
     deadline := time.Now().Add(max)
     for time.Now().Before(deadline) {
