@@ -92,6 +92,11 @@ type Server struct {
     // to a running stream's ctx (#102 ADR-001 sub-task 4). Slot release stays
     // on the stream goroutine's defer — registry only holds the cancel func.
     taskRegistry *TaskRegistry
+    // streamBuffers holds resumable SSE event windows keyed by stream_id
+    // (issue #116) for the local MLX path only. Populated when
+    // routing.stream.resume_enabled; the /v1/messages/{stream_id}/events
+    // replay endpoint drains it honoring Last-Event-ID. nil when disabled.
+    streamBuffers *StreamBufferStore
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -322,6 +327,18 @@ func New(
         cfg.Config.Routing.AgentTasks.TTL,
         cfg.Config.Routing.AgentTasks.MaxEntries,
     )
+    if cfg.Config.Routing.Stream.ResumeEnabled {
+        srv.streamBuffers = NewStreamBufferStore(
+            cfg.Config.Routing.Stream.ResumeMaxEvents,
+            cfg.Config.Routing.Stream.ResumeMaxBytes,
+            cfg.Config.Routing.Stream.ResumeTTL,
+        )
+        slog.Info("resumable streams enabled (local MLX path)",
+            "max_events", cfg.Config.Routing.Stream.ResumeMaxEvents,
+            "max_bytes", cfg.Config.Routing.Stream.ResumeMaxBytes,
+            "ttl", cfg.Config.Routing.Stream.ResumeTTL.String())
+        safego.Go("server_reap_expired_stream_buffers", srv.reapExpiredStreamBuffers)
+    }
     safego.Go("server_reap_expired_tasks", srv.reapExpiredTasks)
     safego.Go("server_evict_oauth2_states", srv.evictOAuth2States)
     return srv
@@ -361,6 +378,10 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
     mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))
+    // #116 resumable SSE: replay endpoint for the local MLX path. Prefix-matched
+    // (/v1/messages/{stream_id}/events); path parsed in handleStreamResume. Only
+    // responds when routing.stream.resume_enabled — otherwise 404.
+    mux.HandleFunc("/v1/messages/", s.withMiddleware(s.handleStreamResume))
     // #102 ADR-001 sub-task 4: agent task cancel endpoint. Prefix-matched so
     // the {id}/cancel suffix is parsed manually in handleAgentTask (no Go
     // 1.22 path-pattern dep). Auth via withMiddleware (existing key auth).
