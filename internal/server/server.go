@@ -2117,12 +2117,15 @@ func extractAnthropicTextContent(messages []adapter.AnthropicMessage) string {
 // cloud model (e.g. glm5.2 via model_mapping) is rejected upstream with 400
 // multimodal_not_supported -> gateway 502 (Claude Code screenshot 502). The
 // handler uses this to force the request to a local vision model before Decide.
-// "image" is the Anthropic block type for vision input; "audio"/"document"
-// are also non-text but image is the reported case.
+// Only true multimodal block types count: "image", "audio", "document".
+// "thinking"/"tool_use"/"tool_result"/"redacted_thinking" are NOT multimodal
+// (they carry text/structured text), so a thinking-mode conversation history
+// must not be misrouted to a vision model (issue #113 over-broad guard).
 func anthropicRequestHasImage(messages []adapter.AnthropicMessage) bool {
     for _, msg := range messages {
         for _, block := range msg.Content {
-            if block.Type != "text" && block.Type != "" {
+            switch block.Type {
+            case "image", "audio", "document":
                 return true
             }
         }
