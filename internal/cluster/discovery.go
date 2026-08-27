@@ -53,6 +53,13 @@ type Node struct {
     // (#95). Empty when the node hasn't reported or doesn't implement
     // /v1/models — such a node is never selected by model (cloud fallback).
     models []string
+    // modelsReady is set true only after the first successful /v1/models
+    // poll (RR13). Until then servesModel returns false for any specific
+    // model — a node marked healthy but never polled must not be routed a
+    // model-specific request off a stale/empty registry. Distinguishes
+    // "never polled" (not ready) from "polled, serves nothing" (ready,
+    // legitimately empty), which a bare empty models slice cannot.
+    modelsReady bool
 }
 
 // Models returns a snapshot of the node's served-model list (#95).
@@ -65,14 +72,23 @@ func (n *Node) Models() []string {
     return out
 }
 
-// servesModel reports whether model is in the node's registry (#95).
+// servesModel reports whether model is in the node's registry (#95, RR13).
+// model=="" is model-agnostic and matches any node. For a specific model the
+// node must have completed at least one /v1/models poll (modelsReady) — a
+// healthy-but-unpolled node is NOT a match, so SelectNodeByModel falls back to
+// cloud instead of routing off a stale/empty registry (RR13 stale window).
 func (n *Node) servesModel(model string) bool {
     if model == "" {
         return true
     }
     n.mu.RLock()
-    defer n.mu.RUnlock()
-    for _, m := range n.models {
+    ready := n.modelsReady
+    models := n.models
+    n.mu.RUnlock()
+    if !ready {
+        return false
+    }
+    for _, m := range models {
         if m == model {
             return true
         }
@@ -154,6 +170,10 @@ type Discovery struct {
     running       atomic.Bool
     rrIndex       atomic.Uint64
     masterClient  *MasterClient
+    // EI10: wg tracks the long-lived healthCheck/masterSync goroutine so Stop
+    // joins (waits for exit) instead of just closing stopCh and racing a
+    // mid-iteration stop that writes node state after Shutdown returned.
+    wg            sync.WaitGroup
 }
 
 func NewDiscovery(cfg config.ClusterConfig) *Discovery {
@@ -200,16 +220,28 @@ func (d *Discovery) Start(ctx context.Context) {
         // don't silently degrade every request to cloud (servesModel empty →
         // SelectNodeByModel finds no node → cloud fallback, no warning).
         d.syncNodeModels()
-        safego.Go("cluster_master_sync", func() { d.masterSyncLoop(ctx) })
+        d.wg.Add(1)
+        safego.Go("cluster_master_sync", func() {
+            defer d.wg.Done()
+            d.masterSyncLoop(ctx)
+        })
     } else {
         d.loadNodesFromConfig()
-        safego.Go("cluster_health_check", func() { d.healthCheckLoop(ctx) })
+        d.wg.Add(1)
+        safego.Go("cluster_health_check", func() {
+            defer d.wg.Done()
+            d.healthCheckLoop(ctx)
+        })
     }
 }
 
 func (d *Discovery) Stop() {
     if d.running.CompareAndSwap(true, false) {
         close(d.stopCh)
+        // EI10: wait for the long-lived loop to observe stopCh/ctx.Done and
+        // return before Stop returns — so Shutdown does not race a mid-iterate
+        // node-state write.
+        d.wg.Wait()
         slog.Info("cluster discovery stopped")
     }
 }
@@ -428,8 +460,17 @@ func (d *Discovery) checkAll() {
             defer wg.Done()
             defer func() {
                 if r := recover(); r != nil {
+                    // RR13: a panic (e.g. malformed upstream JSON in
+                    // fetchRemoteMetrics/fetchModels) must not leave the node
+                    // stuck in its prior state — if it panicked mid-check it
+                    // did not complete a clean health confirmation this round.
+                    // Mark unhealthy + run the threshold so a persistently
+                    // panicking node trends to dead instead of staying "healthy
+                    // but never polled" until the next tick.
                     slog.Error("cluster health check panic recovered",
                         "node_id", n.ID, "panic", r, "stack", string(debug.Stack()))
+                    n.markUnhealthy()
+                    d.checkFailureThreshold(n)
                 }
             }()
             d.checkNode(n)
@@ -504,9 +545,17 @@ func (d *Discovery) checkNode(node *Node) {
     resp.Body.Close()
 
     if resp.StatusCode == http.StatusOK {
-        node.markHealthy()
+        // RR13: fetch metrics + models BEFORE marking healthy. The prior order
+        // (markHealthy then fetchModels) opened a stale window — a node was
+        // selectable by SelectNodeByModel with a stale/empty model registry
+        // (first boot: servesModel empty → cloud fallback; or a node that just
+        // unloaded a model but fetchModels hadn't re-run → routed → 400).
+        // Fetching first means by the time the node is healthy its registry is
+        // current; modelsReady (set in fetchModels) gates servesModel so an
+        // unpolled healthy node is never routed a model-specific request.
         d.fetchRemoteMetrics(node)
         d.fetchModels(node)
+        node.markHealthy()
     } else {
         slog.Warn("cluster node returned non-200", "node_id", node.ID, "status", resp.StatusCode)
         node.markUnhealthy()
@@ -616,6 +665,7 @@ func (d *Discovery) fetchModels(node *Node) {
 
     node.mu.Lock()
     node.models = ids
+    node.modelsReady = true
     node.mu.Unlock()
 
     slog.Debug("cluster models updated",

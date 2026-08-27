@@ -2,13 +2,15 @@ package hardware
 
 import (
     "context"
+    "errors"
+    "fmt"
     "log/slog"
     "sync"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -16,7 +18,7 @@ type Collector struct {
     cfg     *config.HardwareConfig
     mu      sync.RWMutex
     latest  HardwareMetrics
-    cancel  context.CancelFunc
+    worker  *lifecycle.Worker
 
     prevPageIn  uint64
     prevPageOut uint64
@@ -40,18 +42,18 @@ func (c *Collector) Start(ctx context.Context) {
         c.cfg.CollectInterval = 5 * time.Second
     }
 
-    childCtx, cancel := context.WithCancel(ctx)
-    c.cancel = cancel
-
-    safego.Go("hardware_collect_loop", func() { c.collectLoop(childCtx) })
+    // EI10: launch the collect loop as a tracked lifecycle.Worker so Stop joins
+    // (waits for exit) instead of just cancelling and racing a mid-collect stop.
+    c.worker = lifecycle.Start(ctx, "hardware_collect_loop", c.collectLoop)
     slog.Info("hardware collector started", "interval", c.cfg.CollectInterval)
 }
 
 func (c *Collector) Stop() {
-    if c.cancel != nil {
-        c.cancel()
+    if c.worker != nil {
+        c.worker.Stop()
+    } else {
+        slog.Info("hardware collector stopped (never started)")
     }
-    slog.Info("hardware collector stopped")
 }
 
 func (c *Collector) Latest() HardwareMetrics {
@@ -87,24 +89,37 @@ func (c *Collector) collect() {
     m.CollectTime = time.Now()
     var collectErr error
 
-    // Source 1: gopsutil system memory
+    // Source 1: gopsutil system memory. EI4: tag the failing subsystem so a
+    // partial collect (gopsutil ok but iokit fail, or swap fail) surfaces WHICH
+    // source failed. The prior `collectErr = err` clobbered an earlier failure
+    // when a later source also failed — lost the first signal. errors.Join
+    // preserves every failing subsystem in one error.
     if c.cfg.Gopsutil.Enabled {
         if err := collectGopsutilFn(c, &m); err != nil {
             slog.Error("gopsutil collection error", "error", err)
-            collectErr = err
+            collectErr = errors.Join(collectErr, fmt.Errorf("gopsutil: %w", err))
         }
     }
 
-    // Source 2: Swap page rate (sampling diff)
+    // Source 2: Swap page rate (sampling diff). EI4: failure here previously
+    // returned zero SwapPageInRate/OutRate with NO CollectionError — the void
+    // signature only logged Debug, so collectErr stayed nil. The router's P2
+    // swap-thrashing check then read 0 (never trips) AND P0.5
+    // collection_error_protection never tripped (no error). A swap-read failure
+    // silently disabled both overload signals. Now the func returns its error
+    // and it is aggregated into CollectionError like the other sources.
     if c.cfg.Swap.PageRateSampling {
-        c.collectSwapPageRate(&m)
+        if err := c.collectSwapPageRate(&m); err != nil {
+            slog.Error("swap page rate collection error", "error", err)
+            collectErr = errors.Join(collectErr, fmt.Errorf("swap_page_rate: %w", err))
+        }
     }
 
-    // Source 3: IOKit GPU metrics
+    // Source 3: IOKit GPU metrics. EI4: tagged + joined (see Source 1).
     if c.cfg.IOKit.Enabled {
         if err := collectIOKitGPUFn(&m); err != nil {
             slog.Error("iokit gpu collection error", "error", err)
-            collectErr = err
+            collectErr = errors.Join(collectErr, fmt.Errorf("iokit_gpu: %w", err))
         }
     }
 
@@ -180,11 +195,16 @@ var collectIOKitGPUFn = collectIOKitGPU
 
 var collectMLXMetricsFn = collectMLXMetrics
 
-func (c *Collector) collectSwapPageRate(m *HardwareMetrics) {
+// collectSwapPageRate returns an error when the vm.stat read fails. EI4: this
+// was previously void — a swap-read failure left SwapPageInRate/OutRate zero
+// with no error signal, so the router's P2 swap-thrashing check and the P0.5
+// collection_error_protection guard both silently disabled. The caller now
+// aggregates this into CollectionError so hardware protection fires.
+func (c *Collector) collectSwapPageRate(m *HardwareMetrics) error {
     pageIn, pageOut, err := readSwapPageCountsFn()
     if err != nil {
-        slog.Debug("swap page rate sampling failed", "error", err)
-        return
+        slog.Warn("swap page rate sampling failed", "error", err)
+        return err
     }
 
     now := time.Now()
@@ -199,4 +219,5 @@ func (c *Collector) collectSwapPageRate(m *HardwareMetrics) {
     c.prevPageIn = pageIn
     c.prevPageOut = pageOut
     c.prevSampleTime = now
+    return nil
 }

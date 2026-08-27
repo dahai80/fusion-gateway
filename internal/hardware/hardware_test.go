@@ -719,7 +719,10 @@ func TestCollectSwapPageRate_ErrorReturns(t *testing.T) {
     c.prevSampleTime = time.Now().Add(-1 * time.Second)
 
     var m HardwareMetrics
-    c.collectSwapPageRate(&m)
+    err := c.collectSwapPageRate(&m)
+    if err == nil {
+        t.Fatal("EI4: expected collectSwapPageRate to return error on read failure")
+    }
 
     if m.SwapPageInRate != 0 || m.SwapPageOutRate != 0 {
         t.Errorf("rates should be 0 on error, got in=%d out=%d", m.SwapPageInRate, m.SwapPageOutRate)
@@ -1251,6 +1254,71 @@ func TestCollect_MLXError_DoesNotSetCollectErr(t *testing.T) {
     m := c.Latest()
     if m.CollectionError != nil {
         t.Errorf("MLX failure should not set CollectionError, got: %v", m.CollectionError)
+    }
+}
+
+func TestCollect_EI4_SwapReadError_SetsCollectionError(t *testing.T) {
+    t.Log("EI4: swap page-rate read failure must set CollectionError (was void → zero rates + nil error → P0.5/P2 bypassed)")
+    origFn := readSwapPageCountsFn
+    readSwapPageCountsFn = func() (uint64, uint64, error) {
+        return 0, 0, fmt.Errorf("sysctl vm.pageouts unreadable")
+    }
+    defer func() { readSwapPageCountsFn = origFn }()
+
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 1 * time.Second,
+        Gopsutil:        config.GopsutilConfig{Enabled: false},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: false},
+        Swap:            config.SwapConfig{PageRateSampling: true},
+    }
+    c := NewCollector(cfg)
+    c.collect()
+
+    m := c.Latest()
+    if m.CollectionError == nil {
+        t.Fatal("EI4: swap read failure left CollectionError nil — router reads zero swap rates as 'real idle' and P0.5 collection_error_protection never fires")
+    }
+    if m.SwapPageInRate != 0 || m.SwapPageOutRate != 0 {
+        t.Errorf("EI4: swap rates should stay 0 on read failure, got in=%d out=%d", m.SwapPageInRate, m.SwapPageOutRate)
+    }
+}
+
+func TestCollect_EI4_PartialCollect_JoinsAllSubsystemErrors(t *testing.T) {
+    t.Log("EI4: partial collect (gopsutil+swap both fail) must surface BOTH subsystems, not clobber the first")
+    origGops := collectGopsutilFn
+    collectGopsutilFn = func(c *Collector, m *HardwareMetrics) error {
+        return fmt.Errorf("gopsutil unavailable")
+    }
+    defer func() { collectGopsutilFn = origGops }()
+    origSwap := readSwapPageCountsFn
+    readSwapPageCountsFn = func() (uint64, uint64, error) {
+        return 0, 0, fmt.Errorf("sysctl unreadable")
+    }
+    defer func() { readSwapPageCountsFn = origSwap }()
+
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 1 * time.Second,
+        Gopsutil:        config.GopsutilConfig{Enabled: true},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: false},
+        Swap:            config.SwapConfig{PageRateSampling: true},
+    }
+    c := NewCollector(cfg)
+    c.collect()
+
+    m := c.Latest()
+    if m.CollectionError == nil {
+        t.Fatal("EI4: expected CollectionError when two subsystems fail")
+    }
+    msg := m.CollectionError.Error()
+    if !strings.Contains(msg, "gopsutil") {
+        t.Errorf("EI4: CollectionError lost the gopsutil subsystem (clobbered by later swap error): %q", msg)
+    }
+    if !strings.Contains(msg, "swap_page_rate") {
+        t.Errorf("EI4: CollectionError missing the swap_page_rate subsystem: %q", msg)
     }
 }
 

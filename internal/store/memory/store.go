@@ -158,7 +158,16 @@ func (m *MemoryStore) UpdateKey(key *store.APIKeyEntry) error {
 }
 
 func (m *MemoryStore) DeleteKey(name string) error {
-    return m.keys.Delete(name)
+    if err := m.keys.Delete(name); err != nil {
+        return err
+    }
+    // EI5: cascade-reclaim this key's per-key quota entries (usage/dailyUsage/
+    // dailyDate). Without this, a deleted key's quota usage stayed in the maps
+    // forever — unbounded growth over long-running deployments with frequent
+    // key churn. Reclaim runs after the entry delete so an orphaned entry (key
+    // already gone) is still cleaned up; the maps are keyed by name.
+    m.quota.ReclaimKey(name)
+    return nil
 }
 
 func (m *MemoryStore) ListChannels() ([]*store.ChannelEntry, error) {

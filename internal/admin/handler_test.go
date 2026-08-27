@@ -1136,6 +1136,55 @@ func TestHandleKeyByID_NonAdminWriteRejected(t *testing.T) {
     }
 }
 
+// EI9: logs and cost endpoints carry sensitive data (RequestLog has
+// api_key_name + prompt fragments; cost has per-key billing detail). A viewer
+// (dashboard-only role) must NOT read them — only admin (and audit, a
+// privileged read role). requireAdminRoleStrict gates ALL methods, unlike
+// requireAdminRole which lets any viewer GET config. On the bug these endpoints
+// used plain withAuth → viewer read every key's prompts.
+func TestHandleLogs_EI9_ViewerRejected_AdminAuditAllowed(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+    ms := newMockStore()
+    h := newTestHandler(t, ms, auth, "")
+
+    mux := http.NewServeMux()
+    h.RegisterRoutes(mux)
+
+    viewerToken, _ := auth.GenerateToken("viewer", "viewer")
+    adminToken, _ := auth.GenerateToken("admin", "admin")
+
+    sensitivePaths := []string{
+        "/admin/api/logs",
+        "/admin/api/logs/filters",
+        "/admin/api/logs/export",
+        "/admin/api/analytics/cost",
+    }
+
+    for _, p := range sensitivePaths {
+        // viewer must be 403 on every sensitive read
+        req := httptest.NewRequest(http.MethodGet, p, nil)
+        req.Header.Set("Authorization", "Bearer "+viewerToken)
+        rec := httptest.NewRecorder()
+        mux.ServeHTTP(rec, req)
+        if rec.Code != http.StatusForbidden {
+            t.Errorf("EI9: viewer GET %s should be 403 (carries prompt/api_key_name), got %d; body: %s", p, rec.Code, rec.Body.String())
+        }
+    }
+
+    // admin reads succeed (mock store returns data / empty without error)
+    for _, p := range sensitivePaths {
+        req := httptest.NewRequest(http.MethodGet, p, nil)
+        req.Header.Set("Authorization", "Bearer "+adminToken)
+        rec := httptest.NewRecorder()
+        mux.ServeHTTP(rec, req)
+        if rec.Code == http.StatusForbidden {
+            t.Errorf("EI9: admin GET %s should not be 403, got %d; body: %s", p, rec.Code, rec.Body.String())
+        }
+    }
+}
+
 func TestHandleChannels(t *testing.T) {
     t.Parallel()
 

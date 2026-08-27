@@ -18,6 +18,10 @@ type SessionAffinity struct {
     entries map[string]affinityEntry
     ttl     time.Duration
     done    chan struct{}
+    // EI10: wg + stopOnce make Stop a true join (wait for evictLoop exit) and
+    // idempotent (double-Stop no longer double-closes done → panic).
+    wg      sync.WaitGroup
+    stopOnce sync.Once
 }
 
 func NewSessionAffinity(ttl time.Duration) *SessionAffinity {
@@ -29,13 +33,21 @@ func NewSessionAffinity(ttl time.Duration) *SessionAffinity {
         ttl:     ttl,
         done:    make(chan struct{}),
     }
-    safego.Go("session_affinity_evict_loop", sa.evictLoop)
+    sa.wg.Add(1)
+    safego.Go("session_affinity_evict_loop", func() {
+        defer sa.wg.Done()
+        sa.evictLoop()
+    })
     slog.Info("session affinity initialized", "ttl", ttl)
     return sa
 }
 
 func (sa *SessionAffinity) Stop() {
-    close(sa.done)
+    sa.stopOnce.Do(func() {
+        close(sa.done)
+        sa.wg.Wait()
+        slog.Info("session affinity stopped")
+    })
 }
 
 func (sa *SessionAffinity) Record(spaceID, providerName string) {

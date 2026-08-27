@@ -8,6 +8,8 @@ import (
     "os"
     "path/filepath"
     "testing"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
 const fullTestYAML = `
@@ -1441,6 +1443,37 @@ func TestHandleValidationConfig(t *testing.T) {
             t.Errorf("expected base_url_conflict_check true, got %v", sec["base_url_conflict_check"])
         }
     })
+}
+
+// EI1 guard: a config PUT must reload the live snapshot, not just write the
+// file. The prior updateYAMLSection wrote the YAML and returned — on macOS
+// fsnotify is unreliable, so the in-memory ConfigSnapshot stayed on the old
+// value. The operator saw "saved" but routing kept the old config. This guard
+// PUTs validation.base_url_conflict_check true then reads the LIVE snapshot
+// (config.GetSnapshot, what handlers/routing actually consult), not the file.
+// On the BUG (no Reload call) the snapshot stays false → guard FAILS.
+func TestHandleValidationConfig_EI1_PUTReloadsSnapshot(t *testing.T) {
+    _, _, configPath := setupConfigTestWithFile(t)
+    h := newTestHandler(t, newMockStore(), newTestAuth(t), configPath)
+
+    // Snapshot reflects the initial fullTestYAML (base_url_conflict_check=false).
+    if config.GetSnapshot().Config.Validation.BaseURLConflictCheck {
+        t.Fatalf("precondition: expected initial BaseURLConflictCheck false")
+    }
+
+    body := map[string]interface{}{"base_url_conflict_check": true}
+    req := makeAuthenticatedRequest(t, newTestAuth(t), http.MethodPut, "/admin/api/config/validation", body)
+    rec := httptest.NewRecorder()
+    h.handleValidationConfig(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("PUT failed: %d %s", rec.Code, rec.Body.String())
+    }
+
+    // EI1: the LIVE snapshot (not the file) must now reflect the new value —
+    // handlers read config.GetSnapshot, so this is what routing actually uses.
+    if !config.GetSnapshot().Config.Validation.BaseURLConflictCheck {
+        t.Fatal("EI1: config PUT wrote the file but did not reload the live snapshot — operator sees 'saved' but runtime keeps old config (fsnotify-unreliable-on-macOS silent no-op)")
+    }
 }
 
 // ─── Auth Config Tests ──────────────────────────────────────────

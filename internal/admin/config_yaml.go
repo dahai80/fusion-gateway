@@ -1,11 +1,14 @@
 package admin
 
 import (
+    "fmt"
     "log/slog"
     "net/http"
     "os"
+    "path/filepath"
     "strings"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "gopkg.in/yaml.v3"
 )
 
@@ -24,13 +27,54 @@ func readYAMLDoc(path string) (map[string]interface{}, error) {
 }
 
 // writeYAMLDoc marshals and writes the doc map back to the config file.
-// Called by updateYAMLSection after mutation.
+// Called by updateYAMLSection after mutation. EI1: writes atomically
+// (tmp file in same dir + fsync + rename) so a concurrent Reload never reads
+// a half-written file. os.WriteFile is not atomic — a reload racing the write
+// can unmarshal a truncated doc → validate failure → config regress.
 func writeYAMLDoc(path string, doc map[string]interface{}) error {
     out, err := yaml.Marshal(doc)
     if err != nil {
         return err
     }
-    return os.WriteFile(path, out, 0600)
+    return atomicWriteFile(path, out, 0600)
+}
+
+// atomicWriteFile writes data to a temp file in the same directory as path,
+// fsyncs it, then renames over path. Same-dir rename is atomic on POSIX
+// filesystems; fsync before rename guarantees the renamed file's bytes are on
+// disk. EI1 hardening against concurrent config.Reload reading mid-write.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+    dir := filepath.Dir(path)
+    f, err := os.CreateTemp(dir, ".cfg-tmp-*")
+    if err != nil {
+        return err
+    }
+    tmp := f.Name()
+    cleanup := func() { _ = os.Remove(tmp) }
+
+    if _, err := f.Write(data); err != nil {
+        _ = f.Close()
+        cleanup()
+        return err
+    }
+    if err := f.Sync(); err != nil {
+        _ = f.Close()
+        cleanup()
+        return err
+    }
+    if err := f.Close(); err != nil {
+        cleanup()
+        return err
+    }
+    if err := os.Chmod(tmp, perm); err != nil {
+        cleanup()
+        return err
+    }
+    if err := os.Rename(tmp, path); err != nil {
+        cleanup()
+        return err
+    }
+    return nil
 }
 
 // getOrCreateSection returns the sub-map at doc[keys...], creating missing levels.
@@ -74,6 +118,21 @@ func (h *Handler) updateYAMLSection(fn func(doc map[string]interface{}) error) (
         slog.Error("failed to write config file", "path", h.configPath, "error", err)
         return nil, err
     }
+
+    // EI1: explicitly reload the in-memory snapshot right after the file write.
+    // Do NOT rely on fsnotify — it is unreliable on macOS (kqueue), so a PUT
+    // could write the file while the runtime kept serving the old snapshot.
+    // "saved" returned to the operator must mean "snapshot updated", not just
+    // "file written". config.Reload re-reads, validates, runs onReload handlers
+    // (which rebuild breakers/queue/semantic cache), and swaps the snapshot.
+    // If reload fails the file is already changed — surface the error so the
+    // operator knows the live config is stale (manual /admin/config/reload).
+    if _, err := config.Reload(h.configPath); err != nil {
+        slog.Error("config file written but reload failed — live snapshot is STALE",
+            "path", h.configPath, "error", err)
+        return nil, fmt.Errorf("config written but reload failed, live config stale: %w", err)
+    }
+    slog.Info("admin config PUT reloaded live snapshot", "path", h.configPath)
 
     return doc, nil
 }

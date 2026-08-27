@@ -237,3 +237,27 @@ func (q *QuotaStore) DailyUsage(keyName string) (used float64, date string) {
     q.rolloverLocked(keyName, today)
     return q.dailyUsage[keyName], q.dailyDate[keyName]
 }
+
+// ReclaimKey drops a deleted key's entries from the per-key quota maps
+// (usage/dailyUsage/dailyDate). EI5: DeleteKey previously removed the key entry
+// but left its quota usage behind forever — long-running deployments that
+// frequently create+delete keys (team churn, temporary keys) accumulated dead
+// entries: unbounded map growth, SnapshotQuota copied them every persist, and
+// SaveQuota serialized a growing blob. Called from MemoryStore.DeleteKey AFTER
+// the key entry is gone (so an already-missing key still reclaims its orphaned
+// quota entries — the maps are keyed by name regardless of entry existence).
+// Schedules a persist so quota.json drops the reclaimed key too.
+func (q *QuotaStore) ReclaimKey(keyName string) {
+    q.mu.Lock()
+    _, hadUsage := q.usage[keyName]
+    _, hadDailyUsage := q.dailyUsage[keyName]
+    _, hadDailyDate := q.dailyDate[keyName]
+    delete(q.usage, keyName)
+    delete(q.dailyUsage, keyName)
+    delete(q.dailyDate, keyName)
+    q.mu.Unlock()
+    if hadUsage || hadDailyUsage || hadDailyDate {
+        slog.Info("quota maps reclaimed for deleted key", "key", keyName)
+        q.scheduleKeyPersist()
+    }
+}

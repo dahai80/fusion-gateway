@@ -318,7 +318,19 @@ func (r *RedisStore) DeleteKey(name string) error {
     if err == nil && existing.KeyHash != "" {
         r.client.Del(ctx, apiKeyHashPrefix+existing.KeyHash)
     }
-    return r.client.Del(ctx, apiKeyPrefix+name).Err()
+    if err := r.client.Del(ctx, apiKeyPrefix+name).Err(); err != nil {
+        return err
+    }
+    // EI5: cascade-delete the per-key quota usage counter (AH1 dedicated
+    // fusion:quota:used:<name>). Without this a deleted key left its quota
+    // counter behind forever — orphaned Redis keys accumulate over long-running
+    // deployments with frequent key churn. Best-effort Del after the key entry
+    // is gone; a missing counter is a no-op (Del on a non-existent key is not
+    // an error in Redis).
+    if err := r.client.Del(ctx, quotaUsedPrefix+name).Err(); err != nil {
+        slog.Warn("failed to reclaim quota counter for deleted key", "key", name, "error", err)
+    }
+    return nil
 }
 
 // --- Channels ---

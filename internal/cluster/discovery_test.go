@@ -431,10 +431,13 @@ func TestDiscovery_SelectNodeByModel_PrefersServingNode(t *testing.T) {
         n.markHealthy()
     }
 
-    // only node-2 serves qwen3
+    // only node-2 serves qwen3 (modelsReady=true simulates a completed
+    // /v1/models poll — RR13: servesModel is gated on modelsReady so a
+    // bare models set without the ready flag is treated as unpolled)
     n2, _ := d.GetNode("node-2")
     n2.mu.Lock()
     n2.models = []string{"qwen3"}
+    n2.modelsReady = true
     n2.mu.Unlock()
 
     selected, err := d.SelectNodeByModel("least-connections", "qwen3", 0)
@@ -489,12 +492,14 @@ func TestDiscovery_SelectNodeByModel_SkipsCappedNodes(t *testing.T) {
     nb, _ := d.GetNode("node-b")
     na.markHealthy()
     nb.markHealthy()
-    // both serve qwen3
+    // both serve qwen3 (modelsReady=true — simulated /v1/models poll, RR13)
     na.mu.Lock()
     na.models = []string{"qwen3"}
+    na.modelsReady = true
     na.mu.Unlock()
     nb.mu.Lock()
     nb.models = []string{"qwen3"}
+    nb.modelsReady = true
     nb.mu.Unlock()
 
     // node-a filled to cap (max_concurrent=2); node-b free → node-b selected
@@ -518,6 +523,37 @@ func TestDiscovery_SelectNodeByModel_SkipsCappedNodes(t *testing.T) {
     // maxConcurrent <= 0 disables cap → node-a (least-connections tie, first wins) selectable again
     if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err != nil {
         t.Errorf("expected no error with cap disabled (maxConcurrent=0), got: %v", err)
+    }
+}
+
+// RR13 guard: a node marked healthy but NOT yet polled (modelsReady=false) must
+// NOT be selected by SelectNodeByModel — even if its models slice already holds
+// the target. This is the stale window: checkNode marked the node healthy before
+// fetchModels ran (or fetchModels errored), so the registry is stale/empty. On
+// the BUG (old servesModel ignored modelsReady) the unpolled node is selected
+// off its stale registry → routes a model-specific request to a node that may
+// not actually serve it → 400 / silent cloud misroute. On the FIX, the node is
+// skipped → SelectNodeByModel returns an error → router falls back to cloud.
+func TestDiscovery_SelectNodeByModel_SkipsUnpolledHealthyNode(t *testing.T) {
+    t.Log("testing SelectNodeByModel skips healthy-but-unpolled node (RR13 stale window)")
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-a", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    na, _ := d.GetNode("node-a")
+    na.markHealthy()
+    // models slice pre-set (e.g. leftover from a prior poll), but modelsReady
+    // false — simulating the window between markHealthy and fetchModels.
+    na.mu.Lock()
+    na.models = []string{"qwen3"}
+    na.modelsReady = false
+    na.mu.Unlock()
+
+    // unpolled → must NOT be selected → error → router cloud-fallback
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err == nil {
+        t.Fatal("RR13: unpolled healthy node selected off stale registry — modelsReady gate missing, stale window reopened")
     }
 }
 

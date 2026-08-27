@@ -31,14 +31,30 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
         return nil, fmt.Errorf("empty input")
     }
 
+    // RR14: filter healthy nodes by whether they serve req.Model. The prior
+    // code took HealthyNodeList (healthy-only) and round-robined workers
+    // model-blind — shards landed on nodes that never loaded the embedding
+    // model → 400 per shard. Empty model stays model-agnostic (legacy).
     healthyNodes := discovery.HealthyNodeList()
+    if req.Model != "" {
+        serving := make([]*Node, 0, len(healthyNodes))
+        for _, n := range healthyNodes {
+            if n.servesModel(req.Model) {
+                serving = append(serving, n)
+            }
+        }
+        healthyNodes = serving
+    }
     if len(healthyNodes) == 0 {
-        return nil, fmt.Errorf("no healthy cluster nodes for sharding")
+        return nil, fmt.Errorf("no healthy cluster nodes serving model %q for sharding", req.Model)
     }
 
     shardSize := defaultShardSize
     if inputLen <= shardSize || len(healthyNodes) < 2 {
-        node, err := discovery.SelectNode("least-connections")
+        // RR14: single-node path must also be model-aware — SelectNodeByModel
+        // skips nodes not serving req.Model. Empty model falls back to the
+        // model-agnostic SelectNode inside SelectNodeByModel.
+        node, err := discovery.SelectNodeByModel("least-connections", req.Model, 0)
         if err != nil {
             return nil, err
         }
@@ -122,15 +138,36 @@ func ShardEmbedding(ctx context.Context, discovery *Discovery, req *adapter.Embe
         totalTokens += r.tokens
     }
 
-    if firstErr != nil && len(allData) == 0 {
-        return nil, firstErr
+    // RR14: partial failure is a data-plane error, not a 200. The prior code
+    // returned 200 + a short vector list when some shards failed (M<N) —
+    // clients took the truncated Data as success, ran broken similarity
+    // search with index gaps at the failed shards. Now ANY shard failure is
+    // an error: all-failed surfaces firstErr directly; partial surfaces a
+    // structured error naming the failed shards so the client retries.
+    if firstErr != nil {
+        var failedShards []int
+        for i, r := range results {
+            if r.err != nil {
+                failedShards = append(failedShards, i)
+            }
+        }
+        if len(failedShards) == numShards {
+            return nil, firstErr
+        }
+        slog.Error("shard embedding partial failure — returning error, not partial data",
+            "shards", numShards,
+            "failed_shards", failedShards,
+            "first_error", firstErr,
+        )
+        return nil, fmt.Errorf("embedding sharding partial failure: %d/%d shards failed (first: %w)", len(failedShards), numShards, firstErr)
     }
 
     if len(allData) < inputLen {
-        slog.Warn("partial embedding results",
+        slog.Error("shard embedding result count mismatch — returning error",
             "expected", inputLen,
             "got", len(allData),
         )
+        return nil, fmt.Errorf("embedding sharding data loss: expected %d vectors, got %d", inputLen, len(allData))
     }
 
     return &adapter.EmbeddingResponse{

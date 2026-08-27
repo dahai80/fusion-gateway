@@ -35,12 +35,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/keys/", h.requireAdminRole(h.handleKeyByID))
     mux.HandleFunc("/admin/api/channels", h.requireAdminRole(h.handleChannels))
     mux.HandleFunc("/admin/api/channels/", h.requireAdminRole(h.handleChannelByID))
-    mux.HandleFunc("/admin/api/logs", h.withAuth(h.handleLogs))
-    mux.HandleFunc("/admin/api/logs/export", h.withAuth(h.handleLogsExport))
-    mux.HandleFunc("/admin/api/logs/filters", h.withAuth(h.handleLogsFilters))
+    mux.HandleFunc("/admin/api/logs", h.requireAdminRoleStrict(h.handleLogs))
+    mux.HandleFunc("/admin/api/logs/export", h.requireAdminRoleStrict(h.handleLogsExport))
+    mux.HandleFunc("/admin/api/logs/filters", h.requireAdminRoleStrict(h.handleLogsFilters))
     mux.HandleFunc("/admin/api/analytics", h.withAuth(h.handleAnalyticsOverview))
     mux.HandleFunc("/admin/api/analytics/tokens", h.withAuth(h.handleTokenStats))
-    mux.HandleFunc("/admin/api/analytics/cost", h.withAuth(h.handleCostStats))
+    mux.HandleFunc("/admin/api/analytics/cost", h.requireAdminRoleStrict(h.handleCostStats))
     mux.HandleFunc("/admin/api/analytics/models", h.withAuth(h.handleModelStats))
     mux.HandleFunc("/admin/api/analytics/latency", h.withAuth(h.handleLatencyStats))
     mux.HandleFunc("/admin/api/analytics/errors", h.withAuth(h.handleErrorStats))
@@ -108,6 +108,26 @@ func (h *Handler) requireAdminRole(next http.HandlerFunc) http.HandlerFunc {
         if claims == nil || claims.Role != "admin" {
             slog.Warn("config write rejected for non-admin role", "role", func() string { if claims != nil { return claims.Role }; return "" }(), "path", r.URL.Path, "method", r.Method)
             writeError(w, http.StatusForbidden, "admin role required for configuration changes")
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+// requireAdminRoleStrict wraps withAuth and rejects non-admin roles on ALL
+// methods, including GET. EI9: logs and cost endpoints return sensitive data
+// (RequestLog carries api_key_name, prompt fragments, route_reason; cost
+// carries per-key billing detail). The plain requireAdminRole only gates
+// non-GET, so a viewer (read-only dashboard role) could GET /admin/api/logs and
+// read every key's prompts. A viewer must see only desensitized aggregates, not
+// raw logs/cost — so these read endpoints need the same admin-only gate as
+// writes.
+func (h *Handler) requireAdminRoleStrict(next http.HandlerFunc) http.HandlerFunc {
+    return h.withAuth(func(w http.ResponseWriter, r *http.Request) {
+        claims := GetAdminClaims(r.Context())
+        if claims == nil || claims.Role != "admin" {
+            slog.Warn("sensitive read rejected for non-admin role", "role", func() string { if claims != nil { return claims.Role }; return "" }(), "path", r.URL.Path, "method", r.Method)
+            writeError(w, http.StatusForbidden, "admin role required to read logs and cost detail")
             return
         }
         next.ServeHTTP(w, r)
