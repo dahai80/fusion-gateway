@@ -12,8 +12,10 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "os"
     "runtime/debug"
     "sort"
+    "strings"
     "sync"
     "sync/atomic"
     "time"
@@ -174,9 +176,42 @@ type Discovery struct {
     // joins (waits for exit) instead of just closing stopCh and racing a
     // mid-iteration stop that writes node state after Shutdown returned.
     wg            sync.WaitGroup
+    // #119: masterStrategy caches the routing strategy the fusion-multi-node
+    // master owns (master.RoutingSummary.Strategy). Fetched every master-sync
+    // tick alongside node membership. When non-empty and master mode honors
+    // strategy (IgnoreMasterStrategy=false), SelectNode uses this instead of
+    // the caller's local Cluster.LoadBalancer — so the strategy a user
+    // configured in fusion-studio is authoritative for inference, not divergent
+    // from it. atomic.Value holds a string; Load/Store are concurrency-safe.
+    masterStrategy atomic.Value
+}
+
+// envClusterBackend reads FUSION_CLUSTER_BACKEND. When "multi-node", it forces
+// master mode (the master becomes the single source of node membership +
+// strategy) regardless of cluster.mode in config — a 12-factor switch that
+// promotes a standalone-config gateway into master mode without a config edit.
+// Other values (incl. "" unset) leave cluster.mode to govern.
+func envClusterBackend() string {
+    return strings.TrimSpace(os.Getenv("FUSION_CLUSTER_BACKEND"))
 }
 
 func NewDiscovery(cfg config.ClusterConfig) *Discovery {
+    // #119: FUSION_CLUSTER_BACKEND=multi-node forces master mode (single source
+    // of truth). Requires Master.Address; without it the env gate is a no-op
+    // (logged) so a misconfigured env var does not silently empty the node set.
+    if envClusterBackend() == "multi-node" {
+        if cfg.Master.Address != "" {
+            if cfg.Mode != config.ClusterModeMaster {
+                slog.Info("FUSION_CLUSTER_BACKEND=multi-node forcing cluster mode master",
+                    "prior_mode", cfg.Mode, "master_address", cfg.Master.Address)
+            }
+            cfg.Mode = config.ClusterModeMaster
+        } else {
+            slog.Warn("FUSION_CLUSTER_BACKEND=multi-node set but cluster.master.address empty — staying in configured mode (set cluster.master.address to enable master mode)",
+                "configured_mode", cfg.Mode)
+        }
+    }
+
     d := &Discovery{
         nodes:  make(map[string]*Node),
         cfg:    cfg,
@@ -186,7 +221,9 @@ func NewDiscovery(cfg config.ClusterConfig) *Discovery {
 
     if cfg.Mode == config.ClusterModeMaster && cfg.Master.Address != "" {
         d.masterClient = NewMasterClient(cfg.Master)
-        slog.Info("cluster discovery using master mode", "master_address", cfg.Master.Address)
+        slog.Info("cluster discovery using master mode",
+            "master_address", cfg.Master.Address,
+            "honor_master_strategy", !cfg.Master.IgnoreMasterStrategy)
     }
 
     return d
@@ -216,6 +253,9 @@ func (d *Discovery) Start(ctx context.Context) {
 
     if mode == config.ClusterModeMaster {
         d.syncFromMaster()
+        // #119: cache the master-owned strategy before the first selection so a
+        // request arriving before the first sync tick still honors the master.
+        d.syncMasterStrategy()
         // AH3: populate per-node model registries so master-mode deployments
         // don't silently degrade every request to cloud (servesModel empty →
         // SelectNodeByModel finds no node → cloud fallback, no warning).
@@ -416,6 +456,8 @@ func (d *Discovery) masterSyncLoop(ctx context.Context) {
     }
 
     d.syncFromMaster()
+    // #119: pull the master-owned routing strategy so SelectNode honors it.
+    d.syncMasterStrategy()
     // AH3: keep per-node model registries fresh on every master sync.
     d.syncNodeModels()
 
@@ -430,10 +472,71 @@ func (d *Discovery) masterSyncLoop(ctx context.Context) {
             return
         case <-ticker.C:
             d.syncFromMaster()
+            // #119: refresh the master strategy each tick (a user can change
+            // it in fusion-studio; the master's RoutingSummary reflects it).
+            d.syncMasterStrategy()
             // AH3: refresh model registries after the node list may have changed.
             d.syncNodeModels()
         }
     }
+}
+
+// syncMasterStrategy fetches the routing strategy the fusion-multi-node master
+// owns and caches it in masterStrategy. #119: this is what makes the user's
+// fusion-studio strategy choice authoritative for inference node selection,
+// not the gateway's local cluster.load_balancer. Failures are logged at Warn
+// (not Error) and leave the cache untouched — SelectNode falls back to the
+// caller's local strategy, so a transient master blip does not stall routing.
+func (d *Discovery) syncMasterStrategy() {
+    if d.masterClient == nil {
+        return
+    }
+    d.mu.RLock()
+    ignore := d.cfg.Master.IgnoreMasterStrategy
+    d.mu.RUnlock()
+    if ignore {
+        slog.Debug("cluster master strategy sync skipped (ignore_strategy=true, local load_balancer governs)")
+        return
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+
+    summary, err := d.masterClient.RoutingSummary(ctx)
+    if err != nil {
+        slog.Warn("master strategy sync failed — falling back to local load_balancer for this interval",
+            "error", err)
+        return
+    }
+    if summary.Strategy == "" {
+        slog.Warn("master routing summary returned empty strategy — keeping prior cached strategy, falling back to local if none cached",
+            "total_nodes", summary.TotalNodes)
+        return
+    }
+    d.masterStrategy.Store(summary.Strategy)
+    slog.Info("cluster master strategy cached", "strategy", summary.Strategy,
+        "total_nodes", summary.TotalNodes, "avg_load", summary.AvgLoad)
+}
+
+// resolveStrategy returns the effective selection strategy for a SelectNode*
+// call. #119: in master mode with a cached master strategy and
+// IgnoreMasterStrategy=false, the master's strategy overrides the caller's
+// local strategy (single source of truth). Otherwise the caller's strategy
+// governs (standalone mode, opt-out, or no strategy cached yet).
+func (d *Discovery) resolveStrategy(local string) string {
+    if d.masterClient == nil {
+        return local
+    }
+    d.mu.RLock()
+    ignore := d.cfg.Master.IgnoreMasterStrategy
+    d.mu.RUnlock()
+    if ignore {
+        return local
+    }
+    if cached, ok := d.masterStrategy.Load().(string); ok && cached != "" {
+        return cached
+    }
+    return local
 }
 
 func (d *Discovery) checkAll() {
@@ -746,6 +849,7 @@ func (d *Discovery) SelectNodeByPlatform(strategy, platform string) (*Node, erro
         return nil, fmt.Errorf("no healthy cluster nodes on platform %q", platform)
     }
 
+    strategy = d.resolveStrategy(strategy)
     switch strategy {
     case "least-connections":
         return d.selectLeastConnections(healthy), nil
@@ -814,6 +918,7 @@ func (d *Discovery) SelectNodeByModel(strategy, model string, maxConcurrent int)
         return nil, fmt.Errorf("no healthy cluster nodes serving model %q", model)
     }
 
+    strategy = d.resolveStrategy(strategy)
     switch strategy {
     case "least-connections":
         return d.selectLeastConnections(healthy), nil
@@ -899,6 +1004,7 @@ func (d *Discovery) SelectNode(strategy string) (*Node, error) {
         return nil, fmt.Errorf("no healthy cluster nodes available")
     }
 
+    strategy = d.resolveStrategy(strategy)
     switch strategy {
     case "least-connections":
         return d.selectLeastConnections(healthy), nil
@@ -1008,7 +1114,14 @@ func (d *Discovery) selectHardwareAware(nodes []*Node) *Node {
 func (d *Discovery) nodeScore(n *Node) float64 {
     metrics := n.RemoteMetrics()
 
-    memScore := float64(n.MemoryGB)
+    // MemoryGB is mutated by syncFromMaster/applyStaticNodes under node.mu;
+    // read it once under the read lock so nodeScore is race-free against a
+    // concurrent sync (the periodic masterSyncLoop rewrites node fields).
+    n.mu.RLock()
+    memGB := float64(n.MemoryGB)
+    n.mu.RUnlock()
+
+    memScore := memGB
 
     if metrics.CollectedAt.IsZero() {
         // No remote metrics yet — fall back to static scoring
@@ -1020,7 +1133,7 @@ func (d *Discovery) nodeScore(n *Node) float64 {
     }
 
     // Memory headroom: (1 - used_ratio) * totalGB
-    memAvail := (1.0 - metrics.MemoryUsedRatio) * float64(n.MemoryGB)
+    memAvail := (1.0 - metrics.MemoryUsedRatio) * memGB
     if memAvail < 0 {
         memAvail = 0
     }
@@ -1039,7 +1152,7 @@ func (d *Discovery) nodeScore(n *Node) float64 {
     }
 
     // Weighted: 60% memory availability + 30% queue factor + 10% in-flight
-    score := memAvail*0.6 + float64(n.MemoryGB)*queueFactor*0.3 + float64(n.MemoryGB)*inFlightFactor*0.1
+    score := memAvail*0.6 + memGB*queueFactor*0.3 + memGB*inFlightFactor*0.1
 
     slog.Debug("cluster node score",
         "node_id", n.ID,

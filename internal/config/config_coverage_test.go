@@ -910,3 +910,46 @@ func TestValidate_MCPDisabled_NoCredential_Accepted(t *testing.T) {
         t.Fatalf("disabled MCP with no credential must be accepted: %v", err)
     }
 }
+
+// #119 guard: cluster.mode=master requires cluster.master.address (the
+// fusion-multi-node master API URL). An empty address means NewDiscovery has
+// nothing to sync node membership from — every request cloud-degrades silently.
+// Guard: if the validate check were absent, master mode with no address would
+// start successfully and serve nothing.
+func TestValidate_ClusterMasterMode_NoAddress_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Cluster.Enabled = true
+    cfg.Cluster.Mode = ClusterModeMaster
+    cfg.Cluster.Master.Address = ""
+    if err := validate(&cfg); err == nil {
+        t.Fatal("cluster.mode=master with empty master.address must be rejected at validate")
+    }
+}
+
+// #119 guard: master mode WITH a valid address is accepted — proves the reject
+// above is specific to the missing address, not master mode itself.
+// Guard: if the check were too broad (rejecting all master mode), this passes
+// for the wrong reason would flip to fail.
+func TestValidate_ClusterMasterMode_WithAddress_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Cluster.Enabled = true
+    cfg.Cluster.Mode = ClusterModeMaster
+    cfg.Cluster.Master.Address = "http://127.0.0.1:8000"
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("cluster.mode=master with valid address must be accepted: %v", err)
+    }
+}
+
+// #119 guard: master mode disabled (standalone) with empty master.address is
+// accepted — the address only matters in master mode. Proves the check is gated
+// on Mode == master, not unconditional.
+// Guard: if the check fired regardless of mode, standalone would be rejected.
+func TestValidate_ClusterStandalone_NoMasterAddress_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Cluster.Enabled = true
+    cfg.Cluster.Mode = ClusterModeStandalone
+    cfg.Cluster.Master.Address = ""
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("cluster.mode=standalone with empty master.address must be accepted: %v", err)
+    }
+}
