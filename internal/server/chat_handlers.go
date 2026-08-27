@@ -87,13 +87,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     budget := s.tokEngine.EstimateBudget(inputTokens, req.MaxTokens, req.Model, req.Tools != nil, req.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
-    routeReq := &router.RouteRequest{
-        Model:   req.Model,
-        Text:    textContent,
-        Stream:  req.Stream,
-        SpaceID: adapter.SpaceIDFromContext(ctx),
+    // #120 multimodal guard: an image_url content block is invisible to the
+    // router's text-only signal (extractTextContent only keeps string Content,
+    // so RouteRequest.Text drops image parts), so without this guard a
+    // multimodal payload is routed to a text-only model (local text model or a
+    // text-only cloud model like glm5.2) and rejected upstream with 400
+    // multimodal_not_supported -> gateway 502 (same class the /v1/messages
+    // guard in anthropic_messages.go prevents). Local-first when a vision model
+    // is loaded; cloud VLM fallback (#120, e.g. fusion-browser Visual Grounding
+    // where local fusion-mlx has no VLM) when configured; clear 400 otherwise.
+    multimodalDecision := s.multimodalRouteDecision(&req)
+    var decision *router.RouteDecision
+    if multimodalDecision != nil {
+        decision = multimodalDecision
+    } else {
+        routeReq := &router.RouteRequest{
+            Model:   req.Model,
+            Text:    textContent,
+            Stream:  req.Stream,
+            SpaceID: adapter.SpaceIDFromContext(ctx),
+        }
+        decision = s.router.Decide(ctx, routeReq)
     }
-    decision := s.router.Decide(ctx, routeReq)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
@@ -107,6 +122,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         "input_tokens", budget.InputTokens,
         "total_budget", budget.TotalBudget,
     )
+
+    // #120: multimodal request but no local vision model and no cloud VLM
+    // configured — reject with a clear 400 instead of forwarding to a
+    // text-only model that rejects with 400 -> gateway 502.
+    if multimodalUnconfigured(decision) {
+        slog.Warn("chat multimodal request rejected: no routing.multimodal.local_model loaded and no cloud_backend/cloud_model configured", "model", req.Model)
+        http.Error(w, `{"error":{"message":"multimodal requests require routing.multimodal.local_model (loaded) or routing.multimodal.cloud_backend + cloud_model to be configured; no vision model is available","type":"invalid_request"}}`, http.StatusBadRequest)
+        return
+    }
 
     var provider adapter.Provider
     switch decision.Backend {
@@ -886,4 +910,95 @@ func extractTextContent(messages []adapter.ChatMessage) string {
         }
     }
     return sb
+}
+
+// chatRequestHasImage reports whether any /v1/chat/completions message carries
+// an OpenAI multimodal content block. The OpenAI shape is Content as a []any of
+// typed blocks: {"type":"text","text":...}, {"type":"image_url","image_url":...},
+// {"type":"input_audio",...}. A plain-string Content (text-only) returns false.
+// This mirrors anthropicRequestHasImage for the /v1/messages path so the
+// router's text-only signal is not left blind to a multimodal payload (#120).
+func chatRequestHasImage(req *adapter.ChatRequest) bool {
+    if req == nil {
+        return false
+    }
+    for _, msg := range req.Messages {
+        blocks, ok := msg.Content.([]any)
+        if !ok {
+            continue
+        }
+        for _, b := range blocks {
+            obj, ok := b.(map[string]any)
+            if !ok {
+                continue
+            }
+            switch obj["type"] {
+            case "image_url", "input_audio", "input_audio_delta":
+                return true
+            }
+        }
+    }
+    return false
+}
+
+// multimodalRouteDecision returns a forced RouteDecision for a multimodal
+// /v1/chat/completions request, or nil when the request is text-only (fall
+// through to the normal rule chain). Local-first: when routing.multimodal.
+// local_model is set AND that model is loaded on the local fusion-mlx node,
+// force LocalBackend with the request model rewritten to the vision model.
+// Cloud fallback (#120): when local is unavailable but cloud_backend +
+// cloud_model are set, force CloudBackend with CloudTarget=cloud_backend and
+// the request model rewritten to the cloud VLM model. When neither path is
+// available the request is rejected with a clear 400 naming the missing knob
+// instead of a masked text-only 400-as-502. The caller (handleChatCompletions)
+// writes the 400; this helper signals rejection via a sentinel decision with
+// Reason=="multimodal_unconfigured" that the caller checks before forwarding.
+func (s *Server) multimodalRouteDecision(req *adapter.ChatRequest) *router.RouteDecision {
+    if !chatRequestHasImage(req) {
+        return nil
+    }
+    mm := s.cfg.Config.Routing.Multimodal
+    // Local-first: force the local vision model when it is actually loaded.
+    if vlModel := strings.TrimSpace(mm.LocalModel); vlModel != "" {
+        if s.localVisionModelLoaded(vlModel) {
+            slog.Info("chat multimodal request forced to local vision model",
+                "client_model", req.Model, "vision_model", vlModel)
+            req.Model = vlModel
+            return &router.RouteDecision{Backend: router.LocalBackend, Reason: "multimodal_local_vision"}
+        }
+        slog.Info("chat multimodal local vision model not loaded, trying cloud fallback",
+            "vision_model", vlModel)
+    }
+    // Cloud fallback (#120): route to the configured cloud VLM backend+model.
+    cloudBackend := strings.TrimSpace(mm.CloudBackend)
+    cloudModel := strings.TrimSpace(mm.CloudModel)
+    if cloudBackend != "" && cloudModel != "" {
+        slog.Info("chat multimodal request routed to cloud VLM",
+            "client_model", req.Model, "cloud_backend", cloudBackend, "cloud_model", cloudModel)
+        req.Model = cloudModel
+        return &router.RouteDecision{Backend: router.CloudBackend, Reason: "multimodal_cloud_vlm", CloudTarget: cloudBackend}
+    }
+    // Neither path available: signal rejection (caller writes the 400).
+    return &router.RouteDecision{Backend: router.CloudBackend, Reason: "multimodal_unconfigured"}
+}
+
+// localVisionModelLoaded reports whether the given vision model id is loaded
+// on the local fusion-mlx node. Returns false when no fusion-mlx provider is
+// configured or the model is absent from its loaded model set. The model set
+// is refreshed periodically (cmd/gateway/main.go safeGo loop) from fusion-mlx
+// /v1/models, so this reflects the live loaded state, not just config.
+func (s *Server) localVisionModelLoaded(model string) bool {
+    mlx := s.pool.GetFusionMLX()
+    if mlx == nil {
+        return false
+    }
+    loaded := mlx.ModelSet()
+    return loaded != nil && loaded[model]
+}
+
+// multimodalUnconfigured reports whether a decision is the #120 sentinel that
+// means "multimodal request but no local vision model and no cloud VLM
+// configured" — the caller must reject with a clear 400 rather than forward.
+func multimodalUnconfigured(d *router.RouteDecision) bool {
+    return d != nil && d.Reason == "multimodal_unconfigured"
 }
