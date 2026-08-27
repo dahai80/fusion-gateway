@@ -25,9 +25,9 @@ type TeamsStore struct {
     // single atomic write every quotaPersistDebounce, guarantees the final
     // mutation flushes via FlushQuota, and never touches the metadata onMutate
     // path. Set via SetQuotaPersist by the store wiring.
-    quotaPersist      func()
-    quotaPersistTimer *time.Timer
-    quotaPersistMu    sync.Mutex
+    // #117: the timer+lock+AfterFunc block is now the shared
+    // debouncedPersister (persist_debounce.go), not a per-store copy.
+    quotaPersist *debouncedPersister
 }
 
 const quotaPersistDebounce = 2 * time.Second
@@ -48,7 +48,13 @@ func (s *TeamsStore) SetOnMutate(fn func()) { s.onMutate = fn }
 // (typically SaveTeams). Called once during store wiring; nil = memory-only
 // (persistence disabled), and AddCost falls back to fireOnMutate so the quota
 // is still persisted on the metadata path rather than silently dropped.
-func (s *TeamsStore) SetQuotaPersist(fn func()) { s.quotaPersist = fn }
+func (s *TeamsStore) SetQuotaPersist(fn func()) {
+    if fn == nil {
+        s.quotaPersist = nil
+        return
+    }
+    s.quotaPersist = newDebouncedPersister("teams_quota", quotaPersistDebounce, fn)
+}
 
 // scheduleQuotaPersist arms the debounce timer; the first AddCost starts it,
 // subsequent calls reset it, and the final write fires once after the burst.
@@ -59,32 +65,16 @@ func (s *TeamsStore) scheduleQuotaPersist() {
         s.fireOnMutate()
         return
     }
-    s.quotaPersistMu.Lock()
-    defer s.quotaPersistMu.Unlock()
-    if s.quotaPersistTimer != nil {
-        s.quotaPersistTimer.Reset(quotaPersistDebounce)
-        return
-    }
-    s.quotaPersistTimer = time.AfterFunc(quotaPersistDebounce, func() {
-        s.quotaPersistMu.Lock()
-        s.quotaPersistTimer = nil
-        s.quotaPersistMu.Unlock()
-        s.quotaPersist()
-    })
+    s.quotaPersist.Schedule()
 }
 
 // FlushQuota synchronously flushes any pending debounced quota write. Called on
 // graceful shutdown so the last burst of AddCost mutations reaches disk.
 func (s *TeamsStore) FlushQuota() {
-    s.quotaPersistMu.Lock()
-    if s.quotaPersistTimer != nil {
-        s.quotaPersistTimer.Stop()
-        s.quotaPersistTimer = nil
+    if s.quotaPersist == nil {
+        return
     }
-    s.quotaPersistMu.Unlock()
-    if s.quotaPersist != nil {
-        s.quotaPersist()
-    }
+    s.quotaPersist.Flush()
 }
 
 func (s *TeamsStore) fireOnMutate() {

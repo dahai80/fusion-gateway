@@ -24,11 +24,11 @@ type QuotaStore struct {
     // keys.json alone is insufficient anyway — BudgetLimit-only keys never
     // write k.QuotaUsed (the Deduct guard below), so their usage lives only in
     // q.usage. A debounced quota.json persists the three maps atomically every
-    // quotaPersistDebounce, FlushKey drains on shutdown, and SeedUsage restores
+    // keyPersistDebounce, FlushKey drains on shutdown, and SeedUsage restores
     // them on load. Mirrors the F2 team-quota debounce. nil = memory-only.
-    keyPersist      func()
-    keyPersistTimer *time.Timer
-    keyPersistMu    sync.Mutex
+    // #117: the timer+lock+AfterFunc block is now the shared
+    // debouncedPersister (persist_debounce.go), not a per-store copy.
+    keyPersist *debouncedPersister
 }
 
 const keyPersistDebounce = 2 * time.Second
@@ -45,41 +45,25 @@ func NewQuotaStore(keys *KeyStore) *QuotaStore {
 
 // SetKeyPersist installs the debounced per-key quota persistence callback
 // (typically SaveQuota). Called once during store wiring; nil = memory-only.
-func (q *QuotaStore) SetKeyPersist(fn func()) { q.keyPersist = fn }
+func (q *QuotaStore) SetKeyPersist(fn func()) {
+    if fn == nil {
+        q.keyPersist = nil
+        return
+    }
+    q.keyPersist = newDebouncedPersister("quota_key", keyPersistDebounce, fn)
+}
 
 // scheduleKeyPersist arms the debounce timer; coalesces a burst of Deduct
-// calls into a single atomic quota.json write after quotaPersistDebounce.
+// calls into a single atomic quota.json write after keyPersistDebounce.
 func (q *QuotaStore) scheduleKeyPersist() {
-    if q.keyPersist == nil {
-        return
-    }
-    q.keyPersistMu.Lock()
-    defer q.keyPersistMu.Unlock()
-    if q.keyPersistTimer != nil {
-        q.keyPersistTimer.Reset(keyPersistDebounce)
-        return
-    }
-    q.keyPersistTimer = time.AfterFunc(keyPersistDebounce, func() {
-        q.keyPersistMu.Lock()
-        q.keyPersistTimer = nil
-        q.keyPersistMu.Unlock()
-        q.keyPersist()
-    })
+    q.keyPersist.Schedule()
 }
 
 // FlushKey synchronously flushes any pending debounced per-key quota write so
 // the last burst of Deduct before shutdown reaches disk. Called on graceful
 // shutdown via the store.
 func (q *QuotaStore) FlushKey() {
-    q.keyPersistMu.Lock()
-    if q.keyPersistTimer != nil {
-        q.keyPersistTimer.Stop()
-        q.keyPersistTimer = nil
-    }
-    q.keyPersistMu.Unlock()
-    if q.keyPersist != nil {
-        q.keyPersist()
-    }
+    q.keyPersist.Flush()
 }
 
 // SeedUsage restores per-key quota maps from persisted quota.json on startup,
