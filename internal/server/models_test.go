@@ -214,6 +214,97 @@ func TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel(t *testing
     }
 }
 
+// TestAnthropicRequestHasImage_ThinkingAndToolUseNotMultimodal verifies the
+// #113 regression: the multimodal guard must NOT treat thinking/tool_use/
+// tool_result content blocks as multimodal. Claude Code in extended-thinking
+// mode (CLAUDE_CODE_EFFORT_LEVEL=max) sends assistant history with type:"thinking"
+// blocks; the over-broad guard (block.Type != "text" && != "") forced every
+// such request to the local vision model -> local slow/timeout -> context
+// canceled -> A4 cloud fallback also canceled -> CC "Waiting for API response".
+// Only true multimodal types (image/audio/document) force local; a thinking/
+// tool-use text conversation must pass through unchanged.
+func TestAnthropicRequestHasImage_ThinkingAndToolUseNotMultimodal(t *testing.T) {
+    cases := []struct {
+        name     string
+        messages []adapter.AnthropicMessage
+        want     bool
+    }{
+        {
+            name: "thinking block is not multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "assistant", Content: []adapter.AnthropicContentBlock{
+                    {Type: "thinking", Thinking: "compute"},
+                    {Type: "text", Text: "4"},
+                }},
+            },
+            want: false,
+        },
+        {
+            name: "tool_use block is not multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "assistant", Content: []adapter.AnthropicContentBlock{
+                    {Type: "tool_use", ID: "tu1", Name: "ls"},
+                }},
+                {Role: "user", Content: []adapter.AnthropicContentBlock{
+                    {Type: "tool_result", ToolUseID: "tu1", ACContent: "file1"},
+                }},
+            },
+            want: false,
+        },
+        {
+            name: "redacted_thinking is not multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "assistant", Content: []adapter.AnthropicContentBlock{
+                    {Type: "redacted_thinking"},
+                }},
+            },
+            want: false,
+        },
+        {
+            name: "plain text is not multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "user", Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "hi"}}},
+            },
+            want: false,
+        },
+        {
+            name: "image block is multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "user", Content: []adapter.AnthropicContentBlock{
+                    {Type: "text", Text: "describe"},
+                    {Type: "image", Source: &adapter.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "iVBOR"}},
+                }},
+            },
+            want: true,
+        },
+        {
+            name: "audio block is multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "user", Content: []adapter.AnthropicContentBlock{
+                    {Type: "audio", Source: &adapter.AnthropicImageSource{Type: "base64", MediaType: "audio/wav", Data: "UklGR"}},
+                }},
+            },
+            want: true,
+        },
+        {
+            name: "document block is multimodal",
+            messages: []adapter.AnthropicMessage{
+                {Role: "user", Content: []adapter.AnthropicContentBlock{
+                    {Type: "document", Source: &adapter.AnthropicImageSource{Type: "base64", MediaType: "application/pdf", Data: "JVBER"}},
+                }},
+            },
+            want: true,
+        },
+    }
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            if got := anthropicRequestHasImage(tc.messages); got != tc.want {
+                t.Fatalf("anthropicRequestHasImage(%s) = %v, want %v", tc.name, got, tc.want)
+            }
+        })
+    }
+}
+
 // TestHandleAnthropicMessages_MultimodalRejectsWhenNoLocalModel verifies that
 // when an image-bearing request arrives but no routing.multimodal.local_model
 // is configured, the gateway rejects with a clear 400 (invalid_request) naming
