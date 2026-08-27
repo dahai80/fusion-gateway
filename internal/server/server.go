@@ -86,6 +86,18 @@ type Server struct {
     connectorRegistry *connector.Registry
     oauth2States      map[string]oauth2StateEntry
     mcpHandler        *mcp.Handler
+    // #118: dedicated MCP HTTP listener for security-domain isolation from the
+    // main :11432 mux. nil unless mcp.enabled && mcp.listen_enabled. Drained in
+    // Shutdown BEFORE the main httpServer so MCP's forwardToNode outbound calls
+    // finish before the main drain cuts their upstream (F7 ordering).
+    mcpServer   *http.Server
+    mcpListener net.Listener
+    // mcpGate is the MCP-specific auth gate (mcp.token || auth.master_key),
+    // independent of the main auth chain. Applied to BOTH the dedicated
+    // listener (sole gate) and the shared-listener path (layered on top of
+    // withMiddleware) so auth.enabled=false does not open MCP. nil when MCP
+    // is disabled.
+    mcpGate func(http.Handler) http.Handler
     oauth2StatesMu    sync.RWMutex
     // taskRegistry tracks in-flight inference tasks by id (X-Request-ID) so
     // the POST /v1/agent/tasks/{id}/cancel endpoint can propagate cancellation
@@ -327,6 +339,20 @@ func New(
         cfg.Config.Routing.AgentTasks.TTL,
         cfg.Config.Routing.AgentTasks.MaxEntries,
     )
+    // #118: build the MCP auth gate once. Credentials resolve from mcp.token
+    // (preferred) falling back to auth.master_key. Config validation already
+    // rejects an enabled MCP with no credential, so the gate here is defense in
+    // depth — if both are empty and MCP somehow enabled, the gate rejects every
+    // request (fail-closed). nil when MCP is disabled.
+    if cfg.Config.MCP.Enabled {
+        srv.mcpGate = mcp.AuthGate(mcp.AuthConfig{
+            Token:     cfg.Config.MCP.Token,
+            MasterKey: cfg.Config.Auth.MasterKey,
+        })
+        slog.Info("MCP auth gate armed (independent of main auth chain)",
+            "has_token", cfg.Config.MCP.Token != "",
+            "has_master_key", cfg.Config.Auth.MasterKey != "")
+    }
     if cfg.Config.Routing.Stream.ResumeEnabled {
         srv.streamBuffers = NewStreamBufferStore(
             cfg.Config.Routing.Stream.ResumeMaxEvents,
@@ -402,8 +428,22 @@ func (s *Server) Start() error {
     // endpoints share the gateway auth/rate-limit/budget gate — previously
     // mounted on the bare mux, /mcp/v1/call was reachable unauthenticated and
     // could trigger forwardToNode's outbound dial (SSRF amplifier).
+    // #118: the shared chain alone is NOT enough — auth.enabled=false or
+    // passthrough reopens /mcp/v1/call. The MCP auth gate (mcp.token ||
+    // master_key, independent of the main chain) is now layered on top. When a
+    // dedicated MCP listener is configured (mcp.listen_enabled), MCP routes are
+    // served ONLY there with the gate as the sole middleware — NOT on the shared
+    // mux — for security-domain isolation. Otherwise they stay on the shared mux
+    // under shared-chain + gate.
     if s.mcpHandler != nil {
-        s.mcpHandler.RegisterRoutesWithMiddleware(mux, s.withMiddleware)
+        if s.cfg.Config.MCP.ListenEnabled {
+            // Dedicated listener owns MCP routes exclusively; do NOT register
+            // them on the shared mux. Listener started below in startMCPListener.
+            slog.Info("MCP routes delegated to dedicated listener (not on shared mux)",
+                "host", s.cfg.Config.MCP.Host, "port", s.cfg.Config.MCP.Port)
+        } else {
+            s.mcpHandler.RegisterRoutesWithGate(mux, s.withMiddleware, s.mcpGate)
+        }
     }
 
     // Connector plugin framework routes
@@ -511,6 +551,21 @@ func (s *Server) Start() error {
         })
     }
 
+    // #118: dedicated MCP HTTP listener — security-domain isolation from the
+    // main :11432 mux. Serves ONLY the MCP routes under the MCP auth gate (sole
+    // middleware; no shared rate-limit/budget chain, those are inference
+    // concerns). Bound before the main ListenAndServe so a port collision fails
+    // Start() fast rather than after the main server is up. Served in a safeGo
+    // goroutine; drained in Shutdown BEFORE the main httpServer (F7 ordering —
+    // MCP's forwardToNode outbound calls finish before the main drain cuts their
+    // upstream). ListenEnabled + Host/Port + credential are validated in
+    // config.Validate, so reaching here means a bind is safe to attempt.
+    if s.mcpHandler != nil && s.cfg.Config.MCP.ListenEnabled {
+        if err := s.startMCPListener(); err != nil {
+            return fmt.Errorf("start MCP listener: %w", err)
+        }
+    }
+
     if s.cfg.Config.Server.TLS != nil && s.cfg.Config.Server.TLS.CertFile != "" && s.cfg.Config.Server.TLS.KeyFile != "" {
         slog.Info("server starting with TLS", "addr", addr, "cert", s.cfg.Config.Server.TLS.CertFile)
         return s.httpServer.ListenAndServeTLS(s.cfg.Config.Server.TLS.CertFile, s.cfg.Config.Server.TLS.KeyFile)
@@ -544,6 +599,38 @@ func (s *Server) listenUnix(uds *config.UnixSocketConfig) (net.Listener, error) 
     return ln, nil
 }
 
+// startMCPListener binds the dedicated MCP HTTP listener (#118) on mcp.host:port
+// and serves the MCP routes under the MCP auth gate as the sole middleware. The
+// listener + server are stored on s for Shutdown drain. Config validation has
+// already guaranteed Host/Port are set and a credential exists when MCP is
+// enabled, so this only runs when a bind is valid to attempt. Served in a
+// safeGo goroutine so the main TCP ListenAndServe still blocks Start().
+func (s *Server) startMCPListener() error {
+    addr := fmt.Sprintf("%s:%d", s.cfg.Config.MCP.Host, s.cfg.Config.MCP.Port)
+    ln, err := net.Listen("tcp", addr)
+    if err != nil {
+        return fmt.Errorf("listen tcp %s: %w", addr, err)
+    }
+    s.mcpListener = ln
+    mcpMux := http.NewServeMux()
+    s.mcpHandler.RegisterRoutesMCPOnly(mcpMux, s.mcpGate)
+    s.mcpServer = &http.Server{
+        Handler:           mcpMux,
+        ReadTimeout:       30 * time.Second,
+        ReadHeaderTimeout: 10 * time.Second,
+        WriteTimeout:      0, // MCP tool calls may stream / long-poll; no write deadline
+        IdleTimeout:       120 * time.Second,
+    }
+    slog.Info("dedicated MCP listener serving (security-domain isolated, MCP auth gate only)",
+        "addr", addr)
+    safego.Go("mcp_serve", func() {
+        if err := s.mcpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+            slog.Error("mcp serve error", "addr", addr, "error", err)
+        }
+    })
+    return nil
+}
+
 // serve runs httpServer.Serve on a listener. Used by the UDS path; the TCP
 // path keeps ListenAndServe for its built-in addr binding.
 func (s *Server) serve(ln net.Listener) error {
@@ -555,6 +642,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
     if s.otelShutdown != nil {
         if err := s.otelShutdown(ctx); err != nil {
             slog.Warn("otel shutdown error", "error", err)
+        }
+    }
+    // #118: drain the dedicated MCP listener BEFORE the main httpServer. MCP
+    // tool calls route through forwardToNode to fusion-mlx; draining MCP first
+    // lets those in-flight outbound calls complete before the main drain (and
+    // the subsequent autoStopLocal) cuts their upstream. Mirrors the F7
+    // ordering principle (drain dependents before the upstream they depend on).
+    // No-op when no dedicated listener is configured (shared-path MCP drains
+    // with the main httpServer).
+    if s.mcpServer != nil {
+        if merr := s.mcpServer.Shutdown(ctx); merr != nil {
+            slog.Warn("mcp listener shutdown error", "error", merr)
         }
     }
     err := s.httpServer.Shutdown(ctx)

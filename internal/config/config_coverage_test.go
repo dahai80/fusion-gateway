@@ -842,3 +842,71 @@ routing:
     }
     t.Logf("invalid reload rejected, snapshot stays at version=%d", live.Version)
 }
+
+// #118: MCP validation guards. An enabled MCP with no credential (mcp.token AND
+// auth.master_key both empty) must fail config load — MCP routes must not be
+// anonymously reachable. An enabled dedicated listener (listen_enabled=true)
+// must have host + valid port.
+func TestValidate_MCPEnabled_NoCredential_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = true
+    cfg.MCP.Token = ""
+    cfg.Auth.MasterKey = ""
+    if err := validate(&cfg); err == nil {
+        t.Fatal("enabled MCP with no credential (token + master_key empty) must be rejected (fail-closed)")
+    }
+}
+
+func TestValidate_MCPEnabled_WithToken_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = true
+    cfg.MCP.Token = "mcp-secret"
+    cfg.Auth.MasterKey = ""
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("enabled MCP with mcp.token set must be accepted: %v", err)
+    }
+}
+
+func TestValidate_MCPEnabled_WithMasterKey_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = true
+    cfg.MCP.Token = ""
+    cfg.Auth.MasterKey = "master-secret"
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("enabled MCP with auth.master_key fallback must be accepted: %v", err)
+    }
+}
+
+func TestValidate_MCPListenEnabled_NoHost_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = true
+    cfg.MCP.Token = "mcp-secret"
+    cfg.MCP.ListenEnabled = true
+    cfg.MCP.Host = ""
+    cfg.MCP.Port = 11446
+    if err := validate(&cfg); err == nil {
+        t.Fatal("listen_enabled=true with empty host must be rejected")
+    }
+}
+
+func TestValidate_MCPListenEnabled_BadPort_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = true
+    cfg.MCP.Token = "mcp-secret"
+    cfg.MCP.ListenEnabled = true
+    cfg.MCP.Host = "127.0.0.1"
+    cfg.MCP.Port = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("listen_enabled=true with port<=0 must be rejected")
+    }
+}
+
+func TestValidate_MCPDisabled_NoCredential_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MCP.Enabled = false
+    cfg.MCP.Token = ""
+    cfg.Auth.MasterKey = ""
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("disabled MCP with no credential must be accepted: %v", err)
+    }
+}
