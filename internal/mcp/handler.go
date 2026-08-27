@@ -34,6 +34,36 @@ func (h *Handler) RegisterRoutesWithMiddleware(mux *http.ServeMux, wrap func(htt
 	h.register(mux, wrap)
 }
 
+// RegisterRoutesWithGate registers MCP routes on the SHARED main mux, layered as:
+// shared withMiddleware chain (rate limit, budget, observability) THEN the MCP
+// auth gate. The MCP gate is applied AFTER the shared chain so the main-chain
+// context (request id, principal) is present, but the gate's credential check
+// is independent of auth.enabled — MCP stays locked even when the main chain is
+// open (auth.enabled=false). #118 shared-listener path.
+func (h *Handler) RegisterRoutesWithGate(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc, gate func(http.Handler) http.Handler) {
+	h.register(mux, func(hf http.HandlerFunc) http.HandlerFunc {
+		wrapped := hf
+		if wrap != nil {
+			wrapped = wrap(wrapped)
+		}
+		return func(w http.ResponseWriter, r *http.Request) {
+			gate(http.Handler(wrapped)).ServeHTTP(w, r)
+		}
+	})
+}
+
+// RegisterRoutesMCPOnly registers MCP routes with the MCP auth gate as the SOLE
+// middleware (no shared chain). Used by the dedicated MCP listener (#118) which
+// is security-domain-isolated from the main :11432 mux — it does not need the
+// main rate-limiter/budget/observability chain (those are inference concerns).
+func (h *Handler) RegisterRoutesMCPOnly(mux *http.ServeMux, gate func(http.Handler) http.Handler) {
+	h.register(mux, func(hf http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			gate(http.Handler(hf)).ServeHTTP(w, r)
+		}
+	})
+}
+
 func (h *Handler) register(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	regs := []struct {
 		path string

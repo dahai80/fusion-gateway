@@ -581,9 +581,21 @@ type StoreConfig struct {
 }
 
 type MCPConfig struct {
-    Enabled     bool  `mapstructure:"enabled"`
-    Host        string `mapstructure:"host"`
-    Port        int    `mapstructure:"port"`
+    Enabled bool `mapstructure:"enabled"`
+    // #118: Host/Port bind a dedicated MCP HTTP listener (security-domain
+    // isolation from the main :11432 mux). Previously these fields were logged
+    // by mcp.Start() but never bound — dead config. ListenEnabled gates whether
+    // the dedicated listener starts; false (default) keeps MCP on the shared
+    // main mux + the MCP auth gate below. When true, Host/Port must be set.
+    ListenEnabled bool   `mapstructure:"listen_enabled"`
+    Host          string `mapstructure:"host"`
+    Port          int    `mapstructure:"port"`
+    // Token is the MCP-specific bearer credential. The MCP auth gate requires
+    // it independent of the main auth chain, so auth.enabled=false does NOT open
+    // MCP. Empty Token falls back to the master_key (admin-equivalent). If both
+    // Token and master_key are empty with MCP enabled, the listener refuses to
+    // start (fail-closed) — MCP routes must not be anonymously reachable.
+    Token       string `mapstructure:"token"`
     TokenBudget int64  `mapstructure:"token_budget"`
     MaxRequests int    `mapstructure:"max_requests"`
     NodePort    int    `mapstructure:"node_port"`
@@ -974,6 +986,27 @@ func validate(cfg *Config) error {
                 "base_url", backend.BaseURL,
                 "note", "base_url is a dummy host; transport dials the unix socket",
             )
+        }
+    }
+
+    // #118: MCP dedicated-listener + auth gate validation. When MCP is enabled
+    // with a dedicated listener, Host/Port must be set (the listener must bind
+    // somewhere). When MCP is enabled at all, an MCP credential must exist —
+    // either mcp.token or auth.master_key — so the MCP auth gate can enforce
+    // access independent of the main auth chain (auth.enabled=false must NOT
+    // open MCP). Fail-closed: an enabled MCP with no credential is rejected at
+    // config load, not silently exposed.
+    if cfg.MCP.Enabled {
+        if cfg.MCP.ListenEnabled {
+            if cfg.MCP.Host == "" {
+                return fmt.Errorf("mcp.host must be set when mcp.listen_enabled is true (dedicated MCP listener bind address)")
+            }
+            if cfg.MCP.Port <= 0 || cfg.MCP.Port > 65535 {
+                return fmt.Errorf("mcp.port must be in (0,65535] when mcp.listen_enabled is true, got %d", cfg.MCP.Port)
+            }
+        }
+        if cfg.MCP.Token == "" && cfg.Auth.MasterKey == "" {
+            return fmt.Errorf("mcp is enabled but has no credential: set mcp.token or auth.master_key so the MCP auth gate can enforce access (auth.enabled=false must not open MCP)")
         }
     }
 

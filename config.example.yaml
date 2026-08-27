@@ -372,3 +372,26 @@ store:
         password: ""                   # Redis password
         db: 0                          # Redis database number
         pool_size: 10                  # Connection pool size
+
+# #118: MCP cluster gateway — security-domain isolation + independent auth gate.
+# When enabled, MCP routes (/mcp/v1/call, /mcp/v1/tools, etc.) require an MCP
+# credential INDEPENDENT of the main auth chain, so auth.enabled=false does NOT
+# open MCP. The credential is mcp.token (preferred, dedicated) falling back to
+# auth.master_key; if both are empty with mcp.enabled=true, config load fails
+# (fail-closed — MCP routes must not be anonymously reachable).
+#
+# listen_enabled (default false): start a DEDICATED MCP HTTP listener on
+# host:port, serving MCP routes under the MCP auth gate as the sole middleware
+# (isolated from the main :11432 mux). When false, MCP routes stay on the shared
+# main mux under withMiddleware + the MCP auth gate layered on top. The
+# dedicated listener drains before the main server on shutdown (F7 ordering).
+mcp:
+    enabled: false                      # Master switch for the MCP cluster gateway
+    listen_enabled: false               # true = dedicated listener on host:port (security-domain isolation); false = MCP on shared main mux
+    host: "127.0.0.1"                   # Dedicated MCP listener bind address (only used when listen_enabled=true)
+    port: 11446                         # Dedicated MCP listener port (only used when listen_enabled=true)
+    token: ""                           # MCP-specific bearer token (Authorization: Bearer <token>); empty falls back to auth.master_key
+    token_budget: 10000000              # Total token budget across all MCP tool calls
+    max_requests: 10000                 # Max concurrent/in-flight MCP requests
+    node_port: 11445                    # Port dialed for remote MCP node execution (forwardToNode upstream)
+    local_port: 9000                    # Port dialed for local MCP tool execution (forwardToNode localhost upstream)
