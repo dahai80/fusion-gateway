@@ -143,6 +143,7 @@ func newTestServer() *Server {
 
     oidcAuth, _ := middleware.NewOIDCAuthenticator(middleware.OIDCConfig{Enabled: false})
 
+    shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
     s := &Server{
         cfg:               cfg,
         hwCollector:       hwCollector,
@@ -155,6 +156,9 @@ func newTestServer() *Server {
         semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
         connectorRegistry: newConnectorRegistry(cfg),
         oidcAuth:          oidcAuth,
+        rateLimiter:       middleware.NewRateLimiter(),
+        shutdownCtx:       shutdownCtx,
+        shutdownCancel:    shutdownCancel,
     }
     s.buildMiddlewareChain()
     return s
@@ -2218,6 +2222,9 @@ func (m *mockClusterDiscovery) SelectNodeByPlatform(_, _ string) (string, error)
 func (m *mockClusterDiscovery) HealthyNodesByModel(_ string) int {
     return 0
 }
+
+func (m *mockClusterDiscovery) MarkNodeBreakerOpen(_ string)  {}
+func (m *mockClusterDiscovery) MarkNodeBreakerClosed(_ string) {}
 
 func (m *mockClusterDiscovery) SelectNodeByModel(_, _ string, _ int) (string, error) {
     return "", fmt.Errorf("no healthy nodes serving model")
@@ -6274,6 +6281,9 @@ func (m *mockClusterDiscoveryWithNode) SelectNodeByModel(_, _ string, _ int) (st
     }
     return "", fmt.Errorf("no nodes serving model")
 }
+
+func (m *mockClusterDiscoveryWithNode) MarkNodeBreakerOpen(_ string) {}
+func (m *mockClusterDiscoveryWithNode) MarkNodeBreakerClosed(_ string) {}
 
 type mockStore struct {
     store.Store

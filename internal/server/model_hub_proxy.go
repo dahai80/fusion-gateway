@@ -47,6 +47,9 @@ func (s *Server) handleModelHubProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Debug("model-hub proxy forwarding", "method", r.Method, "path", r.URL.Path)
+	// E5 (audit): cap the proxied body so an authenticated client cannot stream
+	// an unbounded body into the model-hub admin API (DoS / OOM).
+	r = s.wrapProxyBody(w, r)
 	hub.ReverseProxy().ServeHTTP(w, r)
 }
 
@@ -78,6 +81,9 @@ func (s *Server) handleMLXAdminProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Debug("fusion-mlx admin proxy forwarding", "method", r.Method, "path", r.URL.Path)
+	// E5 (audit): cap the proxied body — fine-tune/admin paths are admin-gated
+	// but an unbounded body still OOMs fusion-mlx's single process.
+	r = s.wrapProxyBody(w, r)
 	mlx.ReverseProxy().ServeHTTP(w, r)
 }
 
@@ -94,5 +100,8 @@ func (s *Server) handleMLXStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Debug("fusion-mlx stats proxy forwarding", "method", r.Method, "path", r.URL.Path)
+	// E5 (audit): cap the proxied body even on /stats (GET, but defense in
+	// depth — a POST with a body should not be unbounded).
+	r = s.wrapProxyBody(w, r)
 	mlx.ReverseProxy().ServeHTTP(w, r)
 }

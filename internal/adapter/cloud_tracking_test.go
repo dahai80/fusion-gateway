@@ -154,3 +154,52 @@ func TestEI6_WrapEmbeddingRerankBalanced(t *testing.T) {
         t.Fatalf("EI6: cloud in-flight must return to 0 after Embedding+Rerank, got %d (slot leak)", got)
     }
 }
+
+// mockMessagesProvider is a Provider that ALSO implements MessagesProvider
+// (the native Anthropic passthrough interface), standing in for
+// bedrock/vertex/foundry in the H2 guard.
+type mockMessagesProvider struct {
+    mockProvider
+}
+
+func (m *mockMessagesProvider) Messages(ctx context.Context, req *AnthropicRequest) (*AnthropicResponse, error) {
+    return &AnthropicResponse{}, nil
+}
+func (m *mockMessagesProvider) StreamMessages(ctx context.Context, req *AnthropicRequest) (<-chan AnthropicStreamEvent, error) {
+    ch := make(chan AnthropicStreamEvent)
+    close(ch)
+    return ch, nil
+}
+
+// TestH2_WrappedMessagesProvider_Unwraps guards audit H2: a cloud provider
+// implementing MessagesProvider, when wrapped by WrapCloudTracking, must STILL
+// be resolvable as a MessagesProvider via the Unwrap chain. Before the fix,
+// cloudTrackingProvider did not expose Unwrap and did not redeclare
+// MessagesProvider, so the /v1/messages handler's type assertion failed and
+// silently routed Claude requests through the lossy OpenAI conversion path
+// (dropping tool_use/thinking SSE events). Revert Unwrap() → this assertion
+// fails.
+func TestH2_WrappedMessagesProvider_Unwraps(t *testing.T) {
+    signed := &mockMessagesProvider{mockProvider: mockProvider{name: "bedrock"}}
+    wrapped := WrapCloudTracking(signed)
+
+    // The wrapped value itself must NOT satisfy MessagesProvider directly
+    // (that is the whole bug — the decorator does not redeclare it).
+    if _, ok := wrapped.(MessagesProvider); ok {
+        t.Fatalf("H2 premise violated: cloudTrackingProvider must NOT directly implement MessagesProvider")
+    }
+
+    // It must expose Unwrap, and the unwrapped provider must satisfy
+    // MessagesProvider — this is what the /v1/messages handler relies on.
+    unwrapper, ok := wrapped.(interface{ Unwrap() Provider })
+    if !ok {
+        t.Fatalf("H2: cloudTrackingProvider must expose Unwrap() so MessagesProvider resolves through the decorator chain")
+    }
+    inner := unwrapper.Unwrap()
+    if inner == nil {
+        t.Fatalf("H2: Unwrap() returned nil")
+    }
+    if _, ok := inner.(MessagesProvider); !ok {
+        t.Fatalf("H2: unwrapped provider must satisfy MessagesProvider (bedrock/vertex/foundry native Anthropic passthrough), got %T", inner)
+    }
+}

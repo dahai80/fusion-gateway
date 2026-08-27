@@ -2,6 +2,7 @@ package cache
 
 import (
     "container/list"
+    "context"
     "crypto/sha256"
     "encoding/json"
     "fmt"
@@ -10,7 +11,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 )
 
 type entry struct {
@@ -30,6 +31,20 @@ type Cache struct {
     usedBytes  int64
     hits       int64
     misses     int64
+    // R1: lifecycle.Worker wrapping the eviction goroutine so Server.Shutdown
+    // can Stop (cancel + join) it. nil when the cache is disabled.
+    evictWorker *lifecycle.Worker
+}
+
+// Close stops the background eviction goroutine (R1). Idempotent; safe to call
+// from Server.Shutdown. Before R1 the eviction ticker ran forever and leaked
+// on shutdown, continuing to tick against a torn-down store.
+func (c *Cache) Close() {
+    if c == nil || c.evictWorker == nil {
+        return
+    }
+    c.evictWorker.Stop()
+    c.evictWorker = nil
 }
 
 func New(cfg config.CacheConfig) *Cache {
@@ -60,8 +75,10 @@ func New(cfg config.CacheConfig) *Cache {
         maxBytes:   maxBytes,
     }
 
-    // M2 fix: use safeGo for panic recovery on background goroutines
-    safego.Go("cache_evict_expired", c.evictExpired)
+    // R1: launch the eviction goroutine through lifecycle.Worker so Shutdown can
+    // Stop (cancel + join) it instead of leaking. H3 panic-restart is inherited
+    // from the Worker; the loop honors ctx.Done() (added R1).
+    c.evictWorker = lifecycle.Start(context.Background(), "cache_evict_expired", c.evictExpired)
     return c
 }
 
@@ -155,14 +172,20 @@ func (c *Cache) removeElement(elem *list.Element) {
     c.usedBytes -= int64(e.size)
 }
 
-func (c *Cache) evictExpired() {
+func (c *Cache) evictExpired(ctx context.Context) {
     if c == nil {
         return
     }
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
 
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            // R1: honor shutdown so the eviction goroutine exits and Shutdown joins it.
+            return
+        case <-ticker.C:
+        }
         // P1 fix: collect expired keys under RLock (fast), then delete under Lock (short)
         c.mu.RLock()
         now := time.Now()

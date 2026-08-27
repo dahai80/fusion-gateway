@@ -1452,3 +1452,114 @@ func TestDiscovery_MasterMode_NoHealthyNodes_ModelSyncNoOp(t *testing.T) {
         }
     }
 }
+
+// TestR8_MarkNodeBreakerOpen_NotSelectable (R8): MarkNodeBreakerOpen sets the
+// breaker-bypassed flag so a healthy node is no longer selectable by any
+// SelectNode* call and drops out of HealthyNodes(). This is the loop half of
+// the R8 coordination — the router pushes open, Discovery immediately stops
+// routing to it, so Discovery and the router agree (no drift).
+func TestR8_MarkNodeBreakerOpen_NotSelectable(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-2", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+    n1, _ := d.GetNode("node-1")
+    n2, _ := d.GetNode("node-2")
+    n1.markHealthy()
+    n2.markHealthy()
+    // node-2 serves qwen3.
+    n2.mu.Lock()
+    n2.models = []string{"qwen3"}
+    n2.modelsReady = true
+    n2.mu.Unlock()
+
+    // Baseline: 2 healthy, node-2 selectable for qwen3.
+    if got := d.HealthyNodes(); got != 2 {
+        t.Fatalf("baseline: expected 2 healthy nodes, got %d", got)
+    }
+    sel, err := d.SelectNodeByModel("least-connections", "qwen3", 0)
+    if err != nil || sel.ID != "node-2" {
+        t.Fatalf("baseline: expected node-2 selectable for qwen3, got %v %v", sel, err)
+    }
+
+    // Router pushes breaker-open for node-2 (the only qwen3 server).
+    d.MarkNodeBreakerOpen("node-2")
+
+    // Drift-gone check: Discovery now agrees the node is not routable.
+    if got := d.HealthyNodes(); got != 1 {
+        t.Errorf("after breaker-open: expected HealthyNodes=1 (node-2 bypassed), got %d", got)
+    }
+    if n2.BreakerBypassed() != true {
+        t.Errorf("expected node-2 BreakerBypassed=true after MarkNodeBreakerOpen")
+    }
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err == nil {
+        t.Errorf("expected SelectNodeByModel to refuse node-2 (breaker-bypassed), got a node")
+    }
+    // node-1 (not bypassed, but does not serve qwen3) is still selectable as a generic node.
+    if got := d.HealthyNodesByModel("qwen3"); got != 0 {
+        t.Errorf("expected HealthyNodesByModel(qwen3)=0 (node-2 bypassed), got %d", got)
+    }
+}
+
+// TestR8_MarkNodeBreakerClosed_SelectableAgain (R8): after the breaker recovers,
+// MarkNodeBreakerClosed clears the bypass flag and the node is selectable again.
+// Completes the open→closed loop so a recovered node resumes serving.
+func TestR8_MarkNodeBreakerClosed_SelectableAgain(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+    n1.mu.Lock()
+    n1.models = []string{"qwen3"}
+    n1.modelsReady = true
+    n1.mu.Unlock()
+
+    d.MarkNodeBreakerOpen("node-1")
+    if got := d.HealthyNodes(); got != 0 {
+        t.Fatalf("after open: expected 0 selectable, got %d", got)
+    }
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err == nil {
+        t.Fatal("expected SelectNodeByModel to refuse node-1 while breaker-bypassed")
+    }
+
+    // Router pushes breaker-closed on recovery.
+    d.MarkNodeBreakerClosed("node-1")
+
+    if n1.BreakerBypassed() != false {
+        t.Errorf("expected node-1 BreakerBypassed=false after MarkNodeBreakerClosed")
+    }
+    if got := d.HealthyNodes(); got != 1 {
+        t.Errorf("after closed: expected HealthyNodes=1 (recovered), got %d", got)
+    }
+    sel, err := d.SelectNodeByModel("least-connections", "qwen3", 0)
+    if err != nil || sel.ID != "node-1" {
+        t.Errorf("expected node-1 selectable again after recovery, got %v %v", sel, err)
+    }
+}
+
+// TestR8_MarkNodeBreakerOpen_UnknownNodeNoOp (R8): pushing open/closed for an
+// unknown nodeID is a safe no-op (Debug log), never panics or creates a phantom
+// node. Guards the adapter boundary when the router races a node removal.
+func TestR8_MarkNodeBreakerOpen_UnknownNodeNoOp(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    // Unknown node — no panic, no phantom, healthy count unchanged.
+    d.MarkNodeBreakerOpen("ghost-node")
+    d.MarkNodeBreakerClosed("ghost-node")
+    if got := d.HealthyNodes(); got != 0 {
+        t.Errorf("unknown-node push must not change HealthyNodes, got %d", got)
+    }
+    if _, ok := d.GetNode("ghost-node"); ok {
+        t.Errorf("unknown-node push must not create a phantom node")
+    }
+}
+

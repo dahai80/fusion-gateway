@@ -634,7 +634,9 @@ func (p *FusionMLXProvider) StartIdleGCTimer(stopCh <-chan struct{}) {
         checkInterval = 10 * time.Second
     }
 
-    safego.Go("fusion_mlx_idle_gc", func() {
+    // H3: long-lived idle-GC ticker — restart on panic so a single panic does
+    // not permanently stop idle memory reclamation (UMA grows until restart).
+    safego.GoRestart("fusion_mlx_idle_gc", func() {
         ticker := time.NewTicker(checkInterval)
         defer ticker.Stop()
 

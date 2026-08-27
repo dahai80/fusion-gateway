@@ -1,6 +1,7 @@
 package cache
 
 import (
+    "context"
     "testing"
     "time"
 
@@ -88,7 +89,7 @@ func TestCache_EvictExpired_KeepsValidEntries(t *testing.T) {
 
 func TestCache_EvictExpired_NilReceiver(t *testing.T) {
     var c *Cache
-    c.evictExpired()
+    c.evictExpired(context.Background())
 }
 
 func TestCache_New_DefaultMaxEntries(t *testing.T) {

@@ -1223,7 +1223,15 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
                     if v == "" || isMaskedValue(v) {
                         continue
                     }
-                    users[k] = v
+                    // H8: hash the password BEFORE persisting so config.yaml
+                    // never stores plaintext. Previously the raw password was
+                    // written and only bcrypt'd at next startup, leaving it
+                    // plaintext on disk (and in any crash/replay) until restart.
+                    hashed, err := HashAdminPasswordIfPlaintext(v)
+                    if err != nil {
+                        return fmt.Errorf("hash password for user %q: %w", k, err)
+                    }
+                    users[k] = hashed
                 }
                 sec["users"] = users
             }
@@ -1239,6 +1247,24 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
         if raw, ok := sec["users"].(map[string]interface{}); ok {
             for k := range raw {
                 maskedUsers[k] = "********"
+            }
+            // H8: apply the rotated admin credentials to the live AdminAuth so
+            // the new password/jwt_secret take effect immediately — not only at
+            // the next process restart. Without this, a security rotation via
+            // the admin panel is silently ineffective until restart.
+            reloadedUsers := make(map[string]string, len(raw))
+            for k, v := range raw {
+                if hv, ok := v.(string); ok {
+                    reloadedUsers[k] = hv
+                }
+            }
+            if h.auth != nil && len(reloadedUsers) > 0 {
+                h.auth.ReloadUsers(reloadedUsers)
+            }
+        }
+        if h.auth != nil {
+            if newSecret := getString(sec, "jwt_secret"); newSecret != "" && !isMaskedValue(newSecret) {
+                h.auth.ReloadSecret(newSecret)
             }
         }
         writeJSON(w, http.StatusOK, adminConfigResponse{

@@ -53,9 +53,15 @@ type StreamBufferStore struct {
     maxEvents int
     maxBytes  int
     ttl      time.Duration
+    // maxEntries caps the number of concurrent buffered streams (audit R7). 0 =
+    // unlimited. Open evicts the oldest entry (oldest createdAt) when the cap is
+    // reached so a concurrent-SSE burst cannot grow the map to maxEntries ×
+    // maxBytes before the periodic TTL reaper ticks. The newest live streams
+    // stay resumable; the oldest (likely finalized/abandoned) is dropped.
+    maxEntries int
 }
 
-func NewStreamBufferStore(maxEvents, maxBytes int, ttl time.Duration) *StreamBufferStore {
+func NewStreamBufferStore(maxEvents, maxBytes, maxEntries int, ttl time.Duration) *StreamBufferStore {
     if maxEvents <= 0 {
         maxEvents = 256
     }
@@ -66,10 +72,11 @@ func NewStreamBufferStore(maxEvents, maxBytes int, ttl time.Duration) *StreamBuf
         ttl = 10 * time.Minute
     }
     return &StreamBufferStore{
-        buffers:   make(map[string]*streamBufferEntry),
-        maxEvents: maxEvents,
-        maxBytes:  maxBytes,
-        ttl:       ttl,
+        buffers:    make(map[string]*streamBufferEntry),
+        maxEvents:  maxEvents,
+        maxBytes:   maxBytes,
+        ttl:        ttl,
+        maxEntries: maxEntries,
     }
 }
 
@@ -92,9 +99,32 @@ func (s *StreamBufferStore) Open(sid string) *streamBufferEntry {
     if old, ok := s.buffers[sid]; ok {
         slog.Warn("stream buffer: reusing sid, resetting stale entry", "sid", sid, "old_frames", len(old.frames))
     }
+    // R7: enforce the global entries cap. When the map is at/over the cap and
+    // this is a NEW sid (not a reuse above), evict the oldest entry (oldest
+    // createdAt) before inserting — the periodic TTL reaper is tick-based, not
+    // threshold-triggered, so a concurrent-SSE burst would otherwise grow the
+    // map to maxEntries × maxBytes (1 GiB at 1 MiB/entry) before the next tick.
+    // Evicting the oldest keeps the newest live streams resumable.
+    if s.maxEntries > 0 && len(s.buffers) >= s.maxEntries {
+        if _, exists := s.buffers[sid]; !exists {
+            var oldestSid string
+            var oldestAt time.Time
+            for bSid, b := range s.buffers {
+                if oldestSid == "" || b.createdAt.Before(oldestAt) {
+                    oldestSid = bSid
+                    oldestAt = b.createdAt
+                }
+            }
+            if oldestSid != "" {
+                delete(s.buffers, oldestSid)
+                slog.Warn("stream buffer: entries cap reached, evicted oldest entry",
+                    "evicted_sid", oldestSid, "cap", s.maxEntries, "opening_sid", sid)
+            }
+        }
+    }
     s.buffers[sid] = e
     s.mu.Unlock()
-    slog.Debug("stream buffer: opened", "sid", sid, "max_events", s.maxEvents, "max_bytes", s.maxBytes)
+    slog.Debug("stream buffer: opened", "sid", sid, "max_events", s.maxEvents, "max_bytes", s.maxBytes, "max_entries", s.maxEntries)
     return e
 }
 

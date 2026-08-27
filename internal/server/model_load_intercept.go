@@ -41,6 +41,8 @@ func (s *Server) handleModelLoadUnload(w http.ResponseWriter, r *http.Request) {
     slog.Info("forwarding model serve request to model-hub",
         "model", modelID, "original_action", action, "target_path", r.URL.Path)
 
+    // E5 (audit): cap the proxied body before forwarding to model-hub.
+    r = s.wrapProxyBody(w, r)
     hub.ReverseProxy().ServeHTTP(w, r)
 }
 

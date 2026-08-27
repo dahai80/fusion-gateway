@@ -106,6 +106,19 @@ type StreamChunk struct {
     Choices   []ChoiceDelta  `json:"choices"`
     Usage     *UsageResponse `json:"usage,omitempty"`
     Degraded  bool           `json:"degraded,omitempty"`
+    // E1 (audit): Raw carries the verbatim upstream SSE data bytes for
+    // OpenAI-wire-format providers (fusion-mlx, openai_compatible). When set,
+    // the server forward loop emits Raw directly instead of re-marshaling the
+    // struct — skipping the json.Marshal the audit found burning 1-2 cores of
+    // pure (de)serialization at ~50 concurrent long streams. The struct fields
+    // above are still populated (parseSSEStream unmarshals into the struct for
+    // usage/ID/model tracking AND sets Raw), so observability + token counting
+    // are unchanged. omitempty keeps a freshly-built chunk (no Raw, e.g. the
+    // synthetic usage chunk) marshaling exactly as before. Anthropic-format
+    // providers build converted chunks (Anthropic→OpenAI) so they leave Raw
+    // nil and the marshal path is unchanged — passthrough is only for paths
+    // where the wire format is already OpenAI chunks.
+    Raw json.RawMessage `json:"-"`
 }
 
 type ChoiceDelta struct {

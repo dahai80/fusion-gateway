@@ -1,6 +1,7 @@
 package server
 
 import (
+    "context"
     "fmt"
     "log/slog"
     "net/http"
@@ -86,14 +87,20 @@ func (s *Server) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 // the stream's own defer (same path as an explicit cancel-endpoint hit).
 // Interval from routing.agent_tasks.reaper_interval; ttl<=0 makes ReapExpired a
 // no-op so this loop runs harmlessly.
-func (s *Server) reapExpiredTasks() {
+func (s *Server) reapExpiredTasks(ctx context.Context) {
     interval := s.cfg.Config.Routing.AgentTasks.ReaperInterval
     if interval <= 0 {
         interval = 5 * time.Minute
     }
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            // R1: honor shutdown so the reaper exits and Shutdown joins it.
+            return
+        case <-ticker.C:
+        }
         s.taskRegistry.ReapExpired(time.Now())
     }
 }
@@ -102,7 +109,7 @@ func (s *Server) reapExpiredTasks() {
 // (issue #116). The TTL is the reconnect window: a buffer past it can no longer
 // be resumed and is dropped so memory does not grow unbounded under churn.
 // No-op when resume is disabled (store is nil).
-func (s *Server) reapExpiredStreamBuffers() {
+func (s *Server) reapExpiredStreamBuffers(ctx context.Context) {
     if s.streamBuffers == nil {
         return
     }
@@ -117,7 +124,13 @@ func (s *Server) reapExpiredStreamBuffers() {
     }
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            // R1: honor shutdown so the reaper exits and Shutdown joins it.
+            return
+        case <-ticker.C:
+        }
         s.streamBuffers.ReapExpired(time.Now())
     }
 }

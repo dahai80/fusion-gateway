@@ -1,6 +1,7 @@
 package server
 
 import (
+    "context"
     "crypto/rand"
     "encoding/hex"
     "encoding/json"
@@ -157,10 +158,16 @@ func (s *Server) handleConnectionCRUD(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-func (s *Server) evictOAuth2States() {
+func (s *Server) evictOAuth2States(ctx context.Context) {
     ticker := time.NewTicker(10 * time.Minute)
     defer ticker.Stop()
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            // R1: honor shutdown so the evictor exits and Shutdown joins it.
+            return
+        case <-ticker.C:
+        }
         s.oauth2StatesMu.Lock()
         now := time.Now()
         for state, entry := range s.oauth2States {

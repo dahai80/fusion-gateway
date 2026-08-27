@@ -62,8 +62,16 @@ func NewRouterLightClassifier(cfg config.IntentClassifierConfig) *RouterLightCla
     if timeout <= 0 {
         timeout = 2 * time.Second
     }
+    // H4 (audit P1): the intent classifier runs on the Decide hot path (P-1
+    // semantic intent) for every request when enabled. A bare &http.Client{}
+    // inherits http.DefaultTransport (MaxConnsPerHost=0 = unlimited) — under
+    // burst load this opens unbounded connections to the classifier endpoint.
+    // Route through TransportForBackend so the per-host FD cap applies.
     return &RouterLightClassifier{
-        httpClient: &http.Client{Timeout: timeout},
+        httpClient: &http.Client{
+            Timeout:   timeout,
+            Transport: adapter.TransportForBackend(config.BackendConfig{BaseURL: endpoint}),
+        },
         endpoint:   strings.TrimRight(endpoint, "/"),
         baseModel:  baseModel,
         adapter:    cfg.Adapter,

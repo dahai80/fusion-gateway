@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -40,6 +42,15 @@ type BedrockProvider struct {
 	accessKey  string
 	secretKey  string
 	sessionTok string
+	// E6 (audit): AWS SigV4 signing key is scope-stable — deriveSigningKey
+	// for the same (dateStamp, region, service) yields an identical key, so
+	// re-deriving per request burns 4 hmacSHA256 calls of CPU for nothing.
+	// The audit found deriveSigningKey recomputed on every request, competing
+	// with local MLX inference for performance cores. Cache the derived key
+	// by dateStamp (scope = dateStamp/region/bedrock/aws4_request); a day has
+	// one scope, so ~one derivation per credential per day, not per request.
+	signKeyCache   map[string][]byte
+	signKeyCacheMu sync.Mutex
 }
 
 func NewBedrockProvider(name string, backendCfg config.BackendConfig) *BedrockProvider {
@@ -59,13 +70,14 @@ func NewBedrockProvider(name string, backendCfg config.BackendConfig) *BedrockPr
 		timeout = 120 * time.Second
 	}
 	return &BedrockProvider{
-		name:       name,
-		region:     region,
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
-		accessKey:  os.Getenv("AWS_ACCESS_KEY_ID"),
-		secretKey:  os.Getenv("AWS_SECRET_ACCESS_KEY"),
-		sessionTok: os.Getenv("AWS_SESSION_TOKEN"),
+		name:         name,
+		region:       region,
+		baseURL:      baseURL,
+		httpClient:   &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+		accessKey:    os.Getenv("AWS_ACCESS_KEY_ID"),
+		secretKey:    os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		sessionTok:   os.Getenv("AWS_SESSION_TOKEN"),
+		signKeyCache: make(map[string][]byte),
 	}
 }
 
@@ -362,10 +374,26 @@ func (p *BedrockProvider) signSigV4(req *http.Request, body []byte) error {
 }
 
 func (p *BedrockProvider) deriveSigningKey(dateStamp string) []byte {
+	// E6 (audit): SigV4 signing key is scope-stable — same (dateStamp, region,
+	// service) yields an identical key. Cache by dateStamp so the 4 hmacSHA256
+	// derivations run ~once per day per credential, not per request. Per the
+	// audit, per-request derivation burned CPU competing with local MLX
+	// inference for performance cores under cloud burst traffic.
+	p.signKeyCacheMu.Lock()
+	if key, ok := p.signKeyCache[dateStamp]; ok {
+		p.signKeyCacheMu.Unlock()
+		return key
+	}
+	p.signKeyCacheMu.Unlock()
 	kDate := hmacSHA256([]byte("AWS4"+p.secretKey), []byte(dateStamp))
 	kRegion := hmacSHA256(kDate, []byte(p.region))
 	kService := hmacSHA256(kRegion, []byte("bedrock"))
-	return hmacSHA256(kService, []byte("aws4_request"))
+	key := hmacSHA256(kService, []byte("aws4_request"))
+	p.signKeyCacheMu.Lock()
+	p.signKeyCache[dateStamp] = key
+	p.signKeyCacheMu.Unlock()
+	slog.Debug("bedrock derived new signing key for date scope", "date_stamp", dateStamp)
+	return key
 }
 
 func buildCanonicalHeaders(req *http.Request, host string) (signed, canonical string) {
@@ -381,14 +409,10 @@ func buildCanonicalHeaders(req *http.Request, host string) (signed, canonical st
 	for k := range headers {
 		keys = append(keys, k)
 	}
-	// stable sorted order
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
+	// E6 (audit): replace O(n²) bubble sort with sort.Strings. The header set
+	// is tiny (≤4), so this is a clarity fix, not a perf one — but the manual
+	// bubble was a copy-paste hazard flagged alongside the signing-key cache.
+	sort.Strings(keys)
 	var sb strings.Builder
 	var sh strings.Builder
 	for i, k := range keys {

@@ -2,6 +2,7 @@ package cache
 
 import (
     "context"
+    "sync"
     "testing"
     "time"
 
@@ -142,3 +143,59 @@ func TestRedisBackend_CloseIdempotent(t *testing.T) {
     backend.Close()
     backend.Close()
 }
+
+// TestE2_RedisBackend_CountersRaceFree (E2): hits/misses must be atomic.Int64,
+// NOT plain int64. Concurrent increments of the counters (as Get does on every
+// request goroutine) plus concurrent Stats() reads must be race-free under
+// `go test -race`. Before E2, r.hits++/r.misses++ on plain int64 was a data
+// race (torn counter, /metrics hit-rate corrupted) — same bug class as EI2.
+// This guard needs no live redis: it exercises the counter fields directly
+// (the only race surface), so it runs in CI without a redis instance.
+func TestE2_RedisBackend_CountersRaceFree(t *testing.T) {
+    // Zero-value RedisBackend: client is nil, but we never call Get (which
+    // needs the client) — we race the counter fields directly, mirroring what
+    // Get does (r.hits.Add(1) / r.misses.Add(1)) plus Stats() reads.
+    r := &RedisBackend{}
+
+    var wg sync.WaitGroup
+    // Writers: hammer recordHit/recordMiss — the REAL hot-path increments
+    // Get calls on every request goroutine. Reverting the fields to plain
+    // int64 makes these `r.hits++`/`r.misses++` read-modify-writes, which
+    // the race detector flags under this concurrency.
+    const writers = 8
+    const iters = 2000
+    for i := 0; i < writers; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for j := 0; j < iters; j++ {
+                r.recordHit()
+                r.recordMiss()
+            }
+        }()
+    }
+    // Concurrent readers: Stats() reads the counters while writers increment.
+    for i := 0; i < 4; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for j := 0; j < iters; j++ {
+                _ = r.StatsCounterSnapshot()
+            }
+        }()
+    }
+    wg.Wait()
+
+    // E2 atomicity: no increments lost. hits + misses must equal writers*iters
+    // each (all Add(1) accounted for). A torn plain-int64 counter would
+    // undercount under concurrency.
+    want := int64(writers * iters)
+    snap := r.StatsCounterSnapshot()
+    if snap.hits != want {
+        t.Errorf("E2: expected hits=%d, got %d (counter torn under concurrency — not atomic)", want, snap.hits)
+    }
+    if snap.misses != want {
+        t.Errorf("E2: expected misses=%d, got %d (counter torn under concurrency — not atomic)", want, snap.misses)
+    }
+}
+

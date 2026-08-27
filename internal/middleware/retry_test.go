@@ -134,36 +134,68 @@ func TestRetryChat_SucceedsOnSecondAttempt(t *testing.T) {
     }
 }
 
+// backoffBand asserts result lands in [center*(1-f), center*(1+f)] where f is
+// the retry jitter factor (±20%, H5). calculateBackoff now applies jitter, so
+// exact-equality checks no longer hold — the band is the correct invariant.
+func backoffBand(t *testing.T, result, center time.Duration, msg string) {
+    t.Helper()
+    const f = 0.20
+    lo := time.Duration(float64(center) * (1 - f))
+    hi := time.Duration(float64(center) * (1 + f))
+    if result < lo || result > hi {
+        t.Errorf("%s: backoff %v outside jitter band [%v,%v] (center %v)", msg, result, lo, hi, center)
+    }
+}
+
 func TestCalculateBackoff_ZeroInitial(t *testing.T) {
     result := calculateBackoff(0, 0, 0)
-    if result != time.Second {
-        t.Errorf("expected 1s default initial, got %v", result)
-    }
+    backoffBand(t, result, time.Second, "default initial=1s")
 }
 
 func TestCalculateBackoff_ZeroMax(t *testing.T) {
     result := calculateBackoff(0, 100*time.Millisecond, 0)
-    if result != 100*time.Millisecond {
-        t.Errorf("expected 100ms initial, got %v", result)
-    }
+    backoffBand(t, result, 100*time.Millisecond, "initial=100ms")
     cappedResult := calculateBackoff(10, 100*time.Millisecond, 0)
-    if cappedResult != 30*time.Second {
-        t.Errorf("expected 30s default max cap, got %v", cappedResult)
-    }
+    backoffBand(t, cappedResult, 30*time.Second, "default max cap=30s")
 }
 
 func TestCalculateBackoff_ExceedsMax(t *testing.T) {
     result := calculateBackoff(10, 1*time.Second, 5*time.Second)
-    if result != 5*time.Second {
-        t.Errorf("expected 5s max cap, got %v", result)
-    }
+    backoffBand(t, result, 5*time.Second, "max cap=5s")
 }
 
 func TestCalculateBackoff_Normal(t *testing.T) {
     result := calculateBackoff(2, 100*time.Millisecond, 10*time.Second)
-    expected := 400 * time.Millisecond
-    if result != expected {
-        t.Errorf("expected %v, got %v", expected, result)
+    backoffBand(t, result, 400*time.Millisecond, "2^2*100ms=400ms")
+}
+
+// TestH5_Backoff_JitteredNotFixed: H5 (audit P1) — the exponential backoff
+// must be jittered, not a pure initial*2^attempt. Without jitter, N clients
+// failing at the same instant align to identical backoff slots and retry in
+// synchronized bursts that reset a recovering engine's model load. Revert
+// calculateBackoff to return the raw exponential (no jitter.Duration call) and
+// every sample equals the fixed slot → distinct-values check trips.
+func TestH5_Backoff_JitteredNotFixed(t *testing.T) {
+    const initial = 100 * time.Millisecond
+    seen := map[time.Duration]struct{}{}
+    for i := 0; i < 100; i++ {
+        d := calculateBackoff(2, initial, 10*time.Second)
+        backoffBand(t, d, 400*time.Millisecond, "H5 backoff band")
+        seen[d] = struct{}{}
+    }
+    if len(seen) < 5 {
+        t.Fatalf("H5: backoff produced only %d distinct values over 100 calls — jitter missing, clients will herd on identical slots", len(seen))
+    }
+}
+
+// TestH5_Backoff_NeverExceedsMax: jitter is applied to the CAPPED value, so a
+// near-max slot cannot overshoot max. The hard ceiling survives the spread.
+func TestH5_Backoff_NeverExceedsMax(t *testing.T) {
+    const max = 5 * time.Second
+    for i := 0; i < 200; i++ {
+        if d := calculateBackoff(50, 1*time.Second, max); d > max {
+            t.Fatalf("H5: backoff %v exceeds max %v — jitter applied before cap, not after", d, max)
+        }
     }
 }
 

@@ -33,6 +33,11 @@ type ServerConfig struct {
     LogLevel                string          `mapstructure:"log_level"`
     GracefulShutdownTimeout int             `mapstructure:"graceful_shutdown_timeout"`
     MaxRequestBodySize      int64           `mapstructure:"max_request_body_size"`
+    // ProxyMaxBodySize caps request bodies on reverse-proxy paths (model-hub,
+    // fusion-mlx admin/fine-tune, /stats, model load/unload). 0 = default
+    // (maxProxyBodySize, 256 MiB). E5 (audit): proxy paths forwarded r.Body to
+    // httputil.ReverseProxy with no cap → unbounded body OOMs fusion-mlx.
+    ProxyMaxBodySize        int64           `mapstructure:"proxy_max_body_size"`
     EnablePProf             bool            `mapstructure:"enable_pprof"`
     TLS                     *TLSConfig      `mapstructure:"tls"`
     AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
@@ -304,6 +309,16 @@ type StreamConfig struct {
     ResumeMaxEvents int           `mapstructure:"resume_max_events"`
     ResumeMaxBytes  int           `mapstructure:"resume_max_bytes"`
     ResumeTTL       time.Duration `mapstructure:"resume_ttl"`
+    // ResumeMaxEntries is the GLOBAL cap on the number of concurrent stream
+    // buffers (audit R7). resume_max_events/bytes bound ONE stream's rolling
+    // window; this bounds how many streams can be buffered at once so a burst of
+    // 1000 concurrent resumable SSE does not grow the buffers map to 1000 ×
+    // maxBytes (1 GiB at 1 MiB each) before the periodic TTL reaper ticks. On
+    // reaching the cap, Open evicts the oldest entry (oldest createdAt) — the
+    // newest live streams stay resumable, the oldest (likely finalized/abandoned)
+    // is dropped. 0 = unlimited (preserves the prior behavior for back-comat,
+    // but DefaultConfig seeds 1024).
+    ResumeMaxEntries int           `mapstructure:"resume_max_entries"`
 }
 
 type CacheConfig struct {
@@ -377,6 +392,15 @@ type BackendConfig struct {
     // use the transport-factory default (64). Lowering it shrinks the idle pool
     // (and the idle FD footprint) for low-QPS backends.
     MaxIdleConnsPerHost int           `mapstructure:"max_idle_conns_per_host"`
+    // ResponseHeaderTimeout caps how long the transport waits for the upstream
+    // to return response HEADERS after the request is fully sent. R5 (audit P0):
+    // the prior TCP transport set MaxConnsPerHost/IdleConnTimeout but NOT this
+    // field — a stuck upstream that accepted the connection but never replied
+    // occupied a full Client.Timeout (120s) slot, and with a bounded connection
+    // pool (MaxConnsPerHost=16) a few stuck upstreams saturated the pool and
+    // stalled ALL requests to that backend. 0 = use the factory default (30s);
+    // set lower for latency-sensitive backends, higher for slow first-token LLMs.
+    ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
 }
 
 type IOKitConfig struct {
@@ -497,6 +521,15 @@ type ClusterMasterConfig struct {
     // safe: no DefaultConfig seed needed, no mapstructure "omitted vs false"
     // ambiguity — false means "honor master" which is the desired default.
     IgnoreMasterStrategy bool `mapstructure:"ignore_strategy"`
+    // MaxStaleAge (R3 audit P2): the maximum age a cached master strategy may
+    // reach before resolveStrategy treats it as stale and falls back to the
+    // local load_balancer. Before R3 a fetch failure left the cache untouched
+    // with NO staleness bound — a master outage of any duration kept routing
+    // by a possibly-dead strategy (route to dead nodes, sustained outage),
+    // with no operator signal the strategy was过期. Default 2m: a strategy
+    // older than 2m of failed syncs is treated as untrusted. 0 disables the
+    // staleness bound (legacy永久-sticky behavior) — not recommended.
+    MaxStaleAge time.Duration `mapstructure:"max_stale_age"`
 }
 
 type ClusterConfig struct {
@@ -653,6 +686,16 @@ var (
     configVersion    atomic.Uint64
     configMu         sync.RWMutex
     onReloadHandlers []func(old, new *ConfigSnapshot)
+    // H7: reloadMu serializes the onReload handler-run + commit window. Without
+    // it, two concurrent Reloads (admin PUT + fsnotify) both copy the handler
+    // list under a shared RLock then run handlers + globalConfig.Store with NO
+    // lock between them — handlers interleave, DrainAndApply/BuildProviders run
+    // twice concurrently, and the unlocked gap before commit is race-prone.
+    // Holding reloadMu across handler-run+commit makes the whole apply atomic
+    // and mutually exclusive, without coupling to configMu (which guards the
+    // handler-list registration under its own Lock). Handlers in main.go do not
+    // reenter Reload/OnReload, so holding this lock across them is safe.
+    reloadMu sync.Mutex
 )
 
 func Load(path string) (*ConfigSnapshot, error) {
@@ -722,6 +765,12 @@ func FireReload(old, newSnap *ConfigSnapshot) {
     copy(handlers, onReloadHandlers)
     configMu.RUnlock()
 
+    // H7: serialize handler-run under reloadMu so FireReload and Reload do not
+    // run handlers concurrently. FireReload itself does not commit (callers
+    // own the snapshot swap), but it shares the handler list with Reload, so
+    // the same exclusion applies to keep apply paths mutually consistent.
+    reloadMu.Lock()
+    defer reloadMu.Unlock()
     for _, fn := range handlers {
         fn(old, newSnap)
     }
@@ -771,18 +820,22 @@ func Reload(path string) (*ConfigSnapshot, error) {
         LoadedAt: time.Now(),
     }
 
-    // C5 fix: run handlers BEFORE committing new snapshot
+    // C5 fix: run handlers BEFORE committing new snapshot. H7: serialize the
+    // handler-run + commit under reloadMu so concurrent Reloads (admin PUT +
+    // fsnotify) cannot interleave handlers or commit mid-apply — the prior
+    // unlocked gap between RUnlock and Store was race-prone.
     configMu.RLock()
     handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
     copy(handlers, onReloadHandlers)
     configMu.RUnlock()
 
+    reloadMu.Lock()
     for _, fn := range handlers {
         fn(oldSnap, newSnap)
     }
-
     // commit new snapshot only after all handlers succeed
     globalConfig.Store(newSnap)
+    reloadMu.Unlock()
 
     slog.Info("config reloaded", "version", ver)
 
@@ -844,6 +897,17 @@ func validate(cfg *Config) error {
     }
     if cfg.Routing.OutputInputRatioMinInputTokens < 0 {
         return fmt.Errorf("output_input_ratio_min_input_tokens must be non-negative, got: %d", cfg.Routing.OutputInputRatioMinInputTokens)
+    }
+
+    // R7: resume stream buffers. ResumeMaxEntries < 0 is invalid (0 = unlimited
+    // is the documented opt-out). ResumeTTL must be positive when resume is
+    // enabled — a zero/negative TTL makes ReapExpired a no-op (ttl<=0 guard)
+    // so the buffer cap is the only bound, defeating the time-based eviction.
+    if cfg.Routing.Stream.ResumeMaxEntries < 0 {
+        return fmt.Errorf("resume_max_entries must be >= 0 (0 = unlimited), got: %d", cfg.Routing.Stream.ResumeMaxEntries)
+    }
+    if cfg.Routing.Stream.ResumeEnabled && cfg.Routing.Stream.ResumeTTL <= 0 {
+        return fmt.Errorf("resume_ttl must be positive when resume_enabled is true, got: %s", cfg.Routing.Stream.ResumeTTL)
     }
     for i, r := range cfg.Routing.RatioTiers.Rules {
         if r.MaxRatio <= 0 {
@@ -951,6 +1015,15 @@ func validate(cfg *Config) error {
             if backend.MaxIdleConnsPerHost < 0 {
                 return fmt.Errorf("backends.%s.max_idle_conns_per_host must be non-negative, got: %d", name, backend.MaxIdleConnsPerHost)
             }
+            // R5: ResponseHeaderTimeout guards against stuck upstreams. 0 = factory
+            // default (30s). Negative is invalid; an absurdly large value (>10m)
+            // defeats the cap's purpose and is rejected to catch unit mistakes (s vs ms).
+            if backend.ResponseHeaderTimeout < 0 {
+                return fmt.Errorf("backends.%s.response_header_timeout must be non-negative, got: %d", name, backend.ResponseHeaderTimeout)
+            }
+            if backend.ResponseHeaderTimeout > 10*time.Minute {
+                return fmt.Errorf("backends.%s.response_header_timeout must be <= 10m, got: %d", name, backend.ResponseHeaderTimeout)
+            }
             if backend.MaxConnsPerHost == 0 {
                 slog.Warn("backend max_conns_per_host is 0 (unlimited); set a positive cap to bound FDs", "backend", name)
             }
@@ -1009,6 +1082,29 @@ func validate(cfg *Config) error {
     // silent cloud-only gateway masquerading as clustered.
     if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" {
         return fmt.Errorf("cluster.mode=master requires cluster.master.address (the fusion-multi-node master API URL); got empty — set it or use mode=standalone")
+    }
+    // R3: seed a sane max_stale_age default when omitted (0 =永久-sticky, the
+    // pre-R3 bug). 2m bounds how long a cached master strategy is trusted
+    // across failed syncs before resolveStrategy falls back to local. A
+    // negative value is rejected; 0 intentionally left as the explicit legacy
+    // opt-out for operators who want the old永久-sticky behavior.
+    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster {
+        if cfg.Cluster.Master.MaxStaleAge < 0 {
+            return fmt.Errorf("cluster.master.max_stale_age must be >= 0 (0=disable staleness bound, legacy永久-sticky), got %v", cfg.Cluster.Master.MaxStaleAge)
+        }
+        if cfg.Cluster.Master.MaxStaleAge == 0 {
+            cfg.Cluster.Master.MaxStaleAge = 2 * time.Minute
+            slog.Info("cluster.master.max_stale_age defaulted", "max_stale_age", cfg.Cluster.Master.MaxStaleAge)
+        }
+    }
+
+    // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
+    // handlers fall back to the maxProxyBodySize const default at read time);
+    // negative is rejected. A positive cap is what actually bounds the body —
+    // the const alone was never enforced because the proxy paths wrapped
+    // r.Body with no MaxBytesReader at all.
+    if cfg.Server.ProxyMaxBodySize < 0 {
+        return fmt.Errorf("server.proxy_max_body_size must be >= 0 (0=default %d bytes), got %d", int64(256<<20), cfg.Server.ProxyMaxBodySize)
     }
 
     // access independent of the main auth chain (auth.enabled=false must NOT
@@ -1084,6 +1180,7 @@ func DefaultConfig() Config {
             LogLevel:               "info",
             GracefulShutdownTimeout: 15,
             MaxRequestBodySize:     5242880,
+            ProxyMaxBodySize:       256 << 20,
         },
         Routing: RoutingConfig{
             Mode:                      "hybrid",
@@ -1146,6 +1243,7 @@ func DefaultConfig() Config {
                 ResumeMaxEvents:   256,
                 ResumeMaxBytes:    1 << 20,
                 ResumeTTL:         10 * time.Minute,
+                ResumeMaxEntries:  1024,
             },
             AgentTasks: AgentTaskConfig{
                 TTL:            30 * time.Minute,

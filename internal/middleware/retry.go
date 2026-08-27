@@ -9,6 +9,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/jitter"
 )
 
 type RetryableFunc func(ctx context.Context, req *adapter.ChatRequest) (*adapter.ChatResponse, error)
@@ -148,9 +149,22 @@ func calculateBackoff(attempt int, initial, max time.Duration) time.Duration {
 
     backoff := float64(initial) * math.Pow(2, float64(attempt))
     if backoff > float64(max) {
+        backoff = float64(max)
+    }
+    // H5 (audit P1): apply ±20% jitter to the exponential backoff. Without
+    // jitter, N clients that fail simultaneously (e.g. fusion-mlx restart)
+    // align to identical backoff slots — 10s/20s/40s/60s… — and every retry
+    // lands at the same instant, hammering the recovering engine in synchronized
+    // bursts that reset its model load and starve it of a quiet window. The
+    // jitter spreads the retries across a window instead of a single point.
+    // Jitter is applied to the CAPPED value, then re-clamped to max: the ±20%
+    // spread can push a near-max slot above max, so a final min(.,max) keeps
+    // the hard ceiling while still spreading everything below it.
+    jittered := jitter.Duration(time.Duration(backoff))
+    if jittered > max {
         return max
     }
-    return time.Duration(backoff)
+    return jittered
 }
 
 func statusCodeStr(code int) string {

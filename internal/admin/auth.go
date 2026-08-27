@@ -4,6 +4,7 @@ import (
     "errors"
     "fmt"
     "log/slog"
+    "sync"
     "time"
 
     "github.com/golang-jwt/jwt/v5"
@@ -14,6 +15,7 @@ import (
 // Constructed via NewAdminAuth, injected into Server and Handler.
 // #12 fix: passwords stored as bcrypt hashes, not plaintext.
 type AdminAuth struct {
+    mu             sync.RWMutex
     jwtSecret      []byte
     adminUsers     map[string]string // username -> bcrypt hash
     insecureCookie bool              // true when running without TLS
@@ -21,6 +23,48 @@ type AdminAuth struct {
 
 func (a *AdminAuth) SetInsecureCookie(v bool) {
     a.insecureCookie = v
+}
+
+// ReloadUsers atomically replaces the in-memory admin user map (H8). Called
+// after the admin config PUT handler persists new (already-hashed) passwords
+// so a rotated password takes effect immediately — not only after the next
+// process restart. users values must already be bcrypt hashes (the handler
+// hashes before persisting). The current request continues under the old map;
+// the next Authenticate call sees the new one.
+func (a *AdminAuth) ReloadUsers(users map[string]string) {
+    hashedUsers := make(map[string]string, len(users))
+    for username, password := range users {
+        if isBcryptHash(password) {
+            hashedUsers[username] = password
+        } else {
+            hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+            if err != nil {
+                slog.Error("admin ReloadUsers: failed to hash password, skipping user",
+                    "username", username, "error", err)
+                continue
+            }
+            hashedUsers[username] = string(hash)
+        }
+    }
+    a.mu.Lock()
+    a.adminUsers = hashedUsers
+    a.mu.Unlock()
+    slog.Info("admin users reloaded (rotation applied without restart)", "count", len(hashedUsers))
+}
+
+// ReloadSecret atomically replaces the JWT signing secret (H8). Called after
+// the admin config PUT handler persists a new jwt_secret so a rotation takes
+// effect immediately. Existing tokens signed with the old secret are
+// invalidated (validate uses the new secret).
+func (a *AdminAuth) ReloadSecret(secret string) {
+    if len(secret) < 32 {
+        slog.Warn("admin ReloadSecret: secret too short, keeping current secret", "len", len(secret))
+        return
+    }
+    a.mu.Lock()
+    a.jwtSecret = []byte(secret)
+    a.mu.Unlock()
+    slog.Info("admin jwt secret reloaded (rotation applied without restart)")
 }
 
 func NewAdminAuth(secret string, users map[string]string) (*AdminAuth, error) {
@@ -58,7 +102,27 @@ func isBcryptHash(s string) bool {
     return len(s) == 60 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
 }
 
+// HashAdminPasswordIfPlaintext returns a bcrypt hash of password unless it is
+// already a bcrypt hash (in which case it is returned unchanged). H8: the admin
+// config PUT handler wrote raw passwords to config.yaml and relied on a startup
+// bcrypt pass to hash them — so a password set via the admin API sat in
+// plaintext on disk until the next process restart, and a crash/replay before
+// restart exposed it. Hashing at the write path closes the window: only the
+// hash is ever persisted.
+func HashAdminPasswordIfPlaintext(password string) (string, error) {
+    if isBcryptHash(password) {
+        return password, nil
+    }
+    hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+    if err != nil {
+        return "", fmt.Errorf("hash admin password: %w", err)
+    }
+    return string(hash), nil
+}
+
 func (a *AdminAuth) Enabled() bool {
+    a.mu.RLock()
+    defer a.mu.RUnlock()
     return len(a.jwtSecret) > 0 && len(a.adminUsers) > 0
 }
 
@@ -69,7 +133,10 @@ type AdminClaims struct {
 }
 
 func (a *AdminAuth) GenerateToken(username, role string) (string, error) {
-    if len(a.jwtSecret) == 0 {
+    a.mu.RLock()
+    secret := a.jwtSecret
+    a.mu.RUnlock()
+    if len(secret) == 0 {
         return "", errors.New("admin JWT secret not configured")
     }
     claims := AdminClaims{
@@ -82,18 +149,21 @@ func (a *AdminAuth) GenerateToken(username, role string) (string, error) {
         },
     }
     token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString(a.jwtSecret)
+    return token.SignedString(secret)
 }
 
 func (a *AdminAuth) ValidateToken(tokenStr string) (*AdminClaims, error) {
-    if len(a.jwtSecret) == 0 {
+    a.mu.RLock()
+    secret := a.jwtSecret
+    a.mu.RUnlock()
+    if len(secret) == 0 {
         return nil, errors.New("admin JWT secret not configured")
     }
     token, err := jwt.ParseWithClaims(tokenStr, &AdminClaims{}, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
             return nil, errors.New("unexpected signing method")
         }
-        return a.jwtSecret, nil
+        return secret, nil
     })
     if err != nil {
         return nil, err
@@ -107,10 +177,13 @@ func (a *AdminAuth) ValidateToken(tokenStr string) (*AdminClaims, error) {
 
 // #12 fix: use bcrypt comparison instead of plaintext ==
 func (a *AdminAuth) Authenticate(username, password string) bool {
-    if len(a.adminUsers) == 0 {
+    a.mu.RLock()
+    users := a.adminUsers
+    a.mu.RUnlock()
+    if len(users) == 0 {
         return false
     }
-    hashed, ok := a.adminUsers[username]
+    hashed, ok := users[username]
     if !ok {
         return false
     }

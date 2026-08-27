@@ -69,7 +69,9 @@ func (m *CustomPricingManager) StartWatch() {
         slog.Error("custom pricing watch add failed", "path", m.filePath, "error", err)
         return
     }
-    safego.Go("custom_pricing_watcher", func() {
+    // H3: long-lived fsnotify watcher loop — restart on panic so a single panic
+    // does not permanently stop hot-reload of custom pricing (pricing stuck).
+    safego.GoRestart("custom_pricing_watcher", func() {
         var debounce timer
         for {
             select {

@@ -343,6 +343,13 @@ func parseSSEStream(ctx context.Context, body io.Reader, ch chan<- StreamChunk) 
                 slog.Warn("sse unmarshal error", "error", err, "data", data)
                 continue
             }
+            // E1 (audit): carry the verbatim upstream bytes so the server
+            // forward loop can emit them directly instead of re-marshaling the
+            // struct. The upstream is OpenAI-wire-format, so the raw data line
+            // is already a valid OpenAI chunk — re-marshal produced identical
+            // semantics but burned a json.Marshal per frame. Struct fields stay
+            // populated for usage/ID/model tracking.
+            chunk.Raw = json.RawMessage(data)
             // F3 fix: block on send but bail on ctx cancel. The prior non-blocking
             // `default` arm fired whenever the 64-buffer filled — including when the
             // CONSUMER had stopped reading because the client canceled. It then emitted

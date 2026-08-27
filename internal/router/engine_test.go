@@ -287,6 +287,11 @@ type mockClusterSelector struct {
     modelNodes map[string]int
     modelNode  map[string]string
     modelErr   error
+    // R8 breaker-bypass push tracking: which nodeIDs the engine pushed open /
+    // closed, in order. R8 guard tests assert the engine pushes the right
+    // transition on breaker state changes.
+    breakerOpens  []string
+    breakerCloses []string
 }
 
 func (m *mockClusterSelector) HealthyNodes() int                 { return m.healthy }
@@ -336,6 +341,17 @@ func (m *mockClusterSelector) SelectNodeByModel(_, model string, _ int) (string,
         return "", fmt.Errorf("no healthy node serving model %q", model)
     }
     return m.nodeID, m.err
+}
+
+// MarkNodeBreakerOpen implements ClusterSelector (R8) — records the push so
+// guard tests can assert the engine forwards breaker-open transitions.
+func (m *mockClusterSelector) MarkNodeBreakerOpen(nodeID string) {
+    m.breakerOpens = append(m.breakerOpens, nodeID)
+}
+
+// MarkNodeBreakerClosed implements ClusterSelector (R8).
+func (m *mockClusterSelector) MarkNodeBreakerClosed(nodeID string) {
+    m.breakerCloses = append(m.breakerCloses, nodeID)
 }
 
 func TestDecide_ClusterFallback(t *testing.T) {
@@ -2040,3 +2056,74 @@ func TestRecordNodeSuccess_NoOp_EmptyNodeID(t *testing.T) {
         t.Errorf("empty nodeID must not create or open a breaker")
     }
 }
+
+// TestR8_RecordNodeFailure_PushesBreakerOpen (R8): when a per-node breaker
+// transitions to StateOpen, the engine must push MarkNodeBreakerOpen into the
+// cluster selector. This is the push half of the R8 coordination — Discovery
+// becomes the single source of truth for routability instead of a post-hoc
+// bypass that drifts from the router's view.
+func TestR8_RecordNodeFailure_PushesBreakerOpen(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    sel := &mockClusterSelector{}
+    e.SetClusterSelector(sel)
+
+    // First failure: count 1, below threshold — breaker stays closed, no push.
+    e.RecordNodeFailure("node-x")
+    if len(sel.breakerOpens) != 0 {
+        t.Fatalf("expected no breaker-open push below threshold, got %d pushes: %v", len(sel.breakerOpens), sel.breakerOpens)
+    }
+
+    // Second failure hits threshold=2 → StateOpen → push MarkNodeBreakerOpen.
+    e.RecordNodeFailure("node-x")
+    if len(sel.breakerOpens) != 1 || sel.breakerOpens[0] != "node-x" {
+        t.Errorf("expected one breaker-open push for node-x, got %d: %v", len(sel.breakerOpens), sel.breakerOpens)
+    }
+}
+
+// TestR8_RecordNodeSuccess_PushesBreakerClosed (R8): when a tripped per-node
+// breaker recovers to StateClosed (half_open→closed on a successful probe),
+// the engine must push MarkNodeBreakerClosed into the cluster selector so the
+// node becomes selectable again. Steady-state successes on an already-closed
+// breaker must NOT push (no spam).
+func TestR8_RecordNodeSuccess_PushesBreakerClosed(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CircuitBreaker.FailureThreshold = 2
+    cfg.Config.Routing.CircuitBreaker.Timeout = 10 * time.Millisecond
+    cfg.Config.Routing.CircuitBreaker.SuccessThreshold = 1
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    sel := &mockClusterSelector{}
+    e.SetClusterSelector(sel)
+
+    // Trip node-y open.
+    e.RecordNodeFailure("node-y")
+    e.RecordNodeFailure("node-y")
+    if !e.NodeBreakerOpen("node-y") {
+        t.Fatalf("expected node-y open before recovery")
+    }
+    if len(sel.breakerOpens) != 1 || sel.breakerOpens[0] != "node-y" {
+        t.Fatalf("expected breaker-open push for node-y, got %v", sel.breakerOpens)
+    }
+
+    // Wait out the timeout so State() flips to half_open, then a success closes it.
+    time.Sleep(20 * time.Millisecond)
+    _ = e.NodeBreakerState("node-y")
+    e.RecordNodeSuccess("node-y")
+    if e.NodeBreakerOpen("node-y") {
+        t.Fatalf("expected node-y closed after half_open success")
+    }
+    if len(sel.breakerCloses) != 1 || sel.breakerCloses[0] != "node-y" {
+        t.Errorf("expected one breaker-closed push for node-y on recovery, got %d: %v", len(sel.breakerCloses), sel.breakerCloses)
+    }
+
+    // Steady-state success on an already-closed breaker must NOT push again.
+    before := len(sel.breakerCloses)
+    e.RecordNodeSuccess("node-y")
+    if len(sel.breakerCloses) != before {
+        t.Errorf("steady-state success must not push breaker-closed, got %d pushes (was %d)", len(sel.breakerCloses), before)
+    }
+}
+
