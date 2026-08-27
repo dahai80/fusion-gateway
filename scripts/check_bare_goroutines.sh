@@ -13,6 +13,10 @@
 #     an inline `defer recover()` + WaitGroup barrier; safeGo is fire-and-
 #     forget and cannot pair with a WaitGroup, so these carry their own
 #     recovery and are explicitly permitted.
+#   - internal/lifecycle/worker.go — Worker.run carries its own inline
+#     `defer recover()` + WaitGroup barrier (H3 restart-on-panic + EI10 join).
+#     Routing the launch through safeGo would double-wrap the recover and break
+#     the WaitGroup join semantics, so the bare `go w.run(...)` is the sanctioned form.
 #
 # Exit 1 if any other non-test .go file launches a bare goroutine.
 set -euo pipefail
@@ -20,9 +24,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Match a line whose first non-space token is `go` followed by `func(` or a
-# call. Skip test files, the three allowlisted files, and lines that are
+# call. Skip test files, the allowlisted files, and lines that are
 # already safego.Go(...) calls (defensive — those are the correct form).
-ALLOW='internal/safego/safego.go|cmd/gateway/main.go|internal/cluster/discovery.go'
+ALLOW='internal/safego/safego.go|cmd/gateway/main.go|internal/cluster/discovery.go|internal/lifecycle/worker.go'
 
 offenders=$(grep -rEn '^[[:space:]]*go (func\(|[a-zA-Z_])' --include='*.go' internal/ cmd/ \
     | grep -v '_test\.go' \
