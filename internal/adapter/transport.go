@@ -85,6 +85,33 @@ const defaultMaxConnsPerHost = 16
 // avoids redialing a high-QPS local backend on every request.
 const defaultMaxIdleConnsPerHost = 64
 
+// defaultResponseHeaderTimeout is how long the transport waits for upstream
+// response HEADERS after the request is fully sent, when
+// BackendConfig.ResponseHeaderTimeout is unset (R5). 30s is deliberately far
+// below the typical Client.Timeout (120s): a stuck upstream that accepted the
+// connection but never sent headers must fail HERE, not occupy a full 120s
+// slot — otherwise a handful of stuck upstreams saturates the bounded
+// MaxConnsPerHost pool (16) and stalls ALL requests to that backend.
+const defaultResponseHeaderTimeout = 30 * time.Second
+
+// defaultDialTimeout caps the TCP/UDS dial. R5: the prior TCP transport cloned
+// DefaultTransport (which carries a 30s DialContext) but the UDS transport had
+// no dial timeout at all — a dead socket could hang the dial indefinitely. 10s
+// is long enough for any healthy intranet/cloud dial, short enough to fail fast.
+const defaultDialTimeout = 10 * time.Second
+
+// defaultTLSHandshakeTimeout caps the TLS handshake (R5). The prior TCP
+// transport inherited DefaultTransport's 10s, but the UDS transport had none.
+// Applied uniformly now.
+const defaultTLSHandshakeTimeout = 10 * time.Second
+
+func resolveResponseHeaderTimeout(cfg config.BackendConfig) time.Duration {
+    if cfg.ResponseHeaderTimeout > 0 {
+        return cfg.ResponseHeaderTimeout
+    }
+    return defaultResponseHeaderTimeout
+}
+
 // resolveMaxConnsPerHost returns the configured cap or the safe default,
 // logging when the default is applied so an operator can see the effective FD
 // bound per host. A negative config value is treated as "no explicit cap" (the
@@ -130,6 +157,7 @@ func resolveMaxIdleConnsPerHost(cfg config.BackendConfig) int {
 func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
     maxConns := resolveMaxConnsPerHost(cfg)
     maxIdle := resolveMaxIdleConnsPerHost(cfg)
+    respHeaderTimeout := resolveResponseHeaderTimeout(cfg)
 
     if cfg.SocketPath == "" {
         t, ok := http.DefaultTransport.(*http.Transport)
@@ -142,6 +170,21 @@ func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
         cloned.MaxIdleConnsPerHost = maxIdle
         cloned.MaxConnsPerHost = maxConns
         cloned.IdleConnTimeout = 90 * time.Second
+        // R5 (audit P0): bound header wait, dial, and TLS handshake so a stuck
+        // upstream cannot occupy a full Client.Timeout slot and, with the bounded
+        // MaxConnsPerHost pool, stall all requests to the backend. Without
+        // ResponseHeaderTimeout a connected-but-silent upstream hung for 120s.
+        cloned.ResponseHeaderTimeout = respHeaderTimeout
+        cloned.DialContext = (&net.Dialer{Timeout: defaultDialTimeout}).DialContext
+        cloned.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
+        slog.Info("transport: TCP backend timeouts applied",
+            "backend", cfg.BaseURL,
+            "response_header_timeout", respHeaderTimeout.String(),
+            "dial_timeout", defaultDialTimeout.String(),
+            "tls_handshake_timeout", defaultTLSHandshakeTimeout.String(),
+            "max_conns_per_host", maxConns,
+            "max_idle_conns_per_host", maxIdle,
+        )
         return cloned
     }
 
@@ -150,15 +193,19 @@ func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
         "base_url", cfg.BaseURL,
         "max_conns_per_host", maxConns,
         "max_idle_conns_per_host", maxIdle,
+        "response_header_timeout", respHeaderTimeout.String(),
     )
     return &http.Transport{
         DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-            d := net.Dialer{}
+            d := net.Dialer{Timeout: defaultDialTimeout}
             return d.DialContext(ctx, "unix", cfg.SocketPath)
         },
-        MaxIdleConns:        100,
-        MaxIdleConnsPerHost: maxIdle,
-        MaxConnsPerHost:     maxConns,
-        IdleConnTimeout:     90 * time.Second,
+        MaxIdleConns:           100,
+        MaxIdleConnsPerHost:    maxIdle,
+        MaxConnsPerHost:        maxConns,
+        IdleConnTimeout:        90 * time.Second,
+        ResponseHeaderTimeout:  respHeaderTimeout,
+        TLSHandshakeTimeout:    defaultTLSHandshakeTimeout,
+        ExpectContinueTimeout:  1 * time.Second,
     }
 }

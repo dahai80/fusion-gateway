@@ -25,10 +25,17 @@ type MasterClient struct {
 }
 
 func NewMasterClient(cfg config.ClusterMasterConfig) *MasterClient {
+    // H4 (audit P1): route the master sync/poll client through
+    // TransportForBackend so it inherits the MaxConnsPerHost FD cap. A bare
+    // &http.Client{} inherits http.DefaultTransport (MaxConnsPerHost=0 =
+    // unlimited); the master is a single host so the cap bounds burst conns.
     return &MasterClient{
         address:     cfg.Address,
         sharedToken: cfg.SharedToken,
-        client:      &http.Client{Timeout: 10 * time.Second},
+        client: &http.Client{
+            Timeout:   10 * time.Second,
+            Transport: adapter.TransportForBackend(config.BackendConfig{BaseURL: cfg.Address}),
+        },
     }
 }
 

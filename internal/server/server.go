@@ -23,6 +23,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
@@ -60,6 +61,10 @@ type Server struct {
     realtimeProxy   *realtime.Proxy
     rateLimiter     *middleware.RateLimiter
     cache           *cache.Cache
+    // R2: coalesces concurrent same-key non-stream chat fetches to prevent
+    // cold-key cache stampede (N misses → N upstream calls). nil-safe: the
+    // fetch path skips coalescing when this is nil (e.g. cache disabled).
+    fetchCoalescer  *coalescer
     costTracker     *cost.Tracker
     piiMiddleware   *middleware.PIIMiddleware
     cloudStrategy   *router.CloudStrategy
@@ -109,6 +114,22 @@ type Server struct {
     // routing.stream.resume_enabled; the /v1/messages/{stream_id}/events
     // replay endpoint drains it honoring Last-Event-ID. nil when disabled.
     streamBuffers *StreamBufferStore
+    // R1: lifecycle.Workers wrapping the 3 server-owned reaper goroutines so
+    // Shutdown can Stop (cancel + join) each instead of leaking. The cache/
+    // semantic/ratelimit evictors are owned by their respective constructors and
+    // stopped via their own Close() below.
+    reapTasksWorker        *lifecycle.Worker
+    reapStreamBuffersWorker *lifecycle.Worker
+    evictOAuth2Worker      *lifecycle.Worker
+    // R6: server-wide shutdown signal. liveCtx in handleStreamChatResumable is
+    // a child of shutdownCtx so a graceful Shutdown cancels every in-flight
+    // resumable pump (unblocking its upstream body.Read, releasing the local
+    // slot) instead of letting it keep hitting a torn-down fusion-mlx until the
+    // 5-min idle watchdog or a read error fires. shutdownCancel is called in
+    // Shutdown BEFORE the main httpServer drain so the pumps stop issuing new
+    // upstream reads while in-flight responses still flush.
+    shutdownCtx    context.Context
+    shutdownCancel context.CancelFunc
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -310,6 +331,8 @@ func New(
         adminAuthObj = &admin.AdminAuth{}
     }
 
+    // R6: server-wide shutdown signal for the resumable-stream liveCtx roots.
+    shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
     srv := &Server{
         cfg:               cfg,
         cfgPath:           cfgPath,
@@ -321,6 +344,7 @@ func New(
         realtimeProxy:     rp,
         rateLimiter:       middleware.NewRateLimiter(),
         cache:             cache.New(cfg.Config.Cache),
+        fetchCoalescer:    newCoalescer(),
         costTracker:       cost.NewTracker(10000),
         piiMiddleware:     middleware.NewPIIMiddleware(cfg.Config.PII),
         cloudStrategy:     cs,
@@ -334,6 +358,8 @@ func New(
         oauth2States:      make(map[string]oauth2StateEntry),
         mcpHandler:        initMCPHandler(cfg),
         taskRegistry:      NewTaskRegistry(),
+        shutdownCtx:       shutdownCtx,
+        shutdownCancel:    shutdownCancel,
     }
     srv.taskRegistry.SetLimits(
         cfg.Config.Routing.AgentTasks.TTL,
@@ -357,16 +383,27 @@ func New(
         srv.streamBuffers = NewStreamBufferStore(
             cfg.Config.Routing.Stream.ResumeMaxEvents,
             cfg.Config.Routing.Stream.ResumeMaxBytes,
+            cfg.Config.Routing.Stream.ResumeMaxEntries,
             cfg.Config.Routing.Stream.ResumeTTL,
         )
         slog.Info("resumable streams enabled (local MLX path)",
             "max_events", cfg.Config.Routing.Stream.ResumeMaxEvents,
             "max_bytes", cfg.Config.Routing.Stream.ResumeMaxBytes,
+            "max_entries", cfg.Config.Routing.Stream.ResumeMaxEntries,
             "ttl", cfg.Config.Routing.Stream.ResumeTTL.String())
-        safego.Go("server_reap_expired_stream_buffers", srv.reapExpiredStreamBuffers)
+        // R1: launch the stream-buffer reaper through lifecycle.Worker so
+        // Shutdown can Stop (cancel + join) it instead of leaking. H3
+        // panic-restart inherited from the Worker; the loop honors ctx.Done().
+        srv.reapStreamBuffersWorker = lifecycle.Start(context.Background(),
+            "server_reap_expired_stream_buffers", srv.reapExpiredStreamBuffers)
     }
-    safego.Go("server_reap_expired_tasks", srv.reapExpiredTasks)
-    safego.Go("server_evict_oauth2_states", srv.evictOAuth2States)
+    // R1: launch the task + oauth2 reapers through lifecycle.Worker so Shutdown
+    // can Stop (cancel + join) each instead of leaking. H3 panic-restart
+    // inherited from the Worker; each loop honors ctx.Done().
+    srv.reapTasksWorker = lifecycle.Start(context.Background(),
+        "server_reap_expired_tasks", srv.reapExpiredTasks)
+    srv.evictOAuth2Worker = lifecycle.Start(context.Background(),
+        "server_evict_oauth2_states", srv.evictOAuth2States)
     return srv
 }
 
@@ -656,7 +693,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
             slog.Warn("mcp listener shutdown error", "error", merr)
         }
     }
-    err := s.httpServer.Shutdown(ctx)
+    // R6: cancel the resumable-stream liveCtx root so in-flight pumps stop
+    // reading from a torn-down fusion-mlx and release their local slots,
+    // instead of contending slots with the next process on a fast restart.
+    // Done BEFORE the main httpServer drain: the pumps stop issuing new upstream
+    // reads while the drain still flushes any in-flight client responses.
+    if s.shutdownCancel != nil {
+        s.shutdownCancel()
+    }
+    var err error
+    if s.httpServer != nil {
+        err = s.httpServer.Shutdown(ctx)
+    }
     // Inbound UDS cleanup: close the listener (stops the safeGo serve loop) and
     // unlink the socket file so a stale inode doesn't block the next start.
     if s.unixListener != nil {
@@ -679,6 +727,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
     if ms, ok := s.store.(*memorystore.MemoryStore); ok {
         ms.FlushQuota()
     }
+    // R1: Stop (cancel + join) the 3 server-owned reapers and the 3
+    // constructor-owned evictors so they do not outlive Shutdown and keep
+    // ticking against a torn-down store/dead backend (goroutine leak). Before
+    // R1 these used `for range ticker.C` with no stop signal and never joined.
+    if s.reapTasksWorker != nil {
+        s.reapTasksWorker.Stop()
+    }
+    if s.reapStreamBuffersWorker != nil {
+        s.reapStreamBuffersWorker.Stop()
+    }
+    if s.evictOAuth2Worker != nil {
+        s.evictOAuth2Worker.Stop()
+    }
+    s.rateLimiter.Close()
+    s.cache.Close()
+    s.semanticCache.Close()
     return err
 }
 
@@ -784,4 +848,34 @@ const maxAdminBodySize int64 = 2 << 20
 // decode paths. B10: this legacy endpoint was the only inference path missing
 // the cap.
 const maxLegacyBodySize int64 = 10 << 20
+
+// maxProxyBodySize caps request bodies on reverse-proxy paths (model-hub,
+// fusion-mlx admin/fine-tune, /stats, model load/unload). E5 (audit): those
+// handlers passed r.Body straight to httputil.ReverseProxy with no cap, so an
+// authenticated client could stream an unbounded body into the fusion-mlx
+// admin/fine-tune API → single-process OOM or admin event-loop stall, dragging
+// local inference down with it. 256 MiB is far beyond any legitimate proxy
+// payload (fine-tune config/dataset metadata, model serve request, stats read)
+// — actual model binaries are fetched hub↔MLX directly, not through this body.
+const maxProxyBodySize int64 = 256 << 20
+
+// proxyBodyCap resolves the per-request body cap for reverse-proxy paths. E5
+// (audit): a positive server.proxy_max_body_size from config overrides the
+// const default; 0 falls back to the const so an omitted YAML key still caps
+// the body (defense in depth — the const alone was never enforced before E5
+// because the proxy paths never wrapped r.Body).
+func (s *Server) proxyBodyCap() int64 {
+    if s.cfg != nil && s.cfg.Config.Server.ProxyMaxBodySize > 0 {
+        return s.cfg.Config.Server.ProxyMaxBodySize
+    }
+    return maxProxyBodySize
+}
+
+// wrapProxyBody caps r.Body for a reverse-proxy forward. E5 (audit): returns
+// r with the body wrapped in http.MaxBytesReader so an authenticated client
+// cannot stream an unbounded body into fusion-mlx / model-hub admin APIs.
+func (s *Server) wrapProxyBody(w http.ResponseWriter, r *http.Request) *http.Request {
+    r.Body = http.MaxBytesReader(w, r.Body, s.proxyBodyCap())
+    return r
+}
 

@@ -8,17 +8,29 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 )
+
+type RateLimiter struct {
+    counters sync.Map // map[string]*keyState
+    // R1: lifecycle.Worker wrapping the idle-cleanup goroutine so Server.Shutdown
+    // can Stop (cancel + join) it instead of leaking on shutdown.
+    cleanupWorker *lifecycle.Worker
+}
+
+// Close stops the background idle-cleanup goroutine (R1). Idempotent; safe to
+// call from Server.Shutdown. Before R1 the cleanup ticker leaked on shutdown.
+func (rl *RateLimiter) Close() {
+    if rl == nil || rl.cleanupWorker == nil {
+        return
+    }
+    rl.cleanupWorker.Stop()
+    rl.cleanupWorker = nil
+}
 
 type contextKey string
 
 const RequestIDKey contextKey = "request_id"
-
-// L2 fix: per-key mutex via sync.Map, avoiding global lock contention
-type RateLimiter struct {
-    counters sync.Map // map[string]*keyState
-}
 
 type keyState struct {
     mu         sync.Mutex
@@ -34,7 +46,9 @@ type slidingWindow struct {
 
 func NewRateLimiter() *RateLimiter {
     rl := &RateLimiter{}
-    safego.Go("ratelimit_cleanup_idle", rl.cleanupIdle)
+    // R1: launch cleanup through lifecycle.Worker so Shutdown can Stop (cancel
+    // + join) it instead of leaking. H3 panic-restart inherited from Worker.
+    rl.cleanupWorker = lifecycle.Start(context.Background(), "ratelimit_cleanup_idle", rl.cleanupIdle)
     return rl
 }
 
@@ -136,10 +150,16 @@ func (rl *RateLimiter) RemainingRPM(key string, rpm int) int {
 }
 
 // cleanupIdle removes idle key states to prevent memory leak
-func (rl *RateLimiter) cleanupIdle() {
+func (rl *RateLimiter) cleanupIdle(ctx context.Context) {
     ticker := time.NewTicker(5 * time.Minute)
     defer ticker.Stop()
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            // R1: honor shutdown so cleanup exits and Shutdown joins it.
+            return
+        case <-ticker.C:
+        }
         now := time.Now()
         rl.counters.Range(func(key, value interface{}) bool {
             ks := value.(*keyState)

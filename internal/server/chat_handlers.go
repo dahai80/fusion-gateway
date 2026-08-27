@@ -417,10 +417,23 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     endReason := "ch_closed_no_done"
 
     writeChunk := func(chunk adapter.StreamChunk) bool {
-        data, err := json.Marshal(chunk)
-        if err != nil {
-            slog.Error("marshal stream chunk failed", "error", err)
-            return true
+        // E1 (audit): when the provider carried the verbatim upstream bytes
+        // (Raw), emit them directly — skipping the per-frame json.Marshal the
+        // audit found burning ~1-2 cores of pure serialization at ~50
+        // concurrent long streams. Fall back to marshal for chunks built
+        // in-process (synthetic usage chunk, converted Anthropic chunks)
+        // where Raw is nil. The emitted bytes are semantically identical for
+        // OpenAI-wire providers; raw is actually more faithful (preserves
+        // unknown upstream fields) — the audit's "non-invasive forwarding"
+        // principle.
+        data := chunk.Raw
+        if len(data) == 0 {
+            var err error
+            data, err = json.Marshal(chunk)
+            if err != nil {
+                slog.Error("marshal stream chunk failed", "error", err)
+                return true
+            }
         }
         if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
             slog.Warn("stream chat client write failed", "provider", provider.Name(), "error", err)
@@ -644,6 +657,43 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         return provider.Chat(ctx, r)
     }
     chatFn = middleware.RetryChat(s.cfg.Config.Routing.Retry, chatFn)
+
+    // R2: coalesce the upstream fetch per cache key so N concurrent same-key
+    // misses don't stampede upstream (N× cost/limit). The leader runs chatFn
+    // and publishes the response to the cache; concurrent waiters block until
+    // the leader returns, then re-check the cache below. On leader failure
+    // (err != nil) the cache stays unpopulated, so waiters fall through to
+    // the error/A4-fallback path independently — the stampede target is the
+    // SUCCESS path, which is now coalesced. Streaming is NOT coalesced (each
+    // stream is unique); non-stream only.
+    if s.fetchCoalescer != nil && cacheKey != "" {
+        s.fetchCoalescer.Do(cacheKey, func() {
+            r, e := chatFn(ctx, req)
+            if e != nil {
+                return
+            }
+            if s.cache != nil && cacheKey != "" {
+                if respData, marshalErr := json.Marshal(r); marshalErr == nil {
+                    s.cache.Set(cacheKey, respData)
+                }
+            }
+        })
+        // Leader published (or failed): re-check cache. HIT means the leader
+        // (or this caller, if it WAS the leader) populated it — serve it.
+        if cached, ok := s.cache.Get(cacheKey); ok {
+            slog.Debug("cache hit after coalesced fetch", "model", req.Model)
+            w.Header().Set("Content-Type", "application/json")
+            w.Header().Set("X-Cache", "HIT")
+            w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
+            w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+            _, _ = w.Write(cached)
+            return
+        }
+        // Still miss → leader failed. Run the fetch directly for THIS caller
+        // so the error/A4-fallback path runs (observability, breaker, cloud
+        // fallback). Concurrent failed waiters each run their own fetch here
+        // — acceptable: failure is the rare path, not the stampede target.
+    }
 
     resp, err := chatFn(ctx, req)
     if err != nil {

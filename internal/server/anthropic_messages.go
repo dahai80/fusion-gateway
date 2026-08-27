@@ -166,7 +166,14 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         ctx = streamCtx
     }
 
-    if msgProv, ok := provider.(adapter.MessagesProvider); ok {
+    // H2 fix: the cloud provider may be wrapped by cloudTrackingProvider
+    // (decorator that does NOT redeclare MessagesProvider). Resolve the
+    // MessagesProvider assertion through the Unwrap chain so bedrock/vertex/
+    // foundry's native Anthropic passthrough is used, not the lossy OpenAI
+    // conversion path. Without this, Claude tool_use/thinking events are
+    // silently dropped on every cloud /v1/messages request (audit H2).
+    msgProv := resolveMessagesProvider(provider)
+    if msgProv != nil {
         if antReq.Stream {
             s.handleStreamAnthropicMessages(ctx, w, msgProv, &antReq)
         } else {
@@ -209,6 +216,32 @@ func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
     }
     slog.Error("anthropic messages upstream error", "error", err, "status", status)
     http.Error(w, body, status)
+}
+
+// resolveMessagesProvider resolves a MessagesProvider through a chain of
+// Unwrap()-style decorators (audit H2). cloudTrackingProvider wraps every cloud
+// provider but does not redeclare MessagesProvider, so a direct type assertion
+// on the wrapped value fails for bedrock/vertex/foundry and silently routes to
+// the lossy OpenAI conversion path. Walk the Unwrap chain; the first provider
+// that satisfies MessagesProvider wins. A guard against runaway chains bounds
+// the walk (paranoia for a misbehaving decorator that unwraps to itself).
+func resolveMessagesProvider(p adapter.Provider) adapter.MessagesProvider {
+    const maxDepth = 8
+    for i := 0; i < maxDepth; i++ {
+        if mp, ok := p.(adapter.MessagesProvider); ok {
+            return mp
+        }
+        unwrapper, ok := p.(interface{ Unwrap() adapter.Provider })
+        if !ok {
+            return nil
+        }
+        next := unwrapper.Unwrap()
+        if next == nil || next == p {
+            return nil
+        }
+        p = next
+    }
+    return nil
 }
 
 // nonStreamClientCanceled returns true and logs INFO when a non-stream

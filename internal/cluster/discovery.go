@@ -22,6 +22,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/jitter"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
@@ -62,6 +63,19 @@ type Node struct {
     // "never polled" (not ready) from "polled, serves nothing" (ready,
     // legitimately empty), which a bare empty models slice cannot.
     modelsReady bool
+    // breakerBypassed is the R8 coordination flag: set by the router when a
+    // node's per-node circuit breaker opens (RecordNodeFailure → open), cleared
+    // when it recovers (RecordNodeSuccess → closed). A bypassed node is healthy
+    // (the /health probe still succeeds — it tripped on real request failures,
+    // not on being down) but NOT selectable until the breaker cooldown elapses.
+    // This makes Discovery the single source of truth for routability: the
+    // prior design selected a healthy node then bypassed it post-hoc, so
+    // Discovery.Status() reported it routable while the router refused — the
+    // two systems drifted. Decoupled from failures/state (the probe-driven
+    // checkFailureThreshold → markDead lifecycle) so a breaker trip does NOT
+    // inflate the probe failure counter or force markDead — double-counting
+    // would poison the dead/recovery lifecycle with request-failure signals.
+    breakerBypassed atomic.Bool
 }
 
 // Models returns a snapshot of the node's served-model list (#95).
@@ -111,6 +125,15 @@ func (n *Node) State() NodeState {
     return n.state
 }
 
+// selectable reports whether a node is routable: healthy per the /health probe
+// AND not breaker-bypassed (R8). This is the single routability gate the
+// SelectNode* functions apply, so Discovery is the single source of truth — a
+// breaker-open node never reaches a strategy selector, eliminating the
+// post-hoc bypass that caused Discovery.Status() and the router to disagree.
+func (n *Node) selectable() bool {
+    return n.State() == NodeStateHealthy && !n.BreakerBypassed()
+}
+
 func (n *Node) InFlight() int64 {
     return n.inFlight.Load()
 }
@@ -123,6 +146,27 @@ func (n *Node) IncrInFlight() {
 func (n *Node) DecrInFlight() {
     n.inFlight.Add(-1)
     observability.UpdateInFlight("cluster-"+n.ID, n.inFlight.Load())
+}
+
+// BreakerBypassed reports whether the router's per-node circuit breaker has
+// tripped this node open (R8). A bypassed node is healthy but not selectable.
+func (n *Node) BreakerBypassed() bool {
+    return n.breakerBypassed.Load()
+}
+
+// SetBreakerBypassed sets the R8 coordination flag. Called by the router on
+// breaker open (true) / recovered-closed (false) transitions. Logs the
+// transition so a bypassed node is traceable in /metrics + logs, not silent.
+func (n *Node) SetBreakerBypassed(b bool) {
+    prev := n.breakerBypassed.Swap(b)
+    if prev != b {
+        if b {
+            slog.Warn("cluster node breaker-bypassed (not selectable while cooldown elapses)",
+                "node_id", n.ID)
+        } else {
+            slog.Info("cluster node breaker-recovered (selectable again)", "node_id", n.ID)
+        }
+    }
 }
 
 func (n *Node) LastHealth() time.Time {
@@ -182,8 +226,23 @@ type Discovery struct {
     // strategy (IgnoreMasterStrategy=false), SelectNode uses this instead of
     // the caller's local Cluster.LoadBalancer — so the strategy a user
     // configured in fusion-studio is authoritative for inference, not divergent
-    // from it. atomic.Value holds a string; Load/Store are concurrency-safe.
+    // from it.
+    // R3 (audit P2): holds a masterStrategyEntry{strategy, cachedAt}, NOT a
+    // bare string. A fetch failure leaves the cache untouched — before R3 that
+    // meant a strategy cached at T0 was trusted forever across an indefinite
+    // master outage (route to dead nodes, sustained outage, no operator
+    // signal). cachedAt lets resolveStrategy bound trust: older than
+    // cfg.Master.MaxStaleAge → fall back to local load_balancer + Warn.
     masterStrategy atomic.Value
+}
+
+// masterStrategyEntry is the timestamped cached master strategy (R3). The
+// zero value (strategy=="") means "nothing cached yet". cachedAt is the wall
+// time of the successful sync that stored it, used by resolveStrategy's
+// staleness check.
+type masterStrategyEntry struct {
+    strategy string
+    cachedAt time.Time
 }
 
 // envClusterBackend reads FUSION_CLUSTER_BACKEND. When "multi-node", it forces
@@ -212,10 +271,19 @@ func NewDiscovery(cfg config.ClusterConfig) *Discovery {
         }
     }
 
+    // H4 (audit P1): the discovery polling client fans out to every node's
+    // /health and /v1/models on a fixed tick. A bare &http.Client{} inherits
+    // http.DefaultTransport (MaxConnsPerHost=0 = unlimited) — with many nodes
+    // a single tick burst could open dozens of connections per node. Route
+    // through TransportForBackend so the per-host FD cap applies. BaseURL is
+    // empty: the cap is per-host keyed on the dialed URL, not the config field.
     d := &Discovery{
         nodes:  make(map[string]*Node),
         cfg:    cfg,
-        client: &http.Client{Timeout: 5 * time.Second},
+        client: &http.Client{
+            Timeout:   5 * time.Second,
+            Transport: adapter.TransportForBackend(config.BackendConfig{}),
+        },
         stopCh: make(chan struct{}),
     }
 
@@ -261,18 +329,85 @@ func (d *Discovery) Start(ctx context.Context) {
         // SelectNodeByModel finds no node → cloud fallback, no warning).
         d.syncNodeModels()
         d.wg.Add(1)
-        safego.Go("cluster_master_sync", func() {
-            defer d.wg.Done()
-            d.masterSyncLoop(ctx)
-        })
+        // H3: restart on panic so a single panic does not permanently kill the
+        // master sync loop (silent cloud-degrade). wg.Done fires only on clean
+        // exit or circuit-breaker trip; backoff respects stopCh for fast shutdown.
+        d.runRestartable(ctx, "cluster_master_sync", d.masterSyncLoop)
     } else {
         d.loadNodesFromConfig()
         d.wg.Add(1)
-        safego.Go("cluster_health_check", func() {
-            defer d.wg.Done()
-            d.healthCheckLoop(ctx)
-        })
+        // H3: restart on panic so a single panic does not permanently kill the
+        // health-check loop (stale node states, no recovery).
+        d.runRestartable(ctx, "cluster_health_check", d.healthCheckLoop)
     }
+}
+
+// runRestartable runs a long-lived loop (H3) with panic-restart + exponential
+// backoff + a consecutive-panic circuit breaker, so a single panic no longer
+// permanently silences the worker (audit H3). wg.Done fires exactly once on a
+// terminal state: clean return (ctx/stopCh observed by the loop) or circuit
+// breaker trip. Backoff waits respect stopCh so Stop does not stall in backoff.
+func (d *Discovery) runRestartable(ctx context.Context, name string, fn func(context.Context)) {
+    safego.Go(name, func() {
+        defer d.wg.Done()
+        const (
+            baseBackoff    = 100 * time.Millisecond
+            maxBackoff     = 30 * time.Second
+            gracePeriod    = 30 * time.Second
+            maxConsecutive = 10
+        )
+        consecutive := 0
+        backoff := baseBackoff
+        for {
+            started := time.Now()
+            panicked := true
+            func() {
+                defer func() {
+                    if r := recover(); r != nil {
+                        ran := time.Since(started)
+                        if ran >= gracePeriod {
+                            consecutive = 0
+                            backoff = baseBackoff
+                        }
+                        consecutive++
+                        slog.Error("cluster worker panic recovered, restarting",
+                            "worker", name,
+                            "panic", r,
+                            "stack", string(debug.Stack()),
+                            "consecutive_panics", consecutive,
+                            "ran_before_panic", ran.String(),
+                            "next_backoff", backoff.String(),
+                        )
+                        return
+                    }
+                    panicked = false
+                }()
+                fn(ctx)
+            }()
+            if !panicked {
+                return
+            }
+            if consecutive > maxConsecutive {
+                slog.Error("cluster worker circuit breaker tripped, permanently disabled",
+                    "worker", name,
+                    "consecutive_panics", consecutive,
+                    "max_consecutive", maxConsecutive,
+                    "grace_period", gracePeriod.String(),
+                )
+                return
+            }
+            select {
+            case <-time.After(backoff):
+            case <-d.stopCh:
+                return
+            }
+            next := backoff * 2
+            if next > maxBackoff {
+                next = maxBackoff
+            }
+            backoff = next
+        }
+    })
 }
 
 func (d *Discovery) Stop() {
@@ -359,16 +494,20 @@ func (d *Discovery) healthCheckLoop(ctx context.Context) {
 
     d.checkAll()
 
-    ticker := time.NewTicker(interval)
-    defer ticker.Stop()
-
     for {
+        // H5 (audit P1): jittered per-tick wait instead of a fixed
+        // time.NewTicker. A fixed ticker makes every gateway in a cluster
+        // poll on the same interval edge → synchronized 150 req/s spikes
+        // against each node's /health+/v1/status+/v1/models at every tick.
+        // jitter.After spreads each gateway's tick across ±20% of the
+        // interval, smearing the herd into steady load. First iteration
+        // already ran checkAll above; this loop only gates the next wake.
         select {
         case <-ctx.Done():
             return
         case <-d.stopCh:
             return
-        case <-ticker.C:
+        case <-jitter.After(interval):
             d.checkAll()
         }
     }
@@ -461,16 +600,18 @@ func (d *Discovery) masterSyncLoop(ctx context.Context) {
     // AH3: keep per-node model registries fresh on every master sync.
     d.syncNodeModels()
 
-    ticker := time.NewTicker(interval)
-    defer ticker.Stop()
-
     for {
+        // H5 (audit P1): jittered per-tick wait, not a fixed ticker — see
+        // healthCheckLoop. Master mode fans out to master /api/nodes +
+        // routing/summary + every node's /v1/models; 5 gateways on a shared
+        // 10s ticker edge spike the single-threaded master admin loop. The
+        // ±20% spread keeps the aggregate rate while killing the herd.
         select {
         case <-ctx.Done():
             return
         case <-d.stopCh:
             return
-        case <-ticker.C:
+        case <-jitter.After(interval):
             d.syncFromMaster()
             // #119: refresh the master strategy each tick (a user can change
             // it in fusion-studio; the master's RoutingSummary reflects it).
@@ -513,7 +654,9 @@ func (d *Discovery) syncMasterStrategy() {
             "total_nodes", summary.TotalNodes)
         return
     }
-    d.masterStrategy.Store(summary.Strategy)
+    // R3: store the strategy WITH its sync timestamp so resolveStrategy can
+    // bound how long a cached strategy is trusted across failed syncs.
+    d.masterStrategy.Store(masterStrategyEntry{strategy: summary.Strategy, cachedAt: time.Now()})
     slog.Info("cluster master strategy cached", "strategy", summary.Strategy,
         "total_nodes", summary.TotalNodes, "avg_load", summary.AvgLoad)
 }
@@ -529,14 +672,30 @@ func (d *Discovery) resolveStrategy(local string) string {
     }
     d.mu.RLock()
     ignore := d.cfg.Master.IgnoreMasterStrategy
+    maxStale := d.cfg.Master.MaxStaleAge
     d.mu.RUnlock()
     if ignore {
         return local
     }
-    if cached, ok := d.masterStrategy.Load().(string); ok && cached != "" {
-        return cached
+    entry, ok := d.masterStrategy.Load().(masterStrategyEntry)
+    if !ok || entry.strategy == "" {
+        return local
     }
-    return local
+    // R3 (audit P2): bound how long a cached strategy is trusted. A fetch
+    // failure leaves the cache untouched, so without a staleness bound a
+    // strategy cached at T0 is trusted forever across an indefinite master
+    // outage — routing to dead nodes, sustained outage, no operator signal.
+    // Older than max_stale_age → fall back to the caller's local strategy and
+    // log so the operator sees the strategy is过期. maxStale==0 disables the
+    // bound (legacy永久-sticky opt-out).
+    if maxStale > 0 && time.Since(entry.cachedAt) > maxStale {
+        slog.Warn("cluster master strategy is stale beyond max_stale_age — falling back to local load_balancer",
+            "cached_strategy", entry.strategy,
+            "age", time.Since(entry.cachedAt).Round(time.Second),
+            "max_stale_age", maxStale)
+        return local
+    }
+    return entry.strategy
 }
 
 func (d *Discovery) checkAll() {
@@ -804,7 +963,7 @@ func (d *Discovery) HealthyNodeList() []*Node {
 
     var result []*Node
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy {
+        if n.selectable() {
             result = append(result, n)
         }
     }
@@ -822,7 +981,7 @@ func (d *Discovery) HealthyNodesByPlatform(platform string) int {
     defer d.mu.RUnlock()
     count := 0
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy && n.Platform == platform {
+        if n.selectable() && n.Platform == platform {
             count++
         }
     }
@@ -839,7 +998,7 @@ func (d *Discovery) SelectNodeByPlatform(strategy, platform string) (*Node, erro
     d.mu.RLock()
     var healthy []*Node
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy && n.Platform == platform {
+        if n.selectable() && n.Platform == platform {
             healthy = append(healthy, n)
         }
     }
@@ -873,7 +1032,7 @@ func (d *Discovery) HealthyNodesByModel(model string) int {
     defer d.mu.RUnlock()
     count := 0
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy && n.servesModel(model) {
+        if n.selectable() && n.servesModel(model) {
             count++
         }
     }
@@ -898,7 +1057,7 @@ func (d *Discovery) SelectNodeByModel(strategy, model string, maxConcurrent int)
     var healthy []*Node
     var skipped int
     for _, n := range d.nodes {
-        if n.State() != NodeStateHealthy || !n.servesModel(model) {
+        if !n.selectable() || !n.servesModel(model) {
             continue
         }
         if maxConcurrent > 0 && n.InFlight() >= int64(maxConcurrent) {
@@ -1024,11 +1183,50 @@ func (d *Discovery) HealthyNodes() int {
 
     count := 0
     for _, n := range d.nodes {
-        if n.State() == NodeStateHealthy {
+        if n.selectable() {
             count++
         }
     }
     return count
+}
+
+// MarkNodeBreakerOpen marks nodeID breaker-bypassed (R8): the router's per-node
+// circuit breaker tripped open on repeated request failures. The node stays
+// healthy (the /health probe may still succeed) but is not selectable until
+// MarkNodeBreakerClosed. No-op for unknown nodeID. This is the push side of the
+// R8 single-source-of-truth coordination: the breaker transition is the one
+// event that updates routability, so Discovery and the router can never
+// disagree about whether a node is routable.
+func (d *Discovery) MarkNodeBreakerOpen(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    d.mu.RLock()
+    n, ok := d.nodes[nodeID]
+    d.mu.RUnlock()
+    if !ok {
+        slog.Debug("MarkNodeBreakerOpen: unknown node", "node_id", nodeID)
+        return
+    }
+    n.SetBreakerBypassed(true)
+}
+
+// MarkNodeBreakerClosed clears the breaker-bypassed flag (R8): the breaker
+// recovered to closed (cooldown elapsed + a half-open probe succeeded). The
+// node is selectable again on the next SelectNode* call. No-op for unknown
+// nodeID or an already-selectable node.
+func (d *Discovery) MarkNodeBreakerClosed(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    d.mu.RLock()
+    n, ok := d.nodes[nodeID]
+    d.mu.RUnlock()
+    if !ok {
+        slog.Debug("MarkNodeBreakerClosed: unknown node", "node_id", nodeID)
+        return
+    }
+    n.SetBreakerBypassed(false)
 }
 
 // SelectNodeID implements router.ClusterSelector — returns node ID string
@@ -1075,6 +1273,16 @@ func (a *ClusterSelectorAdapter) HealthyNodesByModel(model string) int {
 
 func (a *ClusterSelectorAdapter) SelectNodeByModel(strategy, model string, maxConcurrent int) (string, error) {
     return a.discovery.SelectNodeIDByModel(strategy, model, maxConcurrent)
+}
+
+// MarkNodeBreakerOpen implements router.ClusterSelector (R8).
+func (a *ClusterSelectorAdapter) MarkNodeBreakerOpen(nodeID string) {
+    a.discovery.MarkNodeBreakerOpen(nodeID)
+}
+
+// MarkNodeBreakerClosed implements router.ClusterSelector (R8).
+func (a *ClusterSelectorAdapter) MarkNodeBreakerClosed(nodeID string) {
+    a.discovery.MarkNodeBreakerClosed(nodeID)
 }
 
 func (d *Discovery) selectRoundRobin(nodes []*Node) *Node {

@@ -29,9 +29,17 @@ type ClusterNodeProvider struct {
 }
 
 func NewClusterNodeProvider(node *Node, routingCfg config.RoutingConfig, sharedToken string) *ClusterNodeProvider {
+    // H4 (audit P1): route the cluster inference path through TransportForBackend
+    // so it inherits the MaxConnsPerHost FD cap (default 16). The prior bare
+    // &http.Client{Timeout} inherited http.DefaultTransport (MaxConnsPerHost=0 =
+    // unlimited) — 100 concurrent requests to one node opened 100 connections,
+    // and a 5-gateway fan-out exhausted the node's FD table (macOS ulimit -n 256).
     return &ClusterNodeProvider{
         node:             node,
-        httpClient:       &http.Client{Timeout: 120 * time.Second},
+        httpClient: &http.Client{
+            Timeout:   120 * time.Second,
+            Transport: adapter.TransportForBackend(config.BackendConfig{BaseURL: node.Address}),
+        },
         apiKey:           sharedToken,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
         routeHeaderValue: routingCfg.Negotiation.RouteHeaderValue,

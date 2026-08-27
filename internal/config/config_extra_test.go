@@ -576,3 +576,99 @@ func TestEI8_DefaultConfigStillValid(t *testing.T) {
         t.Fatalf("EI8: DefaultConfig must still validate after EI8 checks, got: %v", err)
     }
 }
+
+// R5 guard tests: ResponseHeaderTimeout bounds a stuck upstream that accepted
+// the connection but never sends headers, so it cannot occupy a full
+// Client.Timeout slot and saturate the bounded MaxConnsPerHost pool. Revert the
+// validate() range checks → these fail. Revert TransportForBackend setting
+// ResponseHeaderTimeout → the adapter test fails (slow header hangs).
+
+func TestR5_Backend_ResponseHeaderTimeoutNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Backends == nil {
+        cfg.Backends = make(map[string]BackendConfig)
+    }
+    cfg.Backends["local"] = BackendConfig{
+        BaseURL:              "http://127.0.0.1:11434",
+        Enabled:              true,
+        ResponseHeaderTimeout: -1 * time.Second,
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("R5: expected error for negative backends.local.response_header_timeout")
+    }
+}
+
+func TestR5_Backend_ResponseHeaderTimeoutTooLarge(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Backends == nil {
+        cfg.Backends = make(map[string]BackendConfig)
+    }
+    cfg.Backends["local"] = BackendConfig{
+        BaseURL:              "http://127.0.0.1:11434",
+        Enabled:              true,
+        ResponseHeaderTimeout: 11 * time.Minute,
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("R5: expected error for backends.local.response_header_timeout > 10m (unit mistake)")
+    }
+}
+
+func TestR5_Backend_ResponseHeaderTimeoutValid(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.Backends == nil {
+        cfg.Backends = make(map[string]BackendConfig)
+    }
+    cfg.Backends["local"] = BackendConfig{
+        BaseURL:              "http://127.0.0.1:11434",
+        Enabled:              true,
+        ResponseHeaderTimeout: 5 * time.Second,
+    }
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("R5: 5s response_header_timeout must be valid, got: %v", err)
+    }
+}
+
+// TestR7_ResumeMaxEntriesNegative: a negative resume_max_entries is invalid
+// (0 = unlimited is the documented opt-out). Guard: revert the < 0 check and
+// validate accepts -1.
+func TestR7_ResumeMaxEntriesNegative(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Stream.ResumeMaxEntries = -1
+    if err := validate(&cfg); err == nil {
+        t.Fatal("R7: expected error for negative resume_max_entries")
+    }
+}
+
+// TestR7_ResumeMaxEntriesZeroUnlimited: 0 (unlimited) must be accepted even
+// when resume is enabled — it is the documented opt-out from the global cap.
+func TestR7_ResumeMaxEntriesZeroUnlimited(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Stream.ResumeEnabled = true
+    cfg.Routing.Stream.ResumeMaxEntries = 0
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("R7: resume_max_entries=0 (unlimited) must be valid, got: %v", err)
+    }
+}
+
+// TestR7_ResumeEnabledTTLZero: when resume is enabled, a zero/negative TTL
+// disables time-based eviction (ReapExpired no-ops), leaving only the entries
+// cap. Reject at config time so deployments don't silently rely on cap alone.
+func TestR7_ResumeEnabledTTLZero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Stream.ResumeEnabled = true
+    cfg.Routing.Stream.ResumeTTL = 0
+    if err := validate(&cfg); err == nil {
+        t.Fatal("R7: expected error for resume_ttl=0 when resume_enabled=true")
+    }
+}
+
+// TestR7_ResumeDisabledTTLZero: TTL=0 is fine when resume is disabled — the
+// buffer store is never constructed, so the TTL is irrelevant.
+func TestR7_ResumeDisabledTTLZero(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Routing.Stream.ResumeEnabled = false
+    cfg.Routing.Stream.ResumeTTL = 0
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("R7: resume_ttl=0 with resume disabled must be valid, got: %v", err)
+    }
+}

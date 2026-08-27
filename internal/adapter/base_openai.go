@@ -5,10 +5,8 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
     "log/slog"
     "net/http"
-    "strings"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -254,6 +252,3 @@ func (b *baseOpenAICompatible) baseListModels(ctx context.Context, vendorLabel s
     }
     return listResp.Data, nil
 }
-
-var _ = io.EOF
-var _ = strings.TrimSpace

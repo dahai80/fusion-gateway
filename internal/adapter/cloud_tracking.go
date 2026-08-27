@@ -15,6 +15,17 @@ func WrapCloudTracking(p Provider) Provider {
     return &cloudTrackingProvider{inner: p}
 }
 
+// Unwrap exposes the underlying provider so interface assertions (e.g. the
+// MessagesProvider check in the /v1/messages handler) resolve to the wrapped
+// provider's real type. Without this, bedrock/vertex/foundry wrapped by
+// WrapCloudTracking fail the MessagesProvider type assertion and silently fall
+// to the lossy OpenAI conversion path, losing native Anthropic SSE events
+// (audit H2). This is the Go convention for decorator types (errors.Unwrap,
+// http.RoundTripper chains).
+func (c *cloudTrackingProvider) Unwrap() Provider {
+    return c.inner
+}
+
 func (c *cloudTrackingProvider) Name() string {
     return c.inner.Name()
 }

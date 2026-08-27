@@ -73,7 +73,7 @@ func setInFlight(d *Discovery, nodeID string, n int64) {
 func waitForMasterStrategy(d *Discovery, want string, timeout time.Duration) bool {
     deadline := time.Now().Add(timeout)
     for time.Now().Before(deadline) {
-        if cached, ok := d.masterStrategy.Load().(string); ok && cached == want {
+        if entry, ok := d.masterStrategy.Load().(masterStrategyEntry); ok && entry.strategy == want {
             return true
         }
         time.Sleep(10 * time.Millisecond)
@@ -191,8 +191,8 @@ func TestMasterStrategy_IgnoreStrategyOptOut(t *testing.T) {
     time.Sleep(300 * time.Millisecond)
 
     // Opt-out → masterStrategy stays empty (syncMasterStrategy skips).
-    if cached, ok := d.masterStrategy.Load().(string); ok && cached != "" {
-        t.Fatalf("ignore_strategy=true must NOT cache master strategy, got %q", cached)
+    if entry, ok := d.masterStrategy.Load().(masterStrategyEntry); ok && entry.strategy != "" {
+        t.Fatalf("ignore_strategy=true must NOT cache master strategy, got %q", entry.strategy)
     }
     setInFlight(d, "hw-node", 5)
     selected, err := d.SelectNodeByModel("least-connections", "served-model", 0)
@@ -303,5 +303,99 @@ func TestEnvClusterBackend_NoAddress_StaysConfigured(t *testing.T) {
     d := NewDiscovery(cfg)
     if d.masterClient != nil {
         t.Fatal("FUSION_CLUSTER_BACKEND=multi-node with empty master.address must NOT create masterClient (no-op, stays standalone)")
+    }
+}
+
+// TestR3_MasterStrategy_StaleFallsBackToLocal (R3 audit P2): a cached master
+// strategy older than max_stale_age must NOT be trusted — resolveStrategy
+// falls back to the caller's local strategy. Before R3 the strategy was
+// cached as a bare string with no timestamp, so a fetch failure left it
+// permanently trusted across an indefinite master outage (route to dead
+// nodes). Here a fresh strategy is cached, then its cachedAt is rewound past
+// max_stale_age to simulate a long outage, and resolveStrategy must return
+// local.
+func TestR3_MasterStrategy_StaleFallsBackToLocal(t *testing.T) {
+    srv := masterStrategyServer(t, "hardware-aware")
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL, MaxStaleAge: 50 * time.Millisecond},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+    if !waitForMasterStrategy(d, "hardware-aware", 2*time.Second) {
+        t.Fatal("master strategy hardware-aware not cached in time")
+    }
+
+    // Rewind cachedAt far into the past so the entry is stale beyond
+    // max_stale_age (50ms). Simulates a master outage long enough that the
+    // cached strategy is no longer trustworthy.
+    d.masterStrategy.Store(masterStrategyEntry{strategy: "hardware-aware", cachedAt: time.Now().Add(-10 * time.Minute)})
+
+    // resolveStrategy must reject the stale strategy and return local.
+    if got := d.resolveStrategy("least-connections"); got != "least-connections" {
+        t.Errorf("R3: stale strategy (age 10m > max_stale_age 50ms) must fall back to local 'least-connections', got %q (stale strategy trusted beyond bound — pre-R3永久-sticky bug)", got)
+    }
+}
+
+// TestR3_MasterStrategy_FreshTrusted: a cached strategy younger than
+// max_stale_age IS trusted (resolveStrategy returns the master strategy).
+// Companion to the stale guard — proves the bound does not reject fresh
+// strategies, only过期 ones.
+func TestR3_MasterStrategy_FreshTrusted(t *testing.T) {
+    srv := masterStrategyServer(t, "hardware-aware")
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL, MaxStaleAge: 10 * time.Minute},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+    if !waitForMasterStrategy(d, "hardware-aware", 2*time.Second) {
+        t.Fatal("master strategy hardware-aware not cached in time")
+    }
+
+    // Fresh (just synced) + max_stale_age 10m → trusted.
+    if got := d.resolveStrategy("least-connections"); got != "hardware-aware" {
+        t.Errorf("R3: fresh strategy must be trusted (return master 'hardware-aware'), got %q", got)
+    }
+}
+
+// TestR3_MasterStrategy_MaxStaleZeroDisablesBound: max_stale_age=0 keeps the
+// legacy永久-sticky behavior (the explicit opt-out) — even a strategy cached
+// 10m ago is trusted. Proves the 0-disables semantics so operators who set 0
+// intentionally are not surprised.
+func TestR3_MasterStrategy_MaxStaleZeroDisablesBound(t *testing.T) {
+    srv := masterStrategyServer(t, "hardware-aware")
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL, MaxStaleAge: 0},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+    if !waitForMasterStrategy(d, "hardware-aware", 2*time.Second) {
+        t.Fatal("master strategy hardware-aware not cached in time")
+    }
+
+    // Rewind 10m into the past, but max_stale_age=0 disables the bound → trusted.
+    d.masterStrategy.Store(masterStrategyEntry{strategy: "hardware-aware", cachedAt: time.Now().Add(-10 * time.Minute)})
+    if got := d.resolveStrategy("least-connections"); got != "hardware-aware" {
+        t.Errorf("R3: max_stale_age=0 must disable the bound (trust even a 10m-old strategy), got %q", got)
     }
 }

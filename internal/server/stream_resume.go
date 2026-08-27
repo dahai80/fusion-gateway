@@ -15,7 +15,6 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
@@ -54,7 +53,16 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     // called on pump-close below. liveCtx copies the inbound fusion-headers
     // map + X-Request-ID from ctx so the pump's outbound upstream request still
     // propagates X-Request-ID / auth headers as in the plain path.
+    //
+    // R6: liveCtx is a CHILD of the server-wide shutdownCtx so a graceful
+    // Shutdown cancels this pump (releasing the local slot) instead of letting
+    // it keep reading a torn-down fusion-mlx. context.Background() here would
+    // ignore Shutdown — slots leak until the 5-min idle watchdog or a read
+    // error, contending the next process on a fast restart.
     liveCtx := context.Background()
+    if s.shutdownCtx != nil {
+        liveCtx = s.shutdownCtx
+    }
     if rid := middleware.RequestIDFromContext(ctx); rid != "" {
         liveCtx = middleware.InjectRequestID(liveCtx, rid)
     }
@@ -116,48 +124,20 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     endReason := "ch_closed_no_done"
     clientGone := false
 
-    // idleWatchCtx is liveCtx scoped to the watchdog: when idle exceeds
-    // IdleTimeout, cancel liveCtx to unblock the pump's body.Read. Mirrors the
-    // plain path's wdCancel but on the decoupled ctx.
+    // R6: the watchdog, keepalive, and chunk consumer run in ONE select loop on
+    // this goroutine — mirroring the plain handleStreamChat forward loop. The
+    // prior split (watchdog in its own safeGo goroutine, keepalivePing as a dead
+    // closure) had three defects: (1) the watchdog read chunkCount/lastChunkAt
+    // written here with no synchronization → `go test -race` data race, torn
+    // lastChunkAt read → false synth message_stop or a never-tripping stale
+    // value; (2) keepalivePing was defined but only referenced via
+    // `_ = keepalivePing` → dead code, resumed streams got zero keepalive, a
+    // slow-but-live MLX cold start let the client proxy time out; (3) no
+    // shutdown signal (fixed by the liveCtx parent below). Folding into one loop
+    // closes all three: lastChunkAt is read and written on this goroutine only,
+    // keepalive fires on every tick the watchdog does not trip, and Shutdown
+    // cancels liveCtx which the loop observes via ch closing.
     watchdogTripped := false
-    var watchdogCancel context.CancelFunc
-    if streamCfg.IdleTimeout > 0 {
-        wc, wcCancel := context.WithCancel(context.Background())
-        watchdogCancel = wcCancel
-        defer watchdogCancel()
-        tickInterval := streamCfg.KeepaliveInterval
-        if tickInterval <= 0 {
-            tickInterval = 5 * time.Second
-        }
-        safego.Go("resumable_stream_idle_watchdog", func() {
-            ticker := time.NewTicker(tickInterval)
-            defer ticker.Stop()
-            lastEvent := time.Now()
-            for {
-                select {
-                case <-wc.Done():
-                    return
-                case <-ticker.C:
-                    // lastChunkAt is written by the single consumer goroutine
-                    // below; the watchdog only reads. A stale read at most
-                    // delays a trip by one tick.
-                    idle := time.Since(lastEvent)
-                    if chunkCount == 0 {
-                        idle = time.Since(streamStart)
-                    }
-                    if !watchdogTripped && idle >= streamCfg.IdleTimeout {
-                        slog.Warn("resumable stream idle watchdog tripped",
-                            "sid", sid, "model", req.Model, "idle", idle, "threshold", streamCfg.IdleTimeout)
-                        watchdogTripped = true
-                        endReason = "watchdog_tripped"
-                        liveCancel()
-                        return
-                    }
-                    lastEvent = time.Now()
-                }
-            }
-        })
-    }
 
     // writeFrameClient writes one buffered frame to the client, flushing. The
     // frame already carries the `id: <sid>:<seq>` line (built by Append).
@@ -178,10 +158,10 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
         return true
     }
 
-    // keepalivePing writes an SSE comment keepalive — client ignores, bytes keep
-    // flowing so a slow-but-live upstream is not timed out. No id line (SSE
-    // comments do not advance Last-Event-ID). Returns false on write failure.
-    keepalivePing := func() bool {
+    // writeKeepalive emits an SSE comment keepalive — the client ignores it, but
+    // the bytes keep flowing so a slow-but-live upstream is not timed out by an
+    // intermediate proxy. SSE comments do not advance Last-Event-ID (no id line).
+    writeKeepalive := func() bool {
         if clientGone {
             return true
         }
@@ -196,34 +176,114 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
         return true
     }
 
+    // tickInterval drives both keepalive and the idle watchdog — same as the
+    // plain path (chat_handlers.go). Disabled (<=0) → pure blocking forward
+    // loop, no keepalive, no watchdog (backward-compat).
+    tickInterval := streamCfg.KeepaliveInterval
+    if streamCfg.IdleTimeout > 0 && tickInterval <= 0 {
+        tickInterval = 5 * time.Second
+    }
+
     // Consumer loop: single reader of ch. Buffers every event (Append builds the
     // frame + assigns seq), then writes the same frame to the client. On a
     // client write failure the loop STOPS writing the client but keeps draining
     // the channel into the buffer until the pump closes — the buffered tail
-    // survives the disconnect. Channel close finalizes the buffer.
-    for chunk := range ch {
-        chunkCount++
-        lastChunkAt = time.Now()
-        if firstChunkAt.IsZero() {
-            firstChunkAt = lastChunkAt
+    // survives the disconnect. Channel close finalizes the buffer. The keepalive
+    // + watchdog tick share this loop so lastChunkAt/chunkCount are touched on
+    // this goroutine only (no race).
+    if tickInterval <= 0 {
+        for chunk := range ch {
+            chunkCount++
+            lastChunkAt = time.Now()
+            if firstChunkAt.IsZero() {
+                firstChunkAt = lastChunkAt
+            }
+            if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+                outputTokens += chunk.Usage.CompletionTokens
+            }
+            lastChunkID = chunk.ID
+            lastChunkModel = chunk.Model
+            lastChunkCreated = chunk.Created
+            // E1 (audit): emit verbatim upstream bytes when present (Raw),
+            // else marshal. Same passthrough as the live chat_handlers
+            // writeChunk — keeps the buffered+replayed bytes faithful to the
+            // upstream and skips the per-frame marshal on the OpenAI-wire
+            // path. Chunks built in-process (no Raw) still marshal.
+            data := chunk.Raw
+            if len(data) == 0 {
+                var err error
+                data, err = json.Marshal(chunk)
+                if err != nil {
+                    slog.Error("resumable stream marshal chunk failed", "sid", sid, "error", err)
+                    data = []byte(`{"error":"marshal_failed"}`)
+                }
+            }
+            _, frame := buf.Append(data)
+            writeFrameClient(frame)
         }
-        if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
-            outputTokens += chunk.Usage.CompletionTokens
+    } else {
+        ticker := time.NewTicker(tickInterval)
+        defer ticker.Stop()
+        if lastChunkAt.IsZero() {
+            lastChunkAt = streamStart
         }
-        lastChunkID = chunk.ID
-        lastChunkModel = chunk.Model
-        lastChunkCreated = chunk.Created
-
-        data, err := json.Marshal(chunk)
-        if err != nil {
-            slog.Error("resumable stream marshal chunk failed", "sid", sid, "error", err)
-            data = []byte(`{"error":"marshal_failed"}`)
+        done := false
+        for !done {
+            select {
+            case chunk, ok := <-ch:
+                if !ok {
+                    done = true
+                    break
+                }
+                chunkCount++
+                lastChunkAt = time.Now()
+                if firstChunkAt.IsZero() {
+                    firstChunkAt = lastChunkAt
+                }
+                if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+                    outputTokens += chunk.Usage.CompletionTokens
+                }
+                lastChunkID = chunk.ID
+                lastChunkModel = chunk.Model
+                lastChunkCreated = chunk.Created
+                // E1 (audit): Raw passthrough — see the no-ticker branch above.
+                data := chunk.Raw
+                if len(data) == 0 {
+                    var err error
+                    data, err = json.Marshal(chunk)
+                    if err != nil {
+                        slog.Error("resumable stream marshal chunk failed", "sid", sid, "error", err)
+                        data = []byte(`{"error":"marshal_failed"}`)
+                    }
+                }
+                _, frame := buf.Append(data)
+                writeFrameClient(frame)
+            case <-ticker.C:
+                if !watchdogTripped {
+                    idle := time.Since(lastChunkAt)
+                    if chunkCount == 0 {
+                        idle = time.Since(streamStart)
+                    }
+                    if streamCfg.IdleTimeout > 0 && idle >= streamCfg.IdleTimeout {
+                        slog.Warn("resumable stream idle watchdog tripped",
+                            "sid", sid, "model", req.Model, "idle", idle, "threshold", streamCfg.IdleTimeout)
+                        watchdogTripped = true
+                        endReason = "watchdog_tripped"
+                        liveCancel()
+                        done = true
+                        break
+                    }
+                    // Keepalive: bytes keep flowing so a slow-but-live upstream
+                    // is not timed out by an intermediate proxy (restores #69's
+                    // 15s keepalive the prior dead keepalivePing dropped).
+                    if !writeKeepalive() {
+                        // writeKeepalive already set clientGone; keep draining to
+                        // buffer — a reconnect replays the tail.
+                    }
+                }
+            }
         }
-        _, frame := buf.Append(data)
-        writeFrameClient(frame)
     }
-
-    _ = keepalivePing
 
     // Pump closed: finalize the buffer so replay waiters drain and exit.
     buf.MarkFinalized()

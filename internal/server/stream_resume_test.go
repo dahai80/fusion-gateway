@@ -70,7 +70,7 @@ func (p *ctxAwareStreamProvider) ListModels(_ context.Context) ([]adapter.ModelI
 func newResumableTestServer(t *testing.T) *Server {
     t.Helper()
     s := newTestServer()
-    s.streamBuffers = NewStreamBufferStore(256, 1<<20, 10*time.Minute)
+    s.streamBuffers = NewStreamBufferStore(256, 1<<20, 0, 10*time.Minute)
     s.cfg.Config.Routing.Stream.ResumeEnabled = true
     return s
 }
@@ -121,7 +121,7 @@ func TestResumableStream_EmitsIDLines(t *testing.T) {
 // TestStreamBuffer_AppendFramesAfterCursor: FramesAfter returns only frames
 // after the cursor seq. Guard: monotonic seq + filter both required.
 func TestStreamBuffer_AppendFramesAfterCursor(t *testing.T) {
-    store := NewStreamBufferStore(256, 1<<20, 10*time.Minute)
+    store := NewStreamBufferStore(256, 1<<20, 0, 10*time.Minute)
     buf := store.Open("sid-cursor")
     if buf == nil {
         t.Fatal("Open returned nil")

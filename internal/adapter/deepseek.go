@@ -2,7 +2,6 @@ package adapter
 
 import (
     "context"
-    "fmt"
     "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -50,5 +49,3 @@ func (p *DeepSeekProvider) ListModels(ctx context.Context) ([]ModelInfo, error) 
         {ID: "deepseek-reasoner", Object: "model", OwnedBy: "deepseek"},
     }, nil
 }
-
-var _ = fmt.Sprintf

@@ -36,6 +36,18 @@ const (
     // enforcement lives in CheckQuota, not the deduction), so no Lua
     // check-then-deduct is needed.
     quotaUsedPrefix = "fusion:quota:used:"
+    // R4 (audit P1): dedicated team cost counters, kept OUTSIDE the team JSON
+    // blob for the same reason as quotaUsedPrefix (AH1). The prior AddTeamCost
+    // was a GetTeam -> mutate QuotaUsed+CostAccumulated -> UpdateTeam RMW on the
+    // blob — non-atomic, so two concurrent gateway instances both read the same
+    // values, each adds its cost, each writes back: one cost is lost (team
+    // billing never reconciles across a multi-gateway + Redis deployment). Two
+    // dedicated float counters incremented atomically fix the lost-cost defect.
+    // A Lua script applies BOTH increments in one atomic Redis op so the two
+    // counters cannot diverge on a partial failure (quota-used and lifetime
+    // cost stay consistent).
+    teamQuotaUsedPrefix = "fusion:team:quota_used:"
+    teamCostAccumPrefix = "fusion:team:cost_accum:"
 )
 
 type RedisStore struct {
@@ -543,23 +555,65 @@ func (r *RedisStore) GetTeamByKey(apiKey string) (*store.Team, error) {
     return r.GetTeam(teamID)
 }
 
+// addTeamCostScript atomically increments BOTH the team quota-used counter and
+// the lifetime cost-accumulated counter in a single Redis EVAL. R4 (audit P1):
+// two separate INCRBYFLOAT calls are each atomic but not transactional — if the
+// second failed after the first succeeded, the two counters diverge (quota used
+// charged but lifetime cost not recorded, or vice versa). KEYS[1]=quota-used,
+// KEYS[2]=cost-accum, ARGV[1]=cost. Returns the new quota-used so the caller
+// can log it; the script itself cannot error on a well-formed INCRBYFLOAT.
+const addTeamCostScript = `
+local used = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+redis.call('INCRBYFLOAT', KEYS[2], ARGV[1])
+return used
+`
+
 func (r *RedisStore) AddTeamCost(teamID string, cost float64) error {
-    team, err := r.GetTeam(teamID)
-    if err != nil {
-        return err
+    // R4 (audit P1): atomic Lua INCRBYFLOAT on dedicated counters, NOT a
+    // GetTeam -> mutate QuotaUsed+CostAccumulated -> UpdateTeam blob RMW. The
+    // RMW lost a cost on every concurrent AddCost across gateway instances
+    // (team billing double-spend): both read the same values, each adds its
+    // cost, each writes back — one cost lost. The Lua script applies both
+    // increments in one atomic Redis op so the counters stay consistent. The
+    // team blob's QuotaUsed/CostAccumulated fields are NOT updated here (they
+    // are the non-atomic RMW victim, same tradeoff as AH1's per-key path); the
+    // dedicated counters are the authoritative source read by CheckTeamQuota.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    if _, err := r.client.Get(ctx, teamPrefix+teamID).Result(); err != nil {
+        return fmt.Errorf("add team cost: team %s not found", teamID)
     }
-    team.QuotaUsed += cost
-    team.CostAccumulated += cost
-    team.UpdatedAt = time.Now()
-    return r.UpdateTeam(team)
+    quotaKey := teamQuotaUsedPrefix + teamID
+    costKey := teamCostAccumPrefix + teamID
+    if err := r.client.Eval(ctx, addTeamCostScript, []string{quotaKey, costKey}, cost).Err(); err != nil {
+        return fmt.Errorf("add team cost atomic increment failed: %w", err)
+    }
+    slog.Debug("team cost added atomically", "team", teamID, "amount", cost)
+    return nil
 }
 
 func (r *RedisStore) CheckTeamQuota(teamID string) (limit, used float64, ok bool, err error) {
+    // R4 (audit P1): read the authoritative quota-used COUNTER, not the
+    // QuotaUsed field baked into the team blob. The blob is a non-atomic RMW
+    // victim (AddTeamCost no longer writes it); the counter is incremented
+    // atomically by the Lua script. The limit still comes from the blob
+    // (admin-set, never mutated by the cost path). A missing counter reads as
+    // 0 (no cost recorded yet) — matches the memory store's fresh-team
+    // semantics, not a hard error.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
     team, err := r.GetTeam(teamID)
     if err != nil {
         return 0, 0, false, err
     }
-    return team.QuotaLimit, team.QuotaUsed, team.QuotaUsed < team.QuotaLimit, nil
+    usedStr, err := r.client.Get(ctx, teamQuotaUsedPrefix+teamID).Result()
+    if err != nil && err != redis.Nil {
+        return 0, 0, false, fmt.Errorf("team quota used read failed: %w", err)
+    }
+    used, _ = strconv.ParseFloat(usedStr, 64)
+    limit = team.QuotaLimit
+    ok = used < limit
+    return limit, used, ok, nil
 }
 
 func (r *RedisStore) AddTeamMember(teamID, userID, role string) error {

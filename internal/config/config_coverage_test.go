@@ -4,6 +4,7 @@ import (
     "context"
     "os"
     "path/filepath"
+    "sync"
     "sync/atomic"
     "testing"
     "time"
@@ -953,3 +954,78 @@ func TestValidate_ClusterStandalone_NoMasterAddress_Accepted(t *testing.T) {
         t.Fatalf("cluster.mode=standalone with empty master.address must be accepted: %v", err)
     }
 }
+
+// TestH7_Reload_HandlersSerialized (H7): two concurrent Reloads must NOT run
+// their onReload handlers at the same time. Before H7, Reload copied the
+// handler list under a shared RLock then ran handlers + committed with no lock
+// in between — so two Reloads interleaved handlers concurrently (and the
+// commit raced). After H7, reloadMu serializes the handler-run+commit window.
+// The guard registers a handler that detects overlap (in-flight counter > 1
+// while it sleeps), then fires N Reloads in parallel and asserts peak overlap
+// stayed 0.
+func TestH7_Reload_HandlersSerialized(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    // Prime globalConfig with an initial snapshot so Reload has an oldSnap.
+    if _, err := Load(f); err != nil {
+        t.Fatalf("initial Load failed: %v", err)
+    }
+
+    var inFlight int32
+    var peakOverlap int32
+    onReloadHandlers = nil
+    OnReload(func(old, newSnap *ConfigSnapshot) {
+        cur := atomic.AddInt32(&inFlight, 1)
+        if cur > 1 {
+            // Another handler is concurrently in-flight — overlap detected.
+            atomic.StoreInt32(&peakOverlap, cur)
+        }
+        // Hold the window open so a concurrent Reload (if unsynchronized) is
+        // guaranteed to overlap. Long enough to force interleaving without a
+        // flaky timing dependency.
+        time.Sleep(20 * time.Millisecond)
+        atomic.AddInt32(&inFlight, -1)
+    })
+
+    const n = 6
+    var wg sync.WaitGroup
+    wg.Add(n)
+    start := make(chan struct{})
+    for i := 0; i < n; i++ {
+        go func() {
+            defer wg.Done()
+            <-start
+            if _, err := Reload(f); err != nil {
+                t.Errorf("Reload failed: %v", err)
+            }
+        }()
+    }
+    close(start)
+    wg.Wait()
+
+    if got := atomic.LoadInt32(&peakOverlap); got > 1 {
+        t.Errorf("H7: expected handler-run serialized (peak overlap 0 or 1), but %d Reloads ran handlers concurrently — reloadMu not held across handler-run+commit", got)
+    }
+    t.Logf("H7: %d concurrent Reloads, peak handler overlap=%d (serialized)", n, peakOverlap)
+}
+

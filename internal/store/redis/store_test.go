@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "fmt"
     "log/slog"
+    "strconv"
     "sync"
     "testing"
     "time"
@@ -517,12 +518,16 @@ func TestRedisStore_AddTeamCost(t *testing.T) {
     if err := rs.AddTeamCost("t1", 25.0); err != nil {
         t.Fatalf("AddTeamCost failed: %v", err)
     }
-    team, _ := rs.GetTeam("t1")
-    if team.QuotaUsed != 25.0 {
-        t.Fatalf("expected 25.0, got %f", team.QuotaUsed)
+    // R4: the authoritative usage is the dedicated COUNTER (read via
+    // CheckTeamQuota), not the blob's QuotaUsed field (the non-atomic RMW
+    // victim, deliberately no longer updated by AddTeamCost — same tradeoff
+    // as AH1's per-key quota path). Assert via the counter read path.
+    _, used, _, err := rs.CheckTeamQuota("t1")
+    if err != nil {
+        t.Fatalf("CheckTeamQuota failed: %v", err)
     }
-    if team.CostAccumulated != 25.0 {
-        t.Fatalf("expected 25.0 accumulated, got %f", team.CostAccumulated)
+    if used != 25.0 {
+        t.Fatalf("expected counter used 25.0, got %f", used)
     }
 }
 
@@ -540,13 +545,27 @@ func TestRedisStore_CheckTeamQuota(t *testing.T) {
     rs, mr := setupTestStore(t)
     defer teardownTestStore(rs, mr)
 
+    // R4: the team blob's QuotaUsed is no longer the source of truth — the
+    // dedicated counter is, starting at 0 for a fresh team. The limit still
+    // comes from the blob. A fresh team (no AddTeamCost) reads used=0, ok=true.
     _ = rs.CreateTeam(&store.Team{ID: "t1", Name: "Team1", QuotaLimit: 100, QuotaUsed: 30})
     limit, used, ok, err := rs.CheckTeamQuota("t1")
     if err != nil {
         t.Fatalf("CheckTeamQuota failed: %v", err)
     }
-    if limit != 100 || used != 30 || !ok {
-        t.Fatalf("expected 100/30/true, got %f/%f/%v", limit, used, ok)
+    if limit != 100 || used != 0 || !ok {
+        t.Fatalf("expected 100/0/true (counter fresh), got %f/%f/%v", limit, used, ok)
+    }
+    // After a deduction the counter reflects it; limit enforcement is additive.
+    if err := rs.AddTeamCost("t1", 30.0); err != nil {
+        t.Fatalf("AddTeamCost failed: %v", err)
+    }
+    _, used, ok, err = rs.CheckTeamQuota("t1")
+    if err != nil {
+        t.Fatalf("CheckTeamQuota after cost failed: %v", err)
+    }
+    if used != 30.0 || !ok {
+        t.Fatalf("expected 30.0/true after one cost, got %f/%v", used, ok)
     }
 }
 
@@ -557,6 +576,79 @@ func TestRedisStore_CheckTeamQuota_MissingTeam(t *testing.T) {
     _, _, _, err := rs.CheckTeamQuota("nonexistent")
     if err == nil {
         t.Fatal("expected error for missing team")
+    }
+}
+
+// TestR4_AddTeamCost_ConcurrentNoLostIncrement: R4 (audit P1) — N concurrent
+// AddTeamCost calls on the same team must each land, none lost. The prior
+// GetTeam -> mutate -> UpdateTeam blob RMW was non-atomic: two goroutines both
+// read QuotaUsed=X, each writes X+1, net +1 not +2 (one increment lost). The
+// Lua INCRBYFLOAT counter is atomic, so 50 concurrent +1.0 calls yield exactly
+// 50.0. Revert AddTeamCost to the blob RMW and the assertion fails (sum < 50).
+func TestR4_AddTeamCost_ConcurrentNoLostIncrement(t *testing.T) {
+    rs, mr := setupTestStore(t)
+    defer teardownTestStore(rs, mr)
+
+    _ = rs.CreateTeam(&store.Team{ID: "tc", Name: "Concurrent", QuotaLimit: 1e9, QuotaUsed: 0})
+
+    const goroutines = 50
+    const perCall = 1.0
+    var wg sync.WaitGroup
+    start := make(chan struct{})
+    wg.Add(goroutines)
+    for i := 0; i < goroutines; i++ {
+        go func() {
+            defer wg.Done()
+            <-start
+            if err := rs.AddTeamCost("tc", perCall); err != nil {
+                t.Errorf("AddTeamCost concurrent: %v", err)
+            }
+        }()
+    }
+    close(start)
+    wg.Wait()
+
+    _, used, _, err := rs.CheckTeamQuota("tc")
+    if err != nil {
+        t.Fatalf("CheckTeamQuota failed: %v", err)
+    }
+    want := float64(goroutines) * perCall
+    if used != want {
+        t.Fatalf("R4: concurrent AddTeamCost lost increments — used=%f want=%f (RMW non-atomic, billing double-spend vector open)", used, want)
+    }
+}
+
+// TestR4_AddTeamCost_BothCountersConsistent: R4 — the Lua script increments
+// quota-used AND cost-accumulated in one atomic op. A partial failure would
+// leave them diverged (quota charged but lifetime cost not recorded). Assert
+// both counters equal the sum of all AddTeamCost calls.
+func TestR4_AddTeamCost_BothCountersConsistent(t *testing.T) {
+    rs, mr := setupTestStore(t)
+    defer teardownTestStore(rs, mr)
+
+    _ = rs.CreateTeam(&store.Team{ID: "tb", Name: "BothCounters", QuotaLimit: 1e9, QuotaUsed: 0})
+
+    if err := rs.AddTeamCost("tb", 10.0); err != nil {
+        t.Fatalf("first AddTeamCost: %v", err)
+    }
+    if err := rs.AddTeamCost("tb", 5.5); err != nil {
+        t.Fatalf("second AddTeamCost: %v", err)
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
+    quotaUsedStr, err := rs.client.Get(ctx, "fusion:team:quota_used:tb").Result()
+    if err != nil {
+        t.Fatalf("read quota_used counter: %v", err)
+    }
+    costAccumStr, err := rs.client.Get(ctx, "fusion:team:cost_accum:tb").Result()
+    if err != nil {
+        t.Fatalf("read cost_accum counter: %v", err)
+    }
+    quotaUsed, _ := strconv.ParseFloat(quotaUsedStr, 64)
+    costAccum, _ := strconv.ParseFloat(costAccumStr, 64)
+    if quotaUsed != 15.5 || costAccum != 15.5 {
+        t.Fatalf("R4: counters diverged — quota_used=%f cost_accum=%f want 15.5/15.5 (Lua not atomic, partial-failure divergence)", quotaUsed, costAccum)
     }
 }
 
