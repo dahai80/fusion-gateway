@@ -255,6 +255,117 @@ func TestLogStore_DefaultMaxLen(t *testing.T) {
     }
 }
 
+// EI11: the ring buffer backing array must stay bounded — cap(s.logs) == maxLen
+// forever, even after a burst that appends far more logs than maxLen. The prior
+// `s.logs = s.logs[1:]` + append resliced but never shrank the backing array,
+// then realloc grew cap, so evicted RequestLog pointers (with prompt fragments
+// ~4KB each) were retained until the next realloc → resident memory inflated
+// permanently under burst traffic. The fix uses a fixed-cap ring (overwrite,
+// no append/reslice) so cap is provably constant and the memory upper bound is
+// maxLen * sizeof(RequestLog), not unbounded.
+func TestLogStore_EI11_RingBackingArrayBounded(t *testing.T) {
+    t.Parallel()
+    const maxLen = 50
+    ls := NewLogStore(maxLen)
+
+    // Cap is fixed at construction and must not grow.
+    if cap(ls.logs) != maxLen {
+        t.Fatalf("EI11: initial cap = %d, want %d (fixed-cap ring)", cap(ls.logs), maxLen)
+    }
+
+    // Burst: append 5x maxLen — every slot overwritten many times.
+    for i := 0; i < 5*maxLen; i++ {
+        if err := ls.Append(&store.RequestLog{
+            ID:   fmt.Sprintf("log-%d", i),
+            Model: "burst-model",
+        }); err != nil {
+            t.Fatalf("append %d failed: %v", i, err)
+        }
+    }
+
+    // Hard guarantee: cap unchanged after the burst (the bug grows it).
+    if cap(ls.logs) != maxLen {
+        t.Fatalf("EI11: cap after burst = %d, want %d (backing array grew unbounded)", cap(ls.logs), maxLen)
+    }
+    if len(ls.logs) != maxLen {
+        t.Fatalf("EI11: len after burst = %d, want %d", len(ls.logs), maxLen)
+    }
+
+    // Only the last maxLen logs survive; the first 4x maxLen were overwritten.
+    logs, total, err := ls.Query(store.LogFilter{Page: 1, PageSize: maxLen})
+    if err != nil {
+        t.Fatal(err)
+    }
+    if total != maxLen {
+        t.Fatalf("EI11: total = %d, want %d (oldest should be evicted)", total, maxLen)
+    }
+    if len(logs) != maxLen {
+        t.Fatalf("EI11: page len = %d, want %d", len(logs), maxLen)
+    }
+
+    // The oldest surviving entry is log-<4*maxLen> (indices 0..4*maxLen-1 evicted).
+    // Query sorts newest→oldest, so the tail is the oldest survivor.
+    oldest := logs[len(logs)-1]
+    wantOldest := fmt.Sprintf("log-%d", 4*maxLen)
+    if oldest.ID != wantOldest {
+        t.Fatalf("EI11: oldest survivor ID = %s, want %s (wrap order wrong)", oldest.ID, wantOldest)
+    }
+
+    // Get must find a surviving log and miss an evicted one.
+    if _, err := ls.Get(wantOldest); err != nil {
+        t.Fatalf("EI11: Get(%s) should exist, got %v", wantOldest, err)
+    }
+    if _, err := ls.Get("log-0"); err == nil {
+        t.Fatalf("EI11: Get(log-0) should be evicted/not found")
+    }
+}
+
+// EI11: before the ring fills, entries are readable in append order (oldest
+// first) and count tracks exactly. Verifies the not-yet-full path.
+func TestLogStore_EI11_PartialRingOrder(t *testing.T) {
+    t.Parallel()
+    ls := NewLogStore(100)
+    for i := 0; i < 5; i++ {
+        if err := ls.Append(&store.RequestLog{
+            ID:        fmt.Sprintf("log-%d", i),
+            Model:     "m",
+            Timestamp: time.Unix(int64(1000+i), 0),
+        }); err != nil {
+            t.Fatal(err)
+        }
+    }
+    logs, total, _ := ls.Query(store.LogFilter{Page: 1, PageSize: 100})
+    if total != 5 {
+        t.Fatalf("EI11: total = %d, want 5", total)
+    }
+    // newest→oldest: log-4 .. log-0
+    if logs[0].ID != "log-4" || logs[4].ID != "log-0" {
+        t.Fatalf("EI11: order = [%s..%s], want [log-4..log-0]", logs[0].ID, logs[4].ID)
+    }
+}
+
+// EI11: DistinctFilters and AllLogs must see the live ring only (no stale slots
+// from before the first fill, no double-count of overwritten slots).
+func TestLogStore_EI11_DistinctFiltersNoStaleSlots(t *testing.T) {
+    t.Parallel()
+    const maxLen = 8
+    ls := NewLogStore(maxLen)
+    for i := 0; i < maxLen; i++ {
+        _ = ls.Append(&store.RequestLog{Model: fmt.Sprintf("model-%d", i), ChannelName: "ch"})
+    }
+    // Overwrite every slot once with a single distinct model.
+    for i := 0; i < maxLen; i++ {
+        _ = ls.Append(&store.RequestLog{Model: "single", ChannelName: "ch"})
+    }
+    filters := ls.DistinctFilters()
+    if len(filters.Models) != 1 || filters.Models[0] != "single" {
+        t.Fatalf("EI11: models = %v, want [single] (stale slots leaked)", filters.Models)
+    }
+    if total := len(ls.AllLogs()); total != maxLen {
+        t.Fatalf("EI11: AllLogs len = %d, want %d (overwritten slots counted)", total, maxLen)
+    }
+}
+
 func TestLogStore_GetByID(t *testing.T) {
     ls := NewLogStore(100)
     _ = ls.Append(&store.RequestLog{ID: "log-1", Model: "gpt-4"})

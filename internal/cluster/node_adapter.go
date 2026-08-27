@@ -91,12 +91,14 @@ func (p *ClusterNodeProvider) Chat(ctx context.Context, req *adapter.ChatRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("chat to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var chatResp adapter.ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode chat response from node %s: %w", p.node.ID, err)
     }
 
@@ -132,9 +134,9 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
 
     if resp.StatusCode != http.StatusOK {
         p.node.DecrInFlight()
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := adapter.ReadErrorBody(resp)
         resp.Body.Close()
-        return nil, fmt.Errorf("stream chat to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
+        return nil, fmt.Errorf("stream chat to node %s status %d: %s", p.node.ID, resp.StatusCode, adapter.TruncateForError(respBody))
     }
 
     // L6 fix: larger buffer to reduce backpressure risk
@@ -145,25 +147,52 @@ func (p *ClusterNodeProvider) StreamChat(ctx context.Context, req *adapter.ChatR
         defer p.node.DecrInFlight()
         defer resp.Body.Close()
 
+        // B8: ctx-watcher closes resp.Body on client cancel, which unblocks the
+        // decoder.Decode read below. Without this, a slow/quiet upstream keeps
+        // Decode blocked in body.Read for minutes after the client is gone — the
+        // transport ctx cancel does eventually propagate, but only on the next
+        // read attempt, which may not come. Closing the body forces an immediate
+        // read error and a clean exit.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("cluster_node_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("cluster node stream canceled by client, closing body", "node_id", p.node.ID, "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
         decoder := json.NewDecoder(resp.Body)
         for {
             var chunk adapter.StreamChunk
             if err := decoder.Decode(&chunk); err != nil {
                 if err != io.EOF {
-                    slog.Error("cluster node sse decode error", "node_id", p.node.ID, "error", err)
+                    // Distinguish client cancel (ctx.Err set) from a genuine
+                    // upstream decode error: cancel is silent, decode errors
+                    // are logged (B8: truncation/abort is observable, not the
+                    // prior silent default-drop).
+                    if ctx.Err() != nil {
+                        slog.Debug("cluster node stream decode ended on cancel", "node_id", p.node.ID, "error", err)
+                    } else {
+                        slog.Error("cluster node sse decode error", "node_id", p.node.ID, "error", err)
+                    }
                 }
                 return
             }
+            // B8: ctx-aware send. The prior nested `default: return` fired
+            // whenever the 256-buffer filled, silently dropping tail data with
+            // no log. Cancel now exits cleanly; a full buffer is a real
+            // backpressure condition that is logged (observable), not swallowed.
             select {
             case ch <- chunk:
+            case <-ctx.Done():
+                slog.Debug("cluster node stream send canceled by client", "node_id", p.node.ID, "error", ctx.Err())
+                return
             default:
-                slog.Warn("cluster node sse backpressure, draining", "node_id", p.node.ID)
-                select {
-                case ch <- chunk:
-                default:
-                    slog.Error("cluster node sse backpressure exceeded, stream truncated", "node_id", p.node.ID)
-                    return
-                }
+                slog.Warn("cluster node sse backpressure exceeded, stream truncated", "node_id", p.node.ID)
+                return
             }
         }
     })
@@ -198,12 +227,14 @@ func (p *ClusterNodeProvider) Embedding(ctx context.Context, req *adapter.Embedd
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("embedding to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var embResp adapter.EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode embedding response from node %s: %w", p.node.ID, err)
     }
 
@@ -237,12 +268,14 @@ func (p *ClusterNodeProvider) Rerank(ctx context.Context, req *adapter.RerankReq
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("rerank to node %s status %d: %s", p.node.ID, resp.StatusCode, string(respBody))
     }
 
     var rerankResp adapter.RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode rerank response from node %s: %w", p.node.ID, err)
     }
 
@@ -272,7 +305,8 @@ func (p *ClusterNodeProvider) ListModels(ctx context.Context) ([]adapter.ModelIn
     var listResp struct {
         Data []adapter.ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         return nil, fmt.Errorf("decode models from node %s: %w", p.node.ID, err)
     }
 

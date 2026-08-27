@@ -4,8 +4,8 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "errors"
     "fmt"
-    "io"
     "log/slog"
     "net/http"
     "net/http/httputil"
@@ -18,11 +18,23 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
+// ErrLocalSlotFull is returned by every fusion-mlx inference method
+// (Chat/StreamChat/Embedding/Rerank) when the local concurrency hard cap
+// (max_concurrent) is reached. It is the single source of truth for the
+// RR4 hard slot cap: the counter check and increment happen as one atomic
+// CAS in tryInFlightAcquire, closing the TOCTOU window the engine's P5
+// advisory read-only check left open. Handlers catch this sentinel and
+// divert the request to cloud instead of overflowing fusion-mlx's UMA/KV
+// cache. A nil/zero max means no cap (legacy behavior), so this error is
+// never returned in that mode.
+var ErrLocalSlotFull = errors.New("local inference slot full: max_concurrent reached, divert to cloud")
+
 type FusionMLXProvider struct {
     baseURL          string
     apiKey           string
     httpClient       *http.Client
     inFlightCounter  atomic.Int64
+    maxConcurrent    int64
     lastGCTime       atomic.Int64
     cfg              config.GCConfig
     routeHeader      string
@@ -46,10 +58,19 @@ func NewFusionMLXProvider(backendCfg config.BackendConfig, routingCfg config.Rou
     // ReverseProxy is unaffected (it url.Parses baseURL and only reads
     // scheme/host, leaving the request path intact).
     base := strings.TrimRight(backendCfg.BaseURL, "/")
+    // RR4: pin the local concurrency hard cap on the provider so every
+    // inference path enforces it atomically at Acquire time. The engine's
+    // P5 check is advisory (reads under RLock, increments later) and left a
+    // TOCTOU window; this is the authoritative gate. <=0 = no cap (legacy).
+    maxConcurrent := int64(routingCfg.LocalPriority.MaxConcurrent)
+    if maxConcurrent < 0 {
+        maxConcurrent = 0
+    }
     return &FusionMLXProvider{
         baseURL:          base,
         apiKey:           backendCfg.APIKey,
         httpClient:       &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+        maxConcurrent:    maxConcurrent,
         cfg:              backendCfg.GC,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
         routeHeaderValue: routingCfg.Negotiation.RouteHeaderValue,
@@ -64,10 +85,44 @@ func (p *FusionMLXProvider) InFlight() int64 {
     return p.inFlightCounter.Load()
 }
 
-// L6 fix: inFlightAcquire returns a release function for clean counter management
-func (p *FusionMLXProvider) inFlightAcquire() func() {
-    p.inFlightCounter.Add(1)
-    return func() { p.inFlightCounter.Add(-1) }
+// MaxConcurrent returns the local hard concurrency cap (RR4). 0 = uncapped.
+func (p *FusionMLXProvider) MaxConcurrent() int64 {
+    return p.maxConcurrent
+}
+
+// tryInFlightAcquire is the RR4 hard slot cap: the check (Load >= max) and
+// the increment (Add(1)) happen atomically against the same counter, closing
+// the TOCTOU window the engine's P5 advisory read-only check left open (N
+// concurrent Decide calls each observed inFlight < max, all routed local,
+// overshooting by N-1). Returns (release, true) on success or (nil, false)
+// when the cap is reached — callers then return ErrLocalSlotFull so the
+// handler diverts to cloud. max <= 0 means no cap (legacy behavior): always
+// succeeds, mirroring the old inFlightAcquire. The CAS loop guards against
+// a race where two goroutines pass the Load check simultaneously: each Add
+// re-reads, and if the post-increment value exceeds max the acquirer backs
+// out (Add(-1)) and retries, bounding overshoot to zero.
+func (p *FusionMLXProvider) tryInFlightAcquire() (func(), bool) {
+    if p.maxConcurrent <= 0 {
+        p.inFlightCounter.Add(1)
+        return func() { p.inFlightCounter.Add(-1) }, true
+    }
+    for {
+        cur := p.inFlightCounter.Load()
+        if cur >= p.maxConcurrent {
+            return nil, false
+        }
+        // Increment-then-recheck: atomic Add returns the new value, so if
+        // another goroutine incremented between our Load and Add, we detect
+        // the overshoot and back out. This is a single counter, so the
+        // Load+Add pair is race-free against itself.
+        after := p.inFlightCounter.Add(1)
+        if after > p.maxConcurrent {
+            p.inFlightCounter.Add(-1)
+            // Retry: a slot may free up, or confirm full on next Load.
+            continue
+        }
+        return func() { p.inFlightCounter.Add(-1) }, true
+    }
 }
 
 func (p *FusionMLXProvider) ModelSet() map[string]bool {
@@ -173,7 +228,7 @@ func (p *FusionMLXProvider) HealthDetail(ctx context.Context) MLXHealthDetail {
         ModelLoaded  bool     `json:"model_loaded"`
         LoadedModels []string `json:"loaded_models"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&body); err != nil {
         slog.Warn("fusion-mlx health body decode failed", "error", err)
         detail.FetchError = err
         return detail
@@ -188,7 +243,12 @@ func (p *FusionMLXProvider) HealthDetail(ctx context.Context) MLXHealthDetail {
 }
 
 func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-    defer p.inFlightAcquire()()
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, chat diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
+    defer release()
 
     body, err := json.Marshal(req)
     if err != nil {
@@ -216,12 +276,12 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("chat request returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode chat response: %w", err)
     }
 
@@ -229,8 +289,14 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 }
 
 func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
-    // L6 fix: use release function so defer works cleanly; goroutine inherits release
-    release := p.inFlightAcquire()
+    // RR4: hard slot cap at the real Acquire point. If the local cap is
+    // reached, return ErrLocalSlotFull before opening any connection so the
+    // handler can divert to cloud (A4-style) instead of overflowing mlx.
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, stream chat diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
     defer func() {
         // release is nil after goroutine takes ownership
         if release != nil {
@@ -263,7 +329,7 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     }
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("stream chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -277,14 +343,37 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         defer goroutineRelease()
         defer resp.Body.Close()
 
-        parseSSEStream(resp.Body, ch)
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseSSEStream. A stalled local engine keeps Read
+        // blocked — ctx.Done() is only checked on the send arm (after a Read
+        // returns), so a stall that never delivers a byte hangs the goroutine,
+        // leaks the connection, and holds the local slot. Closing the body
+        // forces an immediate read error and a clean exit + slot release.
+        // Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("fusion_mlx_stream_chat_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("fusion-mlx stream chat canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
+        parseSSEStream(ctx, resp.Body, ch)
     })
 
     return ch, nil
 }
 
 func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
-    defer p.inFlightAcquire()()
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, embedding diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
+    defer release()
 
     body, err := json.Marshal(req)
     if err != nil {
@@ -312,12 +401,12 @@ func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode embedding response: %w", err)
     }
 
@@ -325,8 +414,12 @@ func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest
 }
 
 func (p *FusionMLXProvider) Rerank(ctx context.Context, req *RerankRequest) (*RerankResponse, error) {
-    p.inFlightCounter.Add(1)
-    defer p.inFlightCounter.Add(-1)
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, rerank diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
+    defer release()
 
     body, err := json.Marshal(req)
     if err != nil {
@@ -354,12 +447,12 @@ func (p *FusionMLXProvider) Rerank(ctx context.Context, req *RerankRequest) (*Re
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var rerankResp RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode rerank response: %w", err)
     }
 
@@ -386,14 +479,14 @@ func (p *FusionMLXProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("list models returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
     }
 
     var listResp struct {
         Data []ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         return nil, fmt.Errorf("decode models response: %w", err)
     }
 

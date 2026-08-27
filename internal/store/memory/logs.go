@@ -14,7 +14,16 @@ import (
 
 type LogStore struct {
     mu      sync.RWMutex
+    // logs is a fixed-capacity ring buffer: len==cap==maxLen, pre-allocated
+    // once in NewLogStore and NEVER grown. Append overwrites in place (no
+    // reslice, no append) so the backing array cap stays == maxLen forever —
+    // burst traffic cannot permanently inflate resident memory (EI11: the
+    // prior `s.logs = s.logs[1:]` + append resliced but never shrank the
+    // backing array, then realloc grew cap, leaving evicted RequestLog
+    // pointers retained until the next realloc).
     logs    []*store.RequestLog
+    head    int // index of the oldest live entry (0 until the ring wraps)
+    count   int // number of live entries (<= maxLen)
     maxLen  int
     counter int64
 }
@@ -24,9 +33,21 @@ func NewLogStore(maxLen int) *LogStore {
         maxLen = 10000
     }
     return &LogStore{
-        logs:   make([]*store.RequestLog, 0, maxLen),
+        logs:   make([]*store.RequestLog, maxLen, maxLen),
         maxLen: maxLen,
     }
+}
+
+// ordered returns the live entries oldest→newest, unwrapping the ring. Callers
+// hold (at least) RLock. Allocates a slice of len(count) per read — acceptable
+// because log reads are admin-only and infrequent; the hot write path (Append)
+// stays zero-alloc.
+func (s *LogStore) ordered() []*store.RequestLog {
+    out := make([]*store.RequestLog, 0, s.count)
+    for i := 0; i < s.count; i++ {
+        out = append(out, s.logs[(s.head+i)%s.maxLen])
+    }
+    return out
 }
 
 func (s *LogStore) Append(log *store.RequestLog) error {
@@ -41,10 +62,15 @@ func (s *LogStore) Append(log *store.RequestLog) error {
         log.Timestamp = time.Now()
     }
 
-    if len(s.logs) >= s.maxLen {
-        s.logs = s.logs[1:]
+    // Ring write: overwrite the oldest slot and advance head once full, else
+    // fill the next free slot. No append, no reslice → cap never grows (EI11).
+    if s.count < s.maxLen {
+        s.logs[s.count] = log
+        s.count++
+    } else {
+        s.logs[s.head] = log
+        s.head = (s.head + 1) % s.maxLen
     }
-    s.logs = append(s.logs, log)
 
     slog.Debug("request log appended",
         "id", log.ID,
@@ -60,7 +86,7 @@ func (s *LogStore) Query(filter store.LogFilter) ([]*store.RequestLog, int, erro
     defer s.mu.RUnlock()
 
     filtered := make([]*store.RequestLog, 0)
-    for _, l := range s.logs {
+    for _, l := range s.ordered() {
         if !matchFilter(l, filter) {
             continue
         }
@@ -100,7 +126,7 @@ func (s *LogStore) Get(id string) (*store.RequestLog, error) {
     s.mu.RLock()
     defer s.mu.RUnlock()
 
-    for _, l := range s.logs {
+    for _, l := range s.ordered() {
         if l.ID == id {
             return l, nil
         }
@@ -113,7 +139,7 @@ func (s *LogStore) Export(filter store.LogFilter, format string) ([]byte, error)
     defer s.mu.RUnlock()
 
     filtered := make([]*store.RequestLog, 0)
-    for _, l := range s.logs {
+    for _, l := range s.ordered() {
         if !matchFilter(l, filter) {
             continue
         }
@@ -133,9 +159,7 @@ func (s *LogStore) Export(filter store.LogFilter, format string) ([]byte, error)
 func (s *LogStore) AllLogs() []*store.RequestLog {
     s.mu.RLock()
     defer s.mu.RUnlock()
-    result := make([]*store.RequestLog, len(s.logs))
-    copy(result, s.logs)
-    return result
+    return s.ordered()
 }
 
 func (s *LogStore) DistinctFilters() *store.LogFilters {
@@ -144,7 +168,7 @@ func (s *LogStore) DistinctFilters() *store.LogFilters {
 
     models := make(map[string]struct{})
     channels := make(map[string]struct{})
-    for _, l := range s.logs {
+    for _, l := range s.ordered() {
         if l.Model != "" {
             models[l.Model] = struct{}{}
         }

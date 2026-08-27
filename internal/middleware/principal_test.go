@@ -105,10 +105,17 @@ func TestPrincipal_KeyName(t *testing.T) {
 }
 
 func TestPrincipal_EffectiveRole(t *testing.T) {
-    t.Run("master_is_admin", func(t *testing.T) {
+    // RR3 (audit P0): the inference MasterKey maps to the inference role, NOT
+    // RoleAdmin. Previously master_is_admin asserted master→admin, which let a
+    // leaked inference key reach /admin/* via withAdminOnly→IsAdmin. Inference
+    // and management planes are now separated; admin requires an admin JWT.
+    t.Run("master_is_inference_not_admin", func(t *testing.T) {
         p := &Principal{IsMaster: true}
-        if p.EffectiveRole() != RoleAdmin {
-            t.Errorf("expected admin, got %s", p.EffectiveRole())
+        if p.EffectiveRole() != RoleInference {
+            t.Errorf("expected inference role for master key, got %s", p.EffectiveRole())
+        }
+        if p.EffectiveRole() == RoleAdmin {
+            t.Error("master key must NOT map to admin role (RR3 plane crossing)")
         }
     })
     t.Run("explicit_role", func(t *testing.T) {
@@ -230,11 +237,15 @@ func TestIsAdmin_NilPrincipal(t *testing.T) {
 }
 
 func TestIsAdmin_MasterKey(t *testing.T) {
-    slog.Info("test IsAdmin_MasterKey")
+    // RR3 (audit P0): the inference MasterKey is NOT admin. Previously this
+    // asserted master→admin, which let a leaked inference key pass
+    // withAdminOnly and reach /admin/teams|orgs|gc|config-reload. Inference and
+    // management planes are separated; admin requires an admin JWT.
+    slog.Info("test IsAdmin_MasterKey (RR3: master is inference, not admin)")
     p := &Principal{IsMaster: true}
     ctx := ContextWithPrincipal(context.Background(), p)
-    if !IsAdmin(ctx) {
-        t.Error("master key should be admin")
+    if IsAdmin(ctx) {
+        t.Error("master key must NOT be admin (RR3 inference/management plane crossing)")
     }
 }
 
@@ -246,11 +257,16 @@ func TestCanWrite_NilPrincipal(t *testing.T) {
 }
 
 func TestCanWrite_MasterKey(t *testing.T) {
-    slog.Info("test CanWrite_MasterKey")
+    // RR3 (audit P0): the inference MasterKey maps to RoleInference, which is
+    // neither RoleAdmin nor RoleEditor, so CanWrite is false. CanWrite has no
+    // production callers today (grep-confirmed), so this encodes the new
+    // boundary: inference keys do not get editor/write role by default. An
+    // admin JWT (Role admin/editor) still passes CanWrite.
+    slog.Info("test CanWrite_MasterKey (RR3: master is inference, not editor/admin)")
     p := &Principal{IsMaster: true}
     ctx := ContextWithPrincipal(context.Background(), p)
-    if !CanWrite(ctx) {
-        t.Error("master key should be able to write")
+    if CanWrite(ctx) {
+        t.Error("master key (inference role) must NOT pass CanWrite (requires admin/editor role)")
     }
 }
 

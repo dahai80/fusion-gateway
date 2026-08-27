@@ -16,6 +16,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/cluster"
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
 	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
+	"github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 	"github.com/fusion-gateway/fusion-gateway/internal/observability"
 	"github.com/fusion-gateway/fusion-gateway/internal/router"
 	"github.com/fusion-gateway/fusion-gateway/internal/server"
@@ -228,6 +229,11 @@ func run(configPath string) error {
 
 	stopCh := make(chan struct{})
 
+	// EI10: track long-lived background workers so Server.Shutdown can Stop
+	// (cancel + join) each before returning — prior safeGo-with-defer-cancel
+	// pattern raced a mid-write stop. These are stopped in shutdown order below.
+	var bgWorkers []*lifecycle.Worker
+
 	// Wire local provider to router
 	if mlxProvider := pool.GetFusionMLX(); mlxProvider != nil {
 		routerEngine.SetLocalInFlight(mlxProvider.InFlight)
@@ -235,22 +241,21 @@ func run(configPath string) error {
 		routerEngine.SetLocalReady(true)
 		slog.Info("wired local provider to router engine")
 
-		modelCtx, modelCancel := context.WithCancel(context.Background())
-		defer modelCancel()
-		// M2 fix: use safeGo for panic recovery on background goroutines
-		safeGo("refresh_model_set", func() {
-			mlxProvider.RefreshModelSet(modelCtx)
+		// EI10: model-set refresh is a tracked lifecycle.Worker (joined on shutdown).
+		modelWorker := lifecycle.Start(context.Background(), "refresh_model_set", func(ctx context.Context) {
+			mlxProvider.RefreshModelSet(ctx)
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					mlxProvider.RefreshModelSet(modelCtx)
-				case <-modelCtx.Done():
+					mlxProvider.RefreshModelSet(ctx)
+				case <-ctx.Done():
 					return
 				}
 			}
 		})
+		bgWorkers = append(bgWorkers, modelWorker)
 
 		mlxProvider.StartIdleGCTimer(stopCh)
 	}
@@ -275,11 +280,10 @@ func run(configPath string) error {
 		srv.SetAdapterIndexRefresher(adapterIndexRefresherShim{idx: adapterIndex})
 		slog.Info("wired adapter index to router engine", "base_url", mlxBackendCfg.BaseURL)
 
-		indexCtx, indexCancel := context.WithCancel(context.Background())
-		defer indexCancel()
-		safeGo("lora_index_refresh", func() {
+		// EI10: adapter-index refresh is a tracked lifecycle.Worker (joined on shutdown).
+		indexWorker := lifecycle.Start(context.Background(), "lora_index_refresh", func(ctx context.Context) {
 			// Initial fetch so validation has data before the first ticker tick.
-			if err := adapterIndex.Refresh(indexCtx); err != nil {
+			if err := adapterIndex.Refresh(ctx); err != nil {
 				slog.Warn("adapter index initial refresh failed", "error", err)
 			}
 			ticker := time.NewTicker(60 * time.Second)
@@ -287,14 +291,15 @@ func run(configPath string) error {
 			for {
 				select {
 				case <-ticker.C:
-					if err := adapterIndex.Refresh(indexCtx); err != nil {
+					if err := adapterIndex.Refresh(ctx); err != nil {
 						slog.Warn("adapter index refresh failed", "error", err)
 					}
-				case <-indexCtx.Done():
+				case <-ctx.Done():
 					return
 				}
 			}
 		})
+		bgWorkers = append(bgWorkers, indexWorker)
 	} else {
 		slog.Info("fusion-mlx backend not configured, adapter index disabled")
 	}
@@ -323,9 +328,8 @@ func run(configPath string) error {
 	// in_flight_requests for the local backend. Cluster-node in_flight is
 	// published at Incr/Decr time; hw* at collector.collect() time. This loop
 	// runs on a 5s cadence so a missed transition is corrected within one tick.
-	metricsCtx, metricsCancel := context.WithCancel(context.Background())
-	defer metricsCancel()
-	safeGo("metrics_sync", func() {
+	// EI10: metrics sync loop is a tracked lifecycle.Worker (joined on shutdown).
+	metricsWorker := lifecycle.Start(context.Background(), "metrics_sync", func(ctx context.Context) {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -333,11 +337,12 @@ func run(configPath string) error {
 			case <-ticker.C:
 				routerEngine.PublishBreakerStates()
 				observability.UpdateInFlight("local", routerEngine.LocalInFlight())
-			case <-metricsCtx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}
 	})
+	bgWorkers = append(bgWorkers, metricsWorker)
 
 	config.OnReload(func(old, newSnap *config.ConfigSnapshot) {
 		routerEngine.DrainAndApply(newSnap)
@@ -407,19 +412,41 @@ func run(configPath string) error {
 	slog.Info("shutting down", "signal", sig.String())
 	close(stopCh)
 
-	// Auto-stop local inference backend if it was auto-started
+	// F7 fix: shutdown order must be (1) stop accepting new connections +
+	// drain in-flight requests, (2) THEN kill the local inference backend,
+	// (3) THEN stop cluster discovery. The prior order killed fusion-mlx
+	// (autoStopLocal) and discovery BEFORE srv.Shutdown drained in-flight
+	// traffic, so any local in-flight request lost its upstream mid-drain
+	// and 502'd for up to the 30s drain window on every restart/upgrade.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("server shutdown error", "error", err)
+		return err
+	}
+
+	// Local backend + discovery only stop after in-flight requests have drained.
 	autoStopLocal(snap.Config.Server.AutoStart)
 
 	if discovery != nil {
 		discovery.Stop()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// B9: stop engine-owned background workers (session affinity evict loop).
+	routerEngine.Shutdown()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		return err
+	// EI10: join the long-lived background workers (model-set refresh, lora
+	// index refresh, metrics sync) so shutdown does not return while a goroutine
+	// is still mid-write. Each Worker.Stop cancels its context then waits for
+	// exit. Ordered after the engine/discovery stops so a worker that publishes
+	// engine/cluster state observes those teardowns rather than racing them.
+	for _, w := range bgWorkers {
+		w.Stop()
 	}
+	// hwCollector.Stop() is deferred at the top of run(); joining it here too
+	// would double-Stop (Worker.Stop is idempotent so that is safe, but the
+	// defer already covers it — leave the collector to its deferred Stop).
 
 	slog.Info("server stopped")
 	return nil

@@ -214,5 +214,26 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         }
     }
 
+    // EI6: wrap each cloud provider with an in-flight tracking decorator so the
+    // fusion_gateway_in_flight_requests{backend="cloud"} series is a live signal
+    // (was permanently 0 — the cloud label was never written). Mirrors the cluster
+    // node_adapter IncrInFlight/DecrInFlight pattern: inc on call entry, dec on
+    // call return (sync methods) or stream close (StreamChat drain goroutine).
+    // Local providers (fusion-mlx/kb/model-hub) are tracked by the router's
+    // localInFlight counter via the metrics_sync loop, so they are NOT wrapped.
+    // NOTE: read p.backends directly here — we already hold p.mu.Lock (taken at
+    // the top of BuildProviders), so calling p.IsLocalProvider() would re-acquire
+    // p.mu.RLock on the same goroutine and deadlock (Go RWMutex: RLock inside
+    // Lock on the same goroutine blocks forever).
+    for name, prov := range p.providers {
+        bc := p.backends[name]
+        switch bc.Type {
+        case "fusion-mlx", "fusion-kb", "fusion-model-hub":
+            continue
+        }
+        p.providers[name] = WrapCloudTracking(prov)
+        slog.Info("wrapped cloud provider with in-flight tracking", "name", name)
+    }
+
     return nil
 }

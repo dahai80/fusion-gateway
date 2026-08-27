@@ -183,6 +183,27 @@ func TestSessionAffinity_Stop(t *testing.T) {
     t.Log("Stop() completes without panic")
 }
 
+// EI10: Stop must be idempotent — the shutdown path (routerEngine.Shutdown →
+// sa.Stop) plus a deferred sa.Stop in a test can reach Stop twice. The prior
+// implementation did close(sa.done) unguarded → double-close panic. Also Stop
+// must join the evictLoop (wait for exit), not just signal it.
+func TestSessionAffinity_EI10_StopIdempotentAndJoins(t *testing.T) {
+    t.Parallel()
+    sa := NewSessionAffinity(10 * time.Minute)
+
+    // Double-Stop must not panic (the bug: close of closed channel).
+    sa.Stop()
+    sa.Stop()
+    sa.Stop()
+
+    // After Stop the evictLoop goroutine has exited — Size is still callable
+    // (only the loop is gone, the map ops are independent). This proves Stop
+    // returned after the join, not before.
+    if sa.Size() != 0 {
+        t.Errorf("EI10: fresh affinity should have size 0, got %d", sa.Size())
+    }
+}
+
 func TestSessionAffinity_EvictExpired(t *testing.T) {
     sa := NewSessionAffinity(50 * time.Millisecond)
     defer sa.Stop()

@@ -1205,13 +1205,24 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
             applyInt(sec, "log_max_len", req.LogMaxLen)
             applyMaskedString(sec, "jwt_secret", req.JWTSecret)
             if req.Users != nil {
+                // F9: the prior check `v != "" && len(v) < 8` let an empty
+                // password through and wrote it — a passwordless admin login.
+                // Empty/masked now means "keep existing" (skip that user);
+                // any real password must be >= 8 chars. This mirrors
+                // applyMaskedString's no-change semantics for secrets.
                 for k, v := range *req.Users {
-                    if v != "" && len(v) < 8 {
+                    if v == "" || isMaskedValue(v) {
+                        continue
+                    }
+                    if len(v) < 8 {
                         return fmt.Errorf("password for user %q must be at least 8 characters", k)
                     }
                 }
                 users := make(map[string]interface{})
                 for k, v := range *req.Users {
+                    if v == "" || isMaskedValue(v) {
+                        continue
+                    }
                     users[k] = v
                 }
                 sec["users"] = users
@@ -1694,6 +1705,17 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
             applyMaskedString(sec, "master_key", req.MasterKey)
             applyBool(sec, "passthrough", req.Passthrough)
             if req.APIKeys != nil {
+                // F9: a GET masks every key (maskAPIKey). A PUT that round-trips
+                // those masked values would write entries with no "key" field
+                // at all, and sec["api_keys"]=yamlKeys replaces the whole list
+                // — so every existing real key is dropped on next reload.
+                // Preserve the existing real key per name when the submitted
+                // key is masked or empty (no-change), only honor a freshly
+                // typed key.
+                existing := make(map[string]string, len(config.GetSnapshot().Config.Auth.APIKeys))
+                for _, ek := range config.GetSnapshot().Config.Auth.APIKeys {
+                    existing[ek.Name] = ek.Key
+                }
                 var yamlKeys []interface{}
                 for _, k := range *req.APIKeys {
                     entry := map[string]interface{}{
@@ -1706,6 +1728,9 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                     }
                     if k.Key != "" && !isMaskedValue(k.Key) {
                         entry["key"] = k.Key
+                    } else if prev, ok := existing[k.Name]; ok && prev != "" {
+                        // submitted key masked/empty -> carry the existing real key
+                        entry["key"] = prev
                     }
                     yamlKeys = append(yamlKeys, entry)
                 }

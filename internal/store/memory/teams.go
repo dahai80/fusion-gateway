@@ -15,7 +15,22 @@ type TeamsStore struct {
     orgs     map[string]*store.Organization
     keyTeam  map[string]string
     onMutate func()
+
+    // F2/P1 fix: quota/cost mutations (AddCost) are high-frequency per-billed-
+    // request writes. Persisting them through onMutate (full teams.json rewrite
+    // per request) is both a write-amplification footgun (P1) and, if skipped
+    // entirely, a billing-bypass-on-restart bug (F2 — the original code skipped
+    // persistence so QuotaUsed reset to the last metadata-mutation snapshot on
+    // every restart). A debounced quota-persist callback coalesces bursts into a
+    // single atomic write every quotaPersistDebounce, guarantees the final
+    // mutation flushes via FlushQuota, and never touches the metadata onMutate
+    // path. Set via SetQuotaPersist by the store wiring.
+    quotaPersist      func()
+    quotaPersistTimer *time.Timer
+    quotaPersistMu    sync.Mutex
 }
+
+const quotaPersistDebounce = 2 * time.Second
 
 func NewTeamsStore() *TeamsStore {
     s := &TeamsStore{
@@ -28,6 +43,49 @@ func NewTeamsStore() *TeamsStore {
 }
 
 func (s *TeamsStore) SetOnMutate(fn func()) { s.onMutate = fn }
+
+// SetQuotaPersist installs the debounced quota/cost persistence callback
+// (typically SaveTeams). Called once during store wiring; nil = memory-only
+// (persistence disabled), and AddCost falls back to fireOnMutate so the quota
+// is still persisted on the metadata path rather than silently dropped.
+func (s *TeamsStore) SetQuotaPersist(fn func()) { s.quotaPersist = fn }
+
+// scheduleQuotaPersist arms the debounce timer; the first AddCost starts it,
+// subsequent calls reset it, and the final write fires once after the burst.
+func (s *TeamsStore) scheduleQuotaPersist() {
+    if s.quotaPersist == nil {
+        // No debounced persister configured (memory-only / pre-wiring): persist
+        // via the metadata path so quota is NOT silently lost on restart.
+        s.fireOnMutate()
+        return
+    }
+    s.quotaPersistMu.Lock()
+    defer s.quotaPersistMu.Unlock()
+    if s.quotaPersistTimer != nil {
+        s.quotaPersistTimer.Reset(quotaPersistDebounce)
+        return
+    }
+    s.quotaPersistTimer = time.AfterFunc(quotaPersistDebounce, func() {
+        s.quotaPersistMu.Lock()
+        s.quotaPersistTimer = nil
+        s.quotaPersistMu.Unlock()
+        s.quotaPersist()
+    })
+}
+
+// FlushQuota synchronously flushes any pending debounced quota write. Called on
+// graceful shutdown so the last burst of AddCost mutations reaches disk.
+func (s *TeamsStore) FlushQuota() {
+    s.quotaPersistMu.Lock()
+    if s.quotaPersistTimer != nil {
+        s.quotaPersistTimer.Stop()
+        s.quotaPersistTimer = nil
+    }
+    s.quotaPersistMu.Unlock()
+    if s.quotaPersist != nil {
+        s.quotaPersist()
+    }
+}
 
 func (s *TeamsStore) fireOnMutate() {
     if s.onMutate != nil {
@@ -215,15 +273,22 @@ func (s *TeamsStore) GetTeamByKey(apiKey string) (*store.Team, error) {
 
 func (s *TeamsStore) AddCost(teamID string, cost float64) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
     team, exists := s.teams[teamID]
     if !exists {
+        s.mu.Unlock()
         return fmt.Errorf("team %s not found", teamID)
     }
     team.QuotaUsed += cost
     team.CostAccumulated += cost
     team.UpdatedAt = time.Now()
     slog.Debug("cost added to team", "team", teamID, "cost", cost, "total", team.CostAccumulated)
+    s.mu.Unlock()
+    // F2/P1: persist quota via the debounced path (not the per-request full
+    // metadata rewrite). See SetQuotaPersist / FlushQuota. Lock released before
+    // the persist callback so the debounced SaveTeams write does not contend
+    // with the write lock (matches the fireOnMutate-after-unlock convention
+    // used by CreateTeam/UpdateTeam/etc).
+    s.scheduleQuotaPersist()
     return nil
 }
 

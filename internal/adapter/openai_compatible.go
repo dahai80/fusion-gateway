@@ -87,12 +87,16 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req *ChatRequest) (
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+    // RR9 (audit P0): bound the success-path read. A misbehaving or MITM
+    // backend returning a multi-GB 200 JSON drove the unbounded Decode to OOM
+    // the gateway. 10 MiB cap via LimitResponseReader; truncation surfaces as a
+    // decode error rather than silent OOM.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil {
         return nil, fmt.Errorf("decode chat response: %w", err)
     }
 
@@ -122,7 +126,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
     }
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("stream chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -133,7 +137,25 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
         defer close(ch)
         defer resp.Body.Close()
 
-        parseSSEStream(resp.Body, ch)
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseSSEStream. Without this, a quiet/stalled
+        // upstream keeps Read blocked indefinitely — ctx.Done() is only
+        // checked on the send arm (after a Read returns), so a stall that
+        // never delivers a byte hangs the goroutine, leaks the connection,
+        // and holds the slot until the 180s watchdog. Closing the body forces
+        // an immediate read error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("openai_compatible_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("openai compatible stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
+        parseSSEStream(ctx, resp.Body, ch)
     })
 
     return ch, nil
@@ -163,12 +185,13 @@ func (p *OpenAICompatibleProvider) Embedding(ctx context.Context, req *Embedding
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil {
         return nil, fmt.Errorf("decode embedding response: %w", err)
     }
 
@@ -199,12 +222,13 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("rerank returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var rerankResp RerankResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&rerankResp); err != nil {
         return nil, fmt.Errorf("decode rerank response: %w", err)
     }
 
@@ -234,7 +258,8 @@ func (p *OpenAICompatibleProvider) ListModels(ctx context.Context) ([]ModelInfo,
     var listResp struct {
         Data []ModelInfo `json:"data"`
     }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil {
         return nil, fmt.Errorf("decode models response: %w", err)
     }
 
@@ -264,18 +289,19 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("image request returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var imgResp ImageResponse
-    if err := json.NewDecoder(resp.Body).Decode(&imgResp); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&imgResp); err != nil {
         return nil, fmt.Errorf("decode image response: %w", err)
     }
     return &imgResp, nil
 }
 
-func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
+func parseSSEStream(ctx context.Context, body io.Reader, ch chan<- StreamChunk) {
     // F1 fix: proper SSE line-by-line parsing — json.Decoder.Decode() fails on "data: " prefix
     buf := make([]byte, 4096)
     var lineBuf []byte
@@ -285,8 +311,14 @@ func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("sse line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: returning (not lineBuf=nil) closes the channel — the
+                // client observes truncation rather than the parser silently
+                // dropping buffered bytes and resyncing mid-JSON. The old
+                // lineBuf=nil kept reading from an arbitrary byte offset,
+                // producing half-JSON "data:" lines forever with no resync
+                // marker (SSE has no length framing).
+                slog.Error("sse line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {
@@ -311,15 +343,17 @@ func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
                 slog.Warn("sse unmarshal error", "error", err, "data", data)
                 continue
             }
+            // F3 fix: block on send but bail on ctx cancel. The prior non-blocking
+            // `default` arm fired whenever the 64-buffer filled — including when the
+            // CONSUMER had stopped reading because the client canceled. It then emitted
+            // a Degraded sentinel that the handler mistook for slow-upstream backpressure
+            // and re-ran the full prompt non-streamed (double GPU load on fusion-mlx).
+            // ctx.Done() makes cancel a silent stop, not a false backpressure signal.
+            // Mirrors anthropic.go:411-416.
             select {
             case ch <- chunk:
-            default:
-                slog.Warn("sse backpressure: channel full, degrading to non-streaming")
-                degradedChunk := StreamChunk{Degraded: true}
-                select {
-                case ch <- degradedChunk:
-                default:
-                }
+            case <-ctx.Done():
+                slog.Debug("sse stream send canceled by client", "error", ctx.Err())
                 return
             }
         }

@@ -20,12 +20,39 @@ func NewHandler(gateway *MCPClusterGateway) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/mcp/v1/tools", h.handleToolsList)
-	mux.HandleFunc("/mcp/v1/tools/register", h.handleToolRegister)
-	mux.HandleFunc("/mcp/v1/tools/unregister", h.handleToolUnregister)
-	mux.HandleFunc("/mcp/v1/call", h.handleToolCall)
-	mux.HandleFunc("/mcp/v1/stats", h.handleStats)
-	mux.HandleFunc("/mcp/v1/health", h.handleHealth)
+	h.register(mux, nil)
+}
+
+// RegisterRoutesWithMiddleware registers the MCP routes through the supplied
+// wrapper so they pass through the gateway middleware chain (auth, rate limit,
+// budget). F1 fix: MCP routes were previously mounted on the bare mux, which
+// bypassed withMiddleware entirely — an unauthenticated /mcp/v1/call could
+// trigger forwardToNode's outbound dial (SSRF amplifier). health stays public
+// only if the wrapper itself permits unauthenticated reads; the wrapper is the
+// single auth gate, applied uniformly to every MCP route.
+func (h *Handler) RegisterRoutesWithMiddleware(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+	h.register(mux, wrap)
+}
+
+func (h *Handler) register(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+	regs := []struct {
+		path string
+		h    http.HandlerFunc
+	}{
+		{"/mcp/v1/tools", h.handleToolsList},
+		{"/mcp/v1/tools/register", h.handleToolRegister},
+		{"/mcp/v1/tools/unregister", h.handleToolUnregister},
+		{"/mcp/v1/call", h.handleToolCall},
+		{"/mcp/v1/stats", h.handleStats},
+		{"/mcp/v1/health", h.handleHealth},
+	}
+	for _, r := range regs {
+		hh := r.h
+		if wrap != nil {
+			hh = wrap(hh)
+		}
+		mux.HandleFunc(r.path, hh)
+	}
 	slog.Info("MCP gateway routes registered")
 }
 
@@ -80,10 +107,12 @@ func (h *Handler) handleToolUnregister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// F1 fix: bound the read so an unbounded body cannot exhaust memory
+	// (siblings handleToolRegister/handleToolCall already cap at 1MiB/5MiB).
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}

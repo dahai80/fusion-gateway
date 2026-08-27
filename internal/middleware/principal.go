@@ -76,8 +76,16 @@ func (p *Principal) KeyName() string {
 }
 
 func (p *Principal) EffectiveRole() Role {
+    // RR3 (audit P0): the inference MasterKey maps to the inference role, not
+    // RoleAdmin. Previously `if p.IsMaster { return RoleAdmin }` let a leaked
+    // inference key pass withAdminOnly (IsAdmin→EffectiveRole==RoleAdmin) and
+    // reach every /admin/teams|orgs|gc|config-reload endpoint. Inference and
+    // management planes must not cross: an inference key grants inference only;
+    // admin surface requires an admin JWT issued by admin.Handler.login. The
+    // master key keeps its inference bypasses (model allowlist, backend access,
+    // rate limit) because those read p.IsMaster directly, not the role.
     if p.IsMaster {
-        return RoleAdmin
+        return RoleInference
     }
     if p.Role != "" {
         return p.Role

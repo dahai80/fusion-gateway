@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -76,8 +75,8 @@ func NewVertexProvider(name string, backendCfg config.BackendConfig) *VertexProv
 		project:     project,
 		region:      region,
 		baseURL:     baseURL,
-		httpClient:  &http.Client{Timeout: timeout},
-		tokenClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient:  &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+		tokenClient: &http.Client{Timeout: 30 * time.Second, Transport: TransportForBackend(backendCfg)},
 	}
 }
 
@@ -176,14 +175,14 @@ func (p *VertexProvider) accessToken(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b := ReadErrorBody(resp)
 		return "", fmt.Errorf("token exchange status %d: %s", resp.StatusCode, string(b))
 	}
 	var tokResp struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int    `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
+	if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&tokResp); err != nil {
 		return "", fmt.Errorf("decode token response: %w", err)
 	}
 	if tokResp.AccessToken == "" {
@@ -224,7 +223,7 @@ func (p *VertexProvider) Messages(ctx context.Context, req *AnthropicRequest) (*
 		return nil, extractUpstreamError(resp)
 	}
 	var antResp AnthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+	if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
 		return nil, fmt.Errorf("decode vertex messages response: %w", err)
 	}
 	return &antResp, nil
@@ -249,6 +248,21 @@ func (p *VertexProvider) StreamMessages(ctx context.Context, req *AnthropicReque
 	safego.Go("vertex_stream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		// RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+		// body.Read inside parseAnthropicEventStreamRaw (which takes no ctx).
+		// A stalled upstream keeps Read blocked indefinitely, hanging the
+		// goroutine + connection. Closing the body forces an immediate read
+		// error and a clean exit. Mirrors node_adapter.go.
+		stopBodyWatch := make(chan struct{})
+		defer close(stopBodyWatch)
+		safego.Go("vertex_stream_cancel_watch", func() {
+			select {
+			case <-ctx.Done():
+				slog.Debug("vertex stream canceled by client, closing body", "error", ctx.Err())
+				resp.Body.Close()
+			case <-stopBodyWatch:
+			}
+		})
 		parseAnthropicEventStreamRaw(resp.Body, ch)
 	})
 	return ch, nil

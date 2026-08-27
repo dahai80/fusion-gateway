@@ -160,7 +160,7 @@ func TestServer_AgentTaskCancel_Endpoint(t *testing.T) {
     s.taskRegistry = NewTaskRegistry()
 
     ctx, cancel := context.WithCancel(context.Background())
-    s.taskRegistry.Register("task-cancel-1", cancel)
+    s.taskRegistry.Register("task-cancel-1", "", cancel)
 
     req := httptest.NewRequest(http.MethodPost, "/v1/agent/tasks/task-cancel-1/cancel", nil)
     rec := httptest.NewRecorder()

@@ -85,6 +85,15 @@ type Engine struct {
     cfg             *config.ConfigSnapshot
     hwCollector     *hardware.Collector
     breakers        map[string]*CircuitBreaker
+    // nodeBreakers holds a per-node circuit breaker keyed by node ID (RR5,
+    // audit P1). The prior design had a single "cluster" breaker: one bad
+    // node's failures accumulated into it and tripped the whole cluster,
+    // poisoning the N-1 healthy nodes (all traffic forced to cloud). Per-node
+    // breakers isolate a failing node — it trips itself and traffic bypasses
+    // it, while healthy nodes keep serving. The cluster breaker stays as an
+    // aggregate view (cluster-wide conditions), never tripped by a single
+    // node's failures. Lazy-created on first record/lookup.
+    nodeBreakers    map[string]*CircuitBreaker
     localReady      bool
     localInFlight   func() int64
     localModels     func() map[string]bool
@@ -121,6 +130,7 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
         cfg:             cfg,
         hwCollector:     hwCollector,
         breakers:        breakers,
+        nodeBreakers:    make(map[string]*CircuitBreaker),
         localReady:      false,
         localInFlight:   func() int64 { return 0 },
         localModels:     func() map[string]bool { return nil },
@@ -132,19 +142,41 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
     // mode=local + queue_enabled. In hybrid/cloud mode the engine falls back
     // to cloud (no queue), so localQueue stays nil and the handler never
     // gates — zero behavior change for the default hybrid path.
-    if cfg.Config.Routing.Mode == "local" && cfg.Config.Routing.LocalPriority.QueueEnabled {
-        maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
-        if maxConcurrent <= 0 {
-            maxConcurrent = 8
-        }
-        e.localQueue = newSlotQueue(maxConcurrent)
-        slog.Info("local slot wait-queue enabled",
-            "mode", "local",
-            "max_concurrent", maxConcurrent,
-            "queue_timeout", cfg.Config.Routing.LocalPriority.QueueTimeout)
-    }
+    e.localQueue = buildLocalQueue(cfg)
 
     return e
+}
+
+// buildLocalQueue constructs the opt-in local wait-queue from a config
+// snapshot: a *slotQueue when routing.mode=local AND
+// local_priority.queue_enabled, else nil. Shared between NewEngine (initial
+// build) and DrainAndApply (hot-reload rebuild, RR6) so both sites stay in
+// sync — the queue is NEVER silently left stale across a config change.
+// max_concurrent<=0 defaults to 8 (same as the original inline build).
+func buildLocalQueue(cfg *config.ConfigSnapshot) *slotQueue {
+    if cfg.Config.Routing.Mode != "local" || !cfg.Config.Routing.LocalPriority.QueueEnabled {
+        return nil
+    }
+    maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
+    if maxConcurrent <= 0 {
+        maxConcurrent = 8
+    }
+    q := newSlotQueue(maxConcurrent)
+    slog.Info("local slot wait-queue built",
+        "mode", "local",
+        "max_concurrent", maxConcurrent,
+        "queue_timeout", cfg.Config.Routing.LocalPriority.QueueTimeout)
+    return q
+}
+
+// queueStateString renders a localQueue for the RR6 hot-reload transition
+// log: "disabled" (nil) or "cap=N" so an operator sees a queue flip or
+// capacity change explicitly rather than a generic "config applied".
+func queueStateString(q *slotQueue) string {
+    if q == nil {
+        return "disabled"
+    }
+    return fmt.Sprintf("cap=%d", cap(q.sem))
 }
 
 func (e *Engine) SetClusterSelector(cs ClusterSelector) {
@@ -222,15 +254,58 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
         slog.Warn("drain timeout: in-flight requests remain", "in_flight", e.localInFlight())
     }
 
-    // Phase 2: Apply - update config reference and rebuild breakers
+    // Phase 2: Apply - update config reference and rebuild breakers.
+    // EI3: inherit the OLD breakers' trip state onto the NEW ones. Without
+    // inheritance, a hot-reload swaps e.breakers for brand-new closed breakers
+    // — an already-open (failing) backend looks healthy to the new breaker, so
+    // requests keep hitting it until the new breaker re-accumulates enough
+    // failures to trip again. A concurrent RecordFailure landing on the old
+    // breaker (GC'd post-swap) was the original race; inheriting state means the
+    // new breaker opens immediately and the operator sees WHY (tripReason),
+    // not a blank "config applied". Snapshot under Lock BEFORE the swap (the
+    // old map is read here, not concurrently by RecordFailure which holds RLock
+    // — but we hold the exclusive Lock so the snapshot+swap is atomic).
     e.mu.Lock()
     e.cfg = cfg
+    inheritedLocal := snapshotBreakerLocked(e.breakers, "local")
+    inheritedCloud := snapshotBreakerLocked(e.breakers, "cloud")
+    inheritedCluster := snapshotBreakerLocked(e.breakers, "cluster")
+    inheritedNodes := make(map[string]BreakerSnapshot, len(e.nodeBreakers))
+    for nodeID := range e.nodeBreakers {
+        inheritedNodes[nodeID] = snapshotBreakerLocked(e.nodeBreakers, nodeID)
+    }
     e.breakers = map[string]*CircuitBreaker{
         "local":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
         "cloud":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
         "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
     }
+    e.breakers["local"].InheritSnapshot(inheritedLocal)
+    e.breakers["cloud"].InheritSnapshot(inheritedCloud)
+    e.breakers["cluster"].InheritSnapshot(inheritedCluster)
+    // RR5: per-node breakers rebuilt fresh (lazy-recreated on next access via
+    // nodeBreakerLocked) but inherit prior trip state so a known-bad node is
+    // still seen as bad right after reload, not rediscovered by failure.
+    e.nodeBreakers = make(map[string]*CircuitBreaker, len(inheritedNodes))
+    for nodeID, snap := range inheritedNodes {
+        nb := NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
+        nb.InheritSnapshot(snap)
+        e.nodeBreakers[nodeID] = nb
+    }
+    // RR6: rebuild localQueue from the new config. Without this, an operator
+    // flipping queue_enabled false→true or raising max_concurrent via admin
+    // saw breakers rebuilt but the queue left stale (nil or old capacity) —
+    // the toggle was a silent no-op while logs claimed "config applied". The
+    // queue is a fresh semaphore; in-flight holds on the old queue keep their
+    // own release closures (Phase 1 drained in-flight to ~0 first). A change
+    // in queue state is logged explicitly so operators see what actually took
+    // effect, not a blanket "config applied".
+    oldQueueState := queueStateString(e.localQueue)
+    e.localQueue = buildLocalQueue(cfg)
+    newQueueState := queueStateString(e.localQueue)
     e.mu.Unlock()
+    if oldQueueState != newQueueState {
+        slog.Info("config applied: local queue rebuilt", "version", cfg.Version, "before", oldQueueState, "after", newQueueState)
+    }
     slog.Info("config applied: circuit breakers rebuilt", "version", cfg.Version)
 
     // Phase 3: Warmup - set local breaker to half_open for gradual recovery
@@ -280,6 +355,22 @@ func (e *Engine) LocalQueue() *slotQueue {
     return e.localQueue
 }
 
+// Shutdown releases engine-owned background goroutines. B9: the session
+// affinity evict loop is a long-lived worker launched in NewSessionAffinity;
+// without an explicit Stop it survives process exit as a dangling goroutine
+// (matters under graceful shutdown / config-reload test harnesses that reuse
+// the engine). Called from cmd/gateway/main.go after srv.Shutdown + discovery
+// stop, mirroring the F7 shutdown order.
+func (e *Engine) Shutdown() {
+    e.mu.RLock()
+    sa := e.sessionAffinity
+    e.mu.RUnlock()
+    if sa != nil {
+        sa.Stop()
+    }
+    slog.Info("router engine shutdown complete")
+}
+
 // QueueTimeout returns the configured wait budget for the local queue. Read
 // from the live config snapshot so hot-reload can tune it without rebuilding
 // the engine. Falls back to 5s when unset.
@@ -319,9 +410,18 @@ func (e *Engine) PublishBreakerStates() {
     for backend := range e.breakers {
         backends = append(backends, backend)
     }
+    nodeIDs := make([]string, 0, len(e.nodeBreakers))
+    for nodeID := range e.nodeBreakers {
+        nodeIDs = append(nodeIDs, nodeID)
+    }
     e.mu.RUnlock()
     for _, backend := range backends {
         observability.UpdateCircuitBreakerState(backend, int(e.CircuitBreakerState(backend)))
+    }
+    // RR5: also publish per-node breaker states so /metrics surfaces an
+    // individual node tripping without it being hidden inside the aggregate.
+    for _, nodeID := range nodeIDs {
+        observability.UpdateCircuitBreakerState("node:"+nodeID, int(e.NodeBreakerState(nodeID)))
     }
 }
 
@@ -363,6 +463,95 @@ func (e *Engine) RecordFailure(backend string) {
     }
 }
 
+// nodeBreakerLocked returns the per-node circuit breaker for nodeID, creating
+// it lazily under e.mu (RR5). Caller MUST hold e.mu (or use the public
+// record/nodeState helpers that lock internally).
+func (e *Engine) nodeBreakerLocked(nodeID string, cbCfg config.CircuitBreakerConfig) *CircuitBreaker {
+    b, ok := e.nodeBreakers[nodeID]
+    if !ok {
+        b = NewCircuitBreaker(cbCfg)
+        e.nodeBreakers[nodeID] = b
+    }
+    return b
+}
+
+// snapshotBreakerLocked returns the trip-state snapshot of the breaker keyed by
+// k in m, or a zero (StateClosed) snapshot if absent. Used by DrainAndApply
+// (EI3) to capture prior trip state before swapping the breaker map. Caller
+// MUST hold e.mu so the map read + breaker snapshot are atomic w.r.t. the swap.
+func snapshotBreakerLocked(m map[string]*CircuitBreaker, k string) BreakerSnapshot {
+    if b, ok := m[k]; ok {
+        return b.Snapshot()
+    }
+    return BreakerSnapshot{}
+}
+
+// RecordNodeSuccess records a success on the per-node breaker for nodeID (RR5).
+// Used instead of RecordSuccess("cluster") when a request was served by a
+// specific cluster node, so one node's failures never accumulate into the
+// shared cluster breaker. No-op for empty nodeID.
+func (e *Engine) RecordNodeSuccess(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    e.mu.Lock()
+    b := e.nodeBreakerLocked(nodeID, e.cfg.Config.Routing.CircuitBreaker)
+    e.mu.Unlock()
+    b.RecordSuccess()
+    observability.UpdateCircuitBreakerState("node:"+nodeID, int(b.State()))
+}
+
+// RecordNodeFailure records a failure on the per-node breaker for nodeID (RR5).
+// When the node's breaker opens, tryCluster* bypasses it (the node trips
+// itself; healthy nodes keep serving). No-op for empty nodeID.
+func (e *Engine) RecordNodeFailure(nodeID string) {
+    if nodeID == "" {
+        return
+    }
+    e.mu.Lock()
+    b := e.nodeBreakerLocked(nodeID, e.cfg.Config.Routing.CircuitBreaker)
+    e.mu.Unlock()
+    b.RecordFailure()
+    state := b.State()
+    observability.UpdateCircuitBreakerState("node:"+nodeID, int(state))
+    if state == StateOpen {
+        slog.Warn("per-node circuit breaker opened", "node_id", nodeID)
+        observability.RecordCircuitBreakerTrip("node:"+nodeID, "failure_threshold")
+    }
+}
+
+// NodeBreakerOpen reports whether the per-node breaker for nodeID is open (RR5).
+// tryCluster* consults this to bypass a tripped node instead of poisoning the
+// whole cluster. False for unknown/empty nodeID (no failures recorded yet).
+func (e *Engine) NodeBreakerOpen(nodeID string) bool {
+    if nodeID == "" {
+        return false
+    }
+    e.mu.RLock()
+    b, ok := e.nodeBreakers[nodeID]
+    e.mu.RUnlock()
+    if !ok {
+        return false
+    }
+    return b.State() == StateOpen
+}
+
+// NodeBreakerState returns the per-node breaker's state (RR5). Used by
+// PublishBreakerStates to push each node's state to the /metrics gauge.
+// StateClosed for unknown/empty nodeID (no failures recorded yet).
+func (e *Engine) NodeBreakerState(nodeID string) CircuitBreakerState {
+    if nodeID == "" {
+        return StateClosed
+    }
+    e.mu.RLock()
+    b, ok := e.nodeBreakers[nodeID]
+    e.mu.RUnlock()
+    if !ok {
+        return StateClosed
+    }
+    return b.State()
+}
+
 func (e *Engine) Trip(backend, reason string) {
     // L1 fix: RLock to find breaker, then call Trip outside RLock
     e.mu.RLock()
@@ -379,10 +568,28 @@ func (e *Engine) Trip(backend, reason string) {
 func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     cfg := config.SnapshotFromContext(ctx)
 
+    // B1: classify intent OUTSIDE the RLock. The LLM classifier
+    // (RouterLightClassifier.Classify) does a blocking HTTP call with a 2s
+    // timeout. Running it under e.mu.RLock (as decideIntentLocked did) blocks
+    // every writer — SetLocalReady/UpdateConfig/DrainAndApply/Trip/
+    // RecordFailure/RecordSuccess — for up to 2s per slow classification,
+    // starving circuit-breaker transitions. Snapshot the classifier + adapter
+    // lookup pointers under RLock (the same safe pointer read the body did),
+    // release, then run the (possibly network) classification lock-free. The
+    // IntentResult is threaded back into decideLocked, so the dispatch side
+    // (tryClusterByPlatformLocked / tryClusterLocked, which DO need the lock)
+    // still runs under RLock. Heuristic classifier is in-process sub-ms but is
+    // moved out too for uniformity — it never blocks meaningfully.
+    e.mu.RLock()
+    llmClassifier := e.classifier
+    heuristicClassifier := e.heuristicClassifier
+    e.mu.RUnlock()
+    intentResult := e.classifyIntentUnlocked(ctx, cfg, req, llmClassifier, heuristicClassifier)
+
     // L1 fix: collect trip reasons during RLock, apply Trip after unlock
     var trips []string
     e.mu.RLock()
-    decision := e.decideLocked(ctx, cfg, req, &trips)
+    decision := e.decideLocked(ctx, cfg, req, &trips, intentResult)
     e.mu.RUnlock()
 
     // Apply deferred trip calls outside read lock (use e.Trip for proper locking)
@@ -392,7 +599,7 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     return decision
 }
 
-func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string) *RouteDecision {
+func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string, intent *IntentResult) *RouteDecision {
 
     // Fast path: embedding/rerank request type routing
     switch req.Type {
@@ -422,7 +629,11 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // rule chain so semantic dispatch wins, with the rule chain as fallback.
     // Disabled by default (intent_classifier.enabled); NoopClassifier makes
     // this a no-op so existing P0-P7 behavior is unchanged.
-    if decision := e.decideIntentLocked(ctx, cfg, req); decision != nil {
+    // B1: the intent classification itself (heuristic + LLM HTTP call) runs
+    // lock-free in classifyIntentUnlocked before Decide takes the RLock; this
+    // branch consumes the precomputed result and only does lock-protected
+    // dispatch (tryCluster*Locked).
+    if decision := e.decideIntentLocked(ctx, cfg, req, intent); decision != nil {
         return decision
     }
 
@@ -613,9 +824,26 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         }
     }
 
-    // P5: Concurrent limit
+    // P5: Concurrent limit (advisory early-shed — B2 / RR4).
+    // This is a TOCTOU soft read: localInFlight is read here under RLock, but
+    // the counter is incremented later in the adapter (fusion_mlx.go
+    // tryInFlightAcquire) inside Chat/StreamChat/Embedding/Rerank, after
+    // Decide returns. N concurrent Decide calls can each observe
+    // inFlight == maxConcurrent-1 and all route local, overshooting by up to
+    // N-1 before any of them increments the counter. RR4 closes that window:
+    // the adapter's tryInFlightAcquire is now an atomic CAS hard cap — when
+    // local is actually full it returns ErrLocalSlotFull and the handler
+    // diverts the request to cloud (no breaker failure recorded). So this P5
+    // read is now purely an advisory early-shed: it diverts to cluster/cloud
+    // BEFORE reaching the adapter when local already LOOKS saturated, saving
+    // a round-trip. Any overshoot that slips past P5 is caught and corrected
+    // by the adapter CAS + cloud diversion. The opt-in slotQueue (#102
+    // ADR-001, mode=local + queue_enabled) remains a separate handler-side
+    // gate that blocks/queues instead of diverting.
     maxConcurrent := cfg.Config.Routing.LocalPriority.MaxConcurrent
     if maxConcurrent > 0 && e.localInFlight() >= int64(maxConcurrent) {
+        slog.Debug("advisory concurrent limit reached, diverting from local",
+            "in_flight", e.localInFlight(), "max_concurrent", maxConcurrent, "model", req.Model)
         if decision := e.tryClusterLocked(cfg, req.Model); decision != nil {
             return decision
         }
@@ -743,6 +971,15 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string) *Rou
         return nil
     }
 
+    // RR5: bypass a node whose per-node breaker is open — it tripped itself on
+    // repeated failure, so routing to it would just fail again. Fall through to
+    // cloud for this request; the node's health-check will reconcile its state.
+    if e.NodeBreakerOpen(nodeID) {
+        slog.Info("cluster node breaker open, bypassing to cloud",
+            "node_id", nodeID, "model", model)
+        return nil
+    }
+
     slog.Info("routing to cluster node",
         "node_id", nodeID, "strategy", strategy, "model", model)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
@@ -773,56 +1010,43 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
         slog.Warn("platform cluster node selection failed", "platform", platform, "error", err)
         return nil
     }
+    // RR5: bypass a node whose per-node breaker is open (see tryClusterLocked).
+    if e.NodeBreakerOpen(nodeID) {
+        slog.Info("cluster node breaker open, bypassing platform dispatch to cloud",
+            "node_id", nodeID, "platform", platform)
+        return nil
+    }
     slog.Info("routing to cluster node by platform", "node_id", nodeID, "platform", platform, "strategy", strategy)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_platform:" + platform, NodeID: nodeID}
 }
 
-// decideIntentLocked is the D4 semantic intent layer (issue #22/#23/#25).
-// It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
-// (intent unknown, low confidence, disabled, or no target platform available).
-func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest) *RouteDecision {
+// classifyIntentUnlocked runs the heuristic and (if enabled) the LLM intent
+// classifier LOCK-FREE. B1: the LLM classifier is a blocking HTTP call (2s
+// timeout); doing it under e.mu.RLock starved every engine writer (breaker
+// transitions, config updates) for the duration of one slow classification.
+// The caller snapshots e.classifier / e.heuristicClassifier under RLock and
+// passes the pointer values here, so a concurrent SetIntentClassifier cannot
+// race the read (the classifier it points at remains valid — implementations
+// are safe for concurrent use per the interface doc). Returns the IntentResult
+// the dispatch side should act on, or nil to defer to the rule chain. No
+// shared engine state is read here; the adapter lookup is consulted under lock
+// in decideIntentLocked.
+func (e *Engine) classifyIntentUnlocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, llmClassifier, heuristicClassifier IntentClassifier) *IntentResult {
     // Heuristic-first: the in-process sub-ms classifier runs before the LLM
     // classifier on every request (latency lever for <20ms gateway overhead).
-    // When it returns IntentCode with sufficient confidence, dispatch straight
-    // to LocalBackend + LoRA hot-swap, skipping the sync LLM classifier
-    // entirely (the dominant latency killer on the code path).
+    // When it returns IntentCode with sufficient confidence, it short-circuits
+    // the sync LLM classifier entirely (the dominant latency killer on the
+    // code path). The result is tagged so the dispatch side logs the heuristic
+    // source label rather than the LLM one.
     hc := cfg.Config.Routing.HeuristicClassifier
-    if hc.Enabled && e.heuristicClassifier != nil {
-        hRes := classifyAndLog(ctx, e.heuristicClassifier, req)
+    if hc.Enabled && heuristicClassifier != nil {
+        hRes := classifyAndLog(ctx, heuristicClassifier, req)
         if hRes.Intent == IntentCode && hRes.Confidence >= hc.MinConfidence {
-            adapter := hRes.Params["code_adapter"]
-            if adapter == "" {
-                adapter = hc.CodeAdapter
+            if hRes.Params == nil {
+                hRes.Params = map[string]string{}
             }
-            if adapter == "" {
-                slog.Info("heuristic: code intent but no code_adapter configured, deferring to rule chain",
-                    "confidence", hRes.Confidence, "model", req.Model)
-                return nil
-            }
-            // Best-effort adapter validation (Stream D): if an adapter index is
-            // wired and does not list this adapter, log a warning but still
-            // dispatch — the index may be stale or not yet refreshed, and
-            // suppressing a valid code intent is worse than a possibly-missing
-            // adapter (fusion-mlx will error on hot-swap if truly absent).
-            if e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
-                slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
-                    "adapter", adapter, "model", req.Model)
-            }
-            // Resolve the bare adapter name to the absolute adapter directory
-            // path that fusion-mlx's per-request "adapters" field requires (a
-            // bare name is rejected with AdapterPathError). When the index has
-            // no path (nil lookup or stale entry), fall back to the bare name
-            // so dispatch still proceeds (best-effort); fusion-mlx surfaces the
-            // error if the adapter is truly unresolvable.
-            adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
-            slog.Info("heuristic: code intent routed to local + lora hot-swap",
-                "adapter", adapter, "adapter_path", adapterPath,
-                "confidence", hRes.Confidence, "model", req.Model)
-            return &RouteDecision{
-                Backend: LocalBackend,
-                Reason:  "intent:code:lora:" + adapter,
-                Adapter: adapterPath,
-            }
+            hRes.Params["_source"] = "heuristic"
+            return hRes
         }
         if hRes.Intent != IntentUnknown {
             slog.Debug("heuristic classified non-code intent, falling through to LLM classifier/rule chain",
@@ -834,7 +1058,7 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
     if !ic.Enabled {
         return nil
     }
-    classifier := e.classifier
+    classifier := llmClassifier
     if classifier == nil {
         classifier = NoopClassifier{}
     }
@@ -847,6 +1071,24 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
             "intent", res.Intent, "confidence", res.Confidence, "min", ic.MinConfidence)
         return nil
     }
+    if res.Params == nil {
+        res.Params = map[string]string{}
+    }
+    res.Params["_source"] = "llm"
+    return res
+}
+
+// decideIntentLocked is the D4 semantic intent layer (issue #22/#23/#25).
+// It runs before the P0-P7 rule chain. Returns nil to defer to the rule chain
+// (intent unknown, low confidence, disabled, or no target platform available).
+// B1: the intent classification (heuristic + LLM HTTP) now runs lock-free in
+// classifyIntentUnlocked before Decide takes the RLock; this method only does
+// lock-protected dispatch (adapter lookup + tryCluster*Locked) from the
+// precomputed result. Must be called under e.mu.RLock.
+func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, res *IntentResult) *RouteDecision {
+    if res == nil {
+        return nil
+    }
 
     // IntentLightweight: prefer Mac local. Don't force — let the rule chain
     // apply hardware/circuit-breaker protections; it already routes to local
@@ -855,23 +1097,41 @@ func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnaps
         return nil
     }
 
-    // IntentCode (LLM-classifier path): the sync LLM classifier also recognized
-    // a coding intent. Dispatch to LocalBackend + LoRA hot-swap using the
-    // configured code_adapter, mirroring the heuristic-first path. The adapter
-    // comes from the classifier Params (if it set one) or the heuristic config
-    // fallback. With no adapter configured, defer to the rule chain (bare base).
+    source := res.Params["_source"]
+
+    // IntentCode (heuristic or LLM path): dispatch to LocalBackend + LoRA
+    // hot-swap using the configured code_adapter. The adapter comes from the
+    // classifier Params (if it set one) or the heuristic config fallback. With
+    // no adapter configured, defer to the rule chain (bare base).
     if res.Intent == IntentCode {
         adapter := res.Params["code_adapter"]
         if adapter == "" {
             adapter = cfg.Config.Routing.HeuristicClassifier.CodeAdapter
         }
         if adapter == "" {
-            slog.Info("llm classifier: code intent but no code_adapter configured, deferring to rule chain",
+            slog.Info(source+": code intent but no code_adapter configured, deferring to rule chain",
                 "confidence", res.Confidence, "model", req.Model)
             return nil
         }
+        // Best-effort adapter validation (heuristic path only — the LLM path
+        // preserved the original behavior of no pre-dispatch index check): if
+        // an adapter index is wired and does not list this adapter, log a
+        // warning but still dispatch — the index may be stale or not yet
+        // refreshed, and suppressing a valid code intent is worse than a
+        // possibly-missing adapter (fusion-mlx will error on hot-swap if truly
+        // absent).
+        if source == "heuristic" && e.adapterLookup != nil && !e.adapterLookup.Has(adapter) {
+            slog.Warn("heuristic: code_adapter not found in adapter index, dispatching anyway (index may be stale)",
+                "adapter", adapter, "model", req.Model)
+        }
+        // Resolve the bare adapter name to the absolute adapter directory path
+        // that fusion-mlx's per-request "adapters" field requires (a bare name
+        // is rejected with AdapterPathError). When the index has no path (nil
+        // lookup or stale entry), fall back to the bare name so dispatch still
+        // proceeds (best-effort); fusion-mlx surfaces the error if the adapter
+        // is truly unresolvable.
         adapterPath := resolveAdapterPath(e.adapterLookup, adapter)
-        slog.Info("llm classifier: code intent routed to local + lora hot-swap",
+        slog.Info(source+": code intent routed to local + lora hot-swap",
             "adapter", adapter, "adapter_path", adapterPath,
             "confidence", res.Confidence, "model", req.Model)
         return &RouteDecision{

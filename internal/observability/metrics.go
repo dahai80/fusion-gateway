@@ -32,7 +32,6 @@ var (
     hwCollectionErrors *prometheus.CounterVec
     configVersion prometheus.Gauge
     inFlightRequests *prometheus.GaugeVec
-    tokenizerCalibrationDeviation prometheus.Gauge
 
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
@@ -40,7 +39,9 @@ var (
     localSuccesses  atomic.Int64
     localFailures   atomic.Int64
     cloudSuccesses  atomic.Int64
-    cloudFailures   atomic.Int64
+    cloudFailures  atomic.Int64
+
+    cloudInFlight  atomic.Int64
 )
 
 func init() {
@@ -152,10 +153,11 @@ func init() {
         Help: "In-flight request count",
     }, []string{"backend"})
 
-    tokenizerCalibrationDeviation = prometheus.NewGauge(prometheus.GaugeOpts{
-        Name: "fusion_gateway_tokenizer_calibration_deviation",
-        Help: "Tokenizer calibration deviation ratio",
-    })
+    // EI6: tokenizer_calibration_deviation removed — it was declared but never
+    // had a write path, so /metrics exposed a permanent 0 that looked like a
+    // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
+    // (AH2) actually computes and reports a value; a dead gauge is worse than
+    // no gauge (audit EI6 "禁止声明了就当存在").
 
     registry.MustRegister(
         requestsTotal, requestDuration, tokensTotal,
@@ -165,7 +167,6 @@ func init() {
         hwGPUMemoryInUseBytes, hwGPUMemoryAllocBytes,
         hwMLXActiveMemoryBytes, hwMLXModelsLoaded, hwMLXInferenceQueueDepth,
         hwCollectionErrors, configVersion, inFlightRequests,
-        tokenizerCalibrationDeviation,
     )
 }
 
@@ -245,6 +246,24 @@ func UpdateConfigVersion(ver uint64) {
 
 func UpdateInFlight(backend string, count int64) {
     inFlightRequests.WithLabelValues(backend).Set(float64(count))
+}
+
+func IncrCloudInFlight() {
+    cur := cloudInFlight.Add(1)
+    inFlightRequests.WithLabelValues("cloud").Set(float64(cur))
+}
+
+func DecrCloudInFlight() {
+    cur := cloudInFlight.Add(-1)
+    if cur < 0 {
+        cur = 0
+        cloudInFlight.Store(0)
+    }
+    inFlightRequests.WithLabelValues("cloud").Set(float64(cur))
+}
+
+func CloudInFlight() int64 {
+    return cloudInFlight.Load()
 }
 
 func Stats() (total, local, cloud int64) {

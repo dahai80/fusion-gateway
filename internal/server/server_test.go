@@ -14,6 +14,7 @@ import (
     "os"
     "path/filepath"
     "strings"
+    "sync/atomic"
     "testing"
     "time"
 
@@ -29,7 +30,37 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
     memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
+    "sync"
 )
+
+// lockedBuffer is a concurrency-safe bytes.Buffer for capturing slog output in
+// stream tests. The Anthropic/OpenAI stream handlers spawn a detached parser
+// goroutine (safego.Go) that keeps emitting slog.Debug after the handler
+// returns; a plain bytes.Buffer raced under -race (test reading logBuf.String()
+// while the parser goroutine still wrote via slog). All access goes through a
+// mutex so concurrent Write/String/Reset are safe.
+type lockedBuffer struct {
+    mu  sync.Mutex
+    buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.buf.Reset()
+}
 
 type mockProvider struct {
     name       string
@@ -1929,58 +1960,6 @@ func TestWriteJSON(t *testing.T) {
         t.Error("expected ok")
     }
     slog.Info("TestWriteJSON passed")
-}
-
-// --- Stream chat with degraded fallback ---
-
-func TestHandleStreamChat_DegradedFallback(t *testing.T) {
-    ch := make(chan adapter.StreamChunk, 2)
-    ch <- adapter.StreamChunk{
-        ID:      "chatcmpl-d",
-        Object:  "chat.completion.chunk",
-        Created: time.Now().Unix(),
-        Model:   "gpt-4",
-        Choices: []adapter.ChoiceDelta{
-            {Index: 0, Delta: map[string]string{"content": "partial"}},
-        },
-        Degraded: true,
-    }
-    close(ch)
-
-    // The degraded path tries to call provider.Chat as fallback
-    s := newTestServerWithProvider("test-cloud", &mockProvider{
-        name:    "test-cloud",
-        healthy: true,
-        streamCh: ch,
-        chatResp: &adapter.ChatResponse{
-            ID:      "chatcmpl-d-fb",
-            Object:  "chat.completion",
-            Created: time.Now().Unix(),
-            Model:   "gpt-4",
-            Choices: []adapter.ChatChoice{
-                {
-                    Index:        0,
-                    Message:      map[string]string{"role": "assistant", "content": "Fallback!"},
-                    FinishReason: "stop",
-                },
-            },
-            Usage: adapter.UsageResponse{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8},
-        },
-    })
-
-    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
-    decision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "test"}
-    req := &adapter.ChatRequest{
-        Model:    "gpt-4",
-        Messages: []adapter.ChatMessage{{Role: "user", Content: "hello"}},
-        Stream:   true,
-    }
-
-    rec := httptest.NewRecorder()
-    provider, _ := s.pool.Get("test-cloud")
-    s.handleStreamChat(context.Background(), rec, provider, req, decision, budget, time.Now())
-
-    slog.Info("TestHandleStreamChat_DegradedFallback", "status", rec.Code, "body_len", rec.Body.Len())
 }
 
 // --- Non-stream chat with cache hit ---
@@ -4287,7 +4266,7 @@ func TestHandleStreamAnthropicMessages_WriteFailureLogged(t *testing.T) {
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
     // Capture slog output into a buffer so we can assert the distinct log line.
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4354,7 +4333,7 @@ func TestHandleStreamAnthropicMessages_ClosesOpenBlocksOnClientCancel(t *testing
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4430,7 +4409,7 @@ func TestHandleStreamAnthropicMessages_ClientCancelWriteFailedSkipsSynth(t *test
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4490,7 +4469,7 @@ func TestHandleStreamAnthropicMessages_StreamSummaryLogged(t *testing.T) {
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4582,7 +4561,7 @@ func TestHandleStreamAnthropicMessages_LastEventIdleNonZeroAfterGap(t *testing.T
     })
     req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
 
-    var logBuf bytes.Buffer
+    var logBuf lockedBuffer
     prev := slog.Default()
     defer slog.SetDefault(prev)
     slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -8032,7 +8011,14 @@ func TestAdminGC_InFlightQueued(t *testing.T) {
     slog.Info("TestAdminGC_InFlightQueued passed")
 }
 
-func TestWithAdminOnly_AdminPass(t *testing.T) {
+func TestWithAdminOnly_MasterKeyRejected(t *testing.T) {
+    // RR3 (audit P0): the inference MasterKey must NOT pass withAdminOnly.
+    // Previously TestWithAdminOnly_AdminPass asserted the opposite — that an
+    // IsMaster Principal passes — which was exactly the plane-crossing defect:
+    // a leaked inference key reached /admin/teams|orgs|gc|config-reload. Now
+    // withAdminOnly rejects IsMasterKey explicitly (defense-in-depth) and IsAdmin
+    // returns false for the inference role. Admin surface requires an admin JWT
+    // (Role admin via admin.Handler.login), not the inference master key.
     s := newTestServer()
     called := false
     handler := s.withAdminOnly(func(w http.ResponseWriter, r *http.Request) {
@@ -8044,10 +8030,13 @@ func TestWithAdminOnly_AdminPass(t *testing.T) {
     req = req.WithContext(ctx)
     rec := httptest.NewRecorder()
     handler(rec, req)
-    if !called {
-        t.Fatal("expected handler to be called")
+    if called {
+        t.Fatal("inference master key must NOT reach admin-only handler (RR3 plane crossing)")
     }
-    slog.Info("TestWithAdminOnly_AdminPass passed")
+    if rec.Code != http.StatusForbidden {
+        t.Fatalf("expected 403 for master key on admin endpoint, got %d", rec.Code)
+    }
+    slog.Info("TestWithAdminOnly_MasterKeyRejected passed (RR3 fix)")
 }
 
 func TestBatches_CreateError(t *testing.T) {
@@ -9382,4 +9371,170 @@ func TestWriteChatFailedError_NilErr(t *testing.T) {
     if got.Error.Message != "Stream chat failed: " {
         t.Fatalf("expected bare prefix, got %q", got.Error.Message)
     }
+}
+
+// TestServer_OAuth2_B13_CrossConnectorStateReplay covers audit finding B13: an
+// OAuth2 state issued for connector_key "conn-A" must NOT be usable against
+// connector_key "conn-B"'s callback. The callback must reject the mismatch
+// (cross-connector state replay → token exfiltration into wrong connector)
+// with 400 before reaching ExchangeCode. authorize stores state before
+// calling AuthorizationURL, so even though "conn-A" is not registered (the
+// authorize call itself returns 400), the state binding persists and the
+// callback path exercises the B13 guard without needing a live connector.
+func TestServer_OAuth2_B13_CrossConnectorStateReplay(t *testing.T) {
+    s := newTestServer()
+    s.oauth2States = make(map[string]oauth2StateEntry)
+
+    // authorize for conn-A with a fixed state; registry has no registered
+    // connector so AuthorizationURL errors, but the state→connector binding
+    // is persisted before that call.
+    authBody := strings.NewReader(`{"connectorKey":"conn-A","state":"st-replay"}`)
+    authReq := httptest.NewRequest(http.MethodPost, "/gateway/v1/oauth2/authorize", authBody)
+    authRec := httptest.NewRecorder()
+    s.handleOAuth2Authorize(authRec, authReq)
+    // authorize returns 400 (connector not registered) — that's fine; the
+    // important precondition is the state was stored.
+    if authRec.Code != http.StatusBadRequest {
+        t.Fatalf("expected authorize 400 (unregistered connector), got %d", authRec.Code)
+    }
+
+    // callback with the SAME state but a DIFFERENT connector_key → must 400.
+    cbReq := httptest.NewRequest(http.MethodGet,
+        "/gateway/v1/oauth2/callback?code=c&state=st-replay&connector_key=conn-B", nil)
+    cbRec := httptest.NewRecorder()
+    s.handleOAuth2Callback(cbRec, cbReq)
+    if cbRec.Code != http.StatusBadRequest {
+        t.Fatalf("cross-connector replay must be 400, got %d body=%s", cbRec.Code, cbRec.Body.String())
+    }
+    if !strings.Contains(cbRec.Body.String(), "state does not match connector_key") {
+        t.Fatalf("expected mismatch error, got %s", cbRec.Body.String())
+    }
+
+    // matching connector_key on a fresh state would proceed past the guard —
+    // verify the guard does NOT reject a legitimate same-connector callback
+    // (state consumed once, so re-issue a second state for conn-A).
+    s.oauth2States["st-legit"] = oauth2StateEntry{connectorKey: "conn-A", issuedAt: time.Now().UTC()}
+    cbReq2 := httptest.NewRequest(http.MethodGet,
+        "/gateway/v1/oauth2/callback?code=c&state=st-legit&connector_key=conn-A", nil)
+    cbRec2 := httptest.NewRecorder()
+    s.handleOAuth2Callback(cbRec2, cbReq2)
+    // Past the B13 guard it reaches ExchangeCode on an unregistered connector
+    // → 400 from the connector layer, NOT the mismatch guard.
+    if cbRec2.Code == http.StatusBadRequest && strings.Contains(cbRec2.Body.String(), "state does not match connector_key") {
+        t.Fatalf("same-connector callback must not trip the B13 mismatch guard, got %s", cbRec2.Body.String())
+    }
+}
+
+// RR4: when the local fusion-mlx hard slot cap (max_concurrent) is reached, a
+// non-stream /v1/chat/completions request must divert to cloud (A4-style) and
+// return 200 — NOT a 502 and NOT a recorded local breaker failure. The adapter
+// CAS rejects the second request with ErrLocalSlotFull; the handler catches it
+// and re-routes. This test holds the single slot with a blocking local backend
+// while a second request arrives, then asserts the second response came from
+// the cloud mock.
+func TestChatCompletions_RR4_LocalSlotFullDivertsToCloud(t *testing.T) {
+    slog.Info("test TestChatCompletions_RR4_LocalSlotFullDivertsToCloud")
+    // Blocking local backend: the first /v1/chat/completions hangs on
+    // releaseCh until the test signals it, holding the single slot. /health
+    // and /v1/models answer immediately so the provider looks ready.
+    releaseCh := make(chan struct{})
+    startedCh := make(chan struct{})
+    var localHits atomic.Int64
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch r.URL.Path {
+        case "/health":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write([]byte(`{"status":"healthy","ready":true,"model_loaded":true,"loaded_models":["qwen-7b"]}`))
+        case "/readyz":
+            w.WriteHeader(http.StatusOK)
+        case "/v1/models":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen-7b","object":"model","owned_by":"mlx"}]}`))
+        case "/v1/chat/completions":
+            localHits.Add(1)
+            close(startedCh)
+            // Hold the slot until the test releases this handler.
+            select {
+            case <-releaseCh:
+            case <-r.Context().Done():
+                return
+            }
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write([]byte(`{"id":"local","object":"chat.completion","created":1,"model":"qwen-7b","choices":[{"index":0,"message":{"role":"assistant","content":"local"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+        default:
+            w.WriteHeader(http.StatusNotFound)
+        }
+    }))
+    defer srv.Close()
+
+    s := newTestServer()
+    // mode=local forces Decide → LocalBackend so the request lands on
+    // fusion-mlx. queue_enabled stays false (default) so the handler does NOT
+    // gate via the slotQueue — the adapter CAS is the only hard cap, exactly
+    // the hybrid-mode default RR4 targets.
+    s.cfg.Config.Routing.Mode = "local"
+    mlx := adapter.NewFusionMLXProvider(config.BackendConfig{
+        Type:    "fusion-mlx",
+        BaseURL: srv.URL,
+        Enabled: true,
+    }, config.RoutingConfig{
+        LocalPriority: config.LocalPriorityConfig{MaxConcurrent: 1},
+    })
+    s.pool.Register("fusion-mlx", mlx, config.BackendConfig{Type: "fusion-mlx", BaseURL: srv.URL, Enabled: true})
+    mlx.RefreshModelSet(context.Background())
+    s.router.SetLocalInFlight(mlx.InFlight)
+    s.router.SetLocalModels(mlx.ModelSet)
+    s.router.SetLocalReady(true)
+
+    // Cloud mock: returns a distinct body so we can prove the second request
+    // was served by cloud, not local.
+    cloud := &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        chatResp: &adapter.ChatResponse{
+            ID:      "chatcmpl-cloud",
+            Object:  "chat.completion",
+            Created: time.Now().Unix(),
+            Model:   "qwen-7b",
+            Choices: []adapter.ChatChoice{
+                {Index: 0, Message: map[string]string{"role": "assistant", "content": "from-cloud"}, FinishReason: "stop"},
+            },
+            Usage: adapter.UsageResponse{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+        },
+    }
+    s.pool.Register("test-cloud", cloud, config.BackendConfig{Type: "openai-compatible", BaseURL: "http://localhost:0", Enabled: true})
+    s.cfg.Config.Routing.Fallback.CloudDefault = "test-cloud"
+
+    chatBody := `{"model":"qwen-7b","messages":[{"role":"user","content":"hi"}],"stream":false}`
+
+    // Request 1: occupies the single local slot (blocks on releaseCh).
+    rec1 := httptest.NewRecorder()
+    go s.handleChatCompletions(rec1, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody)))
+
+    // Wait until the local backend has the slot held.
+    select {
+    case <-startedCh:
+    case <-time.After(2 * time.Second):
+        t.Fatalf("timed out waiting for local backend to hold the slot")
+    }
+
+    // Request 2: local is full → adapter ErrLocalSlotFull → handler diverts to cloud.
+    rec2 := httptest.NewRecorder()
+    s.handleChatCompletions(rec2, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody)))
+
+    if rec2.Code != http.StatusOK {
+        t.Fatalf("RR4: second request should divert to cloud and return 200, got %d body=%s", rec2.Code, rec2.Body.String())
+    }
+    if !strings.Contains(rec2.Body.String(), "from-cloud") {
+        t.Fatalf("RR4: second response should come from cloud mock, got body=%s", rec2.Body.String())
+    }
+    if localHits.Load() != 1 {
+        t.Fatalf("RR4: local backend should be hit exactly once (slot holder), got %d", localHits.Load())
+    }
+    if !strings.Contains(rec2.Header().Get("X-Route-Decision"), "cloud") {
+        t.Fatalf("RR4: X-Route-Decision should indicate cloud diversion, got %q", rec2.Header().Get("X-Route-Decision"))
+    }
+
+    // Release the blocking local handler so request 1 finishes and the test goroutine exits.
+    close(releaseCh)
 }

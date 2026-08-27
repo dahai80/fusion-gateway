@@ -4,6 +4,7 @@ import (
     "context"
     "crypto/sha256"
     "encoding/hex"
+    "errors"
     "log/slog"
     "net/http"
     "net/http/httptest"
@@ -537,6 +538,28 @@ func TestAPIKeyAuthWithStore_DisabledKeyRejected(t *testing.T) {
     handler.ServeHTTP(rec, req)
     if rec.Code != http.StatusUnauthorized {
         t.Fatalf("expected 401 for revoked key, got %d", rec.Code)
+    }
+}
+
+// AH5 (audit P0): a store error during hash lookup must fail closed (401), not
+// be silently indistinguishable from a wrong key. The lookupKeyByHash fix logs
+// the store error at ERROR (observable) while still refusing — no key resolved.
+// This test pins the fail-closed behavior so a future "tolerant" refactor that
+// flips err!=nil to allow is caught as a regression.
+func TestAPIKeyAuthWithStore_StoreErrorFailClosed(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_StoreErrorFailClosed (AH5)")
+    rawKey := "sk-store-down-test-key"
+    st := &mockKeyLookupStore{err: errors.New("redis connection refused")}
+    cfg := &config.AuthConfig{Enabled: true}
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("handler must NOT be called when store lookup errors (fail-closed)")
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer "+rawKey)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401 on store error (fail-closed), got %d", rec.Code)
     }
 }
 

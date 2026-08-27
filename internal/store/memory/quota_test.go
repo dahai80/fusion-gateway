@@ -93,3 +93,71 @@ func TestQuota_DailyLimit_SyncsEntry(t *testing.T) {
         t.Fatalf("entry DailyDate should be populated")
     }
 }
+
+func TestQuota_EI5_ReclaimKey_DropsQuotaMaps(t *testing.T) {
+    t.Parallel()
+    t.Log("EI5: ReclaimKey must drop a key's usage/dailyUsage/dailyDate entries (was unbounded growth)")
+    k := &store.APIKeyEntry{Name: "reclaim-key", Status: "active", BudgetLimit: 100.0, DailyBudgetLimit: 10.0}
+    q := newQuotaStoreWithKey(t, k)
+
+    if err := q.Deduct("reclaim-key", 7.5); err != nil {
+        t.Fatalf("deduct: %v", err)
+    }
+    if got := q.GetUsage("reclaim-key"); got != 7.5 {
+        t.Fatalf("usage before reclaim: got %f want 7.5", got)
+    }
+    if used, _ := q.DailyUsage("reclaim-key"); used != 7.5 {
+        t.Fatalf("daily usage before reclaim: got %f want 7.5", used)
+    }
+
+    q.ReclaimKey("reclaim-key")
+
+    if got := q.GetUsage("reclaim-key"); got != 0 {
+        t.Errorf("EI5: usage after reclaim should be 0, got %f (dead entry never reclaimed)", got)
+    }
+    // Read the daily maps via SnapshotQuota (the persist path) rather than
+    // DailyUsage — DailyUsage's rolloverLocked side-effect would re-seed an
+    // empty entry for a reclaimed key, masking whether reclaim worked. In
+    // production a deleted key never reaches Deduct/Check (auth fails), so the
+    // authoritative "is the dead entry gone?" signal is what gets persisted.
+    usage, dailyUsage, dailyDate := q.SnapshotQuota()
+    if _, ok := usage["reclaim-key"]; ok {
+        t.Errorf("EI5: SnapshotQuota still carries reclaimed usage entry (persist grows unbounded)")
+    }
+    if _, ok := dailyUsage["reclaim-key"]; ok {
+        t.Errorf("EI5: SnapshotQuota still carries reclaimed dailyUsage entry")
+    }
+    if _, ok := dailyDate["reclaim-key"]; ok {
+        t.Errorf("EI5: SnapshotQuota still carries reclaimed dailyDate entry")
+    }
+}
+
+func TestQuota_EI5_DeleteKey_CascadesReclaim(t *testing.T) {
+    t.Parallel()
+    t.Log("EI5: MemoryStore.DeleteKey must cascade into quota.ReclaimKey (was: key gone, quota entries orphaned forever)")
+    ks := NewKeyStore()
+    q := NewQuotaStore(ks)
+    m := &MemoryStore{keys: ks, quota: q}
+
+    k := &store.APIKeyEntry{Name: "del-cascade-key", Status: "active", BudgetLimit: 50.0}
+    if err := m.CreateKey(k); err != nil {
+        t.Fatalf("create key: %v", err)
+    }
+    if err := q.Deduct("del-cascade-key", 12.0); err != nil {
+        t.Fatalf("deduct: %v", err)
+    }
+    if got := q.GetUsage("del-cascade-key"); got != 12.0 {
+        t.Fatalf("usage before delete: got %f want 12.0", got)
+    }
+
+    if err := m.DeleteKey("del-cascade-key"); err != nil {
+        t.Fatalf("delete key: %v", err)
+    }
+
+    if got := q.GetUsage("del-cascade-key"); got != 0 {
+        t.Fatalf("EI5: quota usage after DeleteKey should be reclaimed to 0, got %f (DeleteKey did not cascade reclaim)", got)
+    }
+    if _, err := m.GetKey("del-cascade-key"); err == nil {
+        t.Fatalf("key entry should be gone after DeleteKey")
+    }
+}

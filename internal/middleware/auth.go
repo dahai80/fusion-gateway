@@ -95,7 +95,19 @@ func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool
     sum := sha256.Sum256([]byte(key))
     hash := hex.EncodeToString(sum[:])
     entry, err := st.GetKeyByHash(hash)
-    if err != nil || entry == nil {
+    // AH5 (audit P0): distinguish store-error from not-found. Previously both
+    // branches collapsed into `return nil, false` — fail-closed (401) but
+    // silent: a store outage looked identical to a wrong key, and a future
+    // "tolerant" refactor (err!=nil → allow) would silently flip to fail-open.
+    // Store errors stay fail-closed (no key resolved → 401) but are logged at
+    // ERROR so an outage is observable and distinguishable from bad-credential
+    // noise. Not-found (entry==nil, err==nil) stays a quiet 401.
+    if err != nil {
+        slog.Error("key store lookup failed (fail-closed: no key resolved)",
+            "hash_prefix", hash[:8], "error", err)
+        return nil, false
+    }
+    if entry == nil {
         return nil, false
     }
     if entry.Status != "" && entry.Status != "active" {

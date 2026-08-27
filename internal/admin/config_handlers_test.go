@@ -8,6 +8,8 @@ import (
     "os"
     "path/filepath"
     "testing"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
 const fullTestYAML = `
@@ -1113,6 +1115,41 @@ func TestHandleAdminConfig(t *testing.T) {
             t.Errorf("expected listen :9091, got %v", sec["listen"])
         }
     })
+
+    // F9: an empty password must NOT be written — the prior `v != "" &&
+    // len(v) < 8` guard let "" through, producing a passwordless admin
+    // login. Empty now means "keep existing" (the user is skipped, not
+    // blanked), and a real password under 8 chars is rejected.
+    t.Run("empty_password_not_written", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        users := map[string]string{"admin": ""}
+        body := map[string]interface{}{"users": users}
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/admin", body)
+        rec := httptest.NewRecorder()
+        h.handleAdminConfig(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("empty password (no-change) should be accepted, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        sec := readYAMLSection(t, configPath, "admin")
+        written, _ := sec["users"].(map[string]interface{})
+        if v, ok := written["admin"]; ok && v == "" {
+            t.Fatalf("empty password must not be persisted, got users=%v", written)
+        }
+    })
+
+    t.Run("short_password_rejected", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        users := map[string]string{"admin": "short"}
+        body := map[string]interface{}{"users": users}
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/admin", body)
+        rec := httptest.NewRecorder()
+        h.handleAdminConfig(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("short password should be 400, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
 }
 
 // ─── OIDC Config Tests ──────────────────────────────────────────
@@ -1408,6 +1445,37 @@ func TestHandleValidationConfig(t *testing.T) {
     })
 }
 
+// EI1 guard: a config PUT must reload the live snapshot, not just write the
+// file. The prior updateYAMLSection wrote the YAML and returned — on macOS
+// fsnotify is unreliable, so the in-memory ConfigSnapshot stayed on the old
+// value. The operator saw "saved" but routing kept the old config. This guard
+// PUTs validation.base_url_conflict_check true then reads the LIVE snapshot
+// (config.GetSnapshot, what handlers/routing actually consult), not the file.
+// On the BUG (no Reload call) the snapshot stays false → guard FAILS.
+func TestHandleValidationConfig_EI1_PUTReloadsSnapshot(t *testing.T) {
+    _, _, configPath := setupConfigTestWithFile(t)
+    h := newTestHandler(t, newMockStore(), newTestAuth(t), configPath)
+
+    // Snapshot reflects the initial fullTestYAML (base_url_conflict_check=false).
+    if config.GetSnapshot().Config.Validation.BaseURLConflictCheck {
+        t.Fatalf("precondition: expected initial BaseURLConflictCheck false")
+    }
+
+    body := map[string]interface{}{"base_url_conflict_check": true}
+    req := makeAuthenticatedRequest(t, newTestAuth(t), http.MethodPut, "/admin/api/config/validation", body)
+    rec := httptest.NewRecorder()
+    h.handleValidationConfig(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("PUT failed: %d %s", rec.Code, rec.Body.String())
+    }
+
+    // EI1: the LIVE snapshot (not the file) must now reflect the new value —
+    // handlers read config.GetSnapshot, so this is what routing actually uses.
+    if !config.GetSnapshot().Config.Validation.BaseURLConflictCheck {
+        t.Fatal("EI1: config PUT wrote the file but did not reload the live snapshot — operator sees 'saved' but runtime keeps old config (fsnotify-unreliable-on-macOS silent no-op)")
+    }
+}
+
 // ─── Auth Config Tests ──────────────────────────────────────────
 
 func TestHandleAuthConfig(t *testing.T) {
@@ -1465,6 +1533,70 @@ func TestHandleAuthConfig(t *testing.T) {
         h.handleAuthConfig(rec, req)
         if rec.Code != http.StatusOK {
             t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    // F9: GET masks every api_key. PUTting the masked values back verbatim
+    // must NOT drop the real key — the prior code skipped writing "key" when
+    // masked, then replaced the whole api_keys list, so the real key vanished
+    // on next reload. Verify the real key survives a masked round-trip.
+    t.Run("masked_apikey_roundtrip_preserves_real_key", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        h := newTestHandler(t, ms, auth, configPath)
+
+        // GET -> masked key
+        getReq := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/config/auth", nil)
+        getRec := httptest.NewRecorder()
+        h.handleAuthConfig(getRec, getReq)
+        if getRec.Code != http.StatusOK {
+            t.Fatalf("GET 200, got %d", getRec.Code)
+        }
+        body := decodeResponse(t, getRec)
+        apiKeys, _ := body["api_keys"].([]interface{})
+        if len(apiKeys) != 1 {
+            t.Fatalf("expected 1 api_key, got %d", len(apiKeys))
+        }
+        maskedEntry, _ := apiKeys[0].(map[string]interface{})
+        maskedKey, _ := maskedEntry["key"].(string)
+        if maskedKey[:4] != "****" {
+            t.Fatalf("expected masked key, got %q", maskedKey)
+        }
+
+        // PUT the masked payload back (simulates a dashboard save that did
+        // not retype the key)
+        putBody := map[string]interface{}{
+            "api_keys": []map[string]interface{}{
+                {
+                    "key":             maskedKey,
+                    "name":            maskedEntry["name"],
+                    "rpm":             maskedEntry["rpm"],
+                    "tpm":             maskedEntry["tpm"],
+                    "allowed_models":  maskedEntry["allowed_models"],
+                    "allowed_backends": maskedEntry["allowed_backends"],
+                    "model_modules":   maskedEntry["model_modules"],
+                    "expires_at":      maskedEntry["expires_at"],
+                    "budget_limit":    maskedEntry["budget_limit"],
+                    "daily_budget_limit": maskedEntry["daily_budget_limit"],
+                },
+            },
+        }
+        putReq := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/auth", putBody)
+        putRec := httptest.NewRecorder()
+        h.handleAuthConfig(putRec, putReq)
+        if putRec.Code != http.StatusOK {
+            t.Fatalf("PUT 200, got %d; body: %s", putRec.Code, putRec.Body.String())
+        }
+
+        // real key must still be in the persisted YAML
+        sec := readYAMLSection(t, configPath, "auth")
+        list, _ := sec["api_keys"].([]interface{})
+        if len(list) != 1 {
+            t.Fatalf("expected 1 api_key in YAML, got %d", len(list))
+        }
+        entry, _ := list[0].(map[string]interface{})
+        savedKey, _ := entry["key"].(string)
+        if savedKey != "sk-test-key-1234567890" {
+            t.Fatalf("masked round-trip dropped the real key: got %q (empty=lost, masked=echoed-back-verbatim)", savedKey)
         }
     })
 }

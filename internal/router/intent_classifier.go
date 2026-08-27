@@ -5,12 +5,12 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
     "log/slog"
     "net/http"
     "strings"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
@@ -145,12 +145,14 @@ func (c *RouterLightClassifier) Classify(ctx context.Context, req *RouteRequest)
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("classify returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var cr classifyResponse
-    if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&cr); err != nil {
         return nil, fmt.Errorf("decode classify response: %w", err)
     }
     if len(cr.Choices) == 0 {

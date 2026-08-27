@@ -10,11 +10,11 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "io"
     "log/slog"
     "net/http"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
@@ -69,12 +69,14 @@ func (c *MasterClient) ListNodes(ctx context.Context) (*MasterNodesResponse, err
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        body, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        body := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("master list nodes status %d: %s", resp.StatusCode, string(body))
     }
 
     var result MasterNodesResponse
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&result); err != nil {
         return nil, fmt.Errorf("decode master nodes response: %w", err)
     }
 
@@ -93,12 +95,14 @@ func (c *MasterClient) GetNode(ctx context.Context, nodeID string) (*MasterNodeI
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        body, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        body := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("master get node %s status %d: %s", nodeID, resp.StatusCode, string(body))
     }
 
     var node MasterNodeInfo
-    if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&node); err != nil {
         return nil, fmt.Errorf("decode master node response: %w", err)
     }
     return &node, nil
@@ -146,12 +150,14 @@ func (c *MasterClient) SubmitTask(ctx context.Context, req *TaskSubmitRequest) (
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        respBody := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("master submit task status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var result TaskSubmitResponse
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&result); err != nil {
         return nil, fmt.Errorf("decode task submit response: %w", err)
     }
 
@@ -177,12 +183,14 @@ func (c *MasterClient) RoutingSummary(ctx context.Context) (*MasterRoutingSummar
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        body, _ := io.ReadAll(resp.Body)
+        // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
+        body := adapter.ReadErrorBody(resp)
         return nil, fmt.Errorf("master routing summary status %d: %s", resp.StatusCode, string(body))
     }
 
     var result MasterRoutingSummary
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+    // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
+    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&result); err != nil {
         return nil, fmt.Errorf("decode routing summary: %w", err)
     }
     return &result, nil

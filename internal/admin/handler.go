@@ -31,22 +31,22 @@ func NewHandler(st store.Store, auth *AdminAuth, configPath string) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-    mux.HandleFunc("/admin/api/keys", h.withAuth(h.handleKeys))
-    mux.HandleFunc("/admin/api/keys/", h.withAuth(h.handleKeyByID))
-    mux.HandleFunc("/admin/api/channels", h.withAuth(h.handleChannels))
-    mux.HandleFunc("/admin/api/channels/", h.withAuth(h.handleChannelByID))
-    mux.HandleFunc("/admin/api/logs", h.withAuth(h.handleLogs))
-    mux.HandleFunc("/admin/api/logs/export", h.withAuth(h.handleLogsExport))
-    mux.HandleFunc("/admin/api/logs/filters", h.withAuth(h.handleLogsFilters))
+    mux.HandleFunc("/admin/api/keys", h.requireAdminRole(h.handleKeys))
+    mux.HandleFunc("/admin/api/keys/", h.requireAdminRole(h.handleKeyByID))
+    mux.HandleFunc("/admin/api/channels", h.requireAdminRole(h.handleChannels))
+    mux.HandleFunc("/admin/api/channels/", h.requireAdminRole(h.handleChannelByID))
+    mux.HandleFunc("/admin/api/logs", h.requireAdminRoleStrict(h.handleLogs))
+    mux.HandleFunc("/admin/api/logs/export", h.requireAdminRoleStrict(h.handleLogsExport))
+    mux.HandleFunc("/admin/api/logs/filters", h.requireAdminRoleStrict(h.handleLogsFilters))
     mux.HandleFunc("/admin/api/analytics", h.withAuth(h.handleAnalyticsOverview))
     mux.HandleFunc("/admin/api/analytics/tokens", h.withAuth(h.handleTokenStats))
-    mux.HandleFunc("/admin/api/analytics/cost", h.withAuth(h.handleCostStats))
+    mux.HandleFunc("/admin/api/analytics/cost", h.requireAdminRoleStrict(h.handleCostStats))
     mux.HandleFunc("/admin/api/analytics/models", h.withAuth(h.handleModelStats))
     mux.HandleFunc("/admin/api/analytics/latency", h.withAuth(h.handleLatencyStats))
     mux.HandleFunc("/admin/api/analytics/errors", h.withAuth(h.handleErrorStats))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
-    mux.HandleFunc("/admin/api/quota/", h.withAuth(h.handleQuota))
+    mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))
     mux.HandleFunc("/admin/api/config/routing", h.requireAdminRole(h.handleRoutingConfig))
     mux.HandleFunc("/admin/api/config/backends", h.requireAdminRole(h.handleBackendsConfig))
     mux.HandleFunc("/admin/api/config/backends/", h.requireAdminRole(h.handleBackendByName))
@@ -108,6 +108,26 @@ func (h *Handler) requireAdminRole(next http.HandlerFunc) http.HandlerFunc {
         if claims == nil || claims.Role != "admin" {
             slog.Warn("config write rejected for non-admin role", "role", func() string { if claims != nil { return claims.Role }; return "" }(), "path", r.URL.Path, "method", r.Method)
             writeError(w, http.StatusForbidden, "admin role required for configuration changes")
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+// requireAdminRoleStrict wraps withAuth and rejects non-admin roles on ALL
+// methods, including GET. EI9: logs and cost endpoints return sensitive data
+// (RequestLog carries api_key_name, prompt fragments, route_reason; cost
+// carries per-key billing detail). The plain requireAdminRole only gates
+// non-GET, so a viewer (read-only dashboard role) could GET /admin/api/logs and
+// read every key's prompts. A viewer must see only desensitized aggregates, not
+// raw logs/cost — so these read endpoints need the same admin-only gate as
+// writes.
+func (h *Handler) requireAdminRoleStrict(next http.HandlerFunc) http.HandlerFunc {
+    return h.withAuth(func(w http.ResponseWriter, r *http.Request) {
+        claims := GetAdminClaims(r.Context())
+        if claims == nil || claims.Role != "admin" {
+            slog.Warn("sensitive read rejected for non-admin role", "role", func() string { if claims != nil { return claims.Role }; return "" }(), "path", r.URL.Path, "method", r.Method)
+            writeError(w, http.StatusForbidden, "admin role required to read logs and cost detail")
             return
         }
         next.ServeHTTP(w, r)
@@ -302,10 +322,27 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, key)
 
     case http.MethodDelete:
-        if err := h.store.DeleteKey(name); err != nil {
+        // F8: soft-delete — revoke the key (Status=disabled) instead of
+        // hard-removing it. lookupKeyByHash (middleware/auth.go) rejects any
+        // non-active key, so a disabled key fails auth identically to a
+        // deleted one, but the record survives for audit/quota forensics and
+        // can be re-enabled. Hard delete destroyed recovery + history.
+        key, err := h.store.GetKey(name)
+        if err != nil {
             writeError(w, http.StatusNotFound, err.Error())
             return
         }
+        if key.Status == "disabled" {
+            writeJSON(w, http.StatusNoContent, nil)
+            return
+        }
+        key.Status = "disabled"
+        if err := h.store.UpdateKey(key); err != nil {
+            slog.Error("admin: soft-delete key failed", "key", name, "error", err)
+            writeError(w, http.StatusInternalServerError, "failed to disable key")
+            return
+        }
+        slog.Info("admin: key soft-deleted (disabled)", "key", name)
         writeJSON(w, http.StatusNoContent, nil)
 
     default:

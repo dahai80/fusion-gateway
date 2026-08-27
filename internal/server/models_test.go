@@ -13,6 +13,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
 )
 
 // blockingProvider simulates an unreachable cloud backend: ListModels blocks
@@ -151,6 +152,30 @@ func ids(ms []adapter.ModelInfo) []string {
         out[i] = m.ID
     }
     return out
+}
+
+// TestHandleAnthropicMessages_AllowlistGatesModel verifies the F5 fix: a key
+// whose allowed_models does not include the requested model must be 403'd at
+// /v1/messages. Before the fix this handler skipped CheckModelAllowlist (every
+// other /v1/* inference handler gated on it), so a restricted key could reach
+// an unauthorized model via the Anthropic endpoint — the path Claude Code uses.
+func TestHandleAnthropicMessages_AllowlistGatesModel(t *testing.T) {
+    s := newTestServer()
+    s.pool.Register("glm52", &mockProvider{name: "glm52"}, config.BackendConfig{Type: "anthropic", Enabled: true})
+
+    body := `{"model":"claude-opus-4-7","max_tokens":32,"stream":false,"messages":[{"role":"user","content":"hi"}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    // key restricted to gpt-4-only must NOT reach claude-opus-4-7
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), &middleware.Principal{
+        KeyConfig: &config.AuthKeyConfig{Name: "restricted", AllowedModels: []string{"gpt-4-only"}},
+    }))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusForbidden {
+        t.Fatalf("expected 403 (model not in allowlist), got %d: %s", rec.Code, rec.Body.String())
+    }
 }
 
 // TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel verifies

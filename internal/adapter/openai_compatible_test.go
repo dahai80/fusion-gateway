@@ -3,9 +3,11 @@ package adapter
 import (
     "context"
     "encoding/json"
+    "fmt"
     "log/slog"
     "net/http"
     "net/http/httptest"
+    "sync/atomic"
     "testing"
     "time"
 
@@ -348,7 +350,7 @@ func TestParseSSEStream(t *testing.T) {
     b, _ := json.Marshal(chunk)
     sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 64)
-    parseSSEStream(bytesReader([]byte(sseData)), ch)
+    parseSSEStream(context.Background(), bytesReader([]byte(sseData)), ch)
     if len(ch) != 1 {
         t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
     }
@@ -361,5 +363,114 @@ func TestParseSSEStream_Backpressure(t *testing.T) {
     sseData := "data: " + string(b) + "\n\n"
     ch := make(chan StreamChunk, 1)
     ch <- StreamChunk{ID: "filler"}
-    parseSSEStream(bytesReader([]byte(sseData)), ch)
+
+    // F3 fix: with the ctx-bounded send, a full buffer blocks until the
+    // consumer reads OR ctx is canceled. The old test called
+    // parseSSEStream synchronously with a background ctx and relied on the
+    // deleted Degraded fallback to return — that now hangs forever. Drive it
+    // in a goroutine and cancel ctx to prove cancel unblocks the producer
+    // without emitting a Degraded sentinel (cancel is a silent stop, not
+    // false backpressure that would trigger a non-stream re-run).
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan struct{})
+    go func() {
+        parseSSEStream(ctx, bytesReader([]byte(sseData)), ch)
+        close(done)
+    }()
+    cancel()
+    select {
+    case <-done:
+        // producer returned on cancel — correct
+    case <-time.After(2 * time.Second):
+        t.Fatal("parseSSEStream hung on full buffer; ctx cancel did not unblock it")
+    }
+    // no Degraded sentinel should have been emitted on cancel
+    select {
+    case extra := <-ch:
+        if extra.Degraded {
+            t.Fatal("cancel must not emit a Degraded chunk (false backpressure -> double GPU load)")
+        }
+    default:
+        // only the filler is present; nothing added on cancel
+    }
+}
+
+// TestRR8_CtxWatcherUnblocksStalledReader verifies the RR8 ctx-watcher pattern
+// (the one bolted onto every stream pump) closes the body on ctx cancel,
+// unblocking a stalled Read in a parser that only checks ctx on its send arm.
+//
+// To ISOLATE the watcher from Go's transport-level ctx propagation (which also
+// closes http.Response bodies on request-ctx cancel and would mask the
+// watcher), this drives parseSSEStream directly with a hanging io.Reader that
+// ignores ctx - its Read blocks forever unless SOMETHING closes it. Only the
+// watcher's resp.Body.Close() (simulated via the hangingReader Close) can
+// unblock it. The transport is not in the loop, so this proves the watcher.
+func TestRR8_CtxWatcherUnblocksStalledReader(t *testing.T) {
+    ctx, cancel := context.WithCancel(context.Background())
+    ch := make(chan StreamChunk, 64)
+
+    // hangingReader blocks on Read forever until Close is called. It does NOT
+    // observe any context - mirroring a stalled upstream where the transport
+    // does not propagate cancel (the gap the RR8 watcher fills).
+    body := &hangingReader{unblock: make(chan struct{})}
+
+    pumpDone := make(chan struct{})
+    go func() {
+        defer close(pumpDone)
+        defer close(ch)
+        // The exact watcher pattern from openai_compatible.go StreamChat:
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        go func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("test watcher: ctx canceled, closing body")
+                body.Close()
+            case <-stopBodyWatch:
+            }
+        }()
+        parseSSEStream(ctx, body, ch)
+    }()
+
+    // Pump is now blocked in body.Read (hangingReader ignores ctx). The parser
+    // would stay hung here forever - ctx.Done() is only checked on the send
+    // arm, which is never reached because Read never returns.
+    time.Sleep(50 * time.Millisecond)
+
+    cancel() // triggers the watcher -> body.Close -> Read returns error
+
+    select {
+    case <-pumpDone:
+        // pump goroutine exited; channel closed via defer. Watcher worked.
+    case <-time.After(3 * time.Second):
+        t.Fatal("RR8 watcher did not unblock stalled body.Read within 3s - goroutine leaked")
+    }
+    if _, ok := <-ch; ok {
+        t.Fatal("channel should be closed after pump exit")
+    }
+}
+
+// hangingReader is an io.ReadCloser whose Read blocks until Close is called.
+// It does NOT observe any context - mirroring a stalled upstream where the
+// transport does not propagate cancel (the gap the RR8 watcher fills). Close
+// unblocks an in-flight Read by closing unblock, causing Read to error.
+type hangingReader struct {
+    unblock chan struct{}
+    closed  atomic.Bool
+}
+
+func (h *hangingReader) Read(p []byte) (int, error) {
+    select {
+    case <-h.unblock:
+        return 0, fmt.Errorf("read after body closed")
+    case <-time.After(30 * time.Second):
+        return 0, fmt.Errorf("hangingReader timed out (watcher failed to close body)")
+    }
+}
+
+func (h *hangingReader) Close() error {
+    if h.closed.CompareAndSwap(false, true) {
+        close(h.unblock)
+    }
+    return nil
 }

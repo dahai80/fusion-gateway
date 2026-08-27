@@ -431,10 +431,13 @@ func TestDiscovery_SelectNodeByModel_PrefersServingNode(t *testing.T) {
         n.markHealthy()
     }
 
-    // only node-2 serves qwen3
+    // only node-2 serves qwen3 (modelsReady=true simulates a completed
+    // /v1/models poll — RR13: servesModel is gated on modelsReady so a
+    // bare models set without the ready flag is treated as unpolled)
     n2, _ := d.GetNode("node-2")
     n2.mu.Lock()
     n2.models = []string{"qwen3"}
+    n2.modelsReady = true
     n2.mu.Unlock()
 
     selected, err := d.SelectNodeByModel("least-connections", "qwen3", 0)
@@ -489,12 +492,14 @@ func TestDiscovery_SelectNodeByModel_SkipsCappedNodes(t *testing.T) {
     nb, _ := d.GetNode("node-b")
     na.markHealthy()
     nb.markHealthy()
-    // both serve qwen3
+    // both serve qwen3 (modelsReady=true — simulated /v1/models poll, RR13)
     na.mu.Lock()
     na.models = []string{"qwen3"}
+    na.modelsReady = true
     na.mu.Unlock()
     nb.mu.Lock()
     nb.models = []string{"qwen3"}
+    nb.modelsReady = true
     nb.mu.Unlock()
 
     // node-a filled to cap (max_concurrent=2); node-b free → node-b selected
@@ -518,6 +523,37 @@ func TestDiscovery_SelectNodeByModel_SkipsCappedNodes(t *testing.T) {
     // maxConcurrent <= 0 disables cap → node-a (least-connections tie, first wins) selectable again
     if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err != nil {
         t.Errorf("expected no error with cap disabled (maxConcurrent=0), got: %v", err)
+    }
+}
+
+// RR13 guard: a node marked healthy but NOT yet polled (modelsReady=false) must
+// NOT be selected by SelectNodeByModel — even if its models slice already holds
+// the target. This is the stale window: checkNode marked the node healthy before
+// fetchModels ran (or fetchModels errored), so the registry is stale/empty. On
+// the BUG (old servesModel ignored modelsReady) the unpolled node is selected
+// off its stale registry → routes a model-specific request to a node that may
+// not actually serve it → 400 / silent cloud misroute. On the FIX, the node is
+// skipped → SelectNodeByModel returns an error → router falls back to cloud.
+func TestDiscovery_SelectNodeByModel_SkipsUnpolledHealthyNode(t *testing.T) {
+    t.Log("testing SelectNodeByModel skips healthy-but-unpolled node (RR13 stale window)")
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-a", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    na, _ := d.GetNode("node-a")
+    na.markHealthy()
+    // models slice pre-set (e.g. leftover from a prior poll), but modelsReady
+    // false — simulating the window between markHealthy and fetchModels.
+    na.mu.Lock()
+    na.models = []string{"qwen3"}
+    na.modelsReady = false
+    na.mu.Unlock()
+
+    // unpolled → must NOT be selected → error → router cloud-fallback
+    if _, err := d.SelectNodeByModel("least-connections", "qwen3", 0); err == nil {
+        t.Fatal("RR13: unpolled healthy node selected off stale registry — modelsReady gate missing, stale window reopened")
     }
 }
 
@@ -1318,5 +1354,101 @@ func TestDiscovery_SelectNodeByPlatform_NoHealthy(t *testing.T) {
     _, err := d.SelectNodeByPlatform("least-connections", "windows-cuda")
     if err == nil {
         t.Fatal("expected error when no healthy nodes on platform")
+    }
+}
+
+// TestDiscovery_MasterMode_ModelAwareRouting (AH3, audit P1): master mode skips
+// healthCheckLoop, so without syncNodeModels a node's servesModel stays empty
+// and SelectNodeByModel silently degrades every request to cloud. This test
+// proves the AH3 fix — after master sync + model sync, SelectNodeByModel finds
+// the node serving the requested model.
+func TestDiscovery_MasterMode_ModelAwareRouting(t *testing.T) {
+    t.Log("AH3: master mode populates per-node model registry so model-aware routing works")
+    // One server serves both the master /api/nodes list and the worker's
+    // /v1/models registry (the node's Address points back at this server).
+    var srv *httptest.Server
+    srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch r.URL.Path {
+        case "/api/nodes":
+            resp := MasterNodesResponse{
+                Total:  1,
+                Online: 1,
+                Nodes: []MasterNodeInfo{
+                    {NodeID: "worker-1", Address: srv.URL, GPU: "M2", MemoryGB: 32, Status: "online"},
+                },
+            }
+            _ = json.NewEncoder(w).Encode(resp)
+        case "/v1/models":
+            // The worker exposes this model in its registry.
+            _ = json.NewEncoder(w).Encode([]map[string]string{{"id": "served-model"}})
+        default:
+            http.NotFound(w, r)
+        }
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        LoadBalancer:        "least-connections",
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    // Wait for master sync + model sync to run.
+    time.Sleep(300 * time.Millisecond)
+
+    // AH3 core assertion: the node's model registry is populated, so
+    // SelectNodeByModel finds worker-1 for served-model instead of returning
+    // "no healthy node serving model" (the pre-fix silent cloud fallback).
+    selected, err := d.SelectNodeByModel("least-connections", "served-model", 0)
+    if err != nil {
+        t.Fatalf("expected worker-1 serving served-model, got error: %v (AH3 model sync did not populate registry)", err)
+    }
+    if selected.ID != "worker-1" {
+        t.Errorf("expected worker-1, got %s", selected.ID)
+    }
+
+    // A model no worker exposes still has no serving node (correct cloud fallback).
+    if _, err := d.SelectNodeByModel("least-connections", "absent-model", 0); err == nil {
+        t.Error("expected error when no node serves absent-model")
+    }
+}
+
+// TestDiscovery_MasterMode_NoHealthyNodes_ModelSyncNoOp (AH3): syncNodeModels
+// logs + returns when master reports no online nodes, without erroring.
+func TestDiscovery_MasterMode_NoHealthyNodes_ModelSyncNoOp(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        resp := MasterNodesResponse{Total: 1, Online: 0, Nodes: []MasterNodeInfo{
+            {NodeID: "worker-1", Address: "http://10.0.0.1:8100", Status: "offline"},
+        }}
+        _ = json.NewEncoder(w).Encode(resp)
+    }))
+    defer srv.Close()
+
+    cfg := config.ClusterConfig{
+        Enabled:             true,
+        Mode:                config.ClusterModeMaster,
+        Master:              config.ClusterMasterConfig{Address: srv.URL},
+        HealthCheckInterval: 100 * time.Millisecond,
+    }
+    d := NewDiscovery(cfg)
+    d.Start(context.Background())
+    defer d.Stop()
+
+    time.Sleep(300 * time.Millisecond)
+
+    all := d.AllNodes()
+    if len(all) != 1 {
+        t.Fatalf("expected 1 node synced (offline), got %d", len(all))
+    }
+    for _, n := range all {
+        if n.State() == NodeStateHealthy {
+            t.Errorf("expected all nodes offline, %s is healthy", n.ID)
+        }
     }
 }

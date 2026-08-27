@@ -59,6 +59,10 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
         return nil
     }
     p := NewPersister(dir, m.keys, m.channels, m.teams)
+    // A2: quota store must be wired onto the persister BEFORE Load() so
+    // loadQuota can SeedUsage from the persisted quota.json into the maps
+    // Check/Deduct read (otherwise restart zeroes per-key quota).
+    p.quota = m.quota
     if err := p.Load(); err != nil {
         return err
     }
@@ -77,9 +81,40 @@ func (m *MemoryStore) EnablePersistence(dataDir string) error {
             slog.Error("persist: save teams failed", "error", err)
         }
     })
+    // F2/P1: high-frequency AddCost persists through a debounced SaveTeams so
+    // quota/cost survive restart (F2 billing bypass) without a full-JSON rewrite
+    // per billed request (P1 write amplification). Same SaveTeams writer, just
+    // coalesced. FlushQuota is wired into the store shutdown path.
+    m.teams.SetQuotaPersist(func() {
+        if err := p.SaveTeams(); err != nil {
+            slog.Error("persist: save teams (quota) failed", "error", err)
+        }
+    })
+    // A2: debounced per-key quota persistence — coalesces a burst of Deduct
+    // calls into a single atomic quota.json write, surviving restart without
+    // per-request write amplification. Mirrors the F2 team-quota debounce.
+    m.quota.SetKeyPersist(func() {
+        if err := p.SaveQuota(); err != nil {
+            slog.Error("persist: save quota failed", "error", err)
+        }
+    })
     m.persist = p
     slog.Info("store persistence enabled", "data_dir", dir)
     return nil
+}
+
+// FlushQuota synchronously flushes any pending debounced team quota/cost write
+// so the last burst of AddCost before shutdown reaches disk (F2). Called from
+// Server.Shutdown via a type assertion on the Store interface.
+func (m *MemoryStore) FlushQuota() {
+    if m.teams != nil {
+        m.teams.FlushQuota()
+    }
+    // A2: drain the per-key quota debounce too so the last burst of Deduct
+    // reaches quota.json before shutdown.
+    if m.quota != nil {
+        m.quota.FlushKey()
+    }
 }
 
 func (m *MemoryStore) AppendLog(log *store.RequestLog) error {
@@ -123,7 +158,16 @@ func (m *MemoryStore) UpdateKey(key *store.APIKeyEntry) error {
 }
 
 func (m *MemoryStore) DeleteKey(name string) error {
-    return m.keys.Delete(name)
+    if err := m.keys.Delete(name); err != nil {
+        return err
+    }
+    // EI5: cascade-reclaim this key's per-key quota entries (usage/dailyUsage/
+    // dailyDate). Without this, a deleted key's quota usage stayed in the maps
+    // forever — unbounded growth over long-running deployments with frequent
+    // key churn. Reclaim runs after the entry delete so an orphaned entry (key
+    // already gone) is still cleaned up; the maps are keyed by name.
+    m.quota.ReclaimKey(name)
+    return nil
 }
 
 func (m *MemoryStore) ListChannels() ([]*store.ChannelEntry, error) {

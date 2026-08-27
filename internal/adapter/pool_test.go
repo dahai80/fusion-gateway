@@ -6,6 +6,7 @@ import (
     "net/http"
     "net/http/httptest"
     "testing"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -335,5 +336,58 @@ func TestPool_BuildProviders_RemoveStale(t *testing.T) {
     _, ok := p.Get("stale")
     if ok {
         t.Error("stale provider should be removed")
+    }
+}
+
+// TestEI6_BuildProviders_MixedLocalCloudNoDeadlock guards the cloud-tracking
+// wrap loop in BuildProviders against the RLock-inside-Lock deadlock. The loop
+// runs while BuildProviders holds p.mu.Lock; an earlier version called
+// p.IsLocalProvider() (which takes p.mu.RLock) on the same goroutine and hung
+// forever (Go RWMutex: RLock inside Lock blocks). On the BUG this test never
+// returns (hits the timeout). On the FIX BuildProviders completes and the local
+// provider is NOT wrapped while the cloud provider IS.
+func TestEI6_BuildProviders_MixedLocalCloudNoDeadlock(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer srv.Close()
+
+    done := make(chan struct{})
+    var p *Pool
+    go func() {
+        defer close(done)
+        p = NewPool()
+        cfg := &config.ConfigSnapshot{
+            Config: config.Config{
+                Backends: map[string]config.BackendConfig{
+                    "local": {Enabled: true, Type: "fusion-mlx", BaseURL: srv.URL},
+                    "cloud": {Enabled: true, Type: "openai-compatible", BaseURL: srv.URL},
+                },
+            },
+        }
+        if err := p.BuildProviders(cfg); err != nil {
+            t.Errorf("BuildProviders error: %v", err)
+            return
+        }
+    }()
+    select {
+    case <-done:
+    case <-time.After(5 * time.Second):
+        t.Fatal("EI6: BuildProviders deadlocked — cloud wrap loop re-acquired RLock inside Lock (RLock-inside-Lock on same goroutine)")
+    }
+
+    localProv, ok := p.Get("local")
+    if !ok {
+        t.Fatal("local provider missing")
+    }
+    if _, wrapped := localProv.(*cloudTrackingProvider); wrapped {
+        t.Error("EI6: local provider must NOT be wrapped with cloud tracking")
+    }
+    cloudProv, ok := p.Get("cloud")
+    if !ok {
+        t.Fatal("cloud provider missing")
+    }
+    if _, wrapped := cloudProv.(*cloudTrackingProvider); !wrapped {
+        t.Error("EI6: cloud provider must be wrapped with cloud tracking (in_flight_requests cloud label)")
     }
 }

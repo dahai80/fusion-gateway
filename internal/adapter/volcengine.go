@@ -8,7 +8,6 @@ import (
     "encoding/hex"
     "encoding/json"
     "fmt"
-    "io"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/safego"
     "net/http"
@@ -34,7 +33,7 @@ func NewVolcengineProvider(name string, backendCfg config.BackendConfig) *Volcen
         name:       name,
         baseURL:    backendCfg.BaseURL,
         apiKey:     backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout},
+        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
     }
 }
 
@@ -63,11 +62,11 @@ func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
     if err != nil { return nil, fmt.Errorf("chat request failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("volcengine chat returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var chatResp ChatResponse
-    if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode chat response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&chatResp); err != nil { return nil, fmt.Errorf("decode chat response: %w", err) }
     return &chatResp, nil
 }
 
@@ -82,7 +81,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     resp, err := p.httpClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("volcengine stream request failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("volcengine stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -90,7 +89,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     safego.Go("volcengine_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
-        parseSSEStream(resp.Body, ch)
+        parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
 }
@@ -107,11 +106,11 @@ func (p *VolcengineProvider) Embedding(ctx context.Context, req *EmbeddingReques
     if err != nil { return nil, fmt.Errorf("embedding request failed: %w", err) }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("volcengine embedding returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var embResp EmbeddingResponse
-    if err := json.NewDecoder(resp.Body).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode embedding response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&embResp); err != nil { return nil, fmt.Errorf("decode embedding response: %w", err) }
     return &embResp, nil
 }
 
@@ -128,7 +127,7 @@ func (p *VolcengineProvider) ListModels(ctx context.Context) ([]ModelInfo, error
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("list models returned status %d", resp.StatusCode) }
     var listResp struct { Data []ModelInfo `json:"data"` }
-    if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil { return nil, fmt.Errorf("decode models response: %w", err) }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&listResp); err != nil { return nil, fmt.Errorf("decode models response: %w", err) }
     return listResp.Data, nil
 }
 

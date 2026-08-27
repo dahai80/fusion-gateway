@@ -19,9 +19,10 @@ import (
 type Role string
 
 const (
-    RoleAdmin  Role = "admin"
-    RoleEditor Role = "editor"
-    RoleViewer Role = "viewer"
+    RoleAdmin     Role = "admin"
+    RoleEditor    Role = "editor"
+    RoleViewer    Role = "viewer"
+    RoleInference Role = "inference"
 )
 
 type TeamInfo struct {
@@ -73,8 +74,18 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
                 }
             }
 
+            // RR3 (audit P0): the inference MasterKey gets the inference role,
+            // NOT RoleAdmin. Previously this mapped master to admin, so a leaked
+            // inference key could reach /admin/teams|orgs|gc|config-reload via
+            // withAdminOnly→IsAdmin→EffectiveRole (which also mapped master to
+            // admin). The inference and management planes must stay separated:
+            // an inference key authenticates inference only; admin surface
+            // requires an admin JWT (admin.Handler.requireAdminRole, separate).
+            // The master key's inference-side bypasses (CheckModelAllowlist,
+            // CheckBackendAccess, rate-limit) read p.IsMaster directly and are
+            // unaffected — those are inference privileges, not admin ones.
             if p.IsMaster {
-                role = RoleAdmin
+                role = RoleInference
             }
 
             p.Role = role

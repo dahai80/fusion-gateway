@@ -8,6 +8,8 @@ import (
     "net/http"
     "net/http/httptest"
     "strings"
+    "sync"
+    "sync/atomic"
     "testing"
     "time"
 
@@ -29,19 +31,122 @@ func TestFusionMLXProvider_InFlight(t *testing.T) {
     }
 }
 
-func TestFusionMLXProvider_inFlightAcquire(t *testing.T) {
-    slog.Info("test FusionMLXProvider_inFlightAcquire")
+func TestFusionMLXProvider_tryInFlightAcquire_Uncapped(t *testing.T) {
+    slog.Info("test FusionMLXProvider_tryInFlightAcquire_Uncapped")
+    // max_concurrent <= 0 = uncapped (legacy behavior): always succeeds.
     p := NewFusionMLXProvider(config.BackendConfig{
         Type:    "fusion-mlx",
         BaseURL: "http://localhost:11434",
     }, config.RoutingConfig{})
-    release := p.inFlightAcquire()
+    if p.MaxConcurrent() != 0 {
+        t.Fatalf("expected uncapped (0), got %d", p.MaxConcurrent())
+    }
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        t.Fatalf("expected uncapped acquire to succeed")
+    }
     if p.InFlight() != 1 {
         t.Fatalf("expected 1 in-flight after acquire, got %d", p.InFlight())
     }
     release()
     if p.InFlight() != 0 {
         t.Fatalf("expected 0 in-flight after release, got %d", p.InFlight())
+    }
+}
+
+func TestFusionMLXProvider_tryInFlightAcquire_HardCap(t *testing.T) {
+    slog.Info("test FusionMLXProvider_tryInFlightAcquire_HardCap")
+    // RR4: max_concurrent=2 is a hard cap. Two acquires succeed, the third
+    // returns (nil,false) — the TOCTOU window the engine's P5 advisory check
+    // left open is closed at the Acquire point.
+    p := NewFusionMLXProvider(config.BackendConfig{
+        Type:    "fusion-mlx",
+        BaseURL: "http://localhost:11434",
+    }, config.RoutingConfig{
+        LocalPriority: config.LocalPriorityConfig{MaxConcurrent: 2},
+    })
+    if p.MaxConcurrent() != 2 {
+        t.Fatalf("expected max 2, got %d", p.MaxConcurrent())
+    }
+    r1, ok1 := p.tryInFlightAcquire()
+    if !ok1 {
+        t.Fatalf("first acquire should succeed")
+    }
+    r2, ok2 := p.tryInFlightAcquire()
+    if !ok2 {
+        t.Fatalf("second acquire should succeed")
+    }
+    if p.InFlight() != 2 {
+        t.Fatalf("expected 2 in-flight at cap, got %d", p.InFlight())
+    }
+    r3, ok3 := p.tryInFlightAcquire()
+    if ok3 {
+        r3()
+        t.Fatalf("third acquire should be rejected at hard cap")
+    }
+    if p.InFlight() != 2 {
+        t.Fatalf("in-flight must not change on rejected acquire, got %d", p.InFlight())
+    }
+    // Releasing one frees a slot for the next acquire.
+    r2()
+    r4, ok4 := p.tryInFlightAcquire()
+    if !ok4 {
+        t.Fatalf("acquire should succeed after a release")
+    }
+    r1()
+    r4()
+    if p.InFlight() != 0 {
+        t.Fatalf("expected 0 in-flight after all releases, got %d", p.InFlight())
+    }
+}
+
+func TestFusionMLXProvider_tryInFlightAcquire_ConcurrentNoOversell(t *testing.T) {
+    slog.Info("test FusionMLXProvider_tryInFlightAcquire_ConcurrentNoOversell")
+    // RR4 regression: N goroutines all race to acquire against a small cap.
+    // The old soft check let all N through; the CAS hard cap must reject the
+    // excess so in-flight never exceeds max_concurrent.
+    p := NewFusionMLXProvider(config.BackendConfig{
+        Type:    "fusion-mlx",
+        BaseURL: "http://localhost:11434",
+    }, config.RoutingConfig{
+        LocalPriority: config.LocalPriorityConfig{MaxConcurrent: 4},
+    })
+    const workers = 64
+    var acquired atomic.Int64
+    var rejected atomic.Int64
+    var wg sync.WaitGroup
+    releases := make([]func(), 0, workers)
+    var mu sync.Mutex
+    for i := 0; i < workers; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            r, ok := p.tryInFlightAcquire()
+            if ok {
+                acquired.Add(1)
+                mu.Lock()
+                releases = append(releases, r)
+                mu.Unlock()
+            } else {
+                rejected.Add(1)
+            }
+        }()
+    }
+    wg.Wait()
+    if acquired.Load() != 4 {
+        t.Fatalf("expected exactly 4 acquired (== max_concurrent), got %d", acquired.Load())
+    }
+    if rejected.Load() != workers-4 {
+        t.Fatalf("expected %d rejected, got %d", workers-4, rejected.Load())
+    }
+    if p.InFlight() != 4 {
+        t.Fatalf("in-flight must equal max_concurrent, got %d", p.InFlight())
+    }
+    for _, r := range releases {
+        r()
+    }
+    if p.InFlight() != 0 {
+        t.Fatalf("expected 0 after all releases, got %d", p.InFlight())
     }
 }
 
@@ -706,7 +811,7 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
         b, _ := json.Marshal(chunk)
         sseData := "data: " + string(b) + "\n\n"
         ch := make(chan StreamChunk, 64)
-        parseSSEStream(bytesReader([]byte(sseData)), ch)
+        parseSSEStream(context.Background(), bytesReader([]byte(sseData)), ch)
         if len(ch) != 1 {
             t.Fatalf("expected 1 chunk in channel, got %d", len(ch))
         }
@@ -720,7 +825,31 @@ func TestFusionMLXProvider_parseSSEStream(t *testing.T) {
         ch := make(chan StreamChunk, 1)
         ch <- StreamChunk{ID: "filler"}
 
-        parseSSEStream(bytesReader([]byte(sseData)), ch)
+        // F3 fix: a full buffer now blocks until the consumer reads OR ctx is
+        // canceled (the old Degraded fallback that returned on a full buffer
+        // is deleted — it mistook client cancel for slow-upstream backpressure
+        // and re-ran the prompt non-streamed, double-loading the GPU). Run the
+        // producer in a goroutine and cancel ctx to prove cancel unblocks it
+        // silently (no Degraded sentinel).
+        ctx, cancel := context.WithCancel(context.Background())
+        done := make(chan struct{})
+        go func() {
+            parseSSEStream(ctx, bytesReader([]byte(sseData)), ch)
+            close(done)
+        }()
+        cancel()
+        select {
+        case <-done:
+        case <-time.After(2 * time.Second):
+            t.Fatal("parseSSEStream hung on full buffer; ctx cancel did not unblock it")
+        }
+        select {
+        case extra := <-ch:
+            if extra.Degraded {
+                t.Fatal("cancel must not emit a Degraded chunk (false backpressure -> double GPU load)")
+            }
+        default:
+        }
     })
 }
 

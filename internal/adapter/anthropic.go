@@ -183,22 +183,37 @@ func NewAnthropicProvider(name string, backendCfg config.BackendConfig) *Anthrop
     if timeout == 0 {
         timeout = 120 * time.Second
     }
+    // B5: both clients route through TransportForBackend so Anthropic inherits
+    // the same pool tuning (MaxIdleConnsPerHost 64, RR11 MaxConnsPerHost cap)
+    // and UDS dialing as the other providers. The prior hand-rolled transports
+    // bypassed this: the non-stream client got http.DefaultTransport
+    // (MaxIdleConnsPerHost=2, MaxConnsPerHost=0/unlimited — redialing TLS on
+    // every 3rd concurrent request AND no FD bound) and the stream transport
+    // had no idle pool at all. With socket_path set (UDS convention) the old
+    // code silently ignored it and dialed TCP at http://unix/, failing.
+    //
     // streamHTTPClient: no overall Timeout (http.Client.Timeout caps the full
     // request incl. body read, which truncates long reasoning streams at 120s).
-    // Transport.ResponseHeaderTimeout bounds time-to-first-byte so a dead
-    // upstream still fails fast, while the streamed body runs unbounded until
-    // the upstream closes it naturally. Client cancellation (ctx) still applies.
-    // Non-stream Messages keeps the bounded httpClient.
-    streamTransport := &http.Transport{
-        ResponseHeaderTimeout: timeout,
-        Proxy:                 http.ProxyFromEnvironment,
+    // We clone TransportForBackend's *http.Transport and set
+    // ResponseHeaderTimeout so a dead upstream still fails fast at TTFB, while
+    // the streamed body runs unbounded until the upstream closes it naturally.
+    // Client cancellation (ctx) still applies. Non-stream Messages keeps the
+    // bounded httpClient.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport, ok := baseTransport.(*http.Transport)
+    if !ok {
+        slog.Warn("TransportForBackend not *http.Transport, stream client cannot set ResponseHeaderTimeout", "backend", backendCfg.BaseURL)
+        streamTransport = &http.Transport{ResponseHeaderTimeout: timeout, Proxy: http.ProxyFromEnvironment}
+    } else {
+        streamTransport = streamTransport.Clone()
+        streamTransport.ResponseHeaderTimeout = timeout
     }
     return &AnthropicProvider{
         name:             name,
         baseURL:          backendCfg.BaseURL,
         apiKey:           backendCfg.APIKey,
         apiVersion:       "2023-06-01",
-        httpClient:       &http.Client{Timeout: timeout},
+        httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
         streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
     }
 }
@@ -226,11 +241,11 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
-    if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
         return nil, fmt.Errorf("decode anthropic response: %w", err)
     }
     return AnthropicToOpenAI(&antResp), nil
@@ -254,7 +269,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         return nil, fmt.Errorf("anthropic stream request failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("anthropic stream returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -262,6 +277,22 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseAnthropicSSE. A stalled upstream keeps Read
+        // blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection + slot
+        // until the 180s watchdog. Closing the body forces an immediate read
+        // error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("anthropic_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("anthropic stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         p.parseAnthropicSSE(ctx, resp.Body, ch, req.Model)
     })
     return ch, nil
@@ -285,11 +316,11 @@ func (p *AnthropicProvider) Messages(ctx context.Context, req *AnthropicRequest)
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         return nil, fmt.Errorf("anthropic messages returned status %d: %s", resp.StatusCode, string(respBody))
     }
     var antResp AnthropicResponse
-    if err := json.NewDecoder(resp.Body).Decode(&antResp); err != nil {
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
         return nil, fmt.Errorf("decode anthropic messages response: %w", err)
     }
     return &antResp, nil
@@ -312,7 +343,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
         return nil, fmt.Errorf("anthropic stream messages failed: %w", err)
     }
     if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(resp.Body)
+        respBody := ReadErrorBody(resp)
         resp.Body.Close()
         return nil, fmt.Errorf("anthropic stream messages returned status %d: %s", resp.StatusCode, string(respBody))
     }
@@ -320,6 +351,22 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
     safego.Go("anthropic_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+        // RR8: ctx-watcher closes resp.Body on client cancel, unblocking the
+        // body.Read inside parseAnthropicStreamEvents. A stalled upstream keeps
+        // Read blocked — ctx.Done() is only checked on the send arm, so a stall
+        // that never delivers a byte hangs the goroutine + connection + slot
+        // until the 180s watchdog. Closing the body forces an immediate read
+        // error and a clean exit. Mirrors node_adapter.go.
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("anthropic_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("anthropic stream messages canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
         p.parseAnthropicStreamEvents(ctx, resp.Body, ch)
     })
     return ch, nil
@@ -360,8 +407,11 @@ func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reade
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("anthropic sse line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: close the stream on over-limit instead of silently
+                // dropping buffered bytes (lineBuf=nil) and resyncing
+                // mid-JSON. See openai_compatible.go parseSSEStream B6 note.
+                slog.Error("anthropic sse line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {
@@ -472,8 +522,15 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body
         if n > 0 {
             lineBuf = append(lineBuf, buf[:n]...)
             if len(lineBuf) > maxLineSize {
-                slog.Error("anthropic stream event line exceeded max size, discarding", "size", len(lineBuf))
-                lineBuf = nil
+                // B6: returning (not lineBuf=nil) closes the channel — the
+                // client observes truncation rather than the parser silently
+                // dropping buffered bytes and resyncing mid-JSON. The old
+                // lineBuf=nil kept reading from an arbitrary byte offset,
+                // producing half-JSON "data:" lines forever with no resync
+                // marker (SSE has no length framing).
+                // Mirrors openai_compatible.go:287 parseSSEStream.
+                slog.Error("anthropic stream event line exceeded max size, closing stream", "size", len(lineBuf), "max", maxLineSize)
+                return
             }
         }
         for {

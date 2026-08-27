@@ -25,25 +25,85 @@ const (
     apiKeyPrefix     = "fusion:key:"
     apiKeyHashPrefix = "fusion:keyhash:"
     channelPrefix = "fusion:channel:"
+    // AH1 (audit P1): dedicated quota usage counter, kept OUTSIDE the key JSON
+    // blob. The prior DeductQuota was a GetKey -> mutate QuotaUsed -> UpdateKey
+    // RMW on the blob — non-atomic, so two concurrent gateway instances both
+    // read the same QuotaUsed, each adds its amount, each writes back: one
+    // increment is lost. Across N instances the budget is overshot N-fold
+    // (billing bypass / quota double-spend). A dedicated float counter
+    // incremented by atomic INCRBYFLOAT fixes the lost-increment defect.
+    // Match the memory store contract: DeductQuota is additive (limit
+    // enforcement lives in CheckQuota, not the deduction), so no Lua
+    // check-then-deduct is needed.
+    quotaUsedPrefix = "fusion:quota:used:"
 )
 
 type RedisStore struct {
     client *redis.Client
-    ctx    context.Context
 }
+
+// redisOpTimeout is the per-call deadline applied to every store command (B3).
+// Redis is an "optional" store (memory is the default), but once configured it
+// is a hard dependency on the auth path (GetKeyByHash serves every API-key
+// request). A stalled Redis (BGSAVE, slow command, network blip) without a
+// per-call timeout blocks the calling goroutine indefinitely — cascading to a
+// full gateway stall. 3s bounds any single op; the redis.Options Read/Write
+// timeouts are the backstop for commands that ignore the context deadline.
+const redisOpTimeout = 3 * time.Second
+
+// redisListTimeout is the per-call deadline for SCAN-based list operations
+// (ListKeys/ListChannels/...). These iterate an unbounded keyspace, so they
+// get a longer budget than single-key ops but are still bounded.
+const redisListTimeout = 10 * time.Second
 
 func NewRedisStore(addr, password string, db int) (*RedisStore, error) {
     client := redis.NewClient(&redis.Options{
-        Addr:     addr,
-        Password: password,
-        DB:       db,
+        Addr:         addr,
+        Password:     password,
+        DB:           db,
+        DialTimeout:  3 * time.Second,
+        ReadTimeout:  3 * time.Second, // B3: backstop for context-ignoring commands
+        WriteTimeout: 3 * time.Second,
+        PoolTimeout:  4 * time.Second,
     })
-    ctx := context.Background()
+    ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
+    defer cancel()
     if err := client.Ping(ctx).Err(); err != nil {
         return nil, fmt.Errorf("redis ping failed: %w", err)
     }
     slog.Info("redis store connected", "addr", addr)
-    return &RedisStore{client: client, ctx: ctx}, nil
+    return &RedisStore{client: client}, nil
+}
+
+// withTimeout derives a per-call context with a deadline. B3: every store
+// method MUST use this instead of a shared background context, so a stalled
+// Redis cannot block a goroutine forever. The caller defers cancel().
+func (r *RedisStore) withTimeout(dur time.Duration) (context.Context, context.CancelFunc) {
+    return context.WithTimeout(context.Background(), dur)
+}
+
+// scanKeys lists all keys matching a glob pattern via SCAN (B3). KEYS is O(N)
+// and blocks the Redis event loop — a footgun once the keyspace grows (logs
+// have a 72h TTL, easily reaching millions of keys). SCAN is cursor-based,
+// non-blocking, and bounded by redisListTimeout. Returns the full key set
+// (the keyspace is small enough that collecting in memory is fine).
+func (r *RedisStore) scanKeys(match string) ([]string, error) {
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
+    var keys []string
+    var cursor uint64
+    for {
+        batch, cur, err := r.client.Scan(ctx, cursor, match, 256).Result()
+        if err != nil {
+            return nil, fmt.Errorf("scan %s: %w", match, err)
+        }
+        keys = append(keys, batch...)
+        if cur == 0 {
+            break
+        }
+        cursor = cur
+    }
+    return keys, nil
 }
 
 func (r *RedisStore) Close() error {
@@ -58,13 +118,15 @@ func (r *RedisStore) AppendLog(log *store.RequestLog) error {
         return fmt.Errorf("marshal log: %w", err)
     }
     key := logPrefix + log.ID
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
     pipe := r.client.Pipeline()
-    pipe.Set(r.ctx, key, data, 72*time.Hour)
-    pipe.ZAdd(r.ctx, logPrefix+"index", redis.Z{
+    pipe.Set(ctx, key, data, 72*time.Hour)
+    pipe.ZAdd(ctx, logPrefix+"index", redis.Z{
         Score:  float64(log.Timestamp.Unix()),
         Member: log.ID,
     })
-    _, err = pipe.Exec(r.ctx)
+    _, err = pipe.Exec(ctx)
     return err
 }
 
@@ -77,7 +139,9 @@ func (r *RedisStore) QueryLogs(filter store.LogFilter) ([]*store.RequestLog, int
     if filter.EndTime != nil {
         max = strconv.FormatInt(filter.EndTime.Unix(), 10)
     }
-    ids, err := r.client.ZRangeArgs(r.ctx, redis.ZRangeArgs{
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    ids, err := r.client.ZRangeArgs(ctx, redis.ZRangeArgs{
         Key:     logPrefix + "index",
         Start:   min,
         Stop:    max,
@@ -88,10 +152,10 @@ func (r *RedisStore) QueryLogs(filter store.LogFilter) ([]*store.RequestLog, int
     if err != nil {
         return nil, 0, err
     }
-    total, _ := r.client.ZCount(r.ctx, logPrefix+"index", min, max).Result()
+    total, _ := r.client.ZCount(ctx, logPrefix+"index", min, max).Result()
     var logs []*store.RequestLog
     for _, id := range ids {
-        data, err := r.client.Get(r.ctx, logPrefix+id).Bytes()
+        data, err := r.client.Get(ctx, logPrefix+id).Bytes()
         if err != nil {
             continue
         }
@@ -105,7 +169,9 @@ func (r *RedisStore) QueryLogs(filter store.LogFilter) ([]*store.RequestLog, int
 }
 
 func (r *RedisStore) GetLog(id string) (*store.RequestLog, error) {
-    data, err := r.client.Get(r.ctx, logPrefix+id).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, logPrefix+id).Bytes()
     if err != nil {
         return nil, fmt.Errorf("log %s not found", id)
     }
@@ -125,15 +191,17 @@ func (r *RedisStore) ExportLogs(filter store.LogFilter, format string) ([]byte, 
 }
 
 func (r *RedisStore) DistinctLogFilters() (*store.LogFilters, error) {
-    keys, err := r.client.Keys(r.ctx, logPrefix+"*").Result()
+    keys, err := r.scanKeys(logPrefix + "*")
     if err != nil {
         return nil, fmt.Errorf("list log keys: %w", err)
     }
 
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     models := make(map[string]struct{})
     channels := make(map[string]struct{})
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -168,13 +236,15 @@ func (r *RedisStore) DistinctLogFilters() (*store.LogFilters, error) {
 // --- API Keys ---
 
 func (r *RedisStore) ListKeys() ([]*store.APIKeyEntry, error) {
-    keys, err := r.client.Keys(r.ctx, apiKeyPrefix+"*").Result()
+    keys, err := r.scanKeys(apiKeyPrefix + "*")
     if err != nil {
         return nil, err
     }
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     var result []*store.APIKeyEntry
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -188,7 +258,9 @@ func (r *RedisStore) ListKeys() ([]*store.APIKeyEntry, error) {
 }
 
 func (r *RedisStore) GetKey(name string) (*store.APIKeyEntry, error) {
-    data, err := r.client.Get(r.ctx, apiKeyPrefix+name).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, apiKeyPrefix+name).Bytes()
     if err != nil {
         return nil, fmt.Errorf("key %s not found", name)
     }
@@ -200,7 +272,9 @@ func (r *RedisStore) GetKey(name string) (*store.APIKeyEntry, error) {
 }
 
 func (r *RedisStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
-    name, err := r.client.Get(r.ctx, apiKeyHashPrefix+hash).Result()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    name, err := r.client.Get(ctx, apiKeyHashPrefix+hash).Result()
     if err != nil {
         return nil, fmt.Errorf("key not found by hash")
     }
@@ -212,13 +286,23 @@ func (r *RedisStore) CreateKey(key *store.APIKeyEntry) error {
     if err != nil {
         return err
     }
-    if err := r.client.Set(r.ctx, apiKeyPrefix+key.Name, data, 0).Err(); err != nil {
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    if err := r.client.Set(ctx, apiKeyPrefix+key.Name, data, 0).Err(); err != nil {
         return err
     }
     if key.KeyHash != "" {
-        if err := r.client.Set(r.ctx, apiKeyHashPrefix+key.KeyHash, key.Name, 0).Err(); err != nil {
+        if err := r.client.Set(ctx, apiKeyHashPrefix+key.KeyHash, key.Name, 0).Err(); err != nil {
             slog.Warn("failed to index key hash", "key", key.Name, "error", err)
         }
+    }
+    // AH1 (audit P1): seed the usage counter from the blob's QuotaUsed only if
+    // the counter is absent (SetNX never overwrites) — the counter is the
+    // source of truth once any deduction ran; never overwrite it with a stale
+    // blob value. The budget limit stays read from the blob in CheckQuota; no
+    // separate limit key is needed.
+    if _, err := r.client.SetNX(ctx, quotaUsedPrefix+key.Name, key.QuotaUsed, 0).Result(); err != nil {
+        slog.Warn("failed to seed quota used counter", "key", key.Name, "error", err)
     }
     return nil
 }
@@ -228,23 +312,39 @@ func (r *RedisStore) UpdateKey(key *store.APIKeyEntry) error {
 }
 
 func (r *RedisStore) DeleteKey(name string) error {
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
     existing, err := r.GetKey(name)
     if err == nil && existing.KeyHash != "" {
-        r.client.Del(r.ctx, apiKeyHashPrefix+existing.KeyHash)
+        r.client.Del(ctx, apiKeyHashPrefix+existing.KeyHash)
     }
-    return r.client.Del(r.ctx, apiKeyPrefix+name).Err()
+    if err := r.client.Del(ctx, apiKeyPrefix+name).Err(); err != nil {
+        return err
+    }
+    // EI5: cascade-delete the per-key quota usage counter (AH1 dedicated
+    // fusion:quota:used:<name>). Without this a deleted key left its quota
+    // counter behind forever — orphaned Redis keys accumulate over long-running
+    // deployments with frequent key churn. Best-effort Del after the key entry
+    // is gone; a missing counter is a no-op (Del on a non-existent key is not
+    // an error in Redis).
+    if err := r.client.Del(ctx, quotaUsedPrefix+name).Err(); err != nil {
+        slog.Warn("failed to reclaim quota counter for deleted key", "key", name, "error", err)
+    }
+    return nil
 }
 
 // --- Channels ---
 
 func (r *RedisStore) ListChannels() ([]*store.ChannelEntry, error) {
-    keys, err := r.client.Keys(r.ctx, channelPrefix+"*").Result()
+    keys, err := r.scanKeys(channelPrefix + "*")
     if err != nil {
         return nil, err
     }
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     var result []*store.ChannelEntry
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -258,7 +358,9 @@ func (r *RedisStore) ListChannels() ([]*store.ChannelEntry, error) {
 }
 
 func (r *RedisStore) GetChannel(name string) (*store.ChannelEntry, error) {
-    data, err := r.client.Get(r.ctx, channelPrefix+name).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, channelPrefix+name).Bytes()
     if err != nil {
         return nil, fmt.Errorf("channel %s not found", name)
     }
@@ -274,7 +376,9 @@ func (r *RedisStore) CreateChannel(ch *store.ChannelEntry) error {
     if err != nil {
         return err
     }
-    return r.client.Set(r.ctx, channelPrefix+ch.Name, data, 0).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Set(ctx, channelPrefix+ch.Name, data, 0).Err()
 }
 
 func (r *RedisStore) UpdateChannel(ch *store.ChannelEntry) error {
@@ -282,7 +386,9 @@ func (r *RedisStore) UpdateChannel(ch *store.ChannelEntry) error {
 }
 
 func (r *RedisStore) DeleteChannel(name string) error {
-    return r.client.Del(r.ctx, channelPrefix+name).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Del(ctx, channelPrefix+name).Err()
 }
 
 // --- Analytics ---
@@ -318,21 +424,49 @@ func (r *RedisStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitSt
 // --- Quota ---
 
 func (r *RedisStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
-    key, kerr := r.GetKey(keyName)
-    if kerr != nil {
-        return 0, 0, false, kerr
+    // AH1 (audit P1): read the authoritative usage COUNTER, not the QuotaUsed
+    // field baked into the key blob. The blob is a non-atomic RMW victim; the
+    // counter is incremented by DeductQuota atomically. Missing key is a hard
+    // error (matches the memory store + admin contract) — fail visibly, never
+    // silently gate an unknown key open.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    key, err := r.GetKey(keyName)
+    if err != nil {
+        return 0, 0, false, fmt.Errorf("quota check: key %s not found", keyName)
     }
-    return key.QuotaUsed, key.QuotaLimit, key.QuotaUsed >= key.QuotaLimit, nil
+    usedStr, err := r.client.Get(ctx, quotaUsedPrefix+keyName).Result()
+    if err != nil && err != redis.Nil {
+        return 0, 0, false, fmt.Errorf("quota used read failed: %w", err)
+    }
+    used, _ = strconv.ParseFloat(usedStr, 64)
+    limit = key.BudgetLimit
+    if limit <= 0 {
+        limit = key.QuotaLimit
+    }
+    exceeded = limit > 0 && used >= limit
+    return used, limit, exceeded, nil
 }
 
 func (r *RedisStore) DeductQuota(keyName string, amount float64) error {
-    key, err := r.GetKey(keyName)
-    if err != nil {
-        return err
+    // AH1 (audit P1): atomic INCRBYFLOAT on the dedicated usage counter, NOT a
+    // GetKey -> QuotaUsed += amount -> UpdateKey blob RMW. The RMW lost an
+    // increment on every concurrent deduction across gateway instances (quota
+    // double-spend): both read the same QuotaUsed, each adds its amount, each
+    // writes back — one increment lost. INCRBYFLOAT is a single atomic Redis
+    // op, so no increment is lost even across N instances. Additive only —
+    // limit enforcement lives in CheckQuota (matches the memory store
+    // contract); DeductQuota is admin-manual, fail visibly on missing key.
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    if _, err := r.client.Get(ctx, apiKeyPrefix+keyName).Result(); err != nil {
+        return fmt.Errorf("quota deduct: key %s not found", keyName)
     }
-    key.QuotaUsed += amount
-    key.QuotaRemaining = key.QuotaLimit - key.QuotaUsed
-    return r.UpdateKey(key)
+    if err := r.client.IncrByFloat(ctx, quotaUsedPrefix+keyName, amount).Err(); err != nil {
+        return fmt.Errorf("quota deduct failed: %w", err)
+    }
+    slog.Debug("quota deducted atomically", "key", keyName, "amount", amount)
+    return nil
 }
 
 // --- Teams ---
@@ -342,11 +476,15 @@ func (r *RedisStore) CreateTeam(team *store.Team) error {
     if err != nil {
         return err
     }
-    return r.client.Set(r.ctx, teamPrefix+team.ID, data, 0).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Set(ctx, teamPrefix+team.ID, data, 0).Err()
 }
 
 func (r *RedisStore) GetTeam(id string) (*store.Team, error) {
-    data, err := r.client.Get(r.ctx, teamPrefix+id).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, teamPrefix+id).Bytes()
     if err != nil {
         return nil, fmt.Errorf("team %s not found", id)
     }
@@ -358,13 +496,15 @@ func (r *RedisStore) GetTeam(id string) (*store.Team, error) {
 }
 
 func (r *RedisStore) ListTeams() ([]*store.Team, error) {
-    keys, err := r.client.Keys(r.ctx, teamPrefix+"*").Result()
+    keys, err := r.scanKeys(teamPrefix + "*")
     if err != nil {
         return nil, err
     }
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     var result []*store.Team
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -382,15 +522,21 @@ func (r *RedisStore) UpdateTeam(team *store.Team) error {
 }
 
 func (r *RedisStore) DeleteTeam(id string) error {
-    return r.client.Del(r.ctx, teamPrefix+id).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Del(ctx, teamPrefix+id).Err()
 }
 
 func (r *RedisStore) BindKeyToTeam(apiKey, teamID string) error {
-    return r.client.Set(r.ctx, keyTeamIndex+apiKey, teamID, 0).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Set(ctx, keyTeamIndex+apiKey, teamID, 0).Err()
 }
 
 func (r *RedisStore) GetTeamByKey(apiKey string) (*store.Team, error) {
-    teamID, err := r.client.Get(r.ctx, keyTeamIndex+apiKey).Result()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    teamID, err := r.client.Get(ctx, keyTeamIndex+apiKey).Result()
     if err != nil {
         return nil, fmt.Errorf("no team for key")
     }
@@ -448,11 +594,15 @@ func (r *RedisStore) CreateOrg(org *store.Organization) error {
     if err != nil {
         return err
     }
-    return r.client.Set(r.ctx, orgPrefix+org.ID, data, 0).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Set(ctx, orgPrefix+org.ID, data, 0).Err()
 }
 
 func (r *RedisStore) GetOrg(id string) (*store.Organization, error) {
-    data, err := r.client.Get(r.ctx, orgPrefix+id).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, orgPrefix+id).Bytes()
     if err != nil {
         return nil, fmt.Errorf("organization %s not found", id)
     }
@@ -464,13 +614,15 @@ func (r *RedisStore) GetOrg(id string) (*store.Organization, error) {
 }
 
 func (r *RedisStore) ListOrgs() ([]*store.Organization, error) {
-    keys, err := r.client.Keys(r.ctx, orgPrefix+"*").Result()
+    keys, err := r.scanKeys(orgPrefix + "*")
     if err != nil {
         return nil, err
     }
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     var result []*store.Organization
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -484,7 +636,9 @@ func (r *RedisStore) ListOrgs() ([]*store.Organization, error) {
 }
 
 func (r *RedisStore) DeleteOrg(id string) error {
-    return r.client.Del(r.ctx, orgPrefix+id).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Del(ctx, orgPrefix+id).Err()
 }
 
 // --- Batch ---
@@ -505,7 +659,9 @@ func (r *RedisStore) CreateBatch(requests []store.BatchRequest, endpoint, window
     if err != nil {
         return nil, err
     }
-    if err := r.client.Set(r.ctx, batchPrefix+id, data, 0).Err(); err != nil {
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    if err := r.client.Set(ctx, batchPrefix+id, data, 0).Err(); err != nil {
         return nil, err
     }
     slog.Info("batch created in redis", "id", id)
@@ -513,7 +669,9 @@ func (r *RedisStore) CreateBatch(requests []store.BatchRequest, endpoint, window
 }
 
 func (r *RedisStore) GetBatch(id string) (*store.Batch, error) {
-    data, err := r.client.Get(r.ctx, batchPrefix+id).Bytes()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    data, err := r.client.Get(ctx, batchPrefix+id).Bytes()
     if err != nil {
         return nil, fmt.Errorf("batch %s not found", id)
     }
@@ -525,13 +683,15 @@ func (r *RedisStore) GetBatch(id string) (*store.Batch, error) {
 }
 
 func (r *RedisStore) ListBatches() ([]*store.Batch, error) {
-    keys, err := r.client.Keys(r.ctx, batchPrefix+"*").Result()
+    keys, err := r.scanKeys(batchPrefix + "*")
     if err != nil {
         return nil, err
     }
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
     var result []*store.Batch
     for _, k := range keys {
-        data, err := r.client.Get(r.ctx, k).Bytes()
+        data, err := r.client.Get(ctx, k).Bytes()
         if err != nil {
             continue
         }
@@ -566,7 +726,9 @@ func (r *RedisStore) UpdateBatch(batch *store.Batch) error {
     if err != nil {
         return err
     }
-    return r.client.Set(r.ctx, batchPrefix+batch.ID, data, 0).Err()
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
+    return r.client.Set(ctx, batchPrefix+batch.ID, data, 0).Err()
 }
 
 // --- Cost ---
@@ -587,18 +749,22 @@ func (r *RedisStore) RecordUsage(keyName, backend, model string, promptTokens, c
         return err
     }
     id := fmt.Sprintf("%d", time.Now().UnixNano())
+    ctx, cancel := r.withTimeout(redisOpTimeout)
+    defer cancel()
     pipe := r.client.Pipeline()
-    pipe.Set(r.ctx, costPrefix+"rec:"+id, data, 72*time.Hour)
-    pipe.ZAdd(r.ctx, costByTime, redis.Z{
+    pipe.Set(ctx, costPrefix+"rec:"+id, data, 72*time.Hour)
+    pipe.ZAdd(ctx, costByTime, redis.Z{
         Score:  float64(rec.Timestamp.Unix()),
         Member: id,
     })
-    _, err = pipe.Exec(r.ctx)
+    _, err = pipe.Exec(ctx)
     return err
 }
 
 func (r *RedisStore) GetCostSummary(keyName string) (*store.CostSummary, error) {
-    ids, err := r.client.ZRange(r.ctx, costByTime, 0, -1).Result()
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
+    ids, err := r.client.ZRange(ctx, costByTime, 0, -1).Result()
     if err != nil {
         return nil, err
     }
@@ -608,7 +774,7 @@ func (r *RedisStore) GetCostSummary(keyName string) (*store.CostSummary, error) 
         ByModel:   make(map[string]float64),
     }
     for _, id := range ids {
-        data, err := r.client.Get(r.ctx, costPrefix+"rec:"+id).Bytes()
+        data, err := r.client.Get(ctx, costPrefix+"rec:"+id).Bytes()
         if err != nil {
             continue
         }
