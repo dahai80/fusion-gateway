@@ -36,6 +36,29 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
     }
 }
 
+// FusionHeadersFromContext returns the passthrough header map carried in ctx
+// (set by WithFusionHeaders), or nil. Used to copy fusion headers onto a
+// decoupled ctx (e.g. the resumable-stream pump's liveCtx, issue #116) so
+// outbound upstream requests still propagate X-Request-ID / auth headers.
+func FusionHeadersFromContext(ctx context.Context) map[string]string {
+    headers, _ := ctx.Value(fusionHeadersKey{}).(map[string]string)
+    return headers
+}
+
+// WithFusionHeadersMap attaches a pre-built header map to ctx (the inverse of
+// FusionHeadersFromContext), so a decoupled ctx inherits the inbound headers
+// without an *http.Request.
+func WithFusionHeadersMap(ctx context.Context, headers map[string]string) context.Context {
+    if len(headers) == 0 {
+        return ctx
+    }
+    cp := make(map[string]string, len(headers))
+    for k, v := range headers {
+        cp[k] = v
+    }
+    return context.WithValue(ctx, fusionHeadersKey{}, cp)
+}
+
 func SpaceIDFromContext(ctx context.Context) string {
     headers, _ := ctx.Value(fusionHeadersKey{}).(map[string]string)
     if headers == nil {

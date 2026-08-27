@@ -339,6 +339,16 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
 }
 
 func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
+    // #116 resumable streams: when resume is enabled AND the route decision
+    // picked the local backend, take the resumable path (decoupled pump +
+    // rolling buffer + per-event id). Cloud/cluster/first-party paths are NOT
+    // resumable (upstream has no cursor protocol) and fall through to the plain
+    // forward loop below. The resumable handler owns its own watchdog/slot/
+    // metrics, so it returns without reaching the plain path.
+    if s.streamBuffers != nil && decision.Backend == router.LocalBackend {
+        s.handleStreamChatResumable(ctx, w, provider, req, decision, budget, start)
+        return
+    }
     // F4: wdCtx is a child of the request ctx so the idle watchdog can cancel
     // ONLY the child to unblock an upstream body.Read (stalled stream, issue
     // #69) while the parent ctx stays clean — ctx.Err()==nil after a watchdog

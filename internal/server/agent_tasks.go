@@ -97,3 +97,27 @@ func (s *Server) reapExpiredTasks() {
         s.taskRegistry.ReapExpired(time.Now())
     }
 }
+
+// reapExpiredStreamBuffers evicts resumable-stream buffers past their TTL
+// (issue #116). The TTL is the reconnect window: a buffer past it can no longer
+// be resumed and is dropped so memory does not grow unbounded under churn.
+// No-op when resume is disabled (store is nil).
+func (s *Server) reapExpiredStreamBuffers() {
+    if s.streamBuffers == nil {
+        return
+    }
+    ttl := s.cfg.Config.Routing.Stream.ResumeTTL
+    if ttl <= 0 {
+        ttl = 10 * time.Minute
+    }
+    // Reap at a quarter of the TTL, clamped to >=10s so short TTLs still reap.
+    interval := ttl / 4
+    if interval < 10 * time.Second {
+        interval = 10 * time.Second
+    }
+    ticker := time.NewTicker(interval)
+    defer ticker.Stop()
+    for range ticker.C {
+        s.streamBuffers.ReapExpired(time.Now())
+    }
+}

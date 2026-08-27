@@ -293,6 +293,17 @@ type RetryConfig struct {
 type StreamConfig struct {
     KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
     IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
+    // Resume (issue #116): mid-stream-reconnect replay for the local MLX path.
+    // ResumeEnabled gates stream_id assignment + per-event id + the rolling
+    // buffer + the /v1/messages/{stream_id}/events replay endpoint. Disabled by
+    // default — the buffered local path keeps the upstream pump alive past a
+    // client disconnect (so a reconnect can resume), which holds the local slot
+    // for the whole generation even after the client left. Cloud/first-party
+    // Anthropic paths are never resumable (upstream has no cursor protocol).
+    ResumeEnabled   bool          `mapstructure:"resume_enabled"`
+    ResumeMaxEvents int           `mapstructure:"resume_max_events"`
+    ResumeMaxBytes  int           `mapstructure:"resume_max_bytes"`
+    ResumeTTL       time.Duration `mapstructure:"resume_ttl"`
 }
 
 type CacheConfig struct {
@@ -1080,6 +1091,10 @@ func DefaultConfig() Config {
             Stream: StreamConfig{
                 KeepaliveInterval: 15 * time.Second,
                 IdleTimeout:       180 * time.Second,
+                ResumeEnabled:     false,
+                ResumeMaxEvents:   256,
+                ResumeMaxBytes:    1 << 20,
+                ResumeTTL:         10 * time.Minute,
             },
             AgentTasks: AgentTaskConfig{
                 TTL:            30 * time.Minute,
