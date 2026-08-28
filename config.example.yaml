@@ -415,3 +415,11 @@ mcp:
     max_requests: 10000                 # Max concurrent/in-flight MCP requests
     node_port: 11445                    # Port dialed for remote MCP node execution (forwardToNode upstream)
     local_port: 9000                    # Port dialed for local MCP tool execution (forwardToNode localhost upstream)
+    # #129 Gap 3: managed-MCP per-node tool allowlist. Enterprise tool names
+    # permitted on THIS node. Empty/unset = unrestricted (every registered tool
+    # admitted). Non-empty = a tool call whose name is NOT listed is rejected
+    # at admission (before any node dial). Declared per-node by design — set
+    # identically across nodes via deployment; converge on next restart. No
+    # runtime fan-out needed (the list changes rarely). Hot-reloadable via
+    # /admin/config/reload.
+    managed_tool_allowlist: []          # e.g. ["search_kb", "run_sql", "fetch_doc"]

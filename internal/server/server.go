@@ -533,6 +533,14 @@ func initMCPHandler(cfg *config.ConfigSnapshot) *mcp.Handler {
     }
     gw := mcp.NewMCPClusterGateway(gwCfg)
     gw.Start()
+    // #129 Gap 3: install the managed-MCP per-node tool allowlist from config.
+    // Empty = unrestricted; non-empty rejects unlisted tools at admission.
+    if len(cfg.Config.MCP.ManagedToolAllowlist) > 0 {
+        gw.SetManagedToolAllowlist(cfg.Config.MCP.ManagedToolAllowlist)
+        slog.Info("MCP managed tool allowlist wired",
+            "permitted_tools", len(cfg.Config.MCP.ManagedToolAllowlist),
+        )
+    }
     slog.Info("MCP cluster gateway initialized", "host", gwCfg.Host, "port", gwCfg.Port)
     return mcp.NewHandler(gw)
 }
@@ -951,6 +959,12 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     s.cfg = newCfg
     s.cfgMu.Unlock()
     s.buildMiddlewareChain()
+    // #129 Gap 3: propagate managed-MCP tool allowlist changes on hot-reload
+    // so toggling mcp.managed_tool_allowlist takes effect without a restart.
+    // No-op when MCP disabled (mcpHandler nil). Empty list = unrestricted.
+    if s.mcpHandler != nil {
+        s.mcpHandler.SetManagedToolAllowlist(newCfg.Config.MCP.ManagedToolAllowlist)
+    }
     slog.Info("middleware chain rebuilt on config reload")
 }
 

@@ -672,6 +672,14 @@ type MCPConfig struct {
     MaxRequests int    `mapstructure:"max_requests"`
     NodePort    int    `mapstructure:"node_port"`
     LocalPort   int    `mapstructure:"local_port"`
+    // #129 Gap 3: managed-MCP per-node tool allowlist. Enterprise MCP tool names
+    // permitted on this node. Enforced at the MCP admission path: a tool call
+    // whose name is NOT in this list is rejected (slog.Warn) when the list is
+    // non-empty. Empty = unrestricted (current behavior preserved). Declared
+    // per-node by design — no runtime fan-out needed; set identically across
+    // nodes via deployment, converge on next restart (Rule 2: no pub/sub
+    // subsystem for a single, rarely-changed consumer).
+    ManagedToolAllowlist []string `mapstructure:"managed_tool_allowlist"`
 }
 
 type Config struct {

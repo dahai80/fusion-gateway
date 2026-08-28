@@ -75,6 +75,12 @@ type MCPClusterGateway struct {
 	httpClient     *http.Client
 	running        bool
 	runningMu      sync.Mutex
+	// #129 Gap 3: managed-MCP per-node tool allowlist. nil/empty = unrestricted
+	// (admit every registered tool). When non-empty, HandleToolCall rejects a
+	// tool whose Name is not in the set before any forward. Guarded by its own
+	// mutex so hot-reload (SetManagedToolAllowlist) does not race admission.
+	managedAllowlist    map[string]bool
+	managedAllowlistMu  sync.RWMutex
 }
 
 type GatewayConfig struct {
@@ -84,6 +90,10 @@ type GatewayConfig struct {
 	MaxRequests int    `mapstructure:"max_requests"`
 	NodePort    int    `mapstructure:"node_port"`
 	LocalPort   int    `mapstructure:"local_port"`
+	// #129 Gap 3: enterprise tool names permitted on this node. Empty =
+	// unrestricted. Set identically across nodes via deployment; converge on
+	// next restart. No runtime fan-out (Rule 2: no pub/sub for one consumer).
+	ManagedToolAllowlist []string `mapstructure:"managed_tool_allowlist"`
 }
 
 func DefaultGatewayConfig() GatewayConfig {
@@ -125,6 +135,38 @@ func NewMCPClusterGateway(cfg GatewayConfig) *MCPClusterGateway {
 		tokenBudget:  cfg.TokenBudget,
 		httpClient:   &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// SetManagedToolAllowlist installs the #129 Gap 3 managed-MCP per-node tool
+// allowlist. Empty/nil = unrestricted (admit every registered tool). Used at
+// wiring time from config and on hot-reload so toggling the allowlist takes
+// effect without a restart. Concurrent-safe with HandleToolCall admission.
+func (g *MCPClusterGateway) SetManagedToolAllowlist(tools []string) {
+	set := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		set[t] = true
+	}
+	g.managedAllowlistMu.Lock()
+	g.managedAllowlist = set
+	g.managedAllowlistMu.Unlock()
+	slog.Info("MCP managed tool allowlist updated",
+		"count", len(set),
+		"restricted", len(set) > 0,
+	)
+}
+
+// admitTool is the #129 Gap 3 admission gate: returns true when the tool is
+// permitted under the managed allowlist. Empty allowlist = unrestricted (nil
+// guard). Non-empty = tool name must be present. Called from HandleToolCall
+// before token-budget + node selection so a rejected call never dials a node.
+func (g *MCPClusterGateway) admitTool(toolName string) bool {
+	g.managedAllowlistMu.RLock()
+	allow := g.managedAllowlist
+	g.managedAllowlistMu.RUnlock()
+	if len(allow) == 0 {
+		return true
+	}
+	return allow[toolName]
 }
 
 // SetAllowedNodes replaces the forwardToNode dial allowlist. "localhost" is
@@ -192,6 +234,20 @@ func (g *MCPClusterGateway) HandleToolCall(ctx context.Context, toolName string,
 		}
 	}
 	g.requestsMu.Unlock()
+
+	// #129 Gap 3: managed-MCP per-node tool allowlist admission. Empty list =
+	// unrestricted (current behavior). Non-empty = reject unlisted tool BEFORE
+	// token-budget + node selection so a denied call never dials a node.
+	if !g.admitTool(toolName) {
+		req.Status = MCPRequestFailed
+		req.Error = fmt.Sprintf("tool %s not in managed allowlist", toolName)
+		slog.Warn("MCP call rejected: tool not in managed allowlist",
+			"tool", toolName,
+			"source", source,
+			"request_id", requestID,
+		)
+		return map[string]interface{}{"error": fmt.Sprintf("tool %s is not permitted on this node", toolName)}
+	}
 
 	// check token budget
 	if g.tokenBudget <= 0 || g.totalTokenCount >= g.tokenBudget {

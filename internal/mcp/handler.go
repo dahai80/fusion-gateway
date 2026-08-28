@@ -19,6 +19,17 @@ func NewHandler(gateway *MCPClusterGateway) *Handler {
 	return &Handler{gateway: gateway}
 }
 
+// SetManagedToolAllowlist forwards the #129 Gap 3 managed-MCP tool allowlist
+// update to the underlying gateway. Called from server.RebuildMiddlewareChain
+// on config hot-reload so toggling mcp.managed_tool_allowlist takes effect
+// without a restart. No-op when MCP is disabled (gateway nil).
+func (h *Handler) SetManagedToolAllowlist(tools []string) {
+	if h == nil || h.gateway == nil {
+		return
+	}
+	h.gateway.SetManagedToolAllowlist(tools)
+}
+
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.register(mux, nil)
 }
