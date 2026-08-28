@@ -286,3 +286,61 @@ func TestRR11_AllProvidersUseCappedTransport(t *testing.T) {
     check("openai_compatible", NewOpenAICompatibleProvider("openai_compatible", cfg).httpClient)
     check("fusion_mlx", NewFusionMLXProvider(cfg, config.RoutingConfig{}).httpClient)
 }
+
+// TestR3_StreamClientUnboundedTimeout asserts the R3 audit fix: the stream
+// client must NOT carry an overall Client.Timeout (which caps full body read
+// and truncates long generation >120s), and its transport must set
+// ResponseHeaderTimeout so a dead upstream still fails fast at TTFB. The
+// non-stream client keeps the bounded Timeout. Assert wiring, not timing.
+func TestR3_StreamClientUnboundedTimeout(t *testing.T) {
+    cfg := config.BackendConfig{BaseURL: "http://127.0.0.1:1", APIKey: "k", Timeout: 120 * time.Second}
+
+    t.Run("openai_compatible", func(t *testing.T) {
+        p := NewOpenAICompatibleProvider("oc", cfg)
+        if p.streamHTTPClient == nil {
+            t.Fatal("streamHTTPClient nil")
+        }
+        if p.streamHTTPClient.Timeout != 0 {
+            t.Errorf("stream client Timeout: want 0 (unbounded body read), got %v", p.streamHTTPClient.Timeout)
+        }
+        if p.httpClient.Timeout == 0 {
+            t.Errorf("non-stream client Timeout: want >0 (bounded), got 0")
+        }
+        tpt, ok := p.streamHTTPClient.Transport.(*http.Transport)
+        if !ok {
+            t.Fatalf("stream Transport not *http.Transport: %T", p.streamHTTPClient.Transport)
+        }
+        if tpt.ResponseHeaderTimeout != cfg.Timeout {
+            t.Errorf("ResponseHeaderTimeout: want %v, got %v", cfg.Timeout, tpt.ResponseHeaderTimeout)
+        }
+    })
+
+    t.Run("fusion_mlx", func(t *testing.T) {
+        p := NewFusionMLXProvider(cfg, config.RoutingConfig{})
+        if p.streamHTTPClient == nil {
+            t.Fatal("streamHTTPClient nil")
+        }
+        if p.streamHTTPClient.Timeout != 0 {
+            t.Errorf("stream client Timeout: want 0 (unbounded body read), got %v", p.streamHTTPClient.Timeout)
+        }
+        if p.httpClient.Timeout == 0 {
+            t.Errorf("non-stream client Timeout: want >0 (bounded), got 0")
+        }
+        tpt, ok := p.streamHTTPClient.Transport.(*http.Transport)
+        if !ok {
+            t.Fatalf("stream Transport not *http.Transport: %T", p.streamHTTPClient.Transport)
+        }
+        if tpt.ResponseHeaderTimeout != cfg.Timeout {
+            t.Errorf("ResponseHeaderTimeout: want %v, got %v", cfg.Timeout, tpt.ResponseHeaderTimeout)
+        }
+    })
+
+    t.Run("anthropic_template", func(t *testing.T) {
+        // The original dual-client pattern anthropic.go pioneered — assert it
+        // still holds the invariant R3 replicated into the other two providers.
+        p := NewAnthropicProvider("anthropic", cfg)
+        if p.streamHTTPClient.Timeout != 0 {
+            t.Errorf("anthropic stream Timeout: want 0, got %v", p.streamHTTPClient.Timeout)
+        }
+    })
+}

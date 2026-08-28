@@ -20,7 +20,8 @@ type OpenAICompatibleProvider struct {
     name      string
     baseURL   string
     apiKey    string
-    httpClient *http.Client
+    httpClient       *http.Client
+    streamHTTPClient *http.Client
 }
 
 func NewOpenAICompatibleProvider(name string, backendCfg config.BackendConfig) *OpenAICompatibleProvider {
@@ -29,11 +30,29 @@ func NewOpenAICompatibleProvider(name string, backendCfg config.BackendConfig) *
         timeout = 120 * time.Second
     }
 
+    // R3 (audit): streamHTTPClient has no overall Timeout (Client.Timeout caps
+    // the full request incl. body read, truncating long generation >120s and
+    // making the 180s idle watchdog dead code for header-stall). Clone the
+    // capped transport and keep ResponseHeaderTimeout so a dead upstream still
+    // fails fast at TTFB; the streamed body runs unbounded until the upstream
+    // closes naturally or ctx/per-request deadline (R9) cancels. Mirrors the
+    // anthropic.go dual-client. Non-stream Chat keeps the bounded httpClient.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport, ok := baseTransport.(*http.Transport)
+    if !ok {
+        slog.Warn("TransportForBackend not *http.Transport, stream client cannot set ResponseHeaderTimeout", "backend", backendCfg.BaseURL)
+        streamTransport = &http.Transport{ResponseHeaderTimeout: timeout, Proxy: http.ProxyFromEnvironment}
+    } else {
+        streamTransport = streamTransport.Clone()
+        streamTransport.ResponseHeaderTimeout = timeout
+    }
+
     return &OpenAICompatibleProvider{
-        name:      name,
-        baseURL:   backendCfg.BaseURL,
-        apiKey:    backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+        name:             name,
+        baseURL:          backendCfg.BaseURL,
+        apiKey:           backendCfg.APIKey,
+        httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
+        streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
     }
 }
 
@@ -120,7 +139,10 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
     }
     InjectFusionHeaders(ctx, httpReq)
 
-    resp, err := p.httpClient.Do(httpReq)
+    // R3 (audit): stream path uses the unbounded-timeout client so long
+    // generation is not truncated at 120s; TTFB is still bounded by the cloned
+    // transport's ResponseHeaderTimeout.
+    resp, err := p.streamHTTPClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("stream chat request failed: %w", err)
     }

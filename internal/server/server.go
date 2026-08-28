@@ -130,6 +130,51 @@ type Server struct {
     // upstream reads while in-flight responses still flush.
     shutdownCtx    context.Context
     shutdownCancel context.CancelFunc
+    // R4 (audit): build-time version/commit, stamped by main.go via SetVersion
+    // and surfaced on /v1/status. Defaults until SetVersion is called.
+    version string
+    commit  string
+}
+
+// SetVersion stamps the build-time version + commit onto the server so /v1/status
+// reports the running binary. Called from main.go right after server.New.
+func (s *Server) SetVersion(version, commit string) {
+    s.version = version
+    s.commit = commit
+    slog.Info("gateway build version", "version", version, "commit", commit)
+}
+
+// setupLogging configures the global slog default from the server.log_level
+// config knob (R5 audit fix). Before this, log_level was dead config — slog
+// stayed at Info no matter what. Call once at startup; unknown levels fall
+// back to Info with a warning so a typo never silently disables logging.
+func setupLogging(logLevel string) {
+    level, known := parseLevel(logLevel)
+    if !known {
+        // Warn via a fresh Info-level handler BEFORE SetDefault so the message
+        // is always visible even when the (unknown) level would have hidden it.
+        slog.Warn("unknown log_level, falling back to info", "configured", logLevel)
+    }
+    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+    slog.SetDefault(slog.New(handler))
+}
+
+// parseLevel maps a config log_level string to an slog.Level. Returns known=false
+// for anything outside the accepted set so the caller can warn; empty defaults
+// to Info silently (the common no-config path).
+func parseLevel(logLevel string) (slog.Level, bool) {
+    switch strings.ToLower(strings.TrimSpace(logLevel)) {
+    case "debug":
+        return slog.LevelDebug, true
+    case "warn", "warning":
+        return slog.LevelWarn, true
+    case "error":
+        return slog.LevelError, true
+    case "", "info":
+        return slog.LevelInfo, true
+    default:
+        return slog.LevelInfo, false
+    }
 }
 
 func (s *Server) SetClusterDiscovery(d interface {
@@ -236,6 +281,12 @@ func New(
     tokEngine *tokenizer.Engine,
     cfgPath string,
 ) *Server {
+    // R5 (audit): wire config log_level to the global slog default. Without
+    // this, the server log_level knob was dead config — slog defaulted to
+    // Info regardless. Static at startup; a hot-reload of log_level needs a
+    // re-SetDefault (documented in runbook, out of scope here).
+    setupLogging(cfg.Config.Server.LogLevel)
+
     var rp *realtime.Proxy
     if cfg.Config.Realtime.Enabled {
         rp = realtime.NewProxy(

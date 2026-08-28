@@ -23,6 +23,16 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
+// R4 (audit): build-time version stamping. Defaults let a plain `go build` run
+// (version="dev"); the release workflow injects real values via ldflags:
+//   -ldflags "-X main.version=v0.8.46 -X main.commit=$(git rev-parse --short HEAD)"
+// Surfaced on /v1/status via server.SetVersion so the running binary reports
+// what it is, not just config_version.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 // safeGo launches a goroutine with panic recovery to prevent process crash
 func safeGo(name string, fn func()) {
 	go func() {
@@ -226,6 +236,9 @@ func run(configPath string) error {
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
 	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, configPath)
+	// R4 (audit): stamp build-time version/commit onto the server so /v1/status
+	// reports the running binary, not just config_version.
+	srv.SetVersion(version, commit)
 
 	stopCh := make(chan struct{})
 

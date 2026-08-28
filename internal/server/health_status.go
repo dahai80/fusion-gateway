@@ -188,6 +188,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
         "status":         "ok",
         "uptime_seconds": int(time.Since(s.startTime).Seconds()),
         "config_version": s.cfg.Version,
+        // R4 (audit): surface the running binary version/commit (build-time
+        // ldflags), not just config_version, so operators can confirm the
+        // deployed artifact. Defaults to "dev"/"unknown" on a plain go build.
+        "version":        s.version,
+        "commit":         s.commit,
         "backends":       s.buildBackendStatus(r.Context()),
         "hardware":       s.buildHardwareStatus(hwMetrics),
         "circuit_breakers": map[string]string{

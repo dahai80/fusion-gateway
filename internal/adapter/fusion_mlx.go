@@ -33,6 +33,7 @@ type FusionMLXProvider struct {
     baseURL          string
     apiKey           string
     httpClient       *http.Client
+    streamHTTPClient *http.Client
     inFlightCounter  atomic.Int64
     maxConcurrent    int64
     lastGCTime       atomic.Int64
@@ -66,10 +67,26 @@ func NewFusionMLXProvider(backendCfg config.BackendConfig, routingCfg config.Rou
     if maxConcurrent < 0 {
         maxConcurrent = 0
     }
+    // R3 (audit): streamHTTPClient has no overall Timeout so local long
+    // generation (large max_tokens, reasoning models) is not truncated at 120s
+    // and the 180s idle watchdog becomes real protection. Clone the capped
+    // transport, keep ResponseHeaderTimeout for fast TTFB-fail. Mirrors
+    // anthropic.go / openai_compatible.go dual-client. Non-stream keeps bounded.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport, ok := baseTransport.(*http.Transport)
+    if !ok {
+        slog.Warn("TransportForBackend not *http.Transport, stream client cannot set ResponseHeaderTimeout", "backend", backendCfg.BaseURL)
+        streamTransport = &http.Transport{ResponseHeaderTimeout: timeout, Proxy: http.ProxyFromEnvironment}
+    } else {
+        streamTransport = streamTransport.Clone()
+        streamTransport.ResponseHeaderTimeout = timeout
+    }
+
     return &FusionMLXProvider{
         baseURL:          base,
         apiKey:           backendCfg.APIKey,
-        httpClient:       &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+        httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
+        streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
         maxConcurrent:    maxConcurrent,
         cfg:              backendCfg.GC,
         routeHeader:      routingCfg.Negotiation.RouteHeader,
@@ -323,7 +340,10 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     }
     InjectFusionHeaders(ctx, httpReq)
 
-    resp, err := p.httpClient.Do(httpReq)
+    // R3 (audit): stream path uses the unbounded-timeout client so long local
+    // generation is not truncated at 120s; TTFB still bounded by the cloned
+    // transport's ResponseHeaderTimeout.
+    resp, err := p.streamHTTPClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("stream chat request failed: %w", err)
     }
