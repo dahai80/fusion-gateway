@@ -80,6 +80,7 @@ type AnthropicImageSource struct {
 }
 
 type AnthropicTool struct {
+    Type        string          `json:"type,omitempty"`
     Name        string          `json:"name"`
     Description string          `json:"description,omitempty"`
     InputSchema json.RawMessage `json:"input_schema"`

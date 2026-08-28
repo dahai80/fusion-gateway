@@ -198,6 +198,7 @@ type RoutingConfig struct {
     Mode                      string               `mapstructure:"mode"`
     DefaultModel              string               `mapstructure:"default_model"`
     TokenThreshold            int                  `mapstructure:"token_threshold"`
+    ModelContextLimit         map[string]int       `mapstructure:"model_context_limit"`
     OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
     OutputInputRatioMinInputTokens int             `mapstructure:"output_input_ratio_min_input_tokens"`
     RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
@@ -487,14 +488,12 @@ type TokenizerConfig struct {
 
 type ObservabilityConfig struct {
     LogFormat             string `mapstructure:"log_format"`
+    // S3: log_file enables structured-log mirroring to a rotating file via
+    // lumberjack (in addition to stderr), so logs are no longer an unbounded
+    // stderr stream. Empty = stderr only (default). log_rotation_max_size is the
+    // per-file cap in MiB before rotation; log_rotation_max_backups is how many
+    // rotated files to retain. Defaults applied in DefaultConfig (100 MiB / 7).
     LogFile               string `mapstructure:"log_file"`
-    // S3 (audit SHOULD): log_rotation_max_size / log_rotation_max_backups are
-    // declared + parsed from config.yaml but have NO consumer — setupLogging
-    // writes structured logs to stderr only (no file handler, no rotation).
-    // Kept as struct fields so an operator's existing config.yaml still parses
-    // without a decode error (graceful ignore); marked deprecated so a future
-    // file-logging implementation wires these before relying on them. Do NOT
-    // surface as editable in the admin config surface until consumed.
     LogRotationMaxSize    int    `mapstructure:"log_rotation_max_size"`
     LogRotationMaxBackups int    `mapstructure:"log_rotation_max_backups"`
     MetricsEnabled        bool   `mapstructure:"metrics_enabled"`
@@ -983,6 +982,28 @@ func validate(cfg *Config) error {
 
     if cfg.Routing.TokenThreshold <= 0 {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
+    }
+
+    // RC3: per-model context-limit map. Values must be positive; a zero/negative
+    // limit would either never trigger or reject every request. Empty map = opt-out
+    // (backward-compatible, no cap enforced).
+    for model, limit := range cfg.Routing.ModelContextLimit {
+        if limit <= 0 {
+            return fmt.Errorf("model_context_limit[%q] must be positive, got: %d", model, limit)
+        }
+    }
+
+    // S3: when file logging is enabled, rotation knobs must be sane. A zero or
+    // negative max_size would make lumberjack never rotate (unbounded file, the
+    // exact bug S3 fixes); a negative backup count is meaningless. Empty log_file
+    // = stderr-only opt-out, so these only matter when a file is configured.
+    if strings.TrimSpace(cfg.Observability.LogFile) != "" {
+        if cfg.Observability.LogRotationMaxSize <= 0 {
+            return fmt.Errorf("observability.log_rotation_max_size must be positive when log_file is set, got: %d", cfg.Observability.LogRotationMaxSize)
+        }
+        if cfg.Observability.LogRotationMaxBackups < 0 {
+            return fmt.Errorf("observability.log_rotation_max_backups must be non-negative when log_file is set, got: %d", cfg.Observability.LogRotationMaxBackups)
+        }
     }
 
     if cfg.Routing.Mode != "" && cfg.Routing.Mode != "local" && cfg.Routing.Mode != "cloud" && cfg.Routing.Mode != "hybrid" {
@@ -1564,6 +1585,13 @@ func DefaultConfig() Config {
                 DeviationThreshold:  0.02,
                 AutoSwitchThreshold: 0.05,
             },
+        },
+        Observability: ObservabilityConfig{
+            // S3: sane rotation defaults so enabling log_file does not create an
+            // unbounded file. Applied here (not via zero-value) so an operator's
+            // config.yaml omitting the keys still gets bounded rotation.
+            LogRotationMaxSize:    100,
+            LogRotationMaxBackups: 7,
         },
         Admin: &AdminConfig{
             // RR1 (audit P0): admin dashboard disabled by default. Enabling

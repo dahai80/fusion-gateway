@@ -84,6 +84,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     budget := s.tokEngine.EstimateBudget(inputTokens, req.MaxTokens, req.Model, req.Tools != nil, req.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
+    // RC3: reject oversized requests before the cloud call instead of letting the
+    // cloud model 400 (ContextWindowExceededError) and masking it as a 502.
+    if s.enforceModelContextLimit(w, r, req.Model, budget) {
+        return
+    }
+
     // #120 multimodal guard: an image_url content block is invisible to the
     // router's text-only signal (extractTextContent only keeps string Content,
     // so RouteRequest.Text drops image parts), so without this guard a
@@ -945,6 +951,12 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
     budget := s.tokEngine.EstimateBudget(inputTokens, chatReq.MaxTokens, chatReq.Model, chatReq.Tools != nil, chatReq.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
+    // RC3: reject oversized requests before the cloud call instead of letting the
+    // cloud model 400 (ContextWindowExceededError) and masking it as a 502.
+    if s.enforceModelContextLimit(w, r, chatReq.Model, budget) {
+        return
+    }
+
     routeReq := &router.RouteRequest{
         Model:  chatReq.Model,
         Text:   textContent,
@@ -1010,6 +1022,15 @@ func writeChatFailedError(w http.ResponseWriter, prefix string, err error) {
             detail = detail[:512]
         }
     }
+    status := http.StatusBadGateway
+    errType := "server_error"
+    // RC3: an upstream context-window-exceeded error is a client fault (oversized
+    // prompt), not a server fault. Surface it as 400 so the client shrinks the
+    // prompt instead of the gateway masking it as a 502 (11x in the logs).
+    if isContextLengthError(err) {
+        status = http.StatusBadRequest
+        errType = "context_length_exceeded"
+    }
     body, _ := json.Marshal(struct {
         Error struct {
             Message string `json:"message"`
@@ -1021,10 +1042,10 @@ func writeChatFailedError(w http.ResponseWriter, prefix string, err error) {
             Type    string `json:"type"`
         }{
             Message: prefix + ": " + detail,
-            Type:    "server_error",
+            Type:    errType,
         },
     })
-    http.Error(w, string(body), http.StatusBadGateway)
+    http.Error(w, string(body), status)
 }
 
 func extractTextContent(messages []adapter.ChatMessage) string {
@@ -1095,64 +1116,3 @@ func chatRequestHasImage(req *adapter.ChatRequest) bool {
     return false
 }
 
-// multimodalRouteDecision returns a forced RouteDecision for a multimodal
-// /v1/chat/completions request, or nil when the request is text-only (fall
-// through to the normal rule chain). Local-first: when routing.multimodal.
-// local_model is set AND that model is loaded on the local fusion-mlx node,
-// force LocalBackend with the request model rewritten to the vision model.
-// Cloud fallback (#120): when local is unavailable but cloud_backend +
-// cloud_model are set, force CloudBackend with CloudTarget=cloud_backend and
-// the request model rewritten to the cloud VLM model. When neither path is
-// available the request is rejected with a clear 400 naming the missing knob
-// instead of a masked text-only 400-as-502. The caller (handleChatCompletions)
-// writes the 400; this helper signals rejection via a sentinel decision with
-// Reason=="multimodal_unconfigured" that the caller checks before forwarding.
-func (s *Server) multimodalRouteDecision(req *adapter.ChatRequest) *router.RouteDecision {
-    if !chatRequestHasImage(req) {
-        return nil
-    }
-    mm := s.cfg.Config.Routing.Multimodal
-    // Local-first: force the local vision model when it is actually loaded.
-    if vlModel := strings.TrimSpace(mm.LocalModel); vlModel != "" {
-        if s.localVisionModelLoaded(vlModel) {
-            slog.Info("chat multimodal request forced to local vision model",
-                "client_model", req.Model, "vision_model", vlModel)
-            req.Model = vlModel
-            return &router.RouteDecision{Backend: router.LocalBackend, Reason: "multimodal_local_vision"}
-        }
-        slog.Info("chat multimodal local vision model not loaded, trying cloud fallback",
-            "vision_model", vlModel)
-    }
-    // Cloud fallback (#120): route to the configured cloud VLM backend+model.
-    cloudBackend := strings.TrimSpace(mm.CloudBackend)
-    cloudModel := strings.TrimSpace(mm.CloudModel)
-    if cloudBackend != "" && cloudModel != "" {
-        slog.Info("chat multimodal request routed to cloud VLM",
-            "client_model", req.Model, "cloud_backend", cloudBackend, "cloud_model", cloudModel)
-        req.Model = cloudModel
-        return &router.RouteDecision{Backend: router.CloudBackend, Reason: "multimodal_cloud_vlm", CloudTarget: cloudBackend}
-    }
-    // Neither path available: signal rejection (caller writes the 400).
-    return &router.RouteDecision{Backend: router.CloudBackend, Reason: "multimodal_unconfigured"}
-}
-
-// localVisionModelLoaded reports whether the given vision model id is loaded
-// on the local fusion-mlx node. Returns false when no fusion-mlx provider is
-// configured or the model is absent from its loaded model set. The model set
-// is refreshed periodically (cmd/gateway/main.go safeGo loop) from fusion-mlx
-// /v1/models, so this reflects the live loaded state, not just config.
-func (s *Server) localVisionModelLoaded(model string) bool {
-    mlx := s.pool.GetFusionMLX()
-    if mlx == nil {
-        return false
-    }
-    loaded := mlx.ModelSet()
-    return loaded != nil && loaded[model]
-}
-
-// multimodalUnconfigured reports whether a decision is the #120 sentinel that
-// means "multimodal request but no local vision model and no cloud VLM
-// configured" — the caller must reject with a clear 400 rather than forward.
-func multimodalUnconfigured(d *router.RouteDecision) bool {
-    return d != nil && d.Reason == "multimodal_unconfigured"
-}

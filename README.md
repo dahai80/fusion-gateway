@@ -1146,6 +1146,21 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.51 — Log root-cause sweep (RC2/RC1/RC3/RC4/S3)
+
+Fixes the five root causes that turned cloud outages into client-visible 502s across two days of gateway logs (Task C log analysis). Ordered by client-502 count. All fixes reuse existing breakers/helpers — no new abstractions, no API-shape change (the new 400s are honest status-only responses, not shape changes). RC5 (invalid model) was out of scope (caller-side) and excluded.
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **RC2 (984×) — cloud breaker queried, cluster→local fallback** | Cloud-forcing routing rules (P0.5 hardware error, P1/P1.5/P2/P2.5 memory+swap overload, P3 local-not-ready, P4 token budget, P4.5 ratio tiers) returned `CloudBackend` without ever querying the cloud circuit breaker. The breaker `e.breakers["cloud"]` was fed failures and tripped, but `decideLocked` never read its state → every cloud-forced request during a cloud outage hit a dead cloud → 502. New `cloudOrFallbackLocked` helper: cloud breaker closed → cloud (unchanged); **open → cluster-first then local** (user's local-first choice). Applies to every cloud-forcing return site. |
+| 2 | **RC1 (88×) — built-in server-side tools stripped** | Built-in server-side tools (`{"type":"web_search_20250305","name":"web_search"}`) decoded with `type` dropped (no `Type` field on `AnthropicTool`) but the entry survived as a malformed tool → the orphan-`tool_choice` strip (fires only when `len(Tools)==0`) never fired → `tool_choice:"auto"` + malformed tool forwarded → glm5.2/vLLM 400 → 502. Added `Type` field to `AnthropicTool`; filter strips any tool with `Type!=""` (built-in) or empty `InputSchema` (malformed) before the existing orphan-strip, which then naturally strips the orphaned `tool_choice`. Mixed (built-in + real) keeps real tools. Bedrock/vertex/foundry inherit the fix (strip runs in the handler before provider resolution). |
+| 3 | **RC3 (11×) — per-model context-limit cap + honest 400** | No per-model context-limit map → oversized requests reached cloud, glm5.2 `ContextWindowExceededError` 400, masked as 502. New `routing.model_context_limit` map (e.g. `{glm5.2: 128000}`); shared `enforceModelContextLimit` rejects oversized requests with an honest 400 `{"type":"context_length_exceeded"}` before routing (both `/v1/chat/completions` and `/v1/messages`). `isContextLengthError` also surfaces upstream context-window errors as 400 instead of 502 on the failure paths. |
+| 4 | **RC4 (34×) — unified multimodal guard, /v1/messages gets cloud VLM fallback** | `/v1/chat/completions` had the richer guard (loaded-check → cloud VLM fallback → honest 400); `/v1/messages` had a weaker guard (forced local, 400 if no vision model, **no loaded-check, no cloud VLM fallback**) → image requests leaked to text-only cloud → 502. Extracted shared `multimodalDecisionFor` into `internal/server/multimodal.go`; both endpoints now apply identical logic: local vision model if loaded → cloud VLM if configured → honest 400 sentinel. `/v1/messages` gains the cloud VLM fallback it was missing. |
+| 5 | **S3 — file logging + lumberjack rotation wired** | `setupLogging` wrote stderr only, no file, no rotation → 103.6 MiB unbounded stderr; the `observability.log_file`/`log_rotation_*` config fields were dead (deprecated v0.8.50-rc1). Un-deprecated the fields, wired `lumberjack` into `setupLogging` (MultiWriter stderr+file, `MaxSize`/`MaxBackups`/`Compress`), defaults 100 MB / 7 backups, `config.Validate` range-checks when `log_file` is set. |
+| 6 | **helm lockstep 0.8.50→0.8.51** | `deploy/helm/fusion-gateway/Chart.yaml` `version` + `appVersion` bumped to 0.8.51 (R14 lockstep). |
+
+**Verify**: `check_bare_goroutines.sh` OK; `go vet ./...` clean; `go build ./...` OK; `go test ./... -count=1 -race` all 24 packages green (incl. router RC2, server RC1/RC3/RC4/S3, config).
+
 ### v0.8.50 — Non-blocking audit SHOULD/NICE (S2/S3/N1-N5)
 
 Clears the 7 non-blocking SHOULD/NICE items from the product audit (`audit/fusion-gateway-audit-result-product-0828.md`). The verdict was upgraded Conditional-Go → Go after the v0.8.49 M1/M2/S1 blockers shipped; these are hardening/correctness sweeps that close the remaining SHOULD/NICE tier so the audit is fully remediated at the code layer.

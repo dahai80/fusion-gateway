@@ -3635,6 +3635,139 @@ func TestAnthropicMessages_PreservesToolChoiceWithTools(t *testing.T) {
     slog.Info("TestAnthropicMessages_PreservesToolChoiceWithTools passed", "captured_len", len(capturedBody))
 }
 
+// RC1 (88x 502 root cause #2): a built-in server-side tool entry
+// ({"type":"web_search_20250305","name":"web_search"}) decodes with `type` preserved
+// but no input_schema. The gateway is not a server-side-tool host, so forwarding it
+// + tool_choice makes glm5.2/vLLM reject "tool_choice requires tools" -> 400 -> 502.
+// The built-in tool must be stripped; once all tools are gone the orphan-strip
+// drops tool_choice too.
+func TestRC1_BuiltinToolStripped(t *testing.T) {
+    var capturedBody []byte
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        capturedBody, _ = io.ReadAll(r.Body)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(adapter.AnthropicResponse{
+            ID:      "msg_1",
+            Type:    "message",
+            Role:    "assistant",
+            Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "ok"}},
+            Model:   "claude-3",
+            Usage:   adapter.AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        })
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    antProvider := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    s.pool.Register("test-cloud", antProvider, config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    antBody := `{"model":"claude-3","messages":[{"role":"user","content":"search"}],"stream":false,"max_tokens":100,"tool_choice":"auto","tools":[{"type":"web_search_20250305","name":"web_search"}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (built-in tool stripped, degraded to plain gen), got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if bytes.Contains(capturedBody, []byte("web_search")) {
+        t.Errorf("built-in tool must be stripped before forward, body contains it: %s", string(capturedBody))
+    }
+    if bytes.Contains(capturedBody, []byte("tool_choice")) {
+        t.Errorf("tool_choice must be stripped when all tools were built-in, body contains it: %s", string(capturedBody))
+    }
+}
+
+// RC1 no-regression: a real client tool (no `type`, has input_schema) survives the
+// built-in filter, and its tool_choice is preserved.
+func TestRC1_RealToolPreserved(t *testing.T) {
+    var capturedBody []byte
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        capturedBody, _ = io.ReadAll(r.Body)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(adapter.AnthropicResponse{
+            ID:      "msg_1",
+            Type:    "message",
+            Role:    "assistant",
+            Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "ok"}},
+            Model:   "claude-3",
+            Usage:   adapter.AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        })
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    antProvider := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    s.pool.Register("test-cloud", antProvider, config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    antBody := `{"model":"claude-3","messages":[{"role":"user","content":"weather"}],"stream":false,"max_tokens":100,"tool_choice":"auto","tools":[{"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if !bytes.Contains(capturedBody, []byte("get_weather")) {
+        t.Errorf("real tool must be preserved, missing from body: %s", string(capturedBody))
+    }
+    if !bytes.Contains(capturedBody, []byte("tool_choice")) {
+        t.Errorf("tool_choice with real tool must be preserved, missing from body: %s", string(capturedBody))
+    }
+}
+
+// RC1 mixed: built-in + real tool in one request. Built-in is stripped, real tool
+// + tool_choice are kept (the request still has a valid tool, so no orphan-strip).
+func TestRC1_MixedToolsKeepReal(t *testing.T) {
+    var capturedBody []byte
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        capturedBody, _ = io.ReadAll(r.Body)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(adapter.AnthropicResponse{
+            ID:      "msg_1",
+            Type:    "message",
+            Role:    "assistant",
+            Content: []adapter.AnthropicContentBlock{{Type: "text", Text: "ok"}},
+            Model:   "claude-3",
+            Usage:   adapter.AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+        })
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    antProvider := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    s.pool.Register("test-cloud", antProvider, config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+
+    antBody := `{"model":"claude-3","messages":[{"role":"user","content":"go"}],"stream":false,"max_tokens":100,"tool_choice":"auto","tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(antBody))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+    }
+    if bytes.Contains(capturedBody, []byte("web_search")) {
+        t.Errorf("built-in tool must be stripped, body contains it: %s", string(capturedBody))
+    }
+    if !bytes.Contains(capturedBody, []byte("get_weather")) {
+        t.Errorf("real tool must be kept in mixed request, missing from body: %s", string(capturedBody))
+    }
+    if !bytes.Contains(capturedBody, []byte("tool_choice")) {
+        t.Errorf("tool_choice must be kept (real tool present), missing from body: %s", string(capturedBody))
+    }
+}
+
 // --- handleNonStreamAnthropicMessages directly with real AnthropicProvider ---
 
 func TestHandleNonStreamAnthropicMessages(t *testing.T) {

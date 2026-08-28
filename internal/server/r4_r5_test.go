@@ -3,10 +3,15 @@ package server
 // R4 (version visibility) + R5 (log_level→slog) audit-fix tests.
 
 import (
+    "compress/gzip"
     "encoding/json"
+    "io"
     "log/slog"
     "net/http"
     "net/http/httptest"
+    "os"
+    "path/filepath"
+    "strings"
     "testing"
     "time"
 
@@ -133,7 +138,91 @@ func TestR5_ParseLevel(t *testing.T) {
 // every accepted + unknown level and sets a non-nil default handler.
 func TestR5_SetupLogging_NoPanic(t *testing.T) {
     for _, lvl := range []string{"debug", "info", "warn", "error", "", "garbage"} {
-        // Must not panic on any input.
-        setupLogging(lvl)
+        // Must not panic on any input. Empty logFile = stderr-only (S3 default).
+        setupLogging(lvl, "", 100, 7)
     }
+}
+
+// TestS3_FileLoggingWritesAndRotates verifies the S3 fix: when observability.
+// log_file is set, structured logs are mirrored to a rotating file via
+// lumberjack. A written slog.Info line lands in the file; exceeding max_size
+// triggers a rotation backup. Cleans up temp dir after (process-data rule).
+func TestS3_FileLoggingWritesAndRotates(t *testing.T) {
+    tmpDir := t.TempDir()
+    logFile := filepath.Join(tmpDir, "gateway.log")
+
+    // maxSize=1 MiB. A single line larger than MaxSize is rejected wholesale by
+    // lumberjack (no rotation, write dropped), so cross the cap the realistic way:
+    // many medium lines that accumulate past the boundary and trigger rotation.
+    setupLogging("info", logFile, 1, 3)
+
+    slog.Info("s3-probe-marker")
+    for i := 0; i < 200; i++ {
+        slog.Info("s3-rotate-trigger", "seq", i, "payload", strings.Repeat("x", 16*1024))
+    }
+
+    // The active file must exist and carry the marker line.
+    data, err := os.ReadFile(logFile)
+    if err != nil {
+        t.Fatalf("expected log file %s to exist, got error: %v", logFile, err)
+    }
+    if !strings.Contains(string(data), "s3-probe-marker") && !fileContainsMarker(t, tmpDir, "s3-probe-marker") {
+        t.Fatalf("expected marker 's3-probe-marker' in the active log or a rotated backup, active file: %s", string(data))
+    }
+
+    // A rotation backup must appear (lumberjack names backups <file>-<timestamp>.gz
+    // or <file>.1 when compress is on). At least one extra file beyond the active.
+    entries, err := os.ReadDir(tmpDir)
+    if err != nil {
+        t.Fatalf("read temp dir: %v", err)
+    }
+    if len(entries) < 2 {
+        t.Fatalf("expected at least 2 files (active + rotated backup) after 3+ MiB accumulated writes, got %d", len(entries))
+    }
+    // t.TempDir auto-cleans; nothing else to remove.
+}
+
+// fileContainsMarker scans rotated backups in dir for the marker string.
+// Lumberjack compresses rotated backups (.gz), so gzip files are decompressed
+// before scanning; plain files are scanned as-is.
+func fileContainsMarker(t *testing.T, dir, marker string) bool {
+    t.Helper()
+    entries, err := os.ReadDir(dir)
+    if err != nil {
+        return false
+    }
+    for _, e := range entries {
+        if e.IsDir() {
+            continue
+        }
+        name := e.Name()
+        path := filepath.Join(dir, name)
+        var data []byte
+        if strings.HasSuffix(name, ".gz") {
+            f, err := os.Open(path)
+            if err != nil {
+                continue
+            }
+            gz, err := gzip.NewReader(f)
+            if err != nil {
+                f.Close()
+                continue
+            }
+            data, err = io.ReadAll(gz)
+            f.Close()
+            gz.Close()
+            if err != nil {
+                continue
+            }
+        } else {
+            data, err = os.ReadFile(path)
+            if err != nil {
+                continue
+            }
+        }
+        if strings.Contains(string(data), marker) {
+            return true
+        }
+    }
+    return false
 }

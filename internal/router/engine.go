@@ -795,29 +795,20 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     if hwMetrics.CollectionError != nil && cfg.Config.Hardware.CollectionErrorProtection {
         slog.Error("hardware metrics collection error, refusing local routing",
             "error", hwMetrics.CollectionError)
-        if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-            return decision
-        }
-        return &RouteDecision{Backend: CloudBackend, Reason: "metrics_collection_error"}
+        return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "metrics_collection_error"})
     }
 
     // P1: System memory overload
     if hwMetrics.MemoryUsedRatio > cfg.Config.Routing.LocalPriority.MaxSystemMemoryRatio {
         *trips = append(*trips, "memory_overload")
-        if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-            return decision
-        }
-        return &RouteDecision{Backend: CloudBackend, Reason: "memory_overload"}
+        return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "memory_overload"})
     }
 
     // P1.5: MLX memory overload (independent check)
     if hwMetrics.MLXActiveMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         mlxRatio := float64(hwMetrics.MLXActiveMemory) / float64(hwMetrics.GPUInUseMemory)
         if mlxRatio > cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio {
-            if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-                return decision
-            }
-            return &RouteDecision{Backend: CloudBackend, Reason: "mlx_memory_overload"}
+            return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "mlx_memory_overload"})
         }
     }
 
@@ -825,29 +816,20 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     swapThreshold := cfg.Config.Routing.LocalPriority.SwapPageRateThreshold
     if hwMetrics.SwapPageInRate > swapThreshold || hwMetrics.SwapPageOutRate > swapThreshold {
         *trips = append(*trips, "swap_thrashing")
-        if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-            return decision
-        }
-        return &RouteDecision{Backend: CloudBackend, Reason: "swap_thrashing"}
+        return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "swap_thrashing"})
     }
 
     // P2.5: GPU memory low
     if hwMetrics.GPUAllocMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
         gpuAvail := hwMetrics.GPUAllocMemory - hwMetrics.GPUInUseMemory
         if gpuAvail < uint64(float64(hwMetrics.GPUAllocMemory)*0.2) {
-            if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-                return decision
-            }
-            return &RouteDecision{Backend: CloudBackend, Reason: "gpu_memory_low"}
+            return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "gpu_memory_low"})
         }
     }
 
     // P3: Local not ready
     if !snap.localReady {
-        if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
-            return decision
-        }
-        return &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"}
+        return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"})
     }
 
     // P3.5: Local-exclusive model guard (issue #83)
@@ -884,7 +866,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     budget, ok := tokenizer.BudgetFromContext(ctx)
     if !ok {
         slog.Warn("token budget not found in context, defaulting to cloud")
-        return &RouteDecision{Backend: CloudBackend, Reason: "token_budget_missing"}
+        return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "token_budget_missing"})
     }
     // L4 fix: zero-token (empty prompt) should route local, not waste cloud quota
     if budget.InputTokens == 0 {
@@ -905,7 +887,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                 )
             }
         }
-        return decision
+        return e.cloudOrLocalLocked(req, decision)
     }
 
     // P4.5: Output/Input ratio routing
@@ -936,7 +918,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                     "input_tokens", budget.InputTokens,
                     "predict_output_tokens", budget.PredictOutputTokens,
                 )
-                return &RouteDecision{Backend: CloudBackend, Reason: "ratio_tier_matched", CloudTarget: target}
+                return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "ratio_tier_matched", CloudTarget: target})
             }
         }
 
@@ -949,7 +931,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                 "input_tokens", budget.InputTokens,
                 "predict_output_tokens", budget.PredictOutputTokens,
             )
-            return &RouteDecision{Backend: CloudBackend, Reason: "output_input_ratio_exceeded"}
+            return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "output_input_ratio_exceeded"})
         }
     }
 
@@ -1116,6 +1098,35 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string, snap
     slog.Info("routing to cluster node",
         "node_id", nodeID, "strategy", strategy, "model", model)
     return &RouteDecision{Backend: ClusterBackend, Reason: "cluster_fallback", NodeID: nodeID}
+}
+
+// cloudOrLocalLocked returns the caller-built cloud decision when the cloud breaker
+// is closed (cloud reachable); when the cloud breaker is OPEN (cloud known-down) it
+// falls back to local instead of returning a cloud decision that would 502 against a
+// dead upstream (RC2). No cluster attempt — for request-size rules (P4/P4.5) where a
+// cluster node is the same memory class as local and cannot relieve an oversized
+// request. reason/CloudTarget from cloudDecision are preserved on the cloud path; the
+// local-fallback path appends a _local_fallback suffix for tracing.
+// Called inside decideLocked under breakerMu.RLock — uses the lock-free breaker read.
+func (e *Engine) cloudOrLocalLocked(req *RouteRequest, cloudDecision *RouteDecision) *RouteDecision {
+    if e.breakers["cloud"].State() != StateOpen {
+        return cloudDecision
+    }
+    slog.Warn("cloud breaker open, falling back to local",
+        "original_reason", cloudDecision.Reason, "model", req.Model)
+    return &RouteDecision{Backend: LocalBackend, Reason: cloudDecision.Reason + "_local_fallback"}
+}
+
+// cloudOrFallbackLocked is the cloud-return helper for local-health rules
+// (P0.5/P1/P1.5/P2/P2.5/P3): it preserves the existing cluster-first preference
+// (another healthy local node beats cloud), then delegates to cloudOrLocalLocked for
+// the cloud-vs-local decision. Local-health rules degrade local specifically, so a
+// peer cluster node is a valid intermediate escape — unlike request-size rules.
+func (e *Engine) cloudOrFallbackLocked(cfg *config.ConfigSnapshot, req *RouteRequest, snap routeSnapshot, cloudDecision *RouteDecision) *RouteDecision {
+    if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
+        return decision
+    }
+    return e.cloudOrLocalLocked(req, cloudDecision)
 }
 
 // tryClusterByPlatformLocked attempts to route to a cluster node on a specific

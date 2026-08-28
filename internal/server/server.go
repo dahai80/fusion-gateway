@@ -3,6 +3,7 @@ package server
 import (
     "context"
     "fmt"
+    "io"
     "net"
     "os"
     "strings"
@@ -35,6 +36,8 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
+
+    "gopkg.in/natefinch/lumberjack.v2"
 )
 
 // oauth2StateEntry binds an issued OAuth2 state to the connector_key that
@@ -159,17 +162,33 @@ func (s *Server) SetVersion(version, commit string) {
 }
 
 // setupLogging configures the global slog default from the server.log_level
-// config knob (R5 audit fix). Before this, log_level was dead config — slog
-// stayed at Info no matter what. Call once at startup; unknown levels fall
-// back to Info with a warning so a typo never silently disables logging.
-func setupLogging(logLevel string) {
+// config knob (R5 audit fix) and, when observability.log_file is set, mirrors
+// structured logs to a rotating file via lumberjack (S3). Before S3 the file
+// rotation knobs were dead config and logs grew unbounded on stderr. Call once
+// at startup; unknown levels fall back to Info with a warning so a typo never
+// silently disables logging. An empty logFile keeps the stderr-only behavior.
+func setupLogging(logLevel, logFile string, maxSize, maxBackups int) {
     level, known := parseLevel(logLevel)
     if !known {
         // Warn via a fresh Info-level handler BEFORE SetDefault so the message
         // is always visible even when the (unknown) level would have hidden it.
         slog.Warn("unknown log_level, falling back to info", "configured", logLevel)
     }
-    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+    var w io.Writer = os.Stderr
+    if strings.TrimSpace(logFile) != "" {
+        lw := &lumberjack.Logger{
+            Filename:   logFile,
+            MaxSize:    maxSize,
+            MaxBackups: maxBackups,
+            Compress:   true,
+        }
+        w = io.MultiWriter(os.Stderr, lw)
+        slog.Info("file logging enabled",
+            "file", logFile,
+            "max_size_mb", maxSize,
+            "max_backups", maxBackups)
+    }
+    handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
     slog.SetDefault(slog.New(handler))
 }
 
@@ -339,7 +358,14 @@ func New(
     // this, the server log_level knob was dead config — slog defaulted to
     // Info regardless. Static at startup; a hot-reload of log_level needs a
     // re-SetDefault (documented in runbook, out of scope here).
-    setupLogging(cfg.Config.Server.LogLevel)
+    // S3: mirror structured logs to observability.log_file (rotating via
+    // lumberjack) so logs are no longer an unbounded stderr stream.
+    setupLogging(
+        cfg.Config.Server.LogLevel,
+        cfg.Config.Observability.LogFile,
+        cfg.Config.Observability.LogRotationMaxSize,
+        cfg.Config.Observability.LogRotationMaxBackups,
+    )
 
     var rp *realtime.Proxy
     if cfg.Config.Realtime.Enabled {

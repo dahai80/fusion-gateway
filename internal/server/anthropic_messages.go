@@ -65,6 +65,34 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     budget := s.tokEngine.EstimateBudget(inputTokens, &maxTokens, antReq.Model, len(antReq.Tools) > 0, antReq.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
+    // RC3: reject oversized requests before the cloud call instead of letting the
+    // cloud model 400 (ContextWindowExceededError) and masking it as a 502.
+    if s.enforceModelContextLimit(w, r, antReq.Model, budget) {
+        return
+    }
+
+    // RC1: strip built-in server-side tools (web_search/computer/bash/text_editor)
+    // and malformed tool entries before forwarding. These carry a `type` field and
+    // no input_schema; AnthropicTool now decodes `type` but the gateway is not a
+    // server-side-tool host — forwarding a built-in entry + tool_choice makes
+    // glm5.2/vLLM reject "tool_choice requires tools" -> 400 -> gateway 502 (88x in
+    // the logs). A real client tool has no `type` and has input_schema; it is kept.
+    // After this filter, the orphan-strip below fires naturally when ALL tools were
+    // built-in, dropping the now-orphan tool_choice. Mixed (built-in + real) keeps
+    // the real tools and their tool_choice.
+    if len(antReq.Tools) > 0 {
+        kept := antReq.Tools[:0]
+        for _, t := range antReq.Tools {
+            if t.Type != "" || len(t.InputSchema) == 0 {
+                slog.Info("anthropic messages stripping built-in/malformed tool",
+                    "type", t.Type, "name", t.Name, "model", antReq.Model)
+                continue
+            }
+            kept = append(kept, t)
+        }
+        antReq.Tools = kept
+    }
+
     // Strip an orphan tool_choice (present, but no tools). A client web-search
     // request (Claude Code) carries tool_choice:"auto" + web_search_options:{}
     // but no tools array — that is Anthropic's server-side-tool protocol.
@@ -92,30 +120,28 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         return
     }
 
-    // Multimodal guard: an image/audio content block is invisible to the
-    // router's text-only signal (RouteRequest carries Model/Text/Stream), so
-    // without this guard a multimodal payload is mapped to the text-only cloud
-    // model (e.g. glm5.2) and rejected upstream with 400 multimodal_not_supported
-    // -> gateway 502 (Claude Code screenshot 502). Force the request to a local
-    // vision model (local-first) when configured; otherwise reject with a clear
-    // 400 naming the missing knob instead of a masked cloud-400-as-502. Runs
-    // before Decide so the rule chain cannot divert the payload to cloud.
-    multimodalForced := false
+    // Multimodal guard (RC4, unified with /v1/chat/completions): an image/audio
+    // content block is invisible to the router's text-only signal (RouteRequest
+    // carries Model/Text/Stream), so without this guard a multimodal payload is
+    // mapped to the text-only cloud model (e.g. glm5.2) and rejected upstream
+    // with 400 multimodal_not_supported -> gateway 502. The prior guard forced
+    // local-only and 400'd when no local_model was set — even when a cloud VLM
+    // fallback was configured, leaking image requests to a text-only cloud.
+    // Now both endpoints share multimodalDecisionFor: local vision model if
+    // loaded, else cloud VLM fallback, else a clear 400. Runs before Decide so
+    // the rule chain cannot divert the payload to a text-only backend.
+    var decision *router.RouteDecision
     if anthropicRequestHasImage(antReq.Messages) {
-        vlModel := strings.TrimSpace(s.cfg.Config.Routing.Multimodal.LocalModel)
-        if vlModel == "" {
-            slog.Warn("anthropic multimodal request rejected: no routing.multimodal.local_model configured", "model", antReq.Model)
-            http.Error(w, `{"error":{"message":"multimodal requests require routing.multimodal.local_model to be set to a local vision model; the routed cloud model is text-only","type":"invalid_request"}}`, http.StatusBadRequest)
+        mmDecision, resolved := s.multimodalDecisionFor(antReq.Model)
+        if multimodalUnconfigured(mmDecision) {
+            slog.Warn("anthropic multimodal request rejected: no local vision model loaded and no cloud VLM configured", "model", antReq.Model)
+            http.Error(w, `{"error":{"message":"multimodal requests require routing.multimodal.local_model (loaded) or routing.multimodal.cloud_backend + cloud_model to be configured; no vision model is available","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
-        slog.Info("anthropic multimodal request forced to local vision model", "client_model", antReq.Model, "vision_model", vlModel)
-        antReq.Model = vlModel
-        multimodalForced = true
-    }
-
-    var decision *router.RouteDecision
-    if multimodalForced {
-        decision = &router.RouteDecision{Backend: router.LocalBackend, Reason: "multimodal_local_vision"}
+        if resolved != "" {
+            antReq.Model = resolved
+        }
+        decision = mmDecision
     } else {
         decision = s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
     }
@@ -252,6 +278,12 @@ func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
         if httpErr.RequestID != "" {
             w.Header().Set("x-request-id", httpErr.RequestID)
         }
+    } else if isContextLengthError(err) {
+        // RC3: a plain (non-MessagesHTTPError) upstream context-window-exceeded error
+        // would default to 502. Surface it honestly as 400 so the client can shrink
+        // the prompt instead of retrying a request that will always fail.
+        status = http.StatusBadRequest
+        body = fmt.Sprintf(`{"error":{"message":"upstream context length exceeded: %s","type":"context_length_exceeded"}}`, err.Error())
     }
     slog.Error("anthropic messages upstream error", "error", err, "status", status)
     http.Error(w, body, status)

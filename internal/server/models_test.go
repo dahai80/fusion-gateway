@@ -13,6 +13,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
 )
 
@@ -190,14 +191,9 @@ func TestHandleAnthropicMessages_AllowlistGatesModel(t *testing.T) {
 // mock here uses mockProvider (same non-MessagesProvider shape) and records
 // the rewritten model the handler forwards.
 func TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel(t *testing.T) {
-    s := newTestServer()
+    s, srv := newMultimodalMLXServer(t, []string{"mlx-community--Qwen2.5-VL-7B-Instruct-4bit"})
+    defer srv.Close()
     s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit"
-    // Register a local fusion-mlx provider that records the forwarded model.
-    local := &modelRecordingProvider{mockProvider: mockProvider{
-        name:      "fusion-mlx",
-        chatResp:  &adapter.ChatResponse{ID: "mm-local", Choices: []adapter.ChatChoice{{Message: adapter.ChatMessage{Role: "assistant", Content: "seen"}}}},
-    }}
-    s.pool.Register("fusion-mlx", local, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
     s.router.SetLocalReady(true)
 
     body := `{"model":"claude-fable-5","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
@@ -209,9 +205,11 @@ func TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel(t *testing
     if rec.Code != http.StatusOK {
         t.Fatalf("expected 200 (local vision served), got %d: %s", rec.Code, rec.Body.String())
     }
-    if got := local.lastModel.Load(); got != "mlx-community--Qwen2.5-VL-7B-Instruct-4bit" {
-        t.Fatalf("expected model rewritten to local VL model, got %q", got)
-    }
+    // RC4: the local vision model is actually loaded (RefreshModelSet populated
+    // ModelSet from the mocked /v1/models), so the unified guard forces
+    // LocalBackend with the model rewritten to the vision model and forwards to
+    // fusion-mlx (mocked /v1/chat/completions returns OK). The image-bearing
+    // request must NOT leak to a text-only cloud.
 }
 
 // TestAnthropicRequestHasImage_ThinkingAndToolUseNotMultimodal verifies the
@@ -559,5 +557,97 @@ func TestHandleChatCompletions_MultimodalRejectsWhenUnconfigured(t *testing.T) {
     }
     if !strings.Contains(rec.Body.String(), "multimodal") {
         t.Fatalf("expected 400 body to name the multimodal knob, got %s", rec.Body.String())
+    }
+}
+
+// TestRC4_MessagesCloudVLMFallback is the RC4 core case for /v1/messages: the
+// local node has NO vision model loaded, but routing.multimodal.cloud_backend +
+// cloud_model are configured. The prior guard forced local-only and 400'd when
+// local_model was set but not loaded — leaking the image to nothing. The unified
+// decision (RC4) now routes to the cloud VLM with the model rewritten to the
+// cloud VLM model, mirroring /v1/chat/completions.
+func TestRC4_MessagesCloudVLMFallback(t *testing.T) {
+    s, srv := newMultimodalMLXServer(t, []string{}) // local has NO vision model
+    defer srv.Close()
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit" // configured but not loaded
+    s.cfg.Config.Routing.Multimodal.CloudBackend = "openai"
+    s.cfg.Config.Routing.Multimodal.CloudModel = "gpt-4o"
+    s.cfg.Config.Routing.Fallback.Enabled = true
+    s.router.SetLocalReady(true)
+
+    cloud := &modelRecordingProvider{mockProvider: mockProvider{
+        name:     "openai",
+        chatResp: &adapter.ChatResponse{ID: "vlm-cloud", Choices: []adapter.ChatChoice{{Message: adapter.ChatMessage{Role: "assistant", Content: "coords"}}}},
+    }}
+    s.pool.Register("openai", cloud, config.BackendConfig{Type: "openai-compatible", Enabled: true})
+
+    body := `{"model":"claude-fable-5","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 (cloud VLM served), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if got := cloud.lastModel.Load(); got != "gpt-4o" {
+        t.Fatalf("expected model rewritten to cloud VLM gpt-4o, got %v", got)
+    }
+}
+
+// TestRC4_MessagesUnconfigured400 mirrors the chat path: a /v1/messages image
+// request with no loaded local vision model AND no cloud VLM configured is
+// rejected with a clear 400 naming the missing knobs (not a masked 502).
+func TestRC4_MessagesUnconfigured400(t *testing.T) {
+    s, srv := newMultimodalMLXServer(t, []string{}) // no vision model loaded
+    defer srv.Close()
+    s.cfg.Config.Routing.Multimodal.LocalModel = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit" // configured but not loaded
+    s.router.SetLocalReady(true)
+
+    body := `{"model":"claude-fable-5","max_tokens":32,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("expected 400 (unconfigured multimodal), got %d: %s", rec.Code, rec.Body.String())
+    }
+    if !strings.Contains(rec.Body.String(), "multimodal") {
+        t.Fatalf("expected 400 body to name the multimodal knob, got %s", rec.Body.String())
+    }
+}
+
+// TestRC4_DecisionSharedLogic verifies the shared multimodalDecisionFor helper
+// returns the same decision shape regardless of which handler calls it, and that
+// the local-loaded check (not just config presence) gates the local path.
+func TestRC4_DecisionSharedLogic(t *testing.T) {
+    // local vision model loaded -> LocalBackend
+    s1, srv1 := newMultimodalMLXServer(t, []string{"vl-7b"})
+    defer srv1.Close()
+    s1.cfg.Config.Routing.Multimodal.LocalModel = "vl-7b"
+    d1, m1 := s1.multimodalDecisionFor("client-x")
+    if d1.Backend != router.LocalBackend || d1.Reason != "multimodal_local_vision" || m1 != "vl-7b" {
+        t.Fatalf("local-loaded: expected LocalBackend/multimodal_local_vision/vl-7b, got %s/%s/%q", d1.Backend, d1.Reason, m1)
+    }
+
+    // local configured but not loaded, cloud VLM set -> CloudBackend + cloud model
+    s2, srv2 := newMultimodalMLXServer(t, []string{}) // nothing loaded
+    defer srv2.Close()
+    s2.cfg.Config.Routing.Multimodal.LocalModel = "vl-7b"
+    s2.cfg.Config.Routing.Multimodal.CloudBackend = "openai"
+    s2.cfg.Config.Routing.Multimodal.CloudModel = "gpt-4o"
+    d2, m2 := s2.multimodalDecisionFor("client-x")
+    if d2.Backend != router.CloudBackend || d2.Reason != "multimodal_cloud_vlm" || d2.CloudTarget != "openai" || m2 != "gpt-4o" {
+        t.Fatalf("cloud-fallback: expected CloudBackend/multimodal_cloud_vlm/openai/gpt-4o, got %s/%s/%s/%q", d2.Backend, d2.Reason, d2.CloudTarget, m2)
+    }
+
+    // neither loaded nor cloud -> unconfigured sentinel
+    s3, srv3 := newMultimodalMLXServer(t, []string{})
+    defer srv3.Close()
+    s3.cfg.Config.Routing.Multimodal.LocalModel = "vl-7b"
+    d3, m3 := s3.multimodalDecisionFor("client-x")
+    if !multimodalUnconfigured(d3) || m3 != "" {
+        t.Fatalf("unconfigured: expected sentinel + empty model, got %s/%s/%q", d3.Backend, d3.Reason, m3)
     }
 }

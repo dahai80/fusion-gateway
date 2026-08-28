@@ -2127,3 +2127,76 @@ func TestR8_RecordNodeSuccess_PushesBreakerClosed(t *testing.T) {
     }
 }
 
+// TestRC2_CloudBreakerOpenFallsBackToLocal verifies the RC2 fix: a cloud-forcing
+// rule (P4 token_budget exceeded) must fall back to local when the cloud breaker is
+// OPEN (cloud known-down). Before the fix, the dead cloud breaker was never queried
+// and every cloud-forced request hit a dead cloud → 502 (984× in the logs).
+func TestRC2_CloudBreakerOpenFallsBackToLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.Trip("cloud", "cloud unreachable")
+
+    budget := tokenizer.TokenBudget{InputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Fatalf("expected local fallback when cloud breaker open, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "token_budget_exceeded_local_fallback" {
+        t.Errorf("expected _local_fallback suffix, got %s", dec.Reason)
+    }
+}
+
+// TestRC2_CloudBreakerOpenFallsBackToCluster verifies that when the cloud breaker is
+// OPEN, a local-health cloud-forcing rule (P3 local_not_ready) prefers a healthy
+// cluster node over local (cluster is a peer local-class node).
+func TestRC2_CloudBreakerOpenFallsBackToCluster(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.Trip("cloud", "cloud unreachable")
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:   1,
+        modelNodes: map[string]int{"test-model": 1},
+        modelNode:  map[string]string{"test-model": "node-1"},
+    })
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    // local not ready + cloud breaker open + cluster healthy → cluster.
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != ClusterBackend {
+        t.Fatalf("expected cluster fallback when cloud breaker open and cluster healthy, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// TestRC2_CloudBreakerClosedGoesCloud is the regression guard: the normal path
+// (cloud breaker closed) must still route cloud-forcing rules to cloud unchanged.
+func TestRC2_CloudBreakerClosedGoesCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Fatalf("expected cloud when breaker closed, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "token_budget_exceeded" {
+        t.Errorf("expected unsuffixed reason on the cloud path, got %s", dec.Reason)
+    }
+}
+
