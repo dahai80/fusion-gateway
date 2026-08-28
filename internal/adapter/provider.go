@@ -4,7 +4,12 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "log/slog"
     "net/http"
+
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/propagation"
+    "go.opentelemetry.io/otel/trace"
 )
 
 type fusionHeadersKey struct{}
@@ -38,6 +43,17 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
     headers, _ := ctx.Value(fusionHeadersKey{}).(map[string]string)
     for k, v := range headers {
         req.Header.Set(k, v)
+    }
+    // #129 Gap 2: propagate the OTel trace context (traceparent + baggage) onto
+    // the outbound upstream request so the distributed trace chain survives the
+    // gateway→fusion-mlx / gateway→cloud hop. The handler ctx carries the span
+    // started by observability.HTTPMiddleware; Inject writes W3C headers from
+    // it. No-op when OTel is disabled (no tracer → no span → Inject is empty).
+    if span := trace.SpanFromContext(ctx); span.IsRecording() {
+        otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+        slog.Debug("injected otel traceparent onto upstream request",
+            "trace_id", span.SpanContext().TraceID().String(),
+            "span_id", span.SpanContext().SpanID().String())
     }
 }
 
