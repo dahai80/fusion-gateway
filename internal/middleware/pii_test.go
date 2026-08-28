@@ -189,6 +189,27 @@ func TestPIIMiddleware_ScanText_IPv4(t *testing.T) {
     }
 }
 
+// TestPIIMiddleware_ScanText_ValidatorSecondCandidate (N5): a pattern with a
+// validator must scan EVERY candidate, not just the first. "999.1.1.1" is a
+// regex match for ipv4 but validIPv4 rejects it (octet >255). Before N5 the
+// scan stopped at the first candidate (FindStringIndex) → saw it rejected →
+// never reached the real "10.0.0.1" later in the text → false negative. With
+// FindAllStringIndex the second candidate is checked and detected.
+func TestPIIMiddleware_ScanText_ValidatorSecondCandidate(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_ValidatorSecondCandidate")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    _, types := pm.ScanText("bad 999.1.1.1 then real 10.0.0.1 here")
+    found := false
+    for _, tn := range types {
+        if tn == "ipv4" {
+            found = true
+        }
+    }
+    if !found {
+        t.Errorf("N5: validator must scan past a rejected first candidate; expected ipv4 for 10.0.0.1, got %v", types)
+    }
+}
+
 func TestPIIMiddleware_Handler_WithPII_Deny(t *testing.T) {
     slog.Info("test PIIMiddleware_Handler_WithPII_Deny")
     pm := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "deny"})

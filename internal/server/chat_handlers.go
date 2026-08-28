@@ -68,14 +68,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     textContent := extractTextContent(req.Messages)
 
-    // PII scanning
-    if s.piiMiddleware != nil {
-        deny, detected := s.piiMiddleware.ScanText(textContent)
-        if deny {
-            slog.Warn("request denied: PII detected", "types", detected, "model", req.Model)
-            http.Error(w, fmt.Sprintf(`{"error":{"message":"Request contains PII (%s)","type":"pii_error"}}`, strings.Join(detected, ",")), http.StatusBadRequest)
-            return
-        }
+    // PII scanning (N4: shared gate — /v1/chat/completions, /v1/completions,
+    // /v1/messages all call scanPIIOrDeny so a deny policy is enforced on
+    // every inference path, not just this one).
+    if s.scanPIIOrDeny(w, textContent, req.Model, "/v1/chat/completions") {
+        return
     }
 
     inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
@@ -932,6 +929,13 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
     }
 
     textContent := legacyReq.Prompt
+
+    // N4: PII scanning on the legacy /v1/completions path (previously
+    // bypassed — only /v1/chat/completions scanned). Deny gate identical.
+    if s.scanPIIOrDeny(w, textContent, chatReq.Model, "/v1/completions") {
+        return
+    }
+
     inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
     if err != nil {
         slog.Error("token counting failed", "error", err)
@@ -1031,6 +1035,35 @@ func extractTextContent(messages []adapter.ChatMessage) string {
         }
     }
     return sb
+}
+
+// scanPIIOrDeny runs PII detection over the request text and, when the
+// configured action is "deny", writes a 400 + returns true so the caller
+// short-circuits. Returns false (no response written) when PII is clean or
+// action is log/mask (forward proceeds). endpoint labels the route in the
+// deny log so /v1/chat/completions, /v1/completions, and /v1/messages are
+// distinguishable in observability.
+//
+// N4 (audit NICE): PII scanning was wired ONLY in handleChatCompletions —
+// /v1/completions (legacy prompt) and /v1/messages (Anthropic, the path
+// Claude Code uses) bypassed the scan entirely. A deny policy enforced on
+// chat was silently skipped on the other two inference paths. This helper
+// closes that gap by giving every inference handler the same gate.
+func (s *Server) scanPIIOrDeny(w http.ResponseWriter, textContent, model, endpoint string) bool {
+    if s.piiMiddleware == nil {
+        return false
+    }
+    deny, detected := s.piiMiddleware.ScanText(textContent)
+    if deny {
+        slog.Warn("request denied: PII detected",
+            "types", detected,
+            "model", model,
+            "endpoint", endpoint,
+        )
+        http.Error(w, fmt.Sprintf(`{"error":{"message":"Request contains PII (%s)","type":"pii_error"}}`, strings.Join(detected, ",")), http.StatusBadRequest)
+        return true
+    }
+    return false
 }
 
 // chatRequestHasImage reports whether any /v1/chat/completions message carries

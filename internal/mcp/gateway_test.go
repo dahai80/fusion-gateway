@@ -130,7 +130,7 @@ func TestHandleToolCall_TokenBudgetExhausted(t *testing.T) {
 	cfg := DefaultGatewayConfig()
 	gw := NewMCPClusterGateway(cfg)
 	gw.tokenBudget = 0
-	gw.totalTokenCount = 10
+	gw.totalTokenCount.Store(10)
 	gw.RegisterTool(&MCPTool{
 		Name:        "test_tool",
 		Description: "test",
@@ -367,9 +367,23 @@ func TestHandleToolCall_MaxRequestsEviction(t *testing.T) {
 
 	gw.requestsMu.Lock()
 	reqCount := len(gw.requests)
+	// N3: eviction must drop the OLDEST entry (tool1, inserted first), not a
+	// random map entry. Prior `for k := range; break` picked a random one — this
+	// assertion catches that regression by verifying tool1 is gone and the two
+	// newest (tool2, tool3) survive.
+	remaining := make(map[string]bool, len(gw.requests))
+	for _, r := range gw.requests {
+		remaining[r.ToolName] = true
+	}
 	gw.requestsMu.Unlock()
 	if reqCount > cfg.MaxRequests {
 		t.Errorf("request count %d exceeds max %d", reqCount, cfg.MaxRequests)
+	}
+	if remaining["tool1"] {
+		t.Errorf("N3: oldest entry (tool1) must be evicted on cap, but survived; remaining=%v", remaining)
+	}
+	if !remaining["tool2"] || !remaining["tool3"] {
+		t.Errorf("N3: newest entries (tool2, tool3) must survive eviction; remaining=%v", remaining)
 	}
 }
 

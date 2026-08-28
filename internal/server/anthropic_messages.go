@@ -47,6 +47,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     // reason "token_budget_missing". Without this, short prompts waste cloud
     // quota and long prompts never trigger token_budget_exceeded (issue #62).
     textContent := extractAnthropicTextContent(antReq.Messages)
+
+    // N4: PII scanning on the /v1/messages path (previously bypassed — only
+    // /v1/chat/completions scanned). This is the path Claude Code uses, so a
+    // deny policy MUST apply here too. Run before token counting + routing so
+    // a denied request never reaches an upstream.
+    if s.scanPIIOrDeny(w, textContent, antReq.Model, "/v1/messages") {
+        return
+    }
+
     inputTokens, err := s.tokEngine.CountTokens(ctx, textContent)
     if err != nil {
         slog.Error("token counting failed for anthropic messages", "error", err)

@@ -93,12 +93,20 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
             }
             continue
         }
-        loc := p.regex.FindStringIndex(text)
-        if loc == nil {
-            continue
-        }
-        if p.validator(text, loc[0], loc[1]) {
-            detected = append(detected, p.name)
+        // N5 (audit NICE): the prior FindStringIndex returned only the FIRST
+        // candidate. A text with a leading false positive (validator rejects)
+        // followed by a real match (validator accepts) was NOT detected — the
+        // scan stopped at the first candidate, saw it rejected, and missed
+        // the real one later in the text. FindAllStringIndex iterates every
+        // candidate so a real match anywhere in the text is caught. Append
+        // the name on the FIRST validator-accepting candidate (one name per
+        // pattern, matching the detected-names contract — not one per match).
+        locs := p.regex.FindAllStringIndex(text, -1)
+        for _, loc := range locs {
+            if p.validator(text, loc[0], loc[1]) {
+                detected = append(detected, p.name)
+                break
+            }
         }
     }
 

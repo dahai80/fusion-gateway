@@ -4,5 +4,5 @@ description: Fusion-Gateway - Hybrid inference gateway for Apple Silicon + cloud
 type: application
 # R14 (audit): keep version + appVersion in lockstep with the gateway release
 # (was 0.6.0, lagging v0.8.45 by ~38 patch releases). Bump at every release.
-version: 0.8.48
-appVersion: "0.8.48"
+version: 0.8.50
+appVersion: "0.8.50"

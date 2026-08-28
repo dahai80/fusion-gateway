@@ -5250,6 +5250,71 @@ func TestChatCompletions_PIIDeny(t *testing.T) {
     slog.Info("TestChatCompletions_PIIDeny passed")
 }
 
+// TestCompletions_PIIDeny (N4): /v1/completions (legacy prompt) previously
+// bypassed PII scanning — only /v1/chat/completions scanned. A deny policy
+// must reject a PII-bearing prompt on this path too. The prompt is converted
+// to a single user message and scanned before token counting / routing.
+func TestCompletions_PIIDeny(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        chatResp: &adapter.ChatResponse{
+            ID: "cmpl-1", Object: "text_completion", Created: time.Now().Unix(), Model: "gpt-3.5-turbo",
+            Choices: []adapter.ChatChoice{{Index: 0, Message: map[string]string{"role": "assistant", "content": "Hi!"}, FinishReason: "stop"}},
+        },
+    })
+    s.cfg.Config.PII = config.PIIConfig{
+        Enabled: true,
+        Action:  "deny",
+        Patterns: []config.PIIPattern{
+            {Name: "ssn", Regex: `\d{3}-\d{2}-\d{4}`},
+        },
+    }
+    s.piiMiddleware = middleware.NewPIIMiddleware(s.cfg.Config.PII)
+    s.buildMiddlewareChain()
+
+    body := `{"model":"gpt-3.5-turbo","prompt":"My SSN is 123-45-6789","stream":false}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(body))
+    rec := httptest.NewRecorder()
+    s.handleCompletions(rec, req)
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("N4: expected 400 for PII deny on /v1/completions, got %d (body=%s)", rec.Code, rec.Body.String())
+    }
+    slog.Info("TestCompletions_PIIDeny passed")
+}
+
+// TestAnthropicMessages_PIIDeny (N4): /v1/messages (the path Claude Code
+// uses) previously bypassed PII scanning. A deny policy must reject a
+// PII-bearing message here too. Runs before token counting + routing.
+func TestAnthropicMessages_PIIDeny(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        chatResp: &adapter.ChatResponse{
+            ID: "cmpl-1", Object: "chat.completion", Created: time.Now().Unix(), Model: "claude-3",
+            Choices: []adapter.ChatChoice{{Index: 0, Message: map[string]string{"role": "assistant", "content": "Hi!"}, FinishReason: "stop"}},
+        },
+    })
+    s.cfg.Config.PII = config.PIIConfig{
+        Enabled: true,
+        Action:  "deny",
+        Patterns: []config.PIIPattern{
+            {Name: "ssn", Regex: `\d{3}-\d{2}-\d{4}`},
+        },
+    }
+    s.piiMiddleware = middleware.NewPIIMiddleware(s.cfg.Config.PII)
+    s.buildMiddlewareChain()
+
+    body := `{"model":"claude-3","messages":[{"role":"user","content":"My SSN is 123-45-6789"}],"stream":false,"max_tokens":100}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+    rec := httptest.NewRecorder()
+    s.handleAnthropicMessages(rec, req)
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("N4: expected 400 for PII deny on /v1/messages, got %d (body=%s)", rec.Code, rec.Body.String())
+    }
+    slog.Info("TestAnthropicMessages_PIIDeny passed")
+}
+
 // --- handleChatCompletions: local backend not available ---
 
 func TestChatCompletions_LocalNoProvider(t *testing.T) {

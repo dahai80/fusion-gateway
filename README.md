@@ -1146,6 +1146,23 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.8.50 — Non-blocking audit SHOULD/NICE (S2/S3/N1-N5)
+
+Clears the 7 non-blocking SHOULD/NICE items from the product audit (`audit/fusion-gateway-audit-result-product-0828.md`). The verdict was upgraded Conditional-Go → Go after the v0.8.49 M1/M2/S1 blockers shipped; these are hardening/correctness sweeps that close the remaining SHOULD/NICE tier so the audit is fully remediated at the code layer.
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **S2 (SHOULD) — MCP tool counter data race** | `MCPTool.callCount` (`int64`) was incremented in `HandleToolCall` outside `toolsMu` and read by `ToolCallCount` under `RLock` → data race under `-race`. Same race on `MCPClusterGateway.totalTokenCount`. Both moved to `atomic.Int64` (`Add`/`Load`/`Store`); the budget gate reads `Load()`. Test sites updated to `Store()`. |
+| 2 | **S3 (SHOULD) — dead log-rotation config surface** | `log_rotation_max_size`/`log_rotation_max_backups` were declared, parsed, and admin-editable but had **no consumer** (`setupLogging` writes stderr only). Marked deprecated in `config.go` with a guard comment (fields retained for YAML backward-compat = graceful ignore, not surfaced as editable until a consumer exists). |
+| 3 | **N1 (NICE) — `allowedNodes` unsynced write** | `SetAllowedNodes` wrote the map unlocked while `forwardToNode` reads it per-request → concurrent map read/write. Added `allowedNodesMu sync.RWMutex` guarding write (`SetAllowedNodes`) + read (`forwardToNode` RLock). |
+| 4 | **N2 (NICE) — MCP `forwardToNode` bare `&http.Client{}`** | Constructed a bare `&http.Client{Timeout}` per request → no `MaxConnsPerHost` cap (RR11 FD-exhaustion gap) and no `ResponseHeaderTimeout`/`DialContext` (R5 wedged-slot gap). Routed through `httpx.TransportForBackend` (cloned transport, default cap 16, R5 timeouts); the per-request client reuses that transport. |
+| 5 | **N3 (NICE) — MCP `requests` map eviction picked a random entry** | The cap-reached eviction comment said "oldest" but `for k := range g.requests; break` deletes a RANDOM entry (Go map iteration is randomized). Replaced with a min-`CreatedAt` search (skipping the just-inserted `requestID`), `delete` the oldest, and an `slog.Info` eviction log. Strengthened `TestHandleToolCall_MaxRequestsEviction` to assert the oldest (tool1) is evicted and the two newest (tool2, tool3) survive — the prior test only checked the count cap and would pass under the random-eviction bug. |
+| 6 | **N4 (NICE) — PII scan scope gap** | Only `handleChatCompletions` scanned for PII; `/v1/completions` (legacy) and `/v1/messages` (Anthropic, the Claude Code path) were unscanned. Extracted a shared `scanPIIOrDeny(w, textContent, model, endpoint)` helper and wired it into all three handlers with an endpoint label in the log. Tests: `TestCompletions_PIIDeny` + `TestAnthropicMessages_PIIDeny` (both assert 400 on PII-bearing body). |
+| 7 | **N5 (NICE) — PII `ScanText` first-match-only** | `ScanText` used `FindStringIndex` (first match) on validator patterns: a leading false positive the validator rejected (e.g. `999.1.1.1` for ipv4, octet >255) masked a real match later in the text → false negative. Switched to `FindAllStringIndex` iterating every candidate, appending the name on the first validator-accepting one. Test: `TestPIIMiddleware_ScanText_ValidatorSecondCandidate` scans `bad 999.1.1.1 then real 10.0.0.1` and expects ipv4 detected. |
+| 8 | **helm lockstep 0.8.48→0.8.50** | `deploy/helm/fusion-gateway/Chart.yaml` `version` + `appVersion` bumped to 0.8.50 (had lagged at 0.8.48 past the v0.8.49 M1/M2/S1 release). R14 lockstep restored. |
+
+**Verify**: `check_bare_goroutines.sh` OK; `go vet ./...` clean; `go build ./...` OK; `go test ./... -count=1 -race` all packages green (incl. mcp, middleware, server, config).
+
 ### v0.8.49 — Enterprise release-tag integrity (M1/M2/S1)
 
 Closes the three MUST items blocking the commercial release tag (audit `audit/fusion-gateway-audit-result-product-0828.md`, verdict Conditional-Go). No new features — honesty, release hygiene, and a stream-truncation fix on advertised cloud vendors.

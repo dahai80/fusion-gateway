@@ -261,7 +261,7 @@ func TestHandler_Health_TokenBudgetExhausted(t *testing.T) {
 	cfg := DefaultGatewayConfig()
 	gw := NewMCPClusterGateway(cfg)
 	gw.tokenBudget = 0
-	gw.totalTokenCount = 10
+	gw.totalTokenCount.Store(10)
 	gw.Start()
 	h := NewHandler(gw)
 

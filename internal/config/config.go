@@ -488,6 +488,13 @@ type TokenizerConfig struct {
 type ObservabilityConfig struct {
     LogFormat             string `mapstructure:"log_format"`
     LogFile               string `mapstructure:"log_file"`
+    // S3 (audit SHOULD): log_rotation_max_size / log_rotation_max_backups are
+    // declared + parsed from config.yaml but have NO consumer — setupLogging
+    // writes structured logs to stderr only (no file handler, no rotation).
+    // Kept as struct fields so an operator's existing config.yaml still parses
+    // without a decode error (graceful ignore); marked deprecated so a future
+    // file-logging implementation wires these before relying on them. Do NOT
+    // surface as editable in the admin config surface until consumed.
     LogRotationMaxSize    int    `mapstructure:"log_rotation_max_size"`
     LogRotationMaxBackups int    `mapstructure:"log_rotation_max_backups"`
     MetricsEnabled        bool   `mapstructure:"metrics_enabled"`

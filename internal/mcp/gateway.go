@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/fusion-gateway/fusion-gateway/internal/config"
+	"github.com/fusion-gateway/fusion-gateway/internal/httpx"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +25,12 @@ type MCPTool struct {
 	RequiredMemoryGB float64                `json:"required_memory_gb,omitempty"`
 	RequiredGPU      bool                   `json:"required_gpu,omitempty"`
 	Timeout          float64                `json:"timeout,omitempty"`
-	callCount        int64
+	// S2: callCount is incremented in HandleToolCall (after forwardToNode,
+	// outside toolsMu) and read by ToolCallCount (under RLock). A bare int64
+	// increment is a data race under -race / concurrent tool calls. atomic
+	// makes the increment + read lock-free and race-free without widening the
+	// toolsMu critical section.
+	callCount        atomic.Int64
 }
 
 type MCPRequestStatus string
@@ -64,13 +72,21 @@ type MCPClusterGateway struct {
 	// /mcp/v1/call can no longer coerce the gateway into an outbound request to
 	// an attacker-chosen host even if a node selector were ever installed.
 	allowedNodes    map[string]bool
+	// N1: allowedNodes is written by SetAllowedNodes (wiring / hot-reload)
+	// and read by forwardToNode (per request) with no synchronization — a
+	// concurrent reload races the read. Dedicated mutex so the dial-allowlist
+	// check stays honest under reload.
+	allowedNodesMu  sync.RWMutex
 	tools          map[string]*MCPTool
 	toolsMu        sync.RWMutex
 	requests       map[string]*MCPRequest
 	requestsMu     sync.Mutex
 	maxRequests    int
 	nodeSelector   NodeSelectorFunc
-	totalTokenCount int64
+	// S2: totalTokenCount is incremented in HandleToolCall and read in
+	// HandleToolCall (budget gate) + GetStats, both outside any lock guarding
+	// the counter itself. atomic.Int64 closes the data race.
+	totalTokenCount atomic.Int64
 	tokenBudget    int64
 	httpClient     *http.Client
 	running        bool
@@ -133,7 +149,18 @@ func NewMCPClusterGateway(cfg GatewayConfig) *MCPClusterGateway {
 		requests:     make(map[string]*MCPRequest),
 		maxRequests:  cfg.MaxRequests,
 		tokenBudget:  cfg.TokenBudget,
-		httpClient:   &http.Client{Timeout: 60 * time.Second},
+		// N2 (RR11): the shared MCP forward client MUST route through
+		// httpx.TransportForBackend so per-host connections are capped
+		// (MaxConnsPerHost) + bounded dial/header/TLS timeouts. A bare
+		// &http.Client{Timeout} inherits DefaultTransport which has no
+		// MaxConnsPerHost — a node-forward burst could exhaust the process FD
+		// table. BaseURL is informational here (transport is shared across
+		// nodes; per-node target URL is set on each request), so the cap is
+		// the durable invariant.
+		httpClient: &http.Client{
+			Timeout:   60 * time.Second,
+			Transport: httpx.TransportForBackend(config.BackendConfig{BaseURL: "mcp-cluster"}),
+		},
 	}
 }
 
@@ -177,7 +204,15 @@ func (g *MCPClusterGateway) SetAllowedNodes(nodes []string) {
 	for _, n := range nodes {
 		set[sanitizeNodeID(n)] = true
 	}
+	// N1: guard the write so a concurrent forwardToNode read (RLock) never
+	// races the map replacement. Log the change for auditability.
+	g.allowedNodesMu.Lock()
 	g.allowedNodes = set
+	g.allowedNodesMu.Unlock()
+	slog.Info("MCP allowed nodes updated",
+		"count", len(set),
+		"localhost_only", len(set) == 1,
+	)
 }
 
 func (g *MCPClusterGateway) RegisterTool(tool *MCPTool) {
@@ -227,10 +262,30 @@ func (g *MCPClusterGateway) HandleToolCall(ctx context.Context, toolName string,
 	g.requestsMu.Lock()
 	g.requests[requestID] = req
 	if len(g.requests) > g.maxRequests {
-		// evict oldest
-		for k := range g.requests {
-			delete(g.requests, k)
-			break
+		// N3: evict the OLDEST request by CreatedAt, matching the "evict
+		// oldest" intent. The prior loop `for k := range ...; break` deleted a
+		// RANDOM map entry (Go map iteration order is randomized) — so a
+		// fresh request could be evicted while a stale one stayed, and the
+		// comment lied. Track the min-CreatedAt key and drop that one.
+		var oldestKey string
+		var oldestTime time.Time
+		for k, r := range g.requests {
+			if k == requestID {
+				continue // never evict the entry we just inserted
+			}
+			if oldestKey == "" || r.CreatedAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = r.CreatedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(g.requests, oldestKey)
+			slog.Info("MCP request map evicted oldest entry on cap",
+				"evicted_id", oldestKey,
+				"created_at", oldestTime,
+				"size", len(g.requests),
+				"max", g.maxRequests,
+			)
 		}
 	}
 	g.requestsMu.Unlock()
@@ -250,12 +305,13 @@ func (g *MCPClusterGateway) HandleToolCall(ctx context.Context, toolName string,
 	}
 
 	// check token budget
-	if g.tokenBudget <= 0 || g.totalTokenCount >= g.tokenBudget {
+	used := g.totalTokenCount.Load()
+	if g.tokenBudget <= 0 || used >= g.tokenBudget {
 		req.Status = MCPRequestFailed
 		req.Error = "token budget exhausted"
 		slog.Warn("MCP call rejected: token budget exhausted",
 			"tool", toolName,
-			"total_tokens", g.totalTokenCount,
+			"total_tokens", used,
 			"budget", g.tokenBudget,
 		)
 		return map[string]interface{}{"error": "token budget exhausted"}
@@ -311,12 +367,16 @@ func (g *MCPClusterGateway) HandleToolCall(ctx context.Context, toolName string,
 
 	req.Status = MCPRequestCompleted
 	req.CompletedAt = time.Now()
-	tool.callCount++
+	// S2: atomic increment — callCount is read by ToolCallCount under RLock;
+	// the increment here runs outside toolsMu, so a bare ++ is a data race.
+	tool.callCount.Add(1)
 
 	// estimate token consumption
 	estimatedTokens := estimateTokens(arguments)
 	req.TokenCount = estimatedTokens
-	g.totalTokenCount += int64(estimatedTokens)
+	// S2: atomic add — totalTokenCount is read by the budget gate above and
+	// GetStats, both lock-free; the add here races them under bare int64.
+	g.totalTokenCount.Add(int64(estimatedTokens))
 
 	slog.Info("MCP tool call completed",
 		"tool", toolName,
@@ -347,7 +407,12 @@ func (g *MCPClusterGateway) forwardToNode(ctx context.Context, req *MCPRequest, 
 	// AssignedNode (e.g. via a future node selector) cannot coerce an outbound
 	// dial to an arbitrary host — SSRF amplification closed.
 	node := sanitizeNodeID(req.AssignedNode)
-	if !g.allowedNodes[node] {
+	// N1: read the allowlist under RLock so a concurrent SetAllowedNodes
+	// reload cannot race this map read.
+	g.allowedNodesMu.RLock()
+	allowed := g.allowedNodes[node]
+	g.allowedNodesMu.RUnlock()
+	if !allowed {
 		slog.Warn("MCP forward rejected: node not allowlisted",
 			"node", req.AssignedNode,
 			"sanitized", node,
@@ -368,7 +433,12 @@ func (g *MCPClusterGateway) forwardToNode(ctx context.Context, req *MCPRequest, 
 		timeout = 60 * time.Second
 	}
 
-	client := &http.Client{Timeout: timeout}
+	// N2 (RR11): per-request client reuses the shared capped transport
+	// (MaxConnsPerHost + R5 dial/header/TLS timeouts from the constructor's
+	// httpx.TransportForBackend) but carries this tool's timeout. A bare
+	// &http.Client{Timeout} would inherit DefaultTransport (no MaxConnsPerHost)
+	// — a concurrent burst to one node could exhaust FDs.
+	client := &http.Client{Timeout: timeout, Transport: g.httpClient.Transport}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytesReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create forward request: %w", err)
@@ -424,9 +494,9 @@ func (g *MCPClusterGateway) GetStats() map[string]interface{} {
 		"total_requests":   totalReqs,
 		"completed":        completed,
 		"failed":           failed,
-		"total_token_count": g.totalTokenCount,
+		"total_token_count": g.totalTokenCount.Load(),
 		"token_budget":     g.tokenBudget,
-		"token_remaining":  g.tokenBudget - g.totalTokenCount,
+		"token_remaining":  g.tokenBudget - g.totalTokenCount.Load(),
 	}
 }
 
@@ -454,7 +524,8 @@ func (g *MCPClusterGateway) ToolCallCount(name string) int64 {
 	g.toolsMu.RLock()
 	defer g.toolsMu.RUnlock()
 	if t, ok := g.tools[name]; ok {
-		return t.callCount
+		// S2: load the atomic counter (race-free under concurrent increments).
+		return t.callCount.Load()
 	}
 	return 0
 }
