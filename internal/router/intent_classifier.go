@@ -10,7 +10,7 @@ import (
     "strings"
     "time"
 
-    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
@@ -70,7 +70,7 @@ func NewRouterLightClassifier(cfg config.IntentClassifierConfig) *RouterLightCla
     return &RouterLightClassifier{
         httpClient: &http.Client{
             Timeout:   timeout,
-            Transport: adapter.TransportForBackend(config.BackendConfig{BaseURL: endpoint}),
+            Transport: httpx.TransportForBackend(config.BackendConfig{BaseURL: endpoint}),
         },
         endpoint:   strings.TrimRight(endpoint, "/"),
         baseModel:  baseModel,
@@ -154,13 +154,13 @@ func (c *RouterLightClassifier) Classify(ctx context.Context, req *RouteRequest)
 
     if resp.StatusCode != http.StatusOK {
         // RR10 (audit P0): bounded error body via ReadErrorBody (1 MiB cap).
-        respBody := adapter.ReadErrorBody(resp)
+        respBody := httpx.ReadErrorBody(resp)
         return nil, fmt.Errorf("classify returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var cr classifyResponse
     // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
-    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&cr); err != nil {
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&cr); err != nil {
         return nil, fmt.Errorf("decode classify response: %w", err)
     }
     if len(cr.Choices) == 0 {

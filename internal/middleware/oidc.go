@@ -14,7 +14,7 @@ import (
     "time"
 
     "github.com/golang-jwt/jwt/v5"
-    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
@@ -157,7 +157,7 @@ func (p *OIDCProvider) fetchDiscovery() error {
     var disc oidcDiscovery
     // RR9 (audit P0): bound success-path read (10 MiB) — a hostile/misconfigured
     // OIDC issuer could return a giant discovery doc; see LimitResponseReader.
-    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&disc); err != nil {
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&disc); err != nil {
         return fmt.Errorf("decode discovery: %w", err)
     }
 
@@ -185,7 +185,7 @@ func (p *OIDCProvider) fetchJWKS() error {
 
     var jwks oidcJWKS
     // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
-    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&jwks); err != nil {
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&jwks); err != nil {
         return fmt.Errorf("decode jwks: %w", err)
     }
 

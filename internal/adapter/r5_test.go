@@ -82,8 +82,10 @@ func TestR5_TCP_DefaultResponseHeaderTimeout(t *testing.T) {
     if tpt.ResponseHeaderTimeout <= 0 {
         t.Fatalf("R5: default ResponseHeaderTimeout must be > 0, got %s — stuck upstream would hang full Client.Timeout", tpt.ResponseHeaderTimeout)
     }
-    if tpt.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
-        t.Errorf("R5: default ResponseHeaderTimeout: want %s, got %s", defaultResponseHeaderTimeout, tpt.ResponseHeaderTimeout)
+    // N2: defaultResponseHeaderTimeout moved to httpx as the exported
+    // DefaultResponseHeaderTimeout; adapter/transport.go re-exports it.
+    if tpt.ResponseHeaderTimeout != DefaultResponseHeaderTimeout {
+        t.Errorf("R5: default ResponseHeaderTimeout: want %s, got %s", DefaultResponseHeaderTimeout, tpt.ResponseHeaderTimeout)
     }
     // R5 also tightened dial + TLS handshake; assert they are non-zero too.
     if tpt.DialContext == nil {

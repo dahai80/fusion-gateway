@@ -22,6 +22,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
     "github.com/fusion-gateway/fusion-gateway/internal/jitter"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
@@ -282,7 +283,7 @@ func NewDiscovery(cfg config.ClusterConfig) *Discovery {
         cfg:    cfg,
         client: &http.Client{
             Timeout:   5 * time.Second,
-            Transport: adapter.TransportForBackend(config.BackendConfig{}),
+            Transport: httpx.TransportForBackend(config.BackendConfig{}),
         },
         stopCh: make(chan struct{}),
     }
@@ -860,7 +861,7 @@ func (d *Discovery) fetchRemoteMetrics(node *Node) {
         } `json:"backends"`
     }
     // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
-    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&statusResp); err != nil {
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&statusResp); err != nil {
         // R2 fix: drain remaining body to allow connection reuse
         _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster metrics decode failed", "node_id", node.ID, "error", err)
@@ -912,7 +913,7 @@ func (d *Discovery) fetchModels(node *Node) {
 
     var models []adapter.ModelInfo
     // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
-    if err := json.NewDecoder(adapter.LimitResponseReader(resp.Body)).Decode(&models); err != nil {
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&models); err != nil {
         _, _ = io.Copy(io.Discard, resp.Body)
         slog.Debug("cluster models decode failed", "node_id", node.ID, "error", err)
         return

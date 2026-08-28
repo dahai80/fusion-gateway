@@ -46,8 +46,8 @@ func TestTransportForBackend_TCP(t *testing.T) {
     // RR11 (audit P2): MaxIdleConnsPerHost is NOT enough — MaxConnsPerHost=0
     // means unlimited ACTIVE connections to the single host, an FD-exhaustion
     // vector under a concurrent burst. The factory must set it (default 16).
-    if tpt.MaxConnsPerHost != defaultMaxConnsPerHost {
-        t.Errorf("MaxConnsPerHost: want %d (RR11 default), got %d", defaultMaxConnsPerHost, tpt.MaxConnsPerHost)
+    if tpt.MaxConnsPerHost != DefaultMaxConnsPerHost {
+        t.Errorf("MaxConnsPerHost: want %d (RR11 default), got %d", DefaultMaxConnsPerHost, tpt.MaxConnsPerHost)
     }
 }
 
@@ -179,8 +179,8 @@ func TestRR11_MaxConnsPerHost_Default(t *testing.T) {
         if !ok {
             t.Fatalf("expected *http.Transport, got %T", rt)
         }
-        if tpt.MaxConnsPerHost != defaultMaxConnsPerHost {
-            t.Fatalf("MaxConnsPerHost: want default %d, got %d", defaultMaxConnsPerHost, tpt.MaxConnsPerHost)
+        if tpt.MaxConnsPerHost != DefaultMaxConnsPerHost {
+            t.Fatalf("MaxConnsPerHost: want default %d, got %d", DefaultMaxConnsPerHost, tpt.MaxConnsPerHost)
         }
     })
     t.Run("uds_default", func(t *testing.T) {
@@ -189,8 +189,8 @@ func TestRR11_MaxConnsPerHost_Default(t *testing.T) {
         if !ok {
             t.Fatalf("expected *http.Transport, got %T", rt)
         }
-        if tpt.MaxConnsPerHost != defaultMaxConnsPerHost {
-            t.Fatalf("MaxConnsPerHost: want default %d, got %d", defaultMaxConnsPerHost, tpt.MaxConnsPerHost)
+        if tpt.MaxConnsPerHost != DefaultMaxConnsPerHost {
+            t.Fatalf("MaxConnsPerHost: want default %d, got %d", DefaultMaxConnsPerHost, tpt.MaxConnsPerHost)
         }
     })
 }
@@ -228,8 +228,8 @@ func TestRR11_MaxConnsPerHost_NegativeFallsBack(t *testing.T) {
     if !ok {
         t.Fatalf("expected *http.Transport, got %T", rt)
     }
-    if tpt.MaxConnsPerHost != defaultMaxConnsPerHost {
-        t.Errorf("MaxConnsPerHost: negative config must fall back to default %d, got %d", defaultMaxConnsPerHost, tpt.MaxConnsPerHost)
+    if tpt.MaxConnsPerHost != DefaultMaxConnsPerHost {
+        t.Errorf("MaxConnsPerHost: negative config must fall back to default %d, got %d", DefaultMaxConnsPerHost, tpt.MaxConnsPerHost)
     }
 }
 

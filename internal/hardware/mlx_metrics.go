@@ -10,7 +10,7 @@ import (
     "strings"
     "time"
 
-    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
 )
 
 var mlxMetricsURL = "http://127.0.0.1:11434/metrics"
@@ -46,7 +46,7 @@ func collectMLXMetrics(m *HardwareMetrics) error {
     }
 
     // RR9 (audit P0): bound success-path read (10 MiB) — see LimitResponseReader.
-    body, err := io.ReadAll(adapter.LimitResponseReader(resp.Body))
+    body, err := io.ReadAll(httpx.LimitResponseReader(resp.Body))
     if err != nil {
         return fmt.Errorf("read mlx metrics body: %w", err)
     }

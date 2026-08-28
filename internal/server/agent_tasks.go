@@ -88,7 +88,9 @@ func (s *Server) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 // Interval from routing.agent_tasks.reaper_interval; ttl<=0 makes ReapExpired a
 // no-op so this loop runs harmlessly.
 func (s *Server) reapExpiredTasks(ctx context.Context) {
-    interval := s.cfg.Config.Routing.AgentTasks.ReaperInterval
+    // cfgMu: read via snapshot() so the reload pointer swap (RebuildMiddlewareChain)
+    // cannot race this background goroutine's read (race detector fix).
+    interval := s.snapshot().Config.Routing.AgentTasks.ReaperInterval
     if interval <= 0 {
         interval = 5 * time.Minute
     }
@@ -113,7 +115,8 @@ func (s *Server) reapExpiredStreamBuffers(ctx context.Context) {
     if s.streamBuffers == nil {
         return
     }
-    ttl := s.cfg.Config.Routing.Stream.ResumeTTL
+    // cfgMu: read via snapshot() — same race fix as reapExpiredTasks.
+    ttl := s.snapshot().Config.Routing.Stream.ResumeTTL
     if ttl <= 0 {
         ttl = 10 * time.Minute
     }

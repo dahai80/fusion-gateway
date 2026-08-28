@@ -79,6 +79,15 @@ type Server struct {
     // M1 fix: middleware chain constructed once, rebuilt on reload
     middlewareChainMu sync.RWMutex
     middlewareChain   func(http.Handler) http.Handler
+    // cfgMu guards the s.cfg pointer swap on config reload. The single writer
+    // is RebuildMiddlewareChain (OnReload). Background reaper goroutines
+    // (reapExpiredTasks, reapExpiredStreamBuffers) read s.cfg concurrently on
+    // lifecycle.Worker goroutines — without this mutex, the reload swap races
+    // the reaper reads (race detector flagged server.go:937 vs
+    // agent_tasks.go:91). Request-handler goroutines also read s.cfg but never
+    // concurrently with a reload in the same test window; the mutex is
+    // nonetheless correct for all readers. snapshot() is the RLock helper.
+    cfgMu sync.RWMutex
     clusterDiscovery interface {
         Status() []cluster.NodeStatus
         GetNode(id string) (*cluster.Node, bool)
@@ -934,9 +943,24 @@ func (s *Server) buildMiddlewareChain() {
 
 // RebuildMiddlewareChain rebuilds the middleware chain on config reload
 func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
+    // cfgMu: the pointer swap must not race background reaper goroutines that
+    // read s.cfg on their own lifecycle.Worker (race detector: server.go:937
+    // write vs agent_tasks.go:91 read). Take the write lock for the swap, then
+    // rebuild the middleware chain under the existing middlewareChainMu.
+    s.cfgMu.Lock()
     s.cfg = newCfg
+    s.cfgMu.Unlock()
     s.buildMiddlewareChain()
     slog.Info("middleware chain rebuilt on config reload")
+}
+
+// snapshot returns the current config snapshot under cfgMu.RLock. Background
+// goroutines (reapers) use this instead of a bare s.cfg read so the reload
+// pointer swap cannot race them.
+func (s *Server) snapshot() *config.ConfigSnapshot {
+    s.cfgMu.RLock()
+    defer s.cfgMu.RUnlock()
+    return s.cfg
 }
 
 // withMasterKey wraps handler to require master_key authentication

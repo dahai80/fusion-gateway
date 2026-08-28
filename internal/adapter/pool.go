@@ -134,72 +134,20 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
             continue
         }
 
-        switch backendCfg.Type {
-        case "fusion-mlx":
-            provider := NewFusionMLXProvider(backendCfg, cfg.Config.Routing)
-            p.providers[name] = provider
-        case "openai-compatible":
-            provider := NewOpenAICompatibleProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered openai-compatible provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "anthropic":
-            provider := NewAnthropicProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered anthropic provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "bedrock":
-            provider := NewBedrockProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered bedrock provider (AWS SigV4)", "name", name, "base_url", backendCfg.BaseURL)
-        case "vertex":
-            provider := NewVertexProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered vertex provider (GCP OAuth2)", "name", name, "base_url", backendCfg.BaseURL)
-        case "foundry":
-            provider := NewFoundryProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered foundry provider (Azure)", "name", name, "base_url", backendCfg.BaseURL)
-        case "volcengine":
-            provider := NewVolcengineProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered volcengine provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "qianfan":
-            provider := NewQianfanProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered qianfan provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "deepseek":
-            provider := NewDeepSeekProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered deepseek provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "openrouter":
-            provider := NewOpenRouterProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered openrouter provider", "name", name, "base_url", backendCfg.BaseURL)
-        // Chinese LLM providers - user instruction: "这部分适配工作，要马上启动落地"
-        case "dashscope":
-            provider := NewDashScopeProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered dashscope provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "moonshot":
-            provider := NewMoonshotProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered moonshot provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "zhipu":
-            provider := NewZhipuProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered zhipu provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "minimax":
-            provider := NewMinimaxProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered minimax provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "baichuan":
-            provider := NewBaichuanProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered baichuan provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "hunyuan":
-            provider := NewHunyuanProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered hunyuan provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "stepfun":
-            provider := NewStepFunProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered stepfun provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "yi":
-            provider := NewYiProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered yi provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "fusion-kb":
-            provider := NewFusionKBProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered fusion-kb provider", "name", name, "base_url", backendCfg.BaseURL)
-        case "fusion-model-hub":
-            provider := NewFusionModelHubProvider(name, backendCfg)
-            p.providers[name] = provider; slog.Info("registered fusion-model-hub provider", "name", name, "base_url", backendCfg.BaseURL)
-        default:
-            // M3 fix: fail-fast on unknown backend type instead of silent skip
+        // N1 (audit): build via the provider factory registry (register.go)
+        // instead of a per-type switch. The registry centralizes type->ctor
+        // mapping so adding a backend is one registration line, not a switch
+        // case. Behavior matches the prior switch: same constructors, fail-fast
+        // on unknown type (M3), uniform structured log per registration
+        // (mirrors the Register() method's "provider registered" shape).
+        factory, err := LookupProviderFactory(backendCfg.Type)
+        if err != nil {
+            // M3 fix: fail-fast on unknown backend type instead of silent skip.
             return fmt.Errorf("unknown backend type: %s for backend %q", backendCfg.Type, name)
         }
+        provider := factory(name, backendCfg, cfg)
+        p.providers[name] = provider
+        slog.Info("registered provider", "name", name, "type", backendCfg.Type, "base_url", backendCfg.BaseURL)
 
         p.backends[name] = backendCfg
     }
