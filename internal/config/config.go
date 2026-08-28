@@ -370,6 +370,14 @@ type PIIConfig struct {
     Enabled  bool           `mapstructure:"enabled"`
     Action   string         `mapstructure:"action"`
     Patterns []PIIPattern   `mapstructure:"patterns"`
+    // #128: reserved integration point for a future fusion-guard
+    // guard.redact.patterns.dump IPC contract (filed as fusion-guard#7).
+    // Default false → gateway uses the vendored SSOT (pii_patterns.go), no
+    // runtime guard dependency (guard-unreachable still functions by
+    // construction). When guard ships the dump method, flip this on and add
+    // the fetch+cache path; the drift test keeps the vendored set honest in
+    // the meantime. Do NOT add a fetch call while this is false (dead code).
+    GuardFetch bool `mapstructure:"guard_fetch"`
 }
 
 type PIIPattern struct {

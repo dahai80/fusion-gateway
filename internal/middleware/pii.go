@@ -15,8 +15,9 @@ type PIIChecker struct {
 }
 
 type piiPattern struct {
-    name  string
-    regex *regexp.Regexp
+    name      string
+    regex     *regexp.Regexp
+    validator ValidatorFn
 }
 
 func NewPIIChecker(cfg config.PIIConfig) *PIIChecker {
@@ -29,22 +30,20 @@ func NewPIIChecker(cfg config.PIIConfig) *PIIChecker {
         action = "log"
     }
 
-    patterns := make([]piiPattern, 0)
-    builtins := map[string]string{
-        "email":       `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`,
-        "phone_cn":    `1[3-9]\d{9}`,
-        "phone_us":    `\b\d{3}[-.]?\d{3}[-.]?\d{4}\b`,
-        "credit_card": `\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`,
-        "ssn":         `\b\d{3}-\d{2}-\d{4}\b`,
-        "ip_v4":       `\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`,
+    // #128: load the 15 vendored guard SSOT patterns (priority order) as the
+    // base set, replacing the prior 6 hardcoded builtins that had drifted from
+    // guard (gateway-only ssn/phone_us; guard-only jwt/oauth_bearer/api_key/
+    // conn_string/password/secret_kv/env_kv/netrc/aws_secret/private_key/
+    // id_number). See pii_patterns.go for the SSOT + drift test.
+    patterns, errs := compileGuardPatterns()
+    for _, err := range errs {
+        slog.Warn("PII guard SSOT pattern compile failed", "error", err)
     }
 
-    for name, re := range builtins {
-        if compiled, err := regexp.Compile(re); err == nil {
-            patterns = append(patterns, piiPattern{name: name, regex: compiled})
-        }
-    }
-
+    // User-supplied patterns are appended AFTER the SSOT (override/extend
+    // hook preserved): a user pattern with the same Name appends a second
+    // entry (both run), a new Name extends detection. Validators on user
+    // patterns are nil (regex match alone).
     for _, p := range cfg.Patterns {
         if compiled, err := regexp.Compile(p.Regex); err == nil {
             patterns = append(patterns, piiPattern{name: p.Name, regex: compiled})
@@ -82,7 +81,23 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
 
     var detected []string
     for _, p := range pm.checker.patterns {
-        if p.regex.MatchString(text) {
+        // #128: a pattern with a validator (ipv4/aws_secret/credit_card/phone)
+        // must re-check each candidate with the guard-ported validator — a
+        // candidate the validator rejects (e.g. 999.1.1.1 for ipv4, non-Luhn
+        // digit run for credit_card) is a false positive and skipped, matching
+        // guard collect_spans semantics. Patterns without a validator: a plain
+        // regex match suffices (MatchString fast-path).
+        if p.validator == nil {
+            if p.regex.MatchString(text) {
+                detected = append(detected, p.name)
+            }
+            continue
+        }
+        loc := p.regex.FindStringIndex(text)
+        if loc == nil {
+            continue
+        }
+        if p.validator(text, loc[0], loc[1]) {
             detected = append(detected, p.name)
         }
     }

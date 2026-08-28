@@ -165,12 +165,12 @@ func TestPIIMiddleware_ScanText_PhoneCN(t *testing.T) {
     _, types := pm.ScanText("call 13912345678 for info")
     found := false
     for _, t := range types {
-        if t == "phone_cn" {
+        if t == "phone" {
             found = true
         }
     }
     if !found {
-        t.Error("expected phone_cn type")
+        t.Errorf("expected guard-aligned phone type, got %v", types)
     }
 }
 
@@ -180,12 +180,12 @@ func TestPIIMiddleware_ScanText_IPv4(t *testing.T) {
     _, types := pm.ScanText("server at 192.168.1.1 is down")
     found := false
     for _, t := range types {
-        if t == "ip_v4" {
+        if t == "ipv4" {
             found = true
         }
     }
     if !found {
-        t.Error("expected ip_v4 type")
+        t.Errorf("expected guard-aligned ipv4 type, got %v", types)
     }
 }
 
@@ -224,7 +224,12 @@ func TestPIIMiddleware_Handler_WithPII_Log(t *testing.T) {
 func TestPIIMiddleware_ScanText_CreditCard(t *testing.T) {
     slog.Info("test PIIMiddleware_ScanText_CreditCard")
     pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
-    _, types := pm.ScanText("card number 4111-1111-1111-1111 on file")
+    // #128: guard credit_card = \d{13,19} + Luhn validator. Guard does not
+    // strip separators, so a contiguous 16-digit Luhn-valid card is detected
+    // (4111 4111 4111 4111 is a canonical Luhn-valid test PAN). The prior
+    // gateway-only pattern matched hyphen-split groups; guard-aligned SSOT
+    // matches the bare contiguous run + validates Luhn.
+    _, types := pm.ScanText("card number 4111111111111111 on file")
     found := false
     for _, t := range types {
         if t == "credit_card" {
@@ -236,32 +241,43 @@ func TestPIIMiddleware_ScanText_CreditCard(t *testing.T) {
     }
 }
 
+func TestPIIMiddleware_ScanText_CreditCard_RejectsNonLuhn(t *testing.T) {
+    slog.Info("test PIIMiddleware_ScanText_CreditCard_RejectsNonLuhn")
+    pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    // 13 digits, NOT Luhn-valid → validator rejects (guard valid_luhn). A bare
+    // digit run that is not a real card number must not false-positive.
+    _, types := pm.ScanText("order id 1234567890123 on file")
+    for _, tn := range types {
+        if tn == "credit_card" {
+            t.Fatalf("non-Luhn digit run must NOT be flagged credit_card (guard valid_luhn rejects), got %v", types)
+        }
+    }
+}
+
 func TestPIIMiddleware_ScanText_SSN(t *testing.T) {
     slog.Info("test PIIMiddleware_ScanText_SSN")
     pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    // #128: ssn was a gateway-only pattern NOT in guard fg-redact; removed to
+    // align to the SSOT. Assert it is no longer detected (operator who needs
+    // ssn detection adds it via pii.patterns user-supplied set).
     _, types := pm.ScanText("SSN is 123-45-6789")
-    found := false
-    for _, t := range types {
-        if t == "ssn" {
-            found = true
+    for _, tn := range types {
+        if tn == "ssn" {
+            t.Errorf("ssn is not in the guard SSOT and must not be detected; got %v", types)
         }
-    }
-    if !found {
-        t.Errorf("expected ssn type, got %v", types)
     }
 }
 
 func TestPIIMiddleware_ScanText_PhoneUS(t *testing.T) {
     slog.Info("test PIIMiddleware_ScanText_PhoneUS")
     pm := NewPIIMiddleware(config.PIIConfig{Enabled: true})
+    // #128: phone_us was gateway-only, not in guard; removed. Guard phone =
+    // 1[3-9]\d{9} (CN, leading 1, 11 digits) — 555-123-4567 (10 digits, leads
+    // with 5) does not match. Assert phone_us is no longer detected.
     _, types := pm.ScanText("call 555-123-4567 for info")
-    found := false
-    for _, t := range types {
-        if t == "phone_us" {
-            found = true
+    for _, tn := range types {
+        if tn == "phone_us" {
+            t.Errorf("phone_us is not in the guard SSOT and must not be detected; got %v", types)
         }
-    }
-    if !found {
-        t.Errorf("expected phone_us type, got %v", types)
     }
 }
