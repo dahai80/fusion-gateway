@@ -182,6 +182,8 @@ admin:
   jwt_secret: "test-jwt-secret-that-is-at-least-32-characters-long"
   users:
     admin: "password12345678"
+encryption:
+  master_key: "test-encryption-master-key-32-chars-aaaa"
 oidc:
   enabled: false
   issuer: ""
@@ -1191,6 +1193,35 @@ func TestHandleOIDCConfig(t *testing.T) {
         }
         if sec["issuer"] != "https://auth.example.com" {
             t.Errorf("expected issuer, got %v", sec["issuer"])
+        }
+    })
+
+    // C2 (audit P1, fail-closed): enabling OIDC WITHOUT a master_key must be
+    // rejected by the reload — the handler writes the file, then config.Reload
+    // runs validate() which refuses (tokens would persist plaintext). The
+    // shared fixture seeds a master_key; strip it here to prove the no-key
+    // path is refused at the admin layer, not just at config.Load.
+    t.Run("update_enabled_no_master_key_rejected", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        doc, err := readYAMLDoc(configPath)
+        if err != nil {
+            t.Fatalf("read config: %v", err)
+        }
+        delete(doc, "encryption")
+        if err := writeYAMLDoc(configPath, doc); err != nil {
+            t.Fatalf("strip encryption: %v", err)
+        }
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{
+            "enabled":   true,
+            "issuer":    "https://auth.example.com",
+            "client_id": "my-client",
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/oidc", body)
+        rec := httptest.NewRecorder()
+        h.handleOIDCConfig(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("C2: expected 400 (OIDC enabled without master_key is release-blocking), got %d; body: %s", rec.Code, rec.Body.String())
         }
     })
 }

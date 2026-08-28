@@ -7,5 +7,5 @@ output "cluster_name" {
 }
 
 output "gateway_endpoint" {
-  value = var.enable_ingress ? "https://${var.ingress_host}" : "http://<cluster-ip>:8100"
+  value = var.enable_ingress ? "https://${var.ingress_host}" : "http://<cluster-ip>:11432"
 }

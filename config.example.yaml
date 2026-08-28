@@ -20,7 +20,12 @@ encryption:
 
 auth:
     enabled: true
-    master_key: "fg-master-key-change-me"     # Bypasses rate limits and model allowlists
+    # C1 (audit P1): config.Load REFUSES known placeholders (fg-*, your-*-key,
+    # *-change-me, *-do-not-ship, ...) at startup. Replace ALL placeholder
+    # values below with unique strong secrets BEFORE enabling auth in
+    # production, or the gateway fails to start. A real key is >=32 random
+    # chars; never commit a live key to this template.
+    master_key: "fg-master-key-change-me"     # PLACEHOLDER — replace with >=32 random chars; Load refuses as-is
     api_keys:
         - key: "fg-demo-key-change-me"
           name: "demo"
@@ -36,7 +41,7 @@ auth:
               - "code"
           expires_at: ""                       # RFC3339 expiry, e.g. "2025-12-31T23:59:59Z"
           budget_limit: 0                      # Monthly budget in USD (0 = unlimited)
-        - key: "fg-admin-key"
+        - key: "fg-admin-key"               # PLACEHOLDER — replace; Load refuses as-is
           name: "admin"
           rpm: 0                               # 0 = unlimited
           tpm: 0
@@ -163,7 +168,7 @@ backends:
     fusion-mlx:
         type: "fusion-mlx"
         base_url: "http://127.0.0.1:11434"
-        api_key: "dahai168"                # Must match fusion-mlx settings.json auth.api_key
+        api_key: ""                        # set to match fusion-mlx settings.json auth.api_key (local key, not a cloud credential)
         timeout: 120s
         enabled: true
         gc:
@@ -183,9 +188,9 @@ backends:
     openai:
         type: "openai-compatible"
         base_url: "https://api.openai.com/v1"
-        api_key: "sk-your-openai-key"
+        api_key: "sk-your-openai-key"      # PLACEHOLDER — replace before enabling; Load refuses placeholder on enabled backends
         timeout: 60s
-        enabled: true
+        enabled: false
     qianfan:
         type: "openai-compatible"
         base_url: "https://qianfan.baidubce.com/v2"
@@ -373,9 +378,9 @@ admin:
     enabled: true                      # Enable admin dashboard and API
     listen: ""                         # Optional separate listen address (default: same as server)
     log_max_len: 10000                 # Max request log entries (ring buffer)
-    jwt_secret: "change-me-at-least-32-chars-long-random-secret"  # JWT signing secret (min 32 chars)
+    jwt_secret: "change-me-at-least-32-chars-long-random-secret"  # PLACEHOLDER — replace with >=32 random chars; Load refuses as-is (JWT signing secret)
     users:                             # Admin login credentials (passwords min 8 chars)
-        admin: "change-me-secure-password"
+        admin: "change-me-secure-password"   # PLACEHOLDER — replace with a unique strong password; Load refuses as-is
     enable_pprof: false                # Enable pprof profiling endpoints (requires master_key)
 
 # A3 fix: persistent store backend selection (memory | redis)

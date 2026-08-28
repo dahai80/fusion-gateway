@@ -16,14 +16,14 @@ spec:
             matchLabels:
               name: fusion-gateway
       ports:
-        - port: 8100
+        - port: 11432
           protocol: TCP
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
       ports:
-        - port: 8100
+        - port: 11432
           protocol: TCP
   egress:
     - to:

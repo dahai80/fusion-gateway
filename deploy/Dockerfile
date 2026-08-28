@@ -11,6 +11,6 @@ FROM alpine:3.19
 RUN apk --no-cache add ca-certificates
 WORKDIR /app
 COPY --from=builder /app/fusion-gateway .
-EXPOSE 8100
+EXPOSE 11432
 ENTRYPOINT ["./fusion-gateway"]
 CMD ["--config", "/etc/fusion-gateway/config.yaml"]

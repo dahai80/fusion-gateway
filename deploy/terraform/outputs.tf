@@ -10,5 +10,5 @@ output "helm_release_status" {
 
 output "gateway_endpoint" {
   description = "Gateway endpoint URL"
-  value       = var.enable_ingress ? "https://${var.ingress_host}" : "http://<cluster-ip>:8100"
+  value       = var.enable_ingress ? "https://${var.ingress_host}" : "http://<cluster-ip>:11432"
 }

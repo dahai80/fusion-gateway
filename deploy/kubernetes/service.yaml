@@ -8,8 +8,8 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: 8100
-      targetPort: 8100
+    - port: 11432
+      targetPort: 11432
       protocol: TCP
   selector:
     app: fusion-gateway

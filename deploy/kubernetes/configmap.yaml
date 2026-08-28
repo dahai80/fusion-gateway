@@ -7,7 +7,7 @@ data:
   config.yaml: |
     server:
       host: "0.0.0.0"
-      port: 8100
+      port: 11432
     auth:
       master_key: "${FG_MASTER_KEY}"
     route:

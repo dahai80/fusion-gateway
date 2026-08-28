@@ -1114,6 +1114,19 @@ func validate(cfg *Config) error {
             if backend.MaxConnsPerHost == 0 {
                 slog.Warn("backend max_conns_per_host is 0 (unlimited); set a positive cap to bound FDs", "backend", name)
             }
+            // C1 (audit P1): reject a known-placeholder backend api_key on an
+            // ENABLED backend. Cloud provider keys ("your-volcengine-key",
+            // "sk-your-openai-key", "sk-ant-your-key", ...) are shipped as
+            // template stubs; a careless operator enabling the backend without
+            // rotating the key would send requests with a publicly-known
+            // credential. Disabled backends keep their stub (reserved, not
+            // live). Empty api_key is allowed (local backends need none). The
+            // auth.APIKeys loop above covers the gateway auth keys; this covers
+            // the upstream provider credentials — a separate credential surface
+            // the prior R7 blacklist never touched.
+            if backend.APIKey != "" && isKnownInsecureSecret(backend.APIKey) {
+                return fmt.Errorf("backends.%s.api_key must not be a known placeholder; set the real upstream credential or disable the backend", name)
+            }
         }
     }
 
@@ -1157,18 +1170,26 @@ func validate(cfg *Config) error {
         }
     }
 
-    // R7/C2 (audit P1-ops): encryption.master_key protects OAuth2 connector
-    // tokens at rest (data/connections.json). Without it, tokens persist
-    // plaintext. We can't reliably detect "connector enabled" from config
-    // alone (enablement is runtime via stored connector keys), so gate on the
-    // clearest signal: OIDC enabled means OAuth2 flows are active. Warn LOUDLY
-    // — do not refuse, since encryption is optional for a local-only no-OIDC
-    // deployment. The operator must act before enabling connectors.
-    if cfg.OIDC.Enabled {
+    // R7/C2 (audit P1): encryption.master_key protects OAuth2 connector tokens
+    // at rest (data/connections.json). Without it, tokens persist PLAINTEXT to
+    // disk. Audit C2 grades this a release-blocking MUST ("不满足 C1 或 C2 不得
+    // 对外发布"), so a deployment that activates OAuth2 flows (OIDC enabled OR a
+    // connector persistence_path configured) WITHOUT a master_key is
+    // fail-closed at Load rather than warned. A local-only no-OIDC/no-connector
+    // deployment needs no master_key (nothing to encrypt) and is unaffected.
+    // Signals: cfg.OIDC.Enabled = OAuth2 flows active; cfg.Connector != nil =
+    // connector framework configured (enablement is runtime via stored keys,
+    // but presence of the block means the operator intends to use it).
+    oauth2Active := cfg.OIDC.Enabled || cfg.Connector != nil
+    if oauth2Active {
         if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
-            slog.Warn("OIDC enabled but encryption.master_key is empty — OAuth2/connector tokens will persist PLAINTEXT to disk; set encryption.master_key before going live (audit C2)")
-        } else if isKnownInsecureSecret(cfg.Encryption.MasterKey) {
-            slog.Warn("encryption.master_key is a known placeholder — OAuth2/connector tokens are encrypted with a publicly-known key; rotate it before going live (audit C2)")
+            return fmt.Errorf("encryption.master_key is required when OIDC or connector is enabled — without it OAuth2/connector tokens persist PLAINTEXT to disk; set a >=32-char random master_key (audit C2, release-blocking)")
+        }
+        if isKnownInsecureSecret(cfg.Encryption.MasterKey) {
+            return fmt.Errorf("encryption.master_key must not be a known placeholder when OIDC or connector is enabled — OAuth2/connector tokens would be encrypted with a publicly-known key; set a unique >=32-char random master_key (audit C2, release-blocking)")
+        }
+        if len(cfg.Encryption.MasterKey) < 32 {
+            return fmt.Errorf("encryption.master_key must be at least 32 characters when OIDC or connector is enabled, got %d (audit C2)", len(cfg.Encryption.MasterKey))
         }
     }
 
@@ -1284,7 +1305,18 @@ var knownInsecureJWTSecrets = map[string]bool{
 }
 
 func isKnownInsecureJWTSecret(s string) bool {
-    return knownInsecureJWTSecrets[s]
+    t := strings.ToLower(strings.TrimSpace(s))
+    if t == "" {
+        return false
+    }
+    if knownInsecureJWTSecrets[t] {
+        return true
+    }
+    // C1 (audit P1-ops): the shipped config.yaml carries
+    // "fg-local-dev-jwt-secret-...-DO-NOT-SHIP" which evades the exact table.
+    // Reuse the generic placeholder pattern layer (fg- prefix, do-not-ship /
+    // change-me substrings) so self-describing JWT placeholders are rejected.
+    return looksLikePlaceholder(t)
 }
 
 // knownInsecureSecrets is the R7 (audit P2) denylist for generic secrets —
@@ -1314,9 +1346,63 @@ var knownInsecureSecrets = map[string]bool{
 }
 
 // isKnownInsecureSecret reports whether s is a known placeholder/default
-// secret (exact match, case-insensitive). R7 audit fix.
+// secret. R7 audit fix; C1 (audit P1-ops) extends it from exact-match-only to
+// pattern detection: the shipped config.example.yaml carries literals like
+// "fg-master-key-change-me", "fg-admin-key", "your-baichuan-key",
+// "change-me-secure-password" that all EVADE the exact-match table (no entry
+// for those exact strings), so a careless operator could Load unchanged and
+// ship publicly-known credentials. The pattern layer catches the families:
+//   - "fg-" prefix: repo-baked marker (fg-master-key-*, fg-admin-key, ...)
+//   - "your-" prefix + "-key" suffix: template stub (your-baichuan-key, ...)
+//   - "change-me" / "do-not-ship" / "replace-me" / "placeholder" /
+//     "set-me" / "example" / "todo" / "changeme" substrings
+// Case-insensitive, trims surrounding whitespace. Exact-match table kept for
+// short bare words ("default", "secret", "password") that substring matching
+// would over-flag (a real key containing "secret" is plausible; a real key
+// that IS "secret" is not).
 func isKnownInsecureSecret(s string) bool {
-    return knownInsecureSecrets[strings.ToLower(strings.TrimSpace(s))]
+    t := strings.ToLower(strings.TrimSpace(s))
+    if t == "" {
+        return false
+    }
+    if knownInsecureSecrets[t] {
+        return true
+    }
+    return looksLikePlaceholder(t)
+}
+
+// looksLikePlaceholder applies the C1 pattern layer: prefix/suffix/substring
+// families that the shipped config templates use. Kept conservative to avoid
+// false positives on real credentials — only well-known stub markers.
+func looksLikePlaceholder(t string) bool {
+    // Prefix families.
+    if strings.HasPrefix(t, "fg-") {
+        return true
+    }
+    if strings.HasPrefix(t, "your-") && strings.HasSuffix(t, "-key") {
+        return true
+    }
+    if strings.HasPrefix(t, "sk-your-") || strings.HasPrefix(t, "sk-ant-your-") {
+        return true
+    }
+    // Substring families (case already lowered).
+    substringMarkers := []string{
+        "change-me", "changeme",
+        "do-not-ship", "do_not_ship",
+        "replace-me", "replace_me",
+        "placeholder",
+        "set-me", "set_me",
+        "your-key", "your_key",
+        "your-master", "your-secret",
+        "example-key", "example_key",
+        "todo", "xxxxx",
+    }
+    for _, m := range substringMarkers {
+        if strings.Contains(t, m) {
+            return true
+        }
+    }
+    return false
 }
 
 func DefaultConfig() Config {

@@ -16,7 +16,7 @@ spec:
         app: fusion-gateway
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8100"
+        prometheus.io/port: "11432"
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: fusion-gateway
@@ -37,7 +37,7 @@ spec:
         - name: fusion-gateway
           image: fusion-gateway:latest
           ports:
-            - containerPort: 8100
+            - containerPort: 11432
           env:
             - name: CONFIG_PATH
               value: /etc/fusion-gateway/config.yaml
@@ -60,13 +60,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /livez
-              port: 8100
+              port: 11432
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8100
+              port: 11432
             initialDelaySeconds: 3
             periodSeconds: 5
       volumes:

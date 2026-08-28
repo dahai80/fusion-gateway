@@ -26,4 +26,4 @@ spec:
               service:
                 name: fusion-gateway
                 port:
-                  number: 8100
+                  number: 11432
