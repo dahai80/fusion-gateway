@@ -620,8 +620,23 @@ func (e *Engine) NodeBreakerOpen(nodeID string) bool {
         return false
     }
     e.breakerMu.RLock()
+    defer e.breakerMu.RUnlock()
+    return e.nodeBreakerOpenLocked(nodeID)
+}
+
+// nodeBreakerOpenLocked is the lock-free inner of NodeBreakerOpen (R1 audit
+// fix). The caller MUST hold e.breakerMu (RLock is fine): tryClusterLocked and
+// tryClusterByPlatformLocked already run under breakerMu.RLock via
+// decideLocked, so re-taking it inside NodeBreakerOpen was a redundant nested
+// RLock — not a self-deadlock (Go allows recursive RLock), but it widened the
+// reader's critical section unnecessarily and gave every pending writer a
+// longer wait. Reading the map under the caller's existing lock keeps the
+// snapshot consistent while shortening the held window.
+func (e *Engine) nodeBreakerOpenLocked(nodeID string) bool {
+    if nodeID == "" {
+        return false
+    }
     b, ok := e.nodeBreakers[nodeID]
-    e.breakerMu.RUnlock()
     if !ok {
         return false
     }
@@ -1090,7 +1105,9 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string, snap
     // RR5: bypass a node whose per-node breaker is open — it tripped itself on
     // repeated failure, so routing to it would just fail again. Fall through to
     // cloud for this request; the node's health-check will reconcile its state.
-    if e.NodeBreakerOpen(nodeID) {
+    // R1: caller (decideLocked) already holds breakerMu.RLock, so use the
+    // lock-free variant instead of re-entering the mutex.
+    if e.nodeBreakerOpenLocked(nodeID) {
         slog.Info("cluster node breaker open, bypassing to cloud",
             "node_id", nodeID, "model", model)
         return nil
@@ -1127,7 +1144,9 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
         return nil
     }
     // RR5: bypass a node whose per-node breaker is open (see tryClusterLocked).
-    if e.NodeBreakerOpen(nodeID) {
+    // R1: caller (decideLocked) already holds breakerMu.RLock — use the
+    // lock-free variant instead of re-entering the mutex.
+    if e.nodeBreakerOpenLocked(nodeID) {
         slog.Info("cluster node breaker open, bypassing platform dispatch to cloud",
             "node_id", nodeID, "platform", platform)
         return nil

@@ -3,6 +3,7 @@ package middleware
 import (
     "context"
     "log/slog"
+    "net"
     "net/http"
     "sync"
     "time"
@@ -199,6 +200,24 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
                     http.Error(w, `{"error":{"message":"Rate limit: no API key","type":"rate_limit_error"}}`, http.StatusTooManyRequests)
                     return
                 }
+                // N5 (audit): anonymous path (no key) was fully unlimited — a
+                // single unauthenticated host could fan out unbounded requests.
+                // Apply a per-IP RPM cap when anonymous_rpm > 0. Master already
+                // bypassed above. 0 keeps the unlimited back-compat behavior.
+                if cfg.AnonymousRPM > 0 {
+                    ip := clientIP(r)
+                    if !limiter.AllowRPM("anon:"+ip, cfg.AnonymousRPM) {
+                        slog.Warn("rate limit: anonymous RPM exceeded", "ip", ip, "rpm", cfg.AnonymousRPM, "path", r.URL.Path)
+                        w.Header().Set("Retry-After", "1")
+                        w.Header().Set("X-RateLimit-Remaining", "0")
+                        http.Error(w, `{"error":{"message":"Rate limit exceeded (anonymous RPM)","type":"rate_limit_error"}}`, http.StatusTooManyRequests)
+                        return
+                    }
+                    remaining := limiter.RemainingRPM("anon:"+ip, cfg.AnonymousRPM)
+                    if remaining >= 0 {
+                        w.Header().Set("X-RateLimit-Remaining", formatInt(remaining))
+                    }
+                }
                 next.ServeHTTP(w, r)
                 return
             }
@@ -240,6 +259,21 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
             next.ServeHTTP(w, r)
         })
     }
+}
+
+// clientIP extracts the connecting peer's IP from r.RemoteAddr, stripping the
+// port. Used by the N5 anonymous per-IP rate limiter. Deliberately ignores
+// X-Forwarded-For / X-Real-IP: trusting a client-supplied forward header for a
+// rate-limit key lets an attacker rotate the header to evade the cap. The
+// gateway is the ingress in the local-first deployment, so RemoteAddr is the
+// real peer. If a trusted reverse proxy fronts the gateway, IP derivation can
+// be revisited — but never trust the header unconditionally.
+func clientIP(r *http.Request) string {
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        return r.RemoteAddr
+    }
+    return host
 }
 
 func formatInt(v int) string {

@@ -16,6 +16,14 @@ func RequestID(next http.Handler) http.Handler {
             id = uuid.New().String()
         }
         w.Header().Set("X-Request-ID", id)
+        // R12 (audit): stamp the resolved id back onto the inbound request
+        // header so downstream code reading r.Header.Get("X-Request-ID") —
+        // notably adapter.WithFusionHeaders' passthrough list — sees the same
+        // value the ctx carries and the response echoes. Without this, a
+        // client that omits X-Request-ID got a generated id in ctx/response
+        // but it never propagated to fusion-mlx/cloud upstreams (log
+        // correlation gap). Set is idempotent when the client already sent it.
+        r.Header.Set("X-Request-ID", id)
         ctx := context.WithValue(r.Context(), RequestIDKey, id)
         next.ServeHTTP(w, r.WithContext(ctx))
     })

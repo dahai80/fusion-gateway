@@ -235,7 +235,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
 
     if req.Stream {
-        s.handleStreamChat(ctx, w, provider, &req, decision, budget, start)
+        // R10 (audit): global concurrent-stream cap. Reject with 429 when the
+        // pool is full so a request burst cannot exhaust goroutines/FDs against
+        // cloud fan-out (the local path is already hard-capped by max_concurrent
+        // slots; this is the cloud-side backstop).
+        ok, releaseSlot := s.acquireStreamSlot()
+        if !ok {
+            slog.Warn("stream chat rejected, concurrent stream cap reached",
+                "model", req.Model, "max", s.cfg.Config.Routing.Stream.MaxConcurrentStreams)
+            w.Header().Set("Content-Type", "application/json")
+            w.Header().Set("Retry-After", "2")
+            w.WriteHeader(http.StatusTooManyRequests)
+            fmt.Fprintf(w, `{"error":{"message":"concurrent stream limit reached, retry shortly","type":"rate_limit_error"}}`)
+            return
+        }
+        defer releaseSlot()
+        // R9 (audit): per-request duration ceiling. The stream HTTP client uses
+        // Timeout:0 (R3); without this, a cloud backend configured Timeout:0
+        // could stall the handler + client conn indefinitely. 600s default sits
+        // above the 180s idle watchdog so it only catches true stalls.
+        streamCtx, cancelDeadline := s.streamDeadline(ctx)
+        defer cancelDeadline()
+        s.handleStreamChat(streamCtx, w, provider, &req, decision, budget, start)
     } else {
         s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
     }
@@ -415,6 +436,15 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     var lastChunkAt time.Time
     chunkCount := 0
     endReason := "ch_closed_no_done"
+    // R8 (audit): track whether the stream emitted a terminal chunk. OpenAI-wire
+    // streams signal completion via Choices[].FinishReason non-nil on the last
+    // chunk. If the upstream channel closes WITHOUT that sentinel (and no
+    // watchdog trip / client cancel), the response was truncated mid-generation
+    // — the audit found this fell into the success branch, recording success +
+    // nudging the breaker toward healthy, so a repeatedly-dying local stayed in
+    // rotation. sawFinishReason lets the terminal block distinguish "closed
+    // clean" from "closed incomplete".
+    sawFinishReason := false
 
     writeChunk := func(chunk adapter.StreamChunk) bool {
         // E1 (audit): when the provider carried the verbatim upstream bytes
@@ -462,6 +492,14 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
             if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                 outputTokens += chunk.Usage.CompletionTokens
             }
+            if !sawFinishReason {
+                for _, c := range chunk.Choices {
+                    if c.FinishReason != nil {
+                        sawFinishReason = true
+                        break
+                    }
+                }
+            }
             lastChunkID = chunk.ID
             lastChunkModel = chunk.Model
             lastChunkCreated = chunk.Created
@@ -490,6 +528,14 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 }
                 if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                     outputTokens += chunk.Usage.CompletionTokens
+                }
+                if !sawFinishReason {
+                    for _, c := range chunk.Choices {
+                        if c.FinishReason != nil {
+                            sawFinishReason = true
+                            break
+                        }
+                    }
                 }
                 lastChunkID = chunk.ID
                 lastChunkModel = chunk.Model
@@ -599,8 +645,23 @@ streamDone:
     // F4: record by exit reason. watchdog_tripped is a stall, not a success —
     // RecordFailure nudges the breaker so a dead local trips; the metric status
     // reflects the real outcome rather than masking every exit as "success".
+    // R8 (audit): a channel that closed WITHOUT a terminal FinishReason (and no
+    // watchdog trip / client cancel) was truncated mid-generation by the
+    // upstream — not a clean completion. Recording it as success left the
+    // breaker blind to a repeatedly-dying backend (it looked healthy). Split
+    // the else branch: clean completion (sawFinishReason) → success; closed
+    // without a terminal marker → incomplete → RecordFailure so the breaker
+    // sees the truncation. watchdog_tripped / client_canceled / write_failed
+    // keep their own branches above.
     if endReason == "watchdog_tripped" {
         observability.RecordRequest(string(decision.Backend), req.Model, "stall")
+        s.recordOutcome(decision.Backend, decision.NodeID, false)
+    } else if !sawFinishReason && endReason == "ch_closed_no_done" {
+        // Upstream closed the channel without ever emitting a terminal chunk.
+        endReason = "incomplete"
+        slog.Warn("stream chat closed without finish_reason, recording incomplete",
+            "provider", provider.Name(), "model", req.Model, "chunks", chunkCount)
+        observability.RecordRequest(string(decision.Backend), req.Model, "incomplete")
         s.recordOutcome(decision.Backend, decision.NodeID, false)
     } else {
         observability.RecordRequest(string(decision.Backend), req.Model, "success")

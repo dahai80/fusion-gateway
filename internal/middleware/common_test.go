@@ -46,6 +46,45 @@ func TestRequestID_Generated(t *testing.T) {
     }
 }
 
+// TestR12_RequestIDStampedToInboundHeader (R12 audit): when the client omits
+// X-Request-ID, the middleware generates one AND stamps it back onto the
+// inbound request header so adapter.WithFusionHeaders' passthrough list (which
+// reads r.Header.Get) sees the same value the ctx/response carry. Without this,
+// a generated id lived only in ctx/response and never reached fusion-mlx/cloud
+// upstreams — a log-correlation gap. The client-supplied case is idempotent.
+func TestR12_RequestIDStampedToInboundHeader(t *testing.T) {
+    // Generated case: client omits the header.
+    var generatedInbound, generatedCtx string
+    handler := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        generatedInbound = r.Header.Get("X-Request-ID")
+        generatedCtx, _ = r.Context().Value(RequestIDKey).(string)
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if generatedInbound == "" {
+        t.Fatal("R12: generated X-Request-ID not stamped onto inbound r.Header")
+    }
+    if generatedInbound != generatedCtx {
+        t.Errorf("R12: inbound header %q != ctx %q", generatedInbound, generatedCtx)
+    }
+
+    // Client-supplied case: existing value preserved (Set is idempotent).
+    var suppliedInbound string
+    handler2 := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        suppliedInbound = r.Header.Get("X-Request-ID")
+        w.WriteHeader(http.StatusOK)
+    }))
+    req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+    req2.Header.Set("X-Request-ID", "client-supplied-abc")
+    rec2 := httptest.NewRecorder()
+    handler2.ServeHTTP(rec2, req2)
+    if suppliedInbound != "client-supplied-abc" {
+        t.Errorf("R12: client-supplied id must be preserved on inbound header, got %q", suppliedInbound)
+    }
+}
+
 func TestConfigSnapshot(t *testing.T) {
     slog.Info("test ConfigSnapshot")
     snap := &config.ConfigSnapshot{Version: 42}

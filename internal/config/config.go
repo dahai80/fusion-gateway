@@ -12,6 +12,8 @@ import (
     "github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
     "log/slog"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/crypto"
 )
 
 type TLSConfig struct {
@@ -90,6 +92,11 @@ type RateLimitConfig struct {
     GlobalRPM      int  `mapstructure:"global_rpm"`
     GlobalTPM      int  `mapstructure:"global_tpm"`
     KeyEnforcement bool `mapstructure:"key_enforcement"`
+    // AnonymousRPM caps requests-per-minute from a single client IP when no API
+    // key is in play (auth.enabled=false or passthrough). N5 (audit): the
+    // anonymous path was fully unlimited — a single unauthenticated host could
+    // fan out unbounded requests. 0 disables the per-IP cap (back-compat).
+    AnonymousRPM int `mapstructure:"anonymous_rpm"`
 }
 
 type LocalPriorityConfig struct {
@@ -319,6 +326,21 @@ type StreamConfig struct {
     // is dropped. 0 = unlimited (preserves the prior behavior for back-comat,
     // but DefaultConfig seeds 1024).
     ResumeMaxEntries int           `mapstructure:"resume_max_entries"`
+    // MaxRequestDuration (R9 audit): per-request ceiling on the whole stream
+    // lifetime. The stream HTTP client now uses Timeout:0 (R3) so Client.Timeout
+    // no longer caps the body read; without a server-side deadline a cloud
+    // backend configured Timeout:0 could stall a handler goroutine + client
+    // connection indefinitely. 600s is a generous ceiling above the 180s idle
+    // watchdog so it only catches true stalls, not legit long generation. 0 =
+    // no server-side deadline (back-compat, but not recommended — rely on
+    // watchdog + upstream timeouts only).
+    MaxRequestDuration time.Duration `mapstructure:"max_request_duration"`
+    // MaxConcurrentStreams (R10 audit): global cap on concurrent in-flight
+    // streams across all backends. The local path is already hard-capped by
+    // max_concurrent slots (RR4); this caps cloud fan-out so a request burst
+    // cannot exhaust FDs/goroutines against cloud providers. Acquired at stream
+    // handler entry; excess requests get 429. 0 = unlimited (back-compat).
+    MaxConcurrentStreams int `mapstructure:"max_concurrent_streams"`
 }
 
 type CacheConfig struct {
@@ -698,6 +720,57 @@ var (
     reloadMu sync.Mutex
 )
 
+// encPrefix marks a backend api_key as AES-256-GCM ciphertext (base64 of
+// nonce||ciphertext) that Load should decrypt before providers see it. N4
+// (audit): backend api_keys were stored plaintext in config.yaml. Operators
+// can now store `api_key: enc:<base64>` produced by the encryption helper; a
+// plaintext value still loads (warned) so existing configs keep working until
+// rotated.
+const encPrefix = "enc:"
+
+// decryptBackendAPIKeys (N4 audit) decrypts every backends[*].api_key that
+// carries the "enc:" ciphertext prefix, using encryption.master_key. Builds a
+// transient cipher from the configured master key — Load runs before
+// server.New wires the cipher into connector/OAuth2, so the cipher is built
+// here for the key-decrypt pass only. Plaintext keys (no prefix) pass through
+// unchanged with a warn log nudging rotation. A malformed "enc:" value (bad
+// base64, wrong key, truncated) is a hard error: a silently-decrypted-to-empty
+// key would send an unauthenticated request upstream and look like an upstream
+// bug. Fail loud at Load so the operator fixes the key, not the backend.
+func decryptBackendAPIKeys(cfg *Config) error {
+    if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
+        for name, bc := range cfg.Backends {
+            if bc.APIKey != "" {
+                slog.Warn("backend api_key stored plaintext and no encryption.master_key set; rotate to enc: form",
+                    "backend", name)
+            }
+        }
+        return nil
+    }
+    cipher, err := crypto.NewAESCipher(cfg.Encryption.MasterKey)
+    if err != nil {
+        return fmt.Errorf("init backend api_key cipher: %w", err)
+    }
+    for name, bc := range cfg.Backends {
+        if bc.APIKey == "" {
+            continue
+        }
+        if !strings.HasPrefix(bc.APIKey, encPrefix) {
+            slog.Warn("backend api_key stored plaintext; rotate to enc: form for at-rest protection",
+                "backend", name)
+            continue
+        }
+        plain, err := cipher.Decrypt(strings.TrimPrefix(bc.APIKey, encPrefix))
+        if err != nil {
+            return fmt.Errorf("decrypt backends.%s.api_key: %w", name, err)
+        }
+        bc.APIKey = plain
+        cfg.Backends[name] = bc
+        slog.Info("backend api_key decrypted from enc: form", "backend", name)
+    }
+    return nil
+}
+
 func Load(path string) (*ConfigSnapshot, error) {
     v := viper.New()
     v.SetConfigFile(path)
@@ -726,6 +799,13 @@ func Load(path string) (*ConfigSnapshot, error) {
 
     if err := validate(&cfg); err != nil {
         return nil, fmt.Errorf("validate config: %w", err)
+    }
+
+    // N4 (audit): decrypt backends[*].api_key stored as "enc:" ciphertext.
+    // Runs after validate (master_key placeholder refusal) and before the
+    // snapshot is stored, so providers built from this config see plaintext.
+    if err := decryptBackendAPIKeys(&cfg); err != nil {
+        return nil, fmt.Errorf("decrypt backend api_keys: %w", err)
     }
 
     ver := configVersion.Add(1)
@@ -954,6 +1034,13 @@ func validate(cfg *Config) error {
             if len(password) < 8 {
                 return fmt.Errorf("admin user %q password must be at least 8 characters, got %d", username, len(password))
             }
+            // R7 (audit): reject known placeholder admin passwords. bcrypt
+            // already rejects empty, but "change-me" / "password" would hash
+            // and authenticate — a publicly-known admin credential is an open
+            // door. (Plaintext passwords here are hashed at startup by AdminAuth.)
+            if isKnownInsecureSecret(password) {
+                return fmt.Errorf("admin user %q password must not be a known placeholder; set a unique strong password", username)
+            }
         }
     }
 
@@ -1045,15 +1132,43 @@ func validate(cfg *Config) error {
     // config-side reject fails fast at startup so the operator learns before a
     // request is ever attempted. Only enforced when auth is enabled; a disabled
     // auth block has no live keys to validate.
+    // R7 (audit): reject a known-placeholder master_key when auth is enabled.
+    // The master_key is admin-equivalent (it bypasses rate limits + opens MCP),
+    // so a publicly-known value is a full bypass. Empty is allowed (master_key
+    // is optional) — only the placeholder literals are refused.
+    if cfg.Auth.Enabled && isKnownInsecureSecret(cfg.Auth.MasterKey) {
+        return fmt.Errorf("auth.master_key must not be a known placeholder; set a unique strong secret or leave empty to disable")
+    }
+
     for _, k := range cfg.Auth.APIKeys {
         if cfg.Auth.Enabled && strings.TrimSpace(k.Key) == "" {
             return fmt.Errorf("auth key %q has an empty key; set a non-empty key or remove the entry", k.Name)
+        }
+        // R7 (audit): reject known-placeholder API keys when auth is enabled.
+        // A publicly-known key authenticates anyone who read the repo.
+        if cfg.Auth.Enabled && isKnownInsecureSecret(k.Key) {
+            return fmt.Errorf("auth key %q must not be a known placeholder; set a unique strong key", k.Name)
         }
         if k.BudgetLimit < 0 {
             return fmt.Errorf("auth key %q budget_limit must be non-negative, got %f", k.Name, k.BudgetLimit)
         }
         if k.DailyBudgetLimit < 0 {
             return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
+        }
+    }
+
+    // R7/C2 (audit P1-ops): encryption.master_key protects OAuth2 connector
+    // tokens at rest (data/connections.json). Without it, tokens persist
+    // plaintext. We can't reliably detect "connector enabled" from config
+    // alone (enablement is runtime via stored connector keys), so gate on the
+    // clearest signal: OIDC enabled means OAuth2 flows are active. Warn LOUDLY
+    // — do not refuse, since encryption is optional for a local-only no-OIDC
+    // deployment. The operator must act before enabling connectors.
+    if cfg.OIDC.Enabled {
+        if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
+            slog.Warn("OIDC enabled but encryption.master_key is empty — OAuth2/connector tokens will persist PLAINTEXT to disk; set encryption.master_key before going live (audit C2)")
+        } else if isKnownInsecureSecret(cfg.Encryption.MasterKey) {
+            slog.Warn("encryption.master_key is a known placeholder — OAuth2/connector tokens are encrypted with a publicly-known key; rotate it before going live (audit C2)")
         }
     }
 
@@ -1172,6 +1287,38 @@ func isKnownInsecureJWTSecret(s string) bool {
     return knownInsecureJWTSecrets[s]
 }
 
+// knownInsecureSecrets is the R7 (audit P2) denylist for generic secrets —
+// auth.master_key, api_keys[*].key, and admin passwords. These are the
+// placeholder/default literals a shipped config.yaml carries that a careless
+// operator may leave in place; a publicly-known secret is equivalent to no
+// secret at all. Fail-closed at startup forces rotation before going live.
+// Covers the ops-only P1 items C1 (credential rotation) + C2
+// (encryption.master_key) at the config layer: the shipped config cannot Load
+// until the placeholders are replaced.
+var knownInsecureSecrets = map[string]bool{
+    "change-me":                true,
+    "changeme":                 true,
+    "change-me-now":            true,
+    "placeholder":              true,
+    "DO-NOT-SHIP":              true,
+    "do-not-ship":              true,
+    "default":                  true,
+    "secret":                   true,
+    "password":                 true,
+    "master-key":               true,
+    "master_key":               true,
+    "your-master-key-here":     true,
+    "your-secret-key-here":     true,
+    "replace-me":               true,
+    "todo":                     true,
+}
+
+// isKnownInsecureSecret reports whether s is a known placeholder/default
+// secret (exact match, case-insensitive). R7 audit fix.
+func isKnownInsecureSecret(s string) bool {
+    return knownInsecureSecrets[strings.ToLower(strings.TrimSpace(s))]
+}
+
 func DefaultConfig() Config {
     return Config{
         Server: ServerConfig{
@@ -1237,18 +1384,25 @@ func DefaultConfig() Config {
                 },
             },
             Stream: StreamConfig{
-                KeepaliveInterval: 15 * time.Second,
-                IdleTimeout:       180 * time.Second,
-                ResumeEnabled:     false,
-                ResumeMaxEvents:   256,
-                ResumeMaxBytes:    1 << 20,
-                ResumeTTL:         10 * time.Minute,
-                ResumeMaxEntries:  1024,
+                KeepaliveInterval:    15 * time.Second,
+                IdleTimeout:          180 * time.Second,
+                ResumeEnabled:        false,
+                ResumeMaxEvents:      256,
+                ResumeMaxBytes:       1 << 20,
+                ResumeTTL:            10 * time.Minute,
+                ResumeMaxEntries:     1024,
+                MaxRequestDuration:   600 * time.Second,
+                MaxConcurrentStreams: 256,
             },
             AgentTasks: AgentTaskConfig{
                 TTL:            30 * time.Minute,
                 MaxEntries:     10000,
                 ReaperInterval: 5 * time.Minute,
+            },
+            // N5 (audit): per-IP cap for anonymous (no-key) requests. Default
+            // 60 RPM — engaged once rate_limit.enabled. 0 disables (back-compat).
+            RateLimit: RateLimitConfig{
+                AnonymousRPM: 60,
             },
         },
         Hardware: HardwareConfig{

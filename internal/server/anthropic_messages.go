@@ -175,7 +175,22 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     msgProv := resolveMessagesProvider(provider)
     if msgProv != nil {
         if antReq.Stream {
-            s.handleStreamAnthropicMessages(ctx, w, msgProv, &antReq)
+            // R10 (audit): global concurrent-stream cap (429 when full).
+            ok, releaseSlot := s.acquireStreamSlot()
+            if !ok {
+                slog.Warn("anthropic stream rejected, concurrent stream cap reached",
+                    "model", antReq.Model, "max", s.cfg.Config.Routing.Stream.MaxConcurrentStreams)
+                w.Header().Set("Content-Type", "application/json")
+                w.Header().Set("Retry-After", "2")
+                w.WriteHeader(http.StatusTooManyRequests)
+                fmt.Fprintf(w, `{"error":{"message":"concurrent stream limit reached, retry shortly","type":"rate_limit_error"}}`)
+                return
+            }
+            defer releaseSlot()
+            // R9 (audit): per-request duration ceiling (default 600s).
+            streamCtx, cancelDeadline := s.streamDeadline(ctx)
+            defer cancelDeadline()
+            s.handleStreamAnthropicMessages(streamCtx, w, msgProv, &antReq)
         } else {
             s.handleNonStreamAnthropicMessages(ctx, w, msgProv, &antReq)
         }
@@ -189,7 +204,22 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
             tenant = kc.Name
         }
         if antReq.Stream {
-            s.handleStreamChat(ctx, w, provider, chatReq, decision, budget, start)
+            // R10 (audit): global concurrent-stream cap (429 when full).
+            ok, releaseSlot := s.acquireStreamSlot()
+            if !ok {
+                slog.Warn("anthropic stream rejected, concurrent stream cap reached",
+                    "model", antReq.Model, "max", s.cfg.Config.Routing.Stream.MaxConcurrentStreams)
+                w.Header().Set("Content-Type", "application/json")
+                w.Header().Set("Retry-After", "2")
+                w.WriteHeader(http.StatusTooManyRequests)
+                fmt.Fprintf(w, `{"error":{"message":"concurrent stream limit reached, retry shortly","type":"rate_limit_error"}}`)
+                return
+            }
+            defer releaseSlot()
+            // R9 (audit): per-request duration ceiling (default 600s).
+            streamCtx, cancelDeadline := s.streamDeadline(ctx)
+            defer cancelDeadline()
+            s.handleStreamChat(streamCtx, w, provider, chatReq, decision, budget, start)
         } else {
             s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start, tenant)
         }
@@ -377,6 +407,30 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         }
         return nil
     }
+    // emitAnthropicEvent (N3 audit): emit an upstream Anthropic event. When the
+    // provider carried the verbatim upstream payload (Raw) AND the event is not
+    // block-scoped, write Raw directly — skipping the per-frame json.Marshal
+    // the audit found burning serialization at concurrency. Block-scoped events
+    // (content_block_start/delta/stop) keep the marshal path so MarshalJSON
+    // can inject a missing "index":0 (issue #46); emitting raw bytes that omit
+    // index would regress that fix. Events synthesized in-process (Raw nil)
+    // also marshal. Semantically identical output for pass-through events;
+    // raw is more faithful (preserves unknown upstream fields).
+    emitAnthropicEvent := func(event adapter.AnthropicStreamEvent) error {
+        data := event.Raw
+        blockScoped := event.Type == "content_block_start" ||
+            event.Type == "content_block_delta" ||
+            event.Type == "content_block_stop"
+        if len(data) == 0 || blockScoped {
+            marshaled, err := json.Marshal(event)
+            if err != nil {
+                slog.Error("anthropic stream event marshal failed", "error", err, "type", event.Type)
+                return nil
+            }
+            data = marshaled
+        }
+        return writeSSE("event: %s\ndata: %s\n\n", event.Type, data)
+    }
     writeFailed := false
     // Per-stream timing instrumentation (issue #81). "The response stopped
     // arriving" is a Claude Code internal judgment that an upstream stream
@@ -473,8 +527,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             } else if event.Type == "content_block_stop" {
                 delete(openBlocks, event.Index)
             }
-            data, _ := json.Marshal(event)
-            if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
+            if err := emitAnthropicEvent(event); err != nil {
                 slog.Warn("anthropic stream client write failed", "error", err)
                 writeFailed = true
                 endReason = "write_failed"
@@ -526,8 +579,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 } else if event.Type == "content_block_stop" {
                     delete(openBlocks, event.Index)
                 }
-                data, _ := json.Marshal(event)
-                if err := writeSSE("event: %s\ndata: %s\n\n", event.Type, data); err != nil {
+                if err := emitAnthropicEvent(event); err != nil {
                     slog.Warn("anthropic stream client write failed", "error", err)
                     writeFailed = true
                     endReason = "write_failed"

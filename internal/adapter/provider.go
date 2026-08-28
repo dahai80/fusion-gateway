@@ -14,6 +14,11 @@ var fusionPassthroughHeaders = []string{
     "X-Fusion-Chat-Id",
     "X-Fusion-Route",
     "X-Space-Id",
+    // R12 (audit): forward the request id so fusion-mlx/cloud logs correlate
+    // back to the gateway request. The RequestID middleware stamps a generated
+    // id onto r.Header when the client omits it, so this reads a value in both
+    // the client-supplied and gateway-generated cases.
+    "X-Request-ID",
 }
 
 func WithFusionHeaders(ctx context.Context, r *http.Request) context.Context {

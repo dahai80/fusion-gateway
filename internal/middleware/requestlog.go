@@ -19,18 +19,29 @@ type ResponseRecorder struct {
     http.ResponseWriter
     StatusCode int
     Size       int
+    // written is true once WriteHeader or Write has been called (R2 audit fix:
+    // lets the panic-recover path tell whether the handler already wrote a
+    // response before panicking, so it doesn't double-write a 500 on top).
+    written bool
 }
 
 func NewResponseRecorder(w http.ResponseWriter) *ResponseRecorder {
     return &ResponseRecorder{ResponseWriter: w, StatusCode: http.StatusOK}
 }
 
+// Written reports whether the response has started (header or body written).
+func (r *ResponseRecorder) Written() bool {
+    return r.written
+}
+
 func (r *ResponseRecorder) WriteHeader(code int) {
     r.StatusCode = code
+    r.written = true
     r.ResponseWriter.WriteHeader(code)
 }
 
 func (r *ResponseRecorder) Write(b []byte) (int, error) {
+    r.written = true
     size, err := r.ResponseWriter.Write(b)
     r.Size += size
     return size, err

@@ -141,6 +141,15 @@ type AnthropicStreamEvent struct {
     Model        string                 `json:"model,omitempty"`
     StopReason   string                 `json:"stop_reason,omitempty"`
     StopSequence *string                `json:"stop_sequence,omitempty"`
+    // Raw carries the verbatim upstream "data:" payload bytes for N3 raw
+    // passthrough. json:"-" so it never serializes. The native stream forward
+    // loop emits Raw directly for events that need no in-process transform,
+    // skipping the per-frame json.Marshal (the audit's per-frame serialization
+    // burn). Block-scoped events (content_block_start/delta/stop) are excluded
+    // from raw passthrough: MarshalJSON injects a missing "index":0 (issue
+    // #46), and emitting raw bytes that omit index would regress that fix for
+    // upstreams that drop it.
+    Raw json.RawMessage `json:"-"`
 }
 
 // MarshalJSON emits the event per the Anthropic SSE spec. Block-scoped events
@@ -547,6 +556,12 @@ func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body
                 slog.Warn("anthropic stream event unmarshal error", "error", err)
                 continue
             }
+            // N3: keep the verbatim upstream payload so the forward loop can
+            // emit it directly (raw passthrough) for events that need no
+            // transform. Block-scoped events are excluded at emit time
+            // (index injection, issue #46). Copy the bytes — `data` is a
+            // substring of lineBuf which is reused across frames.
+            event.Raw = append([]byte(nil), data...)
             select {
             case ch <- event:
             case <-ctx.Done():

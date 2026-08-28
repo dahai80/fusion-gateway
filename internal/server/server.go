@@ -13,6 +13,7 @@ import (
     "log/slog"
     "net/http"
     "net/http/pprof"
+    "runtime/debug"
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
     "github.com/fusion-gateway/fusion-gateway/internal/connector"
@@ -134,6 +135,10 @@ type Server struct {
     // and surfaced on /v1/status. Defaults until SetVersion is called.
     version string
     commit  string
+    // R10 (audit): global concurrent-stream semaphore (buffered struct channel).
+    // Sized by routing.stream.max_concurrent_streams in server.New; nil when the
+    // cap is 0 (disabled, back-compat). acquireStreamSlot acquires/releases.
+    streamSem chan struct{}
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
@@ -232,6 +237,46 @@ func (s *Server) recordOutcome(backend router.Backend, nodeID string, success bo
         s.router.RecordSuccess(string(backend))
     } else {
         s.router.RecordFailure(string(backend))
+    }
+}
+
+// streamDeadline (R9 audit) wraps ctx with a per-request duration ceiling from
+// routing.stream.max_request_duration. The stream HTTP client uses Timeout:0
+// (R3), so Client.Timeout no longer bounds the body read; without a server-side
+// deadline a cloud backend configured Timeout:0 could stall a handler goroutine
+// + client connection indefinitely. Returns the parent ctx unchanged (no
+// cancel) when the configured duration is 0 — preserves back-compat and leaves
+// short ops (embeddings, rerank, models) unbounded by the stream ceiling. The
+// caller MUST defer the returned cancel so the deadline ctx releases when the
+// handler returns, even on panic.
+func (s *Server) streamDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+    d := s.cfg.Config.Routing.Stream.MaxRequestDuration
+    if d <= 0 {
+        return ctx, func() {}
+    }
+    return context.WithTimeout(ctx, d)
+}
+
+// acquireStreamSlot (R10 audit) acquires a slot from the global concurrent-
+// stream semaphore, sized by routing.stream.max_concurrent_streams. Returns
+// true on success. On a full pool, returns false so the caller answers 429
+// (the local path is already hard-capped by max_concurrent slots; this caps
+// cloud fan-out so a burst cannot exhaust FDs/goroutines). A nil/empty channel
+// disables the cap (back-compat). The returned release func MUST be deferred.
+// Implemented with a buffered struct channel — a counting semaphore without
+// pulling in golang.org/x/sync (keeps the single-binary offline-first build
+// lean per the project's no-new-dep preference).
+func (s *Server) acquireStreamSlot() (bool, func()) {
+    if s.streamSem == nil {
+        return true, func() {}
+    }
+    select {
+    case s.streamSem <- struct{}{}:
+        return true, func() {
+            <-s.streamSem
+        }
+    default:
+        return false, func() {}
     }
 }
 
@@ -411,6 +456,12 @@ func New(
         taskRegistry:      NewTaskRegistry(),
         shutdownCtx:       shutdownCtx,
         shutdownCancel:    shutdownCancel,
+    }
+    // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
+    // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
+    if n := cfg.Config.Routing.Stream.MaxConcurrentStreams; n > 0 {
+        srv.streamSem = make(chan struct{}, n)
+        slog.Info("global concurrent stream cap enabled", "max", n)
     }
     srv.taskRegistry.SetLimits(
         cfg.Config.Routing.AgentTasks.TTL,
@@ -815,6 +866,26 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 
         var final http.Handler = snapMiddleware(chain(handler))
 
+        // R2 (audit): a panic in any handler/middleware escaped withMiddleware
+        // with no recovery — Go's net/http top-level recover closed the
+        // connection (no 500 body, no log) so the operator saw a silent drop
+        // and the goroutine's panic stack was lost. Catch it here at the
+        // middleware boundary: log the stack + path, write a 500 so the client
+        // gets a body, and let the recorder still capture the status for the
+        // request log. Keeps the process alive (net/http would too) but makes
+        // the failure loud and observable.
+        defer func() {
+            if rv := recover(); rv != nil {
+                slog.Error("handler panic recovered",
+                    "path", r.URL.Path,
+                    "method", r.Method,
+                    "panic", rv,
+                    "stack", string(debug.Stack()))
+                if !rec.Written() {
+                    http.Error(rec, `{"error":{"message":"internal server error"}}`, http.StatusInternalServerError)
+                }
+            }
+        }()
         final.ServeHTTP(rec, r)
 
         keyCfg := middleware.GetAuthKeyConfig(r.Context())

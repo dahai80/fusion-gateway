@@ -2,8 +2,10 @@ package admin
 
 import (
     "encoding/json"
+    "fmt"
     "log/slog"
     "net/http"
+    "time"
 )
 
 type LoginRequest struct {
@@ -30,17 +32,39 @@ func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // R6 (audit): cap the login request body. The bare json.Decode accepted an
+    // unbounded body — a multi-MB POST against /admin/api/login burned memory
+    // for a field set that's a few hundred bytes max. 4 KiB is generous for
+    // username+password JSON; excess surfaces as a 400 (MaxBytesReader wraps
+    // the read error), not an OOM.
+    r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
     var req LoginRequest
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         writeError(w, http.StatusBadRequest, "invalid JSON")
         return
     }
 
+    // R6 (audit): lockout gate BEFORE the bcrypt compare. A locked-out username
+    // gets 429 (not 401) so a brute-forcer can't distinguish "locked" from
+    // "wrong password" by timing — both are refused, but the lockout surfaces
+    // the throttle distinctly for monitoring.
+    if locked, remaining := a.isLockedOut(req.Username); locked {
+        slog.Warn("admin login refused, account locked out",
+            "username", req.Username, "remaining", remaining.Round(time.Second))
+        w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
+        writeError(w, http.StatusTooManyRequests, "account temporarily locked, try again later")
+        return
+    }
+
     if !a.Authenticate(req.Username, req.Password) {
+        a.recordLoginFailure(req.Username)
         slog.Warn("admin login failed", "username", req.Username)
         writeError(w, http.StatusUnauthorized, "invalid credentials")
         return
     }
+
+    a.recordLoginSuccess(req.Username)
 
     token, err := a.GenerateToken(req.Username, "admin")
     if err != nil {

@@ -19,7 +19,24 @@ type AdminAuth struct {
     jwtSecret      []byte
     adminUsers     map[string]string // username -> bcrypt hash
     insecureCookie bool              // true when running without TLS
+    // R6 (audit): per-username login attempt tracking + lockout. A username
+    // key (not IP) survives shared-IP/NAT — a brute-force from behind one NAT
+    // egress would otherwise share one lockout budget across all victims. The
+    // attempt map is bounded by the distinct-usernames-ever-seen (small).
+    loginMu      sync.Mutex
+    loginAttempts map[string]*loginAttempt
 }
+
+// loginAttempt tracks consecutive failures + lockout for one username (R6).
+type loginAttempt struct {
+    count        int
+    lockedUntil  time.Time
+}
+
+const (
+    maxLoginAttempts   = 5
+    loginLockoutDur    = 15 * time.Minute
+)
 
 func (a *AdminAuth) SetInsecureCookie(v bool) {
     a.insecureCookie = v
@@ -92,9 +109,62 @@ func NewAdminAuth(secret string, users map[string]string) (*AdminAuth, error) {
     }
 
     return &AdminAuth{
-        jwtSecret:  []byte(secret),
-        adminUsers: hashedUsers,
+        jwtSecret:    []byte(secret),
+        adminUsers:   hashedUsers,
+        loginAttempts: make(map[string]*loginAttempt),
     }, nil
+}
+
+// isLockedOut reports whether username is currently in login lockout (R6).
+// Returns the remaining lockout duration so the caller can surface it.
+func (a *AdminAuth) isLockedOut(username string) (locked bool, remaining time.Duration) {
+    if username == "" {
+        return false, 0
+    }
+    a.loginMu.Lock()
+    defer a.loginMu.Unlock()
+    att, ok := a.loginAttempts[username]
+    if !ok || att.count < maxLoginAttempts {
+        return false, 0
+    }
+    remaining = time.Until(att.lockedUntil)
+    if remaining <= 0 {
+        // Lockout expired — reset so the next failure starts a fresh window.
+        delete(a.loginAttempts, username)
+        return false, 0
+    }
+    return true, remaining
+}
+
+// recordLoginFailure increments the failure counter for username and arms the
+// lockout once the threshold is crossed (R6). No-op for empty username.
+func (a *AdminAuth) recordLoginFailure(username string) {
+    if username == "" {
+        return
+    }
+    a.loginMu.Lock()
+    defer a.loginMu.Unlock()
+    att, ok := a.loginAttempts[username]
+    if !ok {
+        att = &loginAttempt{}
+        a.loginAttempts[username] = att
+    }
+    att.count++
+    if att.count >= maxLoginAttempts {
+        att.lockedUntil = time.Now().Add(loginLockoutDur)
+        slog.Warn("admin login locked out after repeated failures",
+            "username", username, "attempts", att.count, "locked_for", loginLockoutDur)
+    }
+}
+
+// recordLoginSuccess clears the attempt history for username (R6).
+func (a *AdminAuth) recordLoginSuccess(username string) {
+    if username == "" {
+        return
+    }
+    a.loginMu.Lock()
+    defer a.loginMu.Unlock()
+    delete(a.loginAttempts, username)
 }
 
 // isBcryptHash checks if a string looks like a pre-computed bcrypt hash ($2a$, $2b$, $2y$)
