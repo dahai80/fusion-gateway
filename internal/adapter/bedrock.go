@@ -35,13 +35,14 @@ import (
 // the Anthropic response verbatim, so SSE events + request-id pass through
 // untouched for fusion-code's error bridge.
 type BedrockProvider struct {
-	name       string
-	region     string
-	baseURL    string // overrideable for tests; defaults to bedrock-runtime endpoint
-	httpClient *http.Client
-	accessKey  string
-	secretKey  string
-	sessionTok string
+	name             string
+	region           string
+	baseURL          string // overrideable for tests; defaults to bedrock-runtime endpoint
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
+	accessKey        string
+	secretKey        string
+	sessionTok       string
 	// E6 (audit): AWS SigV4 signing key is scope-stable — deriveSigningKey
 	// for the same (dateStamp, region, service) yields an identical key, so
 	// re-deriving per request burns 4 hmacSHA256 calls of CPU for nothing.
@@ -69,15 +70,22 @@ func NewBedrockProvider(name string, backendCfg config.BackendConfig) *BedrockPr
 	if timeout == 0 {
 		timeout = 120 * time.Second
 	}
+	// R3 (audit): dual-client — streamHTTPClient unbounded so long generation
+	// >120s is not truncated; keeps capped transport ResponseHeaderTimeout so
+	// a dead upstream fails fast at TTFB. Non-stream Messages stays bounded.
+	// Mirrors openai_compatible.go.
+	baseTransport := TransportForBackend(backendCfg)
+	streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
 	return &BedrockProvider{
-		name:         name,
-		region:       region,
-		baseURL:      baseURL,
-		httpClient:   &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
-		accessKey:    os.Getenv("AWS_ACCESS_KEY_ID"),
-		secretKey:    os.Getenv("AWS_SECRET_ACCESS_KEY"),
-		sessionTok:   os.Getenv("AWS_SESSION_TOKEN"),
-		signKeyCache: make(map[string][]byte),
+		name:           name,
+		region:         region,
+		baseURL:        baseURL,
+		httpClient:     &http.Client{Timeout: timeout, Transport: baseTransport},
+		streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
+		accessKey:      os.Getenv("AWS_ACCESS_KEY_ID"),
+		secretKey:      os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		sessionTok:     os.Getenv("AWS_SESSION_TOKEN"),
+		signKeyCache:   make(map[string][]byte),
 	}
 }
 
@@ -150,7 +158,8 @@ func (p *BedrockProvider) StreamMessages(ctx context.Context, req *AnthropicRequ
 		return nil, err
 	}
 	InjectFusionHeaders(ctx, httpReq)
-	resp, err := p.httpClient.Do(httpReq)
+	// R3: stream path uses the unbounded-timeout client.
+	resp, err := p.streamHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock stream messages failed: %w", err)
 	}

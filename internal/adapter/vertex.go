@@ -30,11 +30,12 @@ import (
 //   POST {baseURL}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict
 // base_url defaults to https://{region}-aiplatform.googleapis.com
 type VertexProvider struct {
-	name       string
-	project    string
-	region     string
-	baseURL    string
-	httpClient *http.Client
+	name             string
+	project          string
+	region           string
+	baseURL          string
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
 
 	mu          sync.Mutex
 	saJSON      []byte
@@ -70,13 +71,22 @@ func NewVertexProvider(name string, backendCfg config.BackendConfig) *VertexProv
 	if timeout == 0 {
 		timeout = 120 * time.Second
 	}
+	// R3 (audit): dual-client — streamHTTPClient unbounded so long generation
+	// >120s is not truncated; keeps capped transport ResponseHeaderTimeout so
+	// a dead upstream fails fast at TTFB. doRawPredict threads a `stream` flag
+	// to select it for StreamMessages. Non-stream Messages stays bounded.
+	// tokenClient is orthogonal (OAuth2 exchange, short) — unchanged. Mirrors
+	// openai_compatible.go.
+	baseTransport := TransportForBackend(backendCfg)
+	streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
 	return &VertexProvider{
-		name:        name,
-		project:     project,
-		region:      region,
-		baseURL:     baseURL,
-		httpClient:  &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
-		tokenClient: &http.Client{Timeout: 30 * time.Second, Transport: TransportForBackend(backendCfg)},
+		name:             name,
+		project:          project,
+		region:           region,
+		baseURL:          baseURL,
+		httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
+		streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
+		tokenClient:      &http.Client{Timeout: 30 * time.Second, Transport: TransportForBackend(backendCfg)},
 	}
 }
 
@@ -214,7 +224,7 @@ func (p *VertexProvider) Messages(ctx context.Context, req *AnthropicRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("marshal vertex messages request: %w", err)
 	}
-	resp, err := p.doRawPredict(ctx, req.Model, body)
+	resp, err := p.doRawPredict(ctx, req.Model, body, false)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +245,7 @@ func (p *VertexProvider) StreamMessages(ctx context.Context, req *AnthropicReque
 	if err != nil {
 		return nil, fmt.Errorf("marshal vertex stream messages request: %w", err)
 	}
-	resp, err := p.doRawPredict(ctx, req.Model, body)
+	resp, err := p.doRawPredict(ctx, req.Model, body, true)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +278,7 @@ func (p *VertexProvider) StreamMessages(ctx context.Context, req *AnthropicReque
 	return ch, nil
 }
 
-func (p *VertexProvider) doRawPredict(ctx context.Context, model string, body []byte) (*http.Response, error) {
+func (p *VertexProvider) doRawPredict(ctx context.Context, model string, body []byte, stream bool) (*http.Response, error) {
 	tok, err := p.accessToken(ctx)
 	if err != nil {
 		return nil, err
@@ -280,6 +290,11 @@ func (p *VertexProvider) doRawPredict(ctx context.Context, model string, body []
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+tok)
 	InjectFusionHeaders(ctx, httpReq)
+	// R3: select the unbounded-timeout stream client for StreamMessages so long
+	// generation >120s is not truncated; non-stream Messages uses httpClient.
+	if stream {
+		return p.streamHTTPClient.Do(httpReq)
+	}
 	return p.httpClient.Do(httpReq)
 }
 

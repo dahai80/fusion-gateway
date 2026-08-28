@@ -29,10 +29,11 @@ import (
 // volcengine is NOT a bearer-auth OpenAI-compatible shim (HMAC-SHA256 signing)
 // and is excluded from this base.
 type baseOpenAICompatible struct {
-    name       string
-    baseURL    string
-    apiKey     string
-    httpClient *http.Client
+    name             string
+    baseURL          string
+    apiKey           string
+    httpClient       *http.Client
+    streamHTTPClient *http.Client
 }
 
 func newBaseOpenAICompatible(name string, backendCfg config.BackendConfig) baseOpenAICompatible {
@@ -40,11 +41,19 @@ func newBaseOpenAICompatible(name string, backendCfg config.BackendConfig) baseO
     if timeout == 0 {
         timeout = 120 * time.Second
     }
+    // R3 (audit): dual-client — streamHTTPClient has no overall Timeout (caps
+    // full body read, truncating long generation >120s) but keeps the capped
+    // transport's ResponseHeaderTimeout so a dead upstream fails fast at TTFB.
+    // Non-stream Chat/Embedding/Rerank stay on the bounded httpClient. Covers
+    // all 11 vendor shims via the shared base. Mirrors openai_compatible.go.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
     return baseOpenAICompatible{
-        name:       name,
-        baseURL:    backendCfg.BaseURL,
-        apiKey:     backendCfg.APIKey,
-        httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
+        name:             name,
+        baseURL:          backendCfg.BaseURL,
+        apiKey:           backendCfg.APIKey,
+        httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
+        streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
     }
 }
 
@@ -105,7 +114,8 @@ func (b *baseOpenAICompatible) baseStream(ctx context.Context, req *ChatRequest,
     setAuth(httpReq)
     InjectFusionHeaders(ctx, httpReq)
 
-    resp, err := b.httpClient.Do(httpReq)
+    // R3: stream path uses the unbounded-timeout client.
+    resp, err := b.streamHTTPClient.Do(httpReq)
     if err != nil {
         return nil, fmt.Errorf("%s stream chat request failed: %w", vendorLabel, err)
     }

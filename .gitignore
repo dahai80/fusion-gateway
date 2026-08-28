@@ -1,6 +1,7 @@
-# Binary
-fusion-gateway
-gateway
+# Binary (anchored to repo root — bare `fusion-gateway` matched the
+# deploy/helm/fusion-gateway/ chart dir and silently ignored the whole chart)
+/fusion-gateway
+/gateway
 
 # Local only
 CLAUDE.md

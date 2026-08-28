@@ -343,4 +343,63 @@ func TestR3_StreamClientUnboundedTimeout(t *testing.T) {
             t.Errorf("anthropic stream Timeout: want 0, got %v", p.streamHTTPClient.Timeout)
         }
     })
+
+    // R3 second wave (audit S1): the dual-client was extended to the 6 providers
+    // that previously shared one bounded httpClient for BOTH stream + non-stream
+    // (truncating vendor long-reasoning streams >120s). base_openai covers the
+    // 11 Bearer vendor shims via the shared base — assert via deepseek as the
+    // representative constructor (all shims call newBaseOpenAICompatible).
+    assertR3 := func(t *testing.T, stream, nonStream *http.Client, label string) {
+        t.Helper()
+        if stream == nil {
+            t.Fatalf("%s: streamHTTPClient nil", label)
+        }
+        if stream.Timeout != 0 {
+            t.Errorf("%s: stream client Timeout: want 0 (unbounded body read), got %v", label, stream.Timeout)
+        }
+        if nonStream == nil || nonStream.Timeout == 0 {
+            t.Errorf("%s: non-stream client Timeout: want >0 (bounded), got %v", label, nonStream.Timeout)
+        }
+        tpt, ok := stream.Transport.(*http.Transport)
+        if !ok {
+            t.Fatalf("%s: stream Transport not *http.Transport: %T", label, stream.Transport)
+        }
+        if tpt.ResponseHeaderTimeout != cfg.Timeout {
+            t.Errorf("%s: ResponseHeaderTimeout: want %v, got %v", label, cfg.Timeout, tpt.ResponseHeaderTimeout)
+        }
+        // RR11 cap preserved on the cloned stream transport.
+        if tpt.MaxConnsPerHost <= 0 {
+            t.Fatalf("%s: stream transport MaxConnsPerHost=%d — RR11 FD cap missing", label, tpt.MaxConnsPerHost)
+        }
+    }
+
+    t.Run("base_openai_deepseek", func(t *testing.T) {
+        p := NewDeepSeekProvider("deepseek", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "base_openai_deepseek")
+    })
+
+    t.Run("openrouter", func(t *testing.T) {
+        p := NewOpenRouterProvider("openrouter", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "openrouter")
+    })
+
+    t.Run("volcengine", func(t *testing.T) {
+        p := NewVolcengineProvider("volcengine", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "volcengine")
+    })
+
+    t.Run("bedrock", func(t *testing.T) {
+        p := NewBedrockProvider("bedrock", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "bedrock")
+    })
+
+    t.Run("foundry", func(t *testing.T) {
+        p := NewFoundryProvider("foundry", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "foundry")
+    })
+
+    t.Run("vertex", func(t *testing.T) {
+        p := NewVertexProvider("vertex", cfg)
+        assertR3(t, p.streamHTTPClient, p.httpClient, "vertex")
+    })
 }

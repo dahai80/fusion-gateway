@@ -41,15 +41,19 @@ func (t *ei7FakeTransport) RoundTrip(*http.Request) (*http.Response, error) {
 func newEI7ShimWithFakeBody(t *testing.T) (*DeepSeekProvider, *hangingReader) {
     t.Helper()
     body := &hangingReader{unblock: make(chan struct{})}
-    // Build the shim directly (same package) so we control the httpClient —
+    // Build the shim directly (same package) so we control the clients —
     // newBaseOpenAICompatible builds a real TransportForBackend transport,
     // which we must replace to isolate the watcher from Go's transport ctx.
+    // R3 split baseStream onto streamHTTPClient, so the fake transport must
+    // be wired on BOTH clients (stream path uses streamHTTPClient).
+    fake := &ei7FakeTransport{body: body}
     p := &DeepSeekProvider{
         baseOpenAICompatible: baseOpenAICompatible{
-            name:       "deepseek",
-            baseURL:    "http://deepseek.test",
-            apiKey:     "k",
-            httpClient: &http.Client{Transport: &ei7FakeTransport{body: body}},
+            name:             "deepseek",
+            baseURL:          "http://deepseek.test",
+            apiKey:           "k",
+            httpClient:       &http.Client{Transport: fake},
+            streamHTTPClient: &http.Client{Transport: fake},
         },
     }
     return p, body

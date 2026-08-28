@@ -14,16 +14,25 @@ import (
 )
 
 type OpenRouterProvider struct {
-    name       string
-    baseURL    string
-    apiKey     string
-    httpClient *http.Client
+    name             string
+    baseURL           string
+    apiKey            string
+    httpClient        *http.Client
+    streamHTTPClient  *http.Client
 }
 
 func NewOpenRouterProvider(name string, backendCfg config.BackendConfig) *OpenRouterProvider {
     timeout := backendCfg.Timeout
     if timeout == 0 { timeout = 120 * time.Second }
-    return &OpenRouterProvider{name: name, baseURL: backendCfg.BaseURL, apiKey: backendCfg.APIKey, httpClient: &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)}}
+    // R3 (audit): dual-client — streamHTTPClient unbounded so long generation
+    // >120s is not truncated; keeps capped transport ResponseHeaderTimeout so
+    // a dead upstream fails fast at TTFB. Non-stream stays bounded. Mirrors
+    // openai_compatible.go.
+    baseTransport := TransportForBackend(backendCfg)
+    streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
+    return &OpenRouterProvider{name: name, baseURL: backendCfg.BaseURL, apiKey: backendCfg.APIKey,
+        httpClient: &http.Client{Timeout: timeout, Transport: baseTransport},
+        streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport}}
 }
 
 func (p *OpenRouterProvider) Name() string { return p.name }
@@ -62,7 +71,8 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
-    resp, err := p.httpClient.Do(httpReq)
+    // R3: stream path uses the unbounded-timeout client.
+    resp, err := p.streamHTTPClient.Do(httpReq)
     if err != nil { return nil, fmt.Errorf("openrouter stream failed: %w", err) }
     if resp.StatusCode != http.StatusOK {
         b := ReadErrorBody(resp)

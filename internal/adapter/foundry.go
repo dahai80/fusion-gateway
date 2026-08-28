@@ -25,11 +25,12 @@ import (
 // {base_url}/v1/messages and returns native Anthropic responses/SSE, so this
 // adapter is a thin auth+forward shim with no body transformation.
 type FoundryProvider struct {
-	name        string
-	baseURL     string
-	httpClient  *http.Client
-	apiKey      string
-	accessToken string
+	name             string
+	baseURL          string
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
+	apiKey           string
+	accessToken      string
 }
 
 func NewFoundryProvider(name string, backendCfg config.BackendConfig) *FoundryProvider {
@@ -45,12 +46,19 @@ func NewFoundryProvider(name string, backendCfg config.BackendConfig) *FoundryPr
 	if timeout == 0 {
 		timeout = 120 * time.Second
 	}
+	// R3 (audit): dual-client — streamHTTPClient unbounded so long generation
+	// >120s is not truncated; keeps capped transport ResponseHeaderTimeout so
+	// a dead upstream fails fast at TTFB. Non-stream Messages stays bounded.
+	// Mirrors openai_compatible.go.
+	baseTransport := TransportForBackend(backendCfg)
+	streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
 	return &FoundryProvider{
-		name:        name,
-		baseURL:     backendCfg.BaseURL,
-		httpClient:  &http.Client{Timeout: timeout, Transport: TransportForBackend(backendCfg)},
-		apiKey:      apiKey,
-		accessToken: accessToken,
+		name:             name,
+		baseURL:          backendCfg.BaseURL,
+		httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
+		streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
+		apiKey:           apiKey,
+		accessToken:      accessToken,
 	}
 }
 
@@ -123,7 +131,8 @@ func (p *FoundryProvider) StreamMessages(ctx context.Context, req *AnthropicRequ
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	p.setAuth(httpReq)
 	InjectFusionHeaders(ctx, httpReq)
-	resp, err := p.httpClient.Do(httpReq)
+	// R3: stream path uses the unbounded-timeout client.
+	resp, err := p.streamHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("foundry stream messages failed: %w", err)
 	}

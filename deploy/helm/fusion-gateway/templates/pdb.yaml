@@ -1,0 +1,13 @@
+{{- if .Values.pdb.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fusion-gateway.fullname" . }}
+  labels:
+    {{- include "fusion-gateway.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "fusion-gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1383,7 +1383,7 @@ func TestBatches_Create_InvalidJSON(t *testing.T) {
     slog.Info("TestBatches_Create_InvalidJSON passed")
 }
 
-func TestBatches_Create_Success(t *testing.T) {
+func TestBatches_Create_RejectedNotImplemented(t *testing.T) {
     s := newTestServer()
     batchBody := `{"requests":[{"custom_id":"1","method":"POST","url":"/v1/chat/completions","body":{}}],"endpoint":"/v1/chat/completions"}`
     body := strings.NewReader(batchBody)
@@ -1391,10 +1391,13 @@ func TestBatches_Create_Success(t *testing.T) {
     rec := httptest.NewRecorder()
     s.handleBatches(rec, req)
 
-    if rec.Code != http.StatusOK {
-        t.Fatalf("expected 200, got %d, body: %s", rec.Code, rec.Body.String())
+    // M1 (audit): POST returns 501 Not Implemented — no batch worker exists,
+    // so a 200 + status=pending would be a silent no-op. Malformed input still
+    // 400s (decode runs before the 501 gate); valid submissions are rejected.
+    if rec.Code != http.StatusNotImplemented {
+        t.Fatalf("expected 501 Not Implemented, got %d, body: %s", rec.Code, rec.Body.String())
     }
-    slog.Info("TestBatches_Create_Success passed")
+    slog.Info("TestBatches_Create_RejectedNotImplemented passed")
 }
 
 func TestBatches_List(t *testing.T) {
@@ -1434,26 +1437,15 @@ func TestBatchCRUD_NotFound(t *testing.T) {
 func TestBatchCRUD_Cancel(t *testing.T) {
     s := newTestServer()
 
-    // Create a batch first
-    batchBody := `{"requests":[{"custom_id":"1","method":"POST","url":"/v1/chat/completions","body":{}}]}`
-    body := strings.NewReader(batchBody)
-    req := httptest.NewRequest(http.MethodPost, "/v1/batches", body)
-    rec := httptest.NewRecorder()
-    s.handleBatches(rec, req)
-    if rec.Code != http.StatusOK {
-        t.Fatalf("create batch failed: %d", rec.Code)
-    }
-    var batch map[string]interface{}
-    if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
-        t.Fatalf("invalid json: %v", err)
-    }
-    batchID, ok := batch["id"].(string)
-    if !ok {
-        t.Fatal("batch id not found")
+    // M1 (audit): POST now returns 501 (no worker), so seed the batch directly
+    // via the store to exercise the (unchanged, still-valid) cancel handler.
+    batch, err := s.store.CreateBatch([]store.BatchRequest{{CustomID: "1", Method: "POST", Body: json.RawMessage(`{}`)}}, "/v1/chat/completions", "24h")
+    if err != nil {
+        t.Fatalf("seed batch failed: %v", err)
     }
 
     // Cancel it
-    req2 := httptest.NewRequest(http.MethodPost, "/v1/batches/"+batchID+"/cancel", nil)
+    req2 := httptest.NewRequest(http.MethodPost, "/v1/batches/"+batch.ID+"/cancel", nil)
     rec2 := httptest.NewRecorder()
     s.handleBatchCRUD(rec2, req2)
 
@@ -3084,23 +3076,15 @@ func TestWithMasterKey_MasterFromContext(t *testing.T) {
 func TestBatchCRUD_Get(t *testing.T) {
     s := newTestServer()
 
-    // Create batch first
-    batchBody := `{"requests":[{"custom_id":"1","method":"POST","url":"/v1/chat/completions","body":{}}]}`
-    body := strings.NewReader(batchBody)
-    req := httptest.NewRequest(http.MethodPost, "/v1/batches", body)
-    rec := httptest.NewRecorder()
-    s.handleBatches(rec, req)
-    if rec.Code != http.StatusOK {
-        t.Fatalf("create batch failed: %d", rec.Code)
+    // M1 (audit): POST now returns 501 (no worker), so seed the batch directly
+    // via the store to exercise the (unchanged, still-valid) GET handler.
+    batch, err := s.store.CreateBatch([]store.BatchRequest{{CustomID: "1", Method: "POST", Body: json.RawMessage(`{}`)}}, "/v1/chat/completions", "24h")
+    if err != nil {
+        t.Fatalf("seed batch failed: %v", err)
     }
-    var batch map[string]interface{}
-    if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
-        t.Fatalf("invalid json: %v", err)
-    }
-    batchID, _ := batch["id"].(string)
 
     // Get it
-    req2 := httptest.NewRequest(http.MethodGet, "/v1/batches/"+batchID, nil)
+    req2 := httptest.NewRequest(http.MethodGet, "/v1/batches/"+batch.ID, nil)
     rec2 := httptest.NewRecorder()
     s.handleBatchCRUD(rec2, req2)
 
@@ -8050,14 +8034,19 @@ func TestWithAdminOnly_MasterKeyRejected(t *testing.T) {
 }
 
 func TestBatches_CreateError(t *testing.T) {
+    // M1 (audit): POST always returns 501 after a valid decode (no worker),
+    // so the store error path is never reached — createBatchErr is now a dead
+    // mock field on the POST path. Assert the honest 501 instead of the prior
+    // 400 store-error. The mockStore is still constructed for parity with the
+    // other batch error tests; createBatchErr is intentionally unused here.
     ms := &mockStore{Store: memorystore.NewMemoryStoreWithConfig(10, config.DefaultConfig().Batch), createBatchErr: fmt.Errorf("batch creation failed")}
     s := newTestServerWithMockStore(ms)
     reqBody := `{"requests":[{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}],"endpoint":"/v1/chat/completions","completion_window":"24h"}`
     req := httptest.NewRequest(http.MethodPost, "/v1/batches", strings.NewReader(reqBody))
     rec := httptest.NewRecorder()
     s.handleBatches(rec, req)
-    if rec.Code != http.StatusBadRequest {
-        t.Fatalf("expected 400, got %d", rec.Code)
+    if rec.Code != http.StatusNotImplemented {
+        t.Fatalf("expected 501 Not Implemented (no worker), got %d", rec.Code)
     }
     slog.Info("TestBatches_CreateError passed")
 }

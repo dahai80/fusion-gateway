@@ -626,7 +626,7 @@ cost_markup:
 
 ## Batch API
 
-OpenAI-compatible `/v1/batches` endpoint for asynchronous bulk processing.
+OpenAI-compatible `/v1/batches` endpoint (submissions accepted and validated; background execution NOT implemented — POST returns 501 until a worker is wired).
 
 ```yaml
 batch:
@@ -739,10 +739,9 @@ When `X-Space-Id` header is present, the gateway maintains session affinity — 
 - TTL-based affinity map (default 30 min, auto-eviction)
 - Affinity breaks gracefully: if the target backend is unavailable, re-routes and updates mapping
 
-- `POST /v1/batches` — create batch, returns immediately, processes in background
+- `POST /v1/batches` — validates + accepts submission, returns 501 Not Implemented (no background worker yet)
 - `GET /v1/batches/{id}` — check status (pending/running/completed/failed/cancelled)
 - `POST /v1/batches/{id}/cancel` — cancel a running batch
-- Pluggable `ProcessFn` for custom batch processing logic
 
 ## Kubernetes & Helm Deployment
 
@@ -1091,7 +1090,6 @@ All packages maintain ≥90% test coverage:
 | `internal/adapter` | 90.5% |
 | `internal/admin` | 94.6% |
 | `internal/admin/ui` | 90.0% |
-| `internal/batch` | 100% |
 | `internal/cache` | 99.0% |
 | `internal/cluster` | 97.1% |
 | `internal/config` | 91.7% |
@@ -1124,7 +1122,7 @@ internal/
   cost/               Cost tracking with built-in model pricing table + custom pricing hot reload
   store/              Store interface (logs, keys, channels, analytics, dashboard, quota)
   store/memory/       In-memory store implementation (ring buffer logs, CRUD, analytics, teams/orgs)
-batch/              Batch API store + async processing
+batch/              Batch API store (submission+list+cancel; no execution worker)
   admin/              Admin API handlers + JWT auth + login
   admin/ui/           go:embed frontend assets (React SPA)
   observability/      Prometheus metrics + OpenTelemetry tracing
@@ -1147,6 +1145,18 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.8.49 — Enterprise release-tag integrity (M1/M2/S1)
+
+Closes the three MUST items blocking the commercial release tag (audit `audit/fusion-gateway-audit-result-product-0828.md`, verdict Conditional-Go). No new features — honesty, release hygiene, and a stream-truncation fix on advertised cloud vendors.
+
+| # | Fix | Details |
+|---|-----|---------|
+| 1 | **M1 — `/v1/batches` honesty (501)** | The endpoint silently accepted submissions, returned 200, and **never executed** them: commit `32a1217` deleted the `internal/batch` worker (`go s.process(b)` + `ProcessFn`) and rewired to a store that persists `status=pending` forever. A commercial release must not advertise execution it cannot perform. `handleBatches` now returns **501 Not Implemented** after validating the body (malformed input still gets a precise 400); GET list + per-item CRUD stay (harmless reads on an empty store). README corrected: async-processing claim, `ProcessFn` bullet, `internal/batch 100%` table row, and the dir-layout line all updated to truth. Tests: `TestBatches_Create_RejectedNotImplemented` + `TestBatches_CreateError` (501) green. |
+| 2 | **M2 — helm chart lockstep 0.8.46→0.8.48** | `deploy/helm/fusion-gateway/Chart.yaml` `version` + `appVersion` were stuck at 0.8.46 while HEAD = v0.8.48 (R14 lockstep violated by ~2 releases). Bumped to 0.8.48 so the chart matches the binary. |
+| 3 | **S1 — R3 dual-client on 6 cloud providers** | 6 providers (base_openai + openrouter/bedrock/foundry/vertex/volcengine) used ONE `httpClient{Timeout:120s}` for BOTH stream + non-stream → vendor long-reasoning streams (>120s) were truncated, since the gateway advertises exactly these vendors this was commercial-scope MUST. Replicated the proven dual-client pattern (separate `streamHTTPClient{Timeout:0}` + cloned transport preserving `ResponseHeaderTimeout` + RR11 `MaxConnsPerHost` cap) via a shared helper `cloneStreamTransportForBackend` (`internal/adapter/transport.go`). base_openai covers the 10 Bearer vendor shims (deepseek/moonshot/baichuan/dashscope/hunyuan/minimax/zhipu/qianfan/stepfun/yi) in one edit; vertex threads a `stream bool` flag through the shared `doRawPredict`. The 3 already-fixed refs (openai_compatible/fusion_mlx/anthropic) stay inline (working + tested). Tests: `TestR3_StreamClientUnboundedTimeout` extended with 6 subtests (stream client Timeout==0, non-stream >0, stream transport `*http.Transport` with `ResponseHeaderTimeout==cfg.Timeout` + RR11 cap). |
+
+**Verify**: `check_bare_goroutines.sh` OK; `go vet ./...` clean; `go build ./...` OK; `go test ./... -count=1 -race` all packages green.
 
 ### v0.8.48 — Open issues #128/#129: cluster coordination + guard/PII SSOT
 

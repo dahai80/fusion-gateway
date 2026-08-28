@@ -12,7 +12,9 @@ package adapter
 
 import (
     "io"
+    "log/slog"
     "net/http"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
@@ -50,4 +52,24 @@ func TruncateForError(b []byte) string {
 // &http.Client{Timeout} is forbidden.
 func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
     return httpx.TransportForBackend(cfg)
+}
+
+// cloneStreamTransportForBackend clones the capped transport returned by
+// TransportForBackend and sets ResponseHeaderTimeout = timeout, producing the
+// stream half of the R3 dual-client. The non-stream half keeps the bounded
+// Client.Timeout on the same base transport; the stream half drops the overall
+// timeout (Client.Timeout caps full body read and truncates long generation
+// >120s) while keeping ResponseHeaderTimeout so a dead upstream still fails
+// fast at TTFB. The clone preserves RR11 MaxConnsPerHost + R5 dial/TLS.
+// Mirrors the inline block in openai_compatible.go / fusion_mlx.go /
+// anthropic.go; shared here by the 6 R3-gap providers.
+func cloneStreamTransportForBackend(baseTransport http.RoundTripper, timeout time.Duration, backendLabel string) http.RoundTripper {
+    streamTransport, ok := baseTransport.(*http.Transport)
+    if !ok {
+        slog.Warn("TransportForBackend not *http.Transport, stream client cannot set ResponseHeaderTimeout", "backend", backendLabel)
+        return &http.Transport{ResponseHeaderTimeout: timeout, Proxy: http.ProxyFromEnvironment}
+    }
+    streamTransport = streamTransport.Clone()
+    streamTransport.ResponseHeaderTimeout = timeout
+    return streamTransport
 }

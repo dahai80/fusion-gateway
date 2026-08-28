@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fusion-gateway.fullname" . }}
+  labels:
+    {{- include "fusion-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fusion-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fusion-gateway.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.port }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "fusion-gateway.serviceAccountName" . }}
+      {{- if .Values.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpreadConstraints.zone.maxSkew }}
+          topologyKey: {{ .Values.topologySpreadConstraints.zone.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.zone.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "fusion-gateway.selectorLabels" . | nindent 14 }}
+        - maxSkew: {{ .Values.topologySpreadConstraints.host.maxSkew }}
+          topologyKey: {{ .Values.topologySpreadConstraints.host.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.host.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "fusion-gateway.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: FG_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fusion-gateway.fullname" . }}-secrets
+                  key: master_key
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fusion-gateway
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fusion-gateway.fullname" . }}-config
