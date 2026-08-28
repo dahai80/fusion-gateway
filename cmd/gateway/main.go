@@ -202,6 +202,11 @@ func run(configPath string) error {
 		"version", snap.Version,
 	)
 
+	// #129 Gap 1: advisory shared-port safety warn for local mode without the
+	// slot wait-queue. No-op in hybrid/cloud (cloud fallback exists). Advisory
+	// only — never blocks startup.
+	config.WarnSharedPortSafety(&snap.Config)
+
 	// Auto-start local inference backend (fusion-mlx) if configured
 	as := snap.Config.Server.AutoStart
 	if as != nil {

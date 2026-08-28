@@ -1421,6 +1421,29 @@ func looksLikePlaceholder(t string) bool {
     return false
 }
 
+// WarnSharedPortSafety emits an advisory startup WARN when the gateway runs in
+// pure-local mode (routing.mode=local, no cloud fallback) without the bounded
+// local wait-queue engaged. In that window multiple concurrent clients share
+// one inference port: once max_concurrent is hit, excess requests fail fast
+// with no queue and no cloud spill — a multi-client footgun. The queue is opt-
+// in (local_priority.queue_enabled: true) because a lone single-client node
+// gains nothing but latency from it (Rule 2). Advisory only — does NOT block
+// Load. Issue #129 Gap 1: shared-port safety addressed via operator guidance.
+func WarnSharedPortSafety(cfg *Config) {
+    if cfg.Routing.Mode != "local" {
+        return
+    }
+    if cfg.Routing.LocalPriority.QueueEnabled {
+        return
+    }
+    slog.Warn("local mode active without slot wait-queue: concurrent clients share one inference port with no cloud fallback",
+        "routing.mode", cfg.Routing.Mode,
+        "queue_enabled", false,
+        "max_concurrent", cfg.Routing.LocalPriority.MaxConcurrent,
+        "guidance", "for multi-client shared-port safety set routing.local_priority.queue_enabled: true (bounded FIFO wait-queue)",
+    )
+}
+
 func DefaultConfig() Config {
     return Config{
         Server: ServerConfig{
