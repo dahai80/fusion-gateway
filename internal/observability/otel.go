@@ -20,10 +20,29 @@ import (
 
 var tracer trace.Tracer
 
+// N6 (audit): instrumentation/service version was hardcoded to "0.4.0" at
+// three sites (init, resource, tracer). Read the build-time version injected
+// by R4 (main.version via ldflags) instead, so OTel exports report the real
+// running binary version, not a stale literal. Default "dev" matches a plain
+// `go build` (no ldflags). SetVersion is called from main before server.New
+// (which calls InitTracing) so the tracer + resource pick it up.
+var version = "dev"
+
+// SetVersion stamps the build-time version onto the OTel package so the tracer
+// instrumentation version and the resource service version report the real
+// binary, not the "dev" default. Called once from main at startup.
+func SetVersion(v string) {
+    if v == "" {
+        return
+    }
+    version = v
+    slog.Info("otel version set", "version", v)
+}
+
 func init() {
     tracer = otel.GetTracerProvider().Tracer(
         "github.com/fusion-gateway/fusion-gateway",
-        trace.WithInstrumentationVersion("0.4.0"),
+        trace.WithInstrumentationVersion(version),
     )
 }
 
@@ -50,7 +69,7 @@ func InitTracing(ctx context.Context, cfg OTelConfig) (func(context.Context) err
         resource.NewWithAttributes(
             semconv.SchemaURL,
             semconv.ServiceNameKey.String(serviceName),
-            semconv.ServiceVersionKey.String("0.4.0"),
+            semconv.ServiceVersionKey.String(version),
         ),
     )
     if err != nil {
@@ -105,7 +124,7 @@ func InitTracing(ctx context.Context, cfg OTelConfig) (func(context.Context) err
     ))
     tracer = tp.Tracer(
         "github.com/fusion-gateway/fusion-gateway",
-        trace.WithInstrumentationVersion("0.4.0"),
+        trace.WithInstrumentationVersion(version),
     )
 
     slog.Info("otel tracing initialized", "endpoint", endpoint, "protocol", protocol)

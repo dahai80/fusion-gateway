@@ -58,8 +58,8 @@ func TestSemanticCache_EvictExpired_BackgroundTick(t *testing.T) {
     sc.Store("prompt1", "gpt-4", resp)
 
     sc.mu.Lock()
-    for _, e := range sc.entries {
-        e.Timestamp = time.Now().Add(-2 * time.Hour)
+    for el := sc.entries.Front(); el != nil; el = el.Next() {
+        el.Value.(*SemanticEntry).Timestamp = time.Now().Add(-2 * time.Hour)
     }
     sc.mu.Unlock()
 

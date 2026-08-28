@@ -235,6 +235,12 @@ func run(configPath string) error {
 
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
+	// N6 (audit): stamp the build-time version onto the OTel package BEFORE
+	// server.New (which calls observability.InitTracing) so the tracer
+	// instrumentation version and resource service version report the real
+	// binary, not the stale "0.4.0" literal. Pairs with R4's main.version.
+	observability.SetVersion(version)
+
 	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, configPath)
 	// R4 (audit): stamp build-time version/commit onto the server so /v1/status
 	// reports the running binary, not just config_version.

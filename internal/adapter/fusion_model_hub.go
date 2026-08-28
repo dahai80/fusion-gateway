@@ -43,7 +43,13 @@ func NewFusionModelHubProvider(name string, backendCfg config.BackendConfig) *Fu
 
 	p.proxy = &httputil.ReverseProxy{
 		Director:      p.director,
-		Transport:     &http.Transport{MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second},
+		// N8 (audit): route the reverse-proxy transport through
+		// TransportForBackend so it inherits MaxConnsPerHost cap (RR11) +
+		// R5 ResponseHeaderTimeout/DialContext, like every other backend. The
+		// prior bare &http.Transport{MaxIdleConns:100} had MaxConnsPerHost=0
+		// (unlimited) — a model-hub fan-out could exhaust FDs the same way
+		// the cluster inference path did before H4.
+		Transport:     TransportForBackend(backendCfg),
 		FlushInterval: -1,
 		ErrorHandler:  p.errorHandler,
 	}
@@ -86,7 +92,14 @@ func (p *FusionModelHubProvider) Name() string {
 }
 
 func (p *FusionModelHubProvider) HealthCheck(ctx context.Context) error {
-	client := &http.Client{Timeout: 5 * time.Second}
+	// N8 (audit): HealthCheck used a bare &http.Client{Timeout:5s} with no
+	// TransportForBackend — MaxConnsPerHost=0 (unlimited), no R5 dial/header
+	// timeouts. A probing storm could open unbounded conns. Route through the
+	// shared transport; keep the 5s health timeout via a dedicated client.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: TransportForBackend(p.backendCfg),
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL.String()+"/health", nil)
 	if err != nil {
 		return fmt.Errorf("model-hub health check: %w", err)

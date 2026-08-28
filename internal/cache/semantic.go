@@ -7,14 +7,14 @@ package cache
 // API: NewSemanticCache, Search, Store, Stats.
 
 import (
+    "container/list"
+    "context"
     "encoding/json"
     "log/slog"
     "math"
     "sync"
     "sync/atomic"
     "time"
-
-    "context"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
@@ -31,7 +31,14 @@ type SemanticEntry struct {
 
 type SemanticCache struct {
     mu         sync.RWMutex
-    entries    []*SemanticEntry
+    // N7 (audit): entries was a []*SemanticEntry; Store evicted the oldest at
+    // capacity via copy(sc.entries, sc.entries[1:]) — an O(n) slice head-shift
+    // on every Store once the cache was full (maxEntries default 5000). Switched
+    // to a doubly-linked list: PushFront (newest) + Remove(Back()) (oldest) are
+    // both O(1). Search still scans all entries (inherent to cosine similarity
+    // — no ANN index), but the scan cost is unchanged; only the eviction copy
+    // is eliminated. Mirrors cache.go's container/list convention (Rule 11).
+    entries    *list.List
     threshold  float64
     maxEntries int
     ttl        time.Duration
@@ -85,7 +92,7 @@ func NewSemanticCache(cfg config.SemanticCacheConfig, embedFn EmbedFunc) *Semant
         return nil
     }
     sc := &SemanticCache{
-        entries:     make([]*SemanticEntry, 0),
+        entries:     list.New(),
         threshold:   threshold,
         maxEntries:  maxEntries,
         ttl:         30 * time.Minute,
@@ -171,7 +178,11 @@ func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, b
     defer sc.mu.RUnlock()
     var bestEntry *SemanticEntry
     bestSim := 0.0
-    for _, e := range sc.entries {
+    // N7: scan the linked list front-to-back. O(n) is inherent to cosine
+    // similarity (no ANN index); the list change only removes the O(n)
+    // eviction copy, not the scan. Element.Value is *SemanticEntry.
+    for el := sc.entries.Front(); el != nil; el = el.Next() {
+        e := el.Value.(*SemanticEntry)
         if e.Model != model {
             continue
         }
@@ -206,11 +217,16 @@ func (sc *SemanticCache) Store(prompt string, model string, response json.RawMes
     }
     sc.mu.Lock()
     defer sc.mu.Unlock()
-    // P2 fix: evict oldest entries without slice head-delete memory leak
-    for len(sc.entries) >= sc.maxEntries {
-        copy(sc.entries, sc.entries[1:])
-        sc.entries[len(sc.entries)-1] = nil
-        sc.entries = sc.entries[:len(sc.entries)-1]
+    // N7 (audit): evict the OLDEST entry (list Back) at capacity in O(1). The
+    // prior copy(sc.entries, sc.entries[1:]) shifted the whole slice on every
+    // Store once full — O(n) per insert at maxEntries (default 5000). Newest
+    // entries go to the front (PushFront); oldest at the back. Search scans
+    // front-to-back unchanged.
+    for sc.entries.Len() >= sc.maxEntries {
+        oldest := sc.entries.Back()
+        if oldest != nil {
+            sc.entries.Remove(oldest)
+        }
     }
     entry := &SemanticEntry{
         ID:        ComputeCacheKey(model, prompt, nil, nil, nil),
@@ -220,7 +236,7 @@ func (sc *SemanticCache) Store(prompt string, model string, response json.RawMes
         Model:     model,
         Timestamp: time.Now(),
     }
-    sc.entries = append(sc.entries, entry)
+    sc.entries.PushFront(entry)
     slog.Debug("semantic cache stored", "model", model, "prompt_len", len(prompt))
 }
 
@@ -231,9 +247,9 @@ func (sc *SemanticCache) Stats() (hits, misses int64, size int) {
     sc.mu.RLock()
     defer sc.mu.RUnlock()
     // EI2: hits/misses are atomic.Int64 — Load() is the race-free read. The
-    // RLock stays for len(sc.entries) (the slice header is guarded by the
+    // RLock stays for sc.entries.Len() (the list header is guarded by the
     // mutex); the counters do not need it.
-    return sc.hits.Load(), sc.misses.Load(), len(sc.entries)
+    return sc.hits.Load(), sc.misses.Load(), sc.entries.Len()
 }
 
 func (sc *SemanticCache) evictExpired(ctx context.Context) {
@@ -248,14 +264,20 @@ func (sc *SemanticCache) evictExpired(ctx context.Context) {
         }
         sc.mu.Lock()
         now := time.Now()
-        kept := make([]*SemanticEntry, 0, len(sc.entries))
-        for _, e := range sc.entries {
-            if now.Sub(e.Timestamp) <= sc.ttl {
-                kept = append(kept, e)
+        // N7: walk the list, Remove expired elements in place. O(n) per sweep
+        // but runs every 60s, not per-request — acceptable. list.Remove is
+        // O(1) per element; the prior slice rebuild allocated a fresh slice
+        // every sweep even when nothing expired.
+        evicted := 0
+        for el := sc.entries.Front(); el != nil; {
+            next := el.Next()
+            e := el.Value.(*SemanticEntry)
+            if now.Sub(e.Timestamp) > sc.ttl {
+                sc.entries.Remove(el)
+                evicted++
             }
+            el = next
         }
-        evicted := len(sc.entries) - len(kept)
-        sc.entries = kept
         sc.mu.Unlock()
         if evicted > 0 {
             slog.Debug("semantic cache evicted expired", "count", evicted)

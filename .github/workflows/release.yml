@@ -1,0 +1,97 @@
+name: Release
+
+# R13 (audit): tag-triggered release workflow. CI (ci.yml) runs on every
+# push/PR; this workflow runs ONLY on a pushed v* tag to produce a built
+# darwin/arm64 binary with the version stamped in via ldflags (R4), a git
+# changelog since the last tag, and a GitHub Release attaching the binary.
+#
+# Usage:
+#   git tag v0.8.46
+#   git push origin v0.8.46
+#
+# macOS-only — matches CI (internal/hardware is darwin-only IOKit + sysctl,
+# no cross-platform stubs) and the Apple-Silicon local-first target.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build darwin/arm64 + Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history so the changelog can walk commits since the last tag
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Resolve version + commit
+        id: ver
+        run: |
+          # R4: stamp the tag (without the leading v) + short commit into the
+          # main.version / main.commit package vars the binary reports on
+          # /v1/status. GITHUB_REF_NAME on a tag push is the tag name (e.g. v0.8.46).
+          TAG="${GITHUB_REF_NAME#v}"
+          SHA=$(git rev-parse --short HEAD)
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "commit=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "resolved version=${TAG} commit=${SHA}"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Bare-goroutine gate
+        run: bash scripts/check_bare_goroutines.sh
+
+      - name: Build darwin/arm64 binary
+        run: |
+          # R4 ldflags: inject the resolved version + commit. GOOS=darwin
+          # GOARCH=arm64 matches the deployment target; the resulting binary
+          # is the single distributable artifact.
+          GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }} -X main.commit=${{ steps.ver.outputs.commit }}" \
+            -o fusion-gateway ./cmd/gateway
+          # Sanity: the binary reports the injected version on /v1/status.
+          tar -czf fusion-gateway-darwin-arm64.tar.gz fusion-gateway
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Walk commits from the PREVIOUS tag to HEAD (this tag). If there is
+          # no previous tag (first release), include the whole history.
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+          {
+            echo "## Changes"
+            echo
+            git log --pretty=format:"- %s (%h)" "${RANGE}"
+          } > CHANGELOG.md
+          echo "range=${RANGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            fusion-gateway-darwin-arm64.tar.gz
+            CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

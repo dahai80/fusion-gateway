@@ -22,14 +22,16 @@ func TestSemanticCache_EvictExpired_ManualRemoval(t *testing.T) {
 
     sc.mu.Lock()
     now := time.Now()
-    kept := make([]*SemanticEntry, 0, len(sc.entries))
-    for _, e := range sc.entries {
-        if now.Sub(e.Timestamp) <= sc.ttl {
-            kept = append(kept, e)
+    evicted := 0
+    for el := sc.entries.Front(); el != nil; {
+        next := el.Next()
+        e := el.Value.(*SemanticEntry)
+        if now.Sub(e.Timestamp) > sc.ttl {
+            sc.entries.Remove(el)
+            evicted++
         }
+        el = next
     }
-    evicted := len(sc.entries) - len(kept)
-    sc.entries = kept
     sc.mu.Unlock()
 
     if evicted != 0 {
@@ -54,21 +56,23 @@ func TestSemanticCache_EvictExpired_ExpiredEntries(t *testing.T) {
     sc.Store("old_prompt", "gpt-4", resp)
 
     sc.mu.Lock()
-    for _, e := range sc.entries {
-        e.Timestamp = time.Now().Add(-2 * time.Hour)
+    for el := sc.entries.Front(); el != nil; el = el.Next() {
+        el.Value.(*SemanticEntry).Timestamp = time.Now().Add(-2 * time.Hour)
     }
     sc.mu.Unlock()
 
     sc.mu.Lock()
     now := time.Now()
-    kept := make([]*SemanticEntry, 0, len(sc.entries))
-    for _, e := range sc.entries {
-        if now.Sub(e.Timestamp) <= sc.ttl {
-            kept = append(kept, e)
+    evicted := 0
+    for el := sc.entries.Front(); el != nil; {
+        next := el.Next()
+        e := el.Value.(*SemanticEntry)
+        if now.Sub(e.Timestamp) > sc.ttl {
+            sc.entries.Remove(el)
+            evicted++
         }
+        el = next
     }
-    evicted := len(sc.entries) - len(kept)
-    sc.entries = kept
     sc.mu.Unlock()
 
     if evicted != 1 {
@@ -93,8 +97,8 @@ func TestSemanticCache_Search_ExpiredEntry(t *testing.T) {
     sc.Store("expire_me", "gpt-4", resp)
 
     sc.mu.Lock()
-    for _, e := range sc.entries {
-        e.Timestamp = time.Now().Add(-2 * time.Hour)
+    for el := sc.entries.Front(); el != nil; el = el.Next() {
+        el.Value.(*SemanticEntry).Timestamp = time.Now().Add(-2 * time.Hour)
     }
     sc.mu.Unlock()
 
@@ -164,8 +168,8 @@ func TestSemanticCache_MaxEntriesEviction_Order(t *testing.T) {
 
     sc.mu.RLock()
     prompts := make(map[string]bool)
-    for _, e := range sc.entries {
-        prompts[e.Prompt] = true
+    for el := sc.entries.Front(); el != nil; el = el.Next() {
+        prompts[el.Value.(*SemanticEntry).Prompt] = true
     }
     sc.mu.RUnlock()
 
