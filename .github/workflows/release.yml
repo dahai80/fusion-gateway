@@ -89,6 +89,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # rc tags (vX.Y.Z-rcN) are prereleases, not stable releases. The
+          # workflow pushes the tag automatically, so without this gate every
+          # rc published as latest — misleading the install path. Match -rc
+          # in the tag name and set prerelease accordingly.
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           body_path: CHANGELOG.md
           files: |
             fusion-gateway-darwin-arm64.tar.gz
