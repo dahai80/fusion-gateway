@@ -3463,7 +3463,7 @@ func TestNew(t *testing.T) {
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
 
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected non-nil server")
     }
@@ -5591,7 +5591,7 @@ func TestNew_WithRealtime(t *testing.T) {
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
 
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -5617,7 +5617,7 @@ func TestNew_WithAdminAuth(t *testing.T) {
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
 
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -5640,7 +5640,7 @@ func TestNew_RedisFallbackToMemory(t *testing.T) {
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
 
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -6965,7 +6965,7 @@ func TestNew_WithRedisStoreFallback(t *testing.T) {
     routerEngine := router.NewEngine(cfg, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -6982,7 +6982,7 @@ func TestNew_WithRedisStoreBadAddr(t *testing.T) {
     routerEngine := router.NewEngine(cfg, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -6997,7 +6997,7 @@ func TestNew_WithAdminAuthEnabled(t *testing.T) {
     routerEngine := router.NewEngine(cfg, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -7012,7 +7012,7 @@ func TestNew_WithAdminAuthBadSecret(t *testing.T) {
     routerEngine := router.NewEngine(cfg, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -7029,7 +7029,7 @@ func TestNew_WithOtelEnabled(t *testing.T) {
     routerEngine := router.NewEngine(cfg, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Config.Tokenizer, "")
-    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(cfg, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected server, got nil")
     }
@@ -7345,7 +7345,7 @@ func TestNew_WithClusterEnabled(t *testing.T) {
     routerEngine := router.NewEngine(snap, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Tokenizer, "")
-    s := New(snap, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(snap, hwCollector, routerEngine, pool, tokEngine, "", nil)
     if s == nil {
         t.Fatal("expected non-nil server")
     }
@@ -7364,7 +7364,7 @@ func TestStart_ThenShutdown(t *testing.T) {
     routerEngine := router.NewEngine(snap, hwCollector)
     pool := adapter.NewPool()
     tokEngine := tokenizer.NewEngine(&cfg.Tokenizer, "")
-    s := New(snap, hwCollector, routerEngine, pool, tokEngine, "")
+    s := New(snap, hwCollector, routerEngine, pool, tokEngine, "", nil)
     go func() {
         time.Sleep(200 * time.Millisecond)
         ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

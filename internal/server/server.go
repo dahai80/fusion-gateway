@@ -20,6 +20,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/connector"
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
+    "github.com/fusion-gateway/fusion-gateway/internal/browser"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
@@ -151,6 +152,15 @@ type Server struct {
     // Sized by routing.stream.max_concurrent_streams in server.New; nil when the
     // cap is 0 (disabled, back-compat). acquireStreamSlot acquires/releases.
     streamSem chan struct{}
+    // #130: cross-node browser-session scheduling HTTP handler. nil when
+    // browser.enabled is false (no routes registered, no subsystem wired). The
+    // registry/scheduler/proxy lifecycle is owned by main.go (registry.Start via
+    // a tracked lifecycle.Worker, registry.Stop on shutdown); the server only
+    // holds the handler to register its routes on the main mux. Routes are
+    // registered in New only when this is non-nil — a hot-disable makes the
+    // handlers return 503 (matches the mcp toggle behavior); a full unregister
+    // needs a restart.
+    browserHandler *browser.Handler
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
@@ -353,6 +363,7 @@ func New(
     pool *adapter.Pool,
     tokEngine *tokenizer.Engine,
     cfgPath string,
+    browserHandler *browser.Handler,
 ) *Server {
     // R5 (audit): wire config log_level to the global slog default. Without
     // this, the server log_level knob was dead config — slog defaulted to
@@ -491,6 +502,7 @@ func New(
         taskRegistry:      NewTaskRegistry(),
         shutdownCtx:       shutdownCtx,
         shutdownCancel:    shutdownCancel,
+        browserHandler:    browserHandler,
     }
     // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
     // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
@@ -626,6 +638,18 @@ func (s *Server) Start() error {
         } else {
             s.mcpHandler.RegisterRoutesWithGate(mux, s.withMiddleware, s.mcpGate)
         }
+    }
+
+    // #130: cross-node browser-session scheduling routes. Registered only when
+    // the browser handler is non-nil (browser.enabled in config). Create/
+    // execute/close go through the key-auth wrap; the admin node map + metrics
+    // go through the admin-role wrap — same auth surfaces as /v1/* and /admin/*,
+    // no parallel auth path. RegisterRoutes is a no-op when the handler/ proxy
+    // is nil, so a disabled subsystem adds no routes.
+    if s.browserHandler != nil {
+        s.browserHandler.RegisterRoutes(mux, s.withMiddleware, s.withAdminOnly)
+        slog.Info("browser scheduling routes registered",
+            "node_count", len(s.cfg.Config.Browser.Nodes))
     }
 
     // Connector plugin framework routes

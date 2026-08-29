@@ -674,7 +674,7 @@ func TestServerCreation(t *testing.T) {
 	pool := adapter.NewPool()
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
-	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, "test_config.yaml")
+	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, "test_config.yaml", nil)
 	if srv == nil {
 		t.Fatal("expected non-nil server")
 	}
@@ -691,7 +691,7 @@ func TestServerStartAndShutdown(t *testing.T) {
 	pool := adapter.NewPool()
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
-	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, "test_config.yaml")
+	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, "test_config.yaml", nil)
 
 	safeGo("server_start_test", func() {
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
@@ -896,7 +896,7 @@ func TestFullStartupPath(t *testing.T) {
 
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
 
-	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, cfgPath)
+	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, cfgPath, nil)
 
 	stopCh := make(chan struct{})
 
@@ -953,7 +953,7 @@ func TestFullStartupPath_WithCluster(t *testing.T) {
 		t.Fatalf("failed to build providers: %v", err)
 	}
 	tokEngine := tokenizer.NewEngine(&snap.Config.Tokenizer, "http://127.0.0.1:11434")
-	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, cfgPath)
+	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, cfgPath, nil)
 
 	discovery := cluster.NewDiscovery(snap.Config.Cluster)
 	clusterCtx, clusterCancel := context.WithCancel(context.Background())

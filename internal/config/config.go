@@ -658,6 +658,72 @@ type StoreConfig struct {
     Redis   RedisConfig `mapstructure:"redis"`
 }
 
+// BrowserConfig is the gateway-side configuration for the cross-node
+// browser-session scheduling subsystem (#130). Namespace `browser.*` in
+// config.yaml, mirroring the `mcp.*`/`cluster.*` convention. Default-off:
+// `enabled: false` means no routes are registered and no poll goroutine
+// starts — the subsystem is inert until an operator consciously turns it on.
+//
+// The gateway becomes a scheduler + full proxy over fusion-browser nodes.
+// fusion-browser is a non-persistent single-node WKWebView engine exposing a
+// per-node `{type:"capacity"}` UDS plane; this gateway discovers nodes
+// (static config seed + dial-in register), polls capacity, places
+// create_session on the node with most headroom, and forwards all session
+// lifecycle ops to the pinned node. The pin map is in-memory only (non-
+// persistent engine — a persisted pin would point at a dead session after a
+// browser restart, a false guarantee).
+type BrowserConfig struct {
+    Enabled bool `mapstructure:"enabled"`
+    // PollInterval is the capacity poll cadence. Each tick queries every live
+    // node's `{type:"capacity"}` and refreshes the registry snapshot used for
+    // placement. Jittered via internal/jitter (H5) so a cluster of gateways
+    // does not synchronize a request spike against shared nodes at each tick
+    // edge. Default 5s.
+    PollInterval time.Duration `mapstructure:"poll_interval"`
+    // FailureThreshold is the consecutive poll-fail count that marks a node
+    // dead (dial fail / conn-refused / framing error). Dead nodes stay in the
+    // map (the admin node map shows them) but are skipped by placement.
+    // Default 3.
+    FailureThreshold int `mapstructure:"failure_threshold"`
+    // RecoveryInterval is the backoff before a dead node is re-probed. A node
+    // that recovers (poll succeeds) flips back to live. Default 30s.
+    RecoveryInterval time.Duration `mapstructure:"recovery_interval"`
+    // GlobalMaxSessions is the optional cross-node session ceiling. 0 = no
+    // ceiling (each node capped by its own max_sessions). When set, a create
+    // that would push the sum of live_sessions across live nodes to >= the
+    // ceiling is rejected with quota_exceeded (503, not retryable).
+    GlobalMaxSessions int `mapstructure:"global_max_sessions"`
+    // MinFreeMBPerSession is the per-session memory floor for placement. A
+    // candidate node must have free_memory_mb >= this floor to admit a new
+    // session. free_memory_mb==0 means the probe failed (unknown — never
+    // fabricate); such a node is admitted with the memory check skipped
+    // (contract fallback ranks by fewest live_sessions). Default 200.
+    MinFreeMBPerSession int `mapstructure:"min_free_mb_per_session"`
+    // FrameMaxBytes bounds a single length-prefixed frame, mirroring
+    // fusion-browser Framing.swift maxFrameBytes. A frame claiming > cap is a
+    // hard error (drop + close conn). Default 8 MiB.
+    FrameMaxBytes int `mapstructure:"frame_max_bytes"`
+    // DialTimeout is the NodeClient UDS dial timeout. A node that does not
+    // accept the connection within this bound is unreachable. Default 2s.
+    DialTimeout time.Duration `mapstructure:"dial_timeout"`
+    // FrameTimeout is the partial-frame / response-read timeout — the bound
+    // on reading the full frame body after the length prefix is consumed
+    // (B-4 partial-frame slow-drip hold). Default 30s.
+    FrameTimeout time.Duration `mapstructure:"frame_timeout"`
+    // Nodes is the static seed for hybrid discovery. Each entry is an operator
+    // label (id) + the node's UDS socket_path. The registry keys on the stable
+    // config id (NOT the per-process node_id the poll returns), so a browser
+    // restart (new node_id) is absorbed under the same key without churning
+    // placement. Dial-in nodes self-register with a minted label.
+    Nodes []BrowserNodeConfig `mapstructure:"nodes"`
+}
+
+// BrowserNodeConfig is one static-seed browser node entry.
+type BrowserNodeConfig struct {
+    ID         string `mapstructure:"id"`
+    SocketPath string `mapstructure:"socket_path"`
+}
+
 type MCPConfig struct {
     Enabled bool `mapstructure:"enabled"`
     // #118: Host/Port bind a dedicated MCP HTTP listener (security-domain
@@ -717,6 +783,7 @@ type Config struct {
     Encryption    *EncryptionConfig        `mapstructure:"encryption"`
     Connector     *ConnectorConfig         `mapstructure:"connector"`
     MCP           MCPConfig                `mapstructure:"mcp"`
+    Browser       BrowserConfig            `mapstructure:"browser"`
 }
 
 type ConfigSnapshot struct {
@@ -1304,6 +1371,50 @@ func validate(cfg *Config) error {
         }
     }
 
+    // #130: browser scheduling subsystem validation. Range-check the numeric
+    // knobs (EI8: bare zero-value numerics bypassed validation before) and
+    // require at least one static-seed node OR dial-in capability when
+    // enabled. A poll interval <= 0 would busy-loop; a zero frame cap would
+    // reject every frame; negative thresholds are meaningless. The static
+    // seed may be empty if dial-in registration is expected, but every
+    // declared node needs a non-empty id + socket_path (an empty socket_path
+    // would dial nowhere and fail every poll — loud at load, not a silent
+    // dead node at runtime).
+    if cfg.Browser.Enabled {
+        if cfg.Browser.PollInterval <= 0 {
+            return fmt.Errorf("browser.poll_interval must be positive, got %v", cfg.Browser.PollInterval)
+        }
+        if cfg.Browser.FailureThreshold <= 0 {
+            return fmt.Errorf("browser.failure_threshold must be positive, got %d", cfg.Browser.FailureThreshold)
+        }
+        if cfg.Browser.RecoveryInterval < 0 {
+            return fmt.Errorf("browser.recovery_interval must be >= 0, got %v", cfg.Browser.RecoveryInterval)
+        }
+        if cfg.Browser.GlobalMaxSessions < 0 {
+            return fmt.Errorf("browser.global_max_sessions must be >= 0 (0=no ceiling), got %d", cfg.Browser.GlobalMaxSessions)
+        }
+        if cfg.Browser.MinFreeMBPerSession < 0 {
+            return fmt.Errorf("browser.min_free_mb_per_session must be >= 0, got %d", cfg.Browser.MinFreeMBPerSession)
+        }
+        if cfg.Browser.FrameMaxBytes <= 0 {
+            return fmt.Errorf("browser.frame_max_bytes must be positive, got %d", cfg.Browser.FrameMaxBytes)
+        }
+        if cfg.Browser.DialTimeout <= 0 {
+            return fmt.Errorf("browser.dial_timeout must be positive, got %v", cfg.Browser.DialTimeout)
+        }
+        if cfg.Browser.FrameTimeout <= 0 {
+            return fmt.Errorf("browser.frame_timeout must be positive, got %v", cfg.Browser.FrameTimeout)
+        }
+        for i, n := range cfg.Browser.Nodes {
+            if strings.TrimSpace(n.ID) == "" {
+                return fmt.Errorf("browser.nodes[%d].id is required (operator label; distinct from the per-process node_id)", i)
+            }
+            if strings.TrimSpace(n.SocketPath) == "" {
+                return fmt.Errorf("browser.nodes[%d].socket_path is required (UDS path the gateway dials to forward)", i)
+            }
+        }
+    }
+
     return nil
 }
 
@@ -1602,6 +1713,23 @@ func DefaultConfig() Config {
             Enabled:   false,
             JWTSecret: defaultJWTSecret,
             LogMaxLen: 10000,
+        },
+        Browser: BrowserConfig{
+            // #130: default-off gate. Off = no routes registered, no poll
+            // goroutine started (the subsystem is inert). An operator opts in
+            // by setting browser.enabled=true + browser.nodes[]. Sane polling
+            // + framing defaults mirror fusion-browser's own
+            // maxFrameBytes/frameTimeoutMs so a stock-enabled gateway works
+            // against a stock fusion-browser node with no extra tuning.
+            Enabled:              false,
+            PollInterval:         5 * time.Second,
+            FailureThreshold:     3,
+            RecoveryInterval:     30 * time.Second,
+            GlobalMaxSessions:    0,
+            MinFreeMBPerSession:  200,
+            FrameMaxBytes:        8 * 1024 * 1024,
+            DialTimeout:          2 * time.Second,
+            FrameTimeout:         30 * time.Second,
         },
     }
 }
