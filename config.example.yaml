@@ -423,3 +423,33 @@ mcp:
     # runtime fan-out needed (the list changes rarely). Hot-reloadable via
     # /admin/config/reload.
     managed_tool_allowlist: []          # e.g. ["search_kb", "run_sql", "fetch_doc"]
+
+# #130: cross-node browser-session scheduling. The gateway acts as a placement
+# coordinator for a pool of fusion-browser nodes (non-persistent single-node
+# WKWebView automation engines, each exposing a UDS {type:"capacity"} plane).
+# The gateway ranks nodes by headroom (most free_memory_mb, then fewest
+# live_sessions) and pins each created session to a node for the rest of its
+# life. Default-off: set enabled:true only when fusion-browser nodes are
+# deployed. Routes (registered only when enabled):
+#   POST   /v1/browser/sessions            create + place a session
+#   POST   /v1/browser/sessions/{id}/actions  forward an action to the pinned node
+#   DELETE /v1/browser/sessions/{id}       close + evict the pin (idempotent)
+#   GET    /v1/browser/nodes               admin: node map (live/dead, capacity)
+#   GET    /v1/browser/metrics             admin: opaque node metrics relay
+browser:
+    enabled: false                       # Master switch. false = no routes, no poll worker.
+    poll_interval: "5s"                  # Capacity-poll cadence (jittered ±20%, H5).
+    failure_threshold: 3                 # Consecutive poll failures before a node flips dead.
+    recovery_interval: "30s"             # Dead-node re-probe backoff (avoid hammering a down node).
+    global_max_sessions: 0               # 0 = no global ceiling; >0 caps sum(live_sessions) across nodes.
+    min_free_mb_per_session: 200         # Memory floor: a node with free_memory_mb in (0, min) is skipped (free==0 = unknown, admitted).
+    frame_max_bytes: 8388608             # UDS length-prefixed frame cap (8 MiB, mirrors fusion-browser Framing.swift).
+    dial_timeout: "2s"                   # Per-call UDS dial timeout.
+    frame_timeout: "30s"                 # Per-frame read timeout (partial-frame slow-drip drop, B-4).
+    nodes: []                            # Static seed: [{id, socket_path}]. id is the stable registry key (survives browser restarts). Dial-in nodes self-register at runtime.
+    # Example:
+    # nodes:
+    #     - id: "mbp-node-1"
+    #       socket_path: "/tmp/fusion-browser.sock"
+    #     - id: "mbp-node-2"
+    #       socket_path: "/tmp/fusion-browser-2.sock"

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/adapter"
+	"github.com/fusion-gateway/fusion-gateway/internal/browser"
 	"github.com/fusion-gateway/fusion-gateway/internal/cluster"
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
 	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
@@ -246,7 +247,52 @@ func run(configPath string) error {
 	// binary, not the stale "0.4.0" literal. Pairs with R4's main.version.
 	observability.SetVersion(version)
 
-	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, configPath)
+	// #130: cross-node browser-session scheduling subsystem. Built only when
+	// browser.enabled; nil otherwise (server.New registers no routes + wires
+	// nothing for a nil handler). The registry owns the capacity-poll worker
+	// (lifecycle.Worker, panic-recover + join-on-stop); its lifecycle is tracked
+	// separately via the browserRegistry variable and stopped in shutdown
+	// order (mirrors discovery.Stop). The proxy/scheduler/handler are inert
+	// without the registry's live capacity snapshots, so Start is the single
+	// activation point. Static-seed nodes come from browser.nodes; dial-in
+	// nodes self-register at runtime via the capacity frame.
+	var browserRegistry *browser.Registry
+	var browserHandler *browser.Handler
+	if snap.Config.Browser.Enabled {
+		browserClient := browser.NewNodeClient(
+			snap.Config.Browser.DialTimeout,
+			snap.Config.Browser.FrameMaxBytes,
+			snap.Config.Browser.FrameTimeout,
+		)
+		reg, err := browser.NewRegistry(
+			browserClient,
+			snap.Config.Browser.PollInterval,
+			snap.Config.Browser.FailureThreshold,
+			snap.Config.Browser.RecoveryInterval,
+			snap.Config.Browser.Nodes,
+		)
+		if err != nil {
+			slog.Error("browser registry init failed, disabling browser subsystem", "error", err)
+		} else {
+			browserRegistry = reg
+			sched := browser.NewScheduler(reg,
+				snap.Config.Browser.GlobalMaxSessions,
+				snap.Config.Browser.MinFreeMBPerSession)
+			proxy := browser.NewProxy(reg, browserClient, sched)
+			browserHandler = browser.NewHandler(proxy)
+			// Launch the capacity poll worker. Context is cancelled on shutdown
+			// via registry.Stop (lifecycle.Worker join, EI10). Started before
+			// server.New so the first poll can populate snapshots before the
+			// first create arrives.
+			reg.Start(context.Background())
+			slog.Info("browser scheduling subsystem enabled",
+				"nodes", len(snap.Config.Browser.Nodes),
+				"poll_interval", snap.Config.Browser.PollInterval.String(),
+				"global_max_sessions", snap.Config.Browser.GlobalMaxSessions)
+		}
+	}
+
+	srv := server.New(snap, hwCollector, routerEngine, pool, tokEngine, configPath, browserHandler)
 	// R4 (audit): stamp build-time version/commit onto the server so /v1/status
 	// reports the running binary, not just config_version.
 	srv.SetVersion(version, commit)
@@ -455,6 +501,13 @@ func run(configPath string) error {
 
 	if discovery != nil {
 		discovery.Stop()
+	}
+
+	// #130: stop the browser capacity-poll worker (lifecycle.Worker join).
+	// After discovery so a dial-in register race does not write into a torn-
+	// down registry; the poll loop observes the context cancel and exits.
+	if browserRegistry != nil {
+		browserRegistry.Stop()
 	}
 
 	// B9: stop engine-owned background workers (session affinity evict loop).
