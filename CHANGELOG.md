@@ -9,6 +9,18 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-30
+
+### Fixed
+- Dependency security bump to clear the `govulncheck -mode=source` SCA gate:
+  Go toolchain `1.26.3`→`1.26.6` (9 reachable stdlib advisories: net/url
+  GO-2026-6218, html/template GO-2026-6091, crypto/tls GO-2026-6090/5856,
+  net/http GO-2026-6089/5026, encoding/asn1 GO-2026-5972, net/textproto
+  GO-2026-5039, crypto/x509 GO-2026-5037) and `google.golang.org/grpc`
+  `v1.81.1`→`v1.82.1` (GO-2026-6061, xDS RBAC + HTTP/2). The v0.9.1 release
+  binary was built on the pre-bump toolchain; v0.9.2 is the first release
+  built on the patched toolchain with 0 reachable vulnerabilities.
+
 ## [0.9.1] - 2026-08-30
 
 ### Added
