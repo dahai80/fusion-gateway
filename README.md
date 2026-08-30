@@ -392,6 +392,20 @@ Configuration: `realtime.enabled`, `realtime.backend_url`, `realtime.api_key`.
 | IOKit (ioreg) | GPU Device/Renderer/Tiler utilization, GPU memory | `ioreg -r -d 1 -w 0 -c AGXAccelerator` |
 | fusion-mlx /metrics | MLX active memory, models loaded, inference queue depth | Prometheus parser |
 
+## Observability
+
+All metrics are exported on `/metrics` (Prometheus format, `fusion_gateway_*`
+prefix) behind the master-key. The production monitoring stack ships under
+[`deploy/observability/`](deploy/observability/):
+
+- `alerts.yaml` — Prometheus alerting rules (availability / capacity / latency).
+- `grafana-dashboard.json` — Grafana dashboard (request rate, p50/p99 latency,
+  success rate, circuit breaker, in-flight, memory/GPU, swap, routing reasons).
+- `README.md` — metric inventory, scrape config, alert severity model.
+
+Alert triage actions are documented in
+[`docs/runbook-recovery.md#alert-triage`](docs/runbook-recovery.md#alert-triage).
+
 ## SSE Backpressure
 
 When the downstream SSE channel is full (slow client), the gateway:

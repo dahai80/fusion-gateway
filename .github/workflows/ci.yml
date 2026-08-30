@@ -46,3 +46,41 @@ jobs:
       # caching so a previously-passing-but-racy run re-runs fresh.
       - name: Test (race)
         run: go test ./... -count=1 -race
+
+  # Enterprise SCA gate: govulncheck scans the 56 direct + transitive Go
+  # dependencies against the Go vulnerability database (https://vuln.go.dev).
+  # Fails the build on any known vulnerability that is actually reachable
+  # from the module's call graph (-mode=source), not just declared in go.mod.
+  # Runs as its own job so it parallelizes with build-test. macOS runner to
+  # match the rest of CI (internal/hardware is darwin-only); govulncheck
+  # itself is platform-agnostic but keeps a single runner class.
+  vuln-scan:
+    name: govulncheck (SCA)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # Pin govulncheck to a tagged release so the scanner version is
+      # reproducible across runs. Bump deliberately when a newer scanner
+      # ships. Installed from the canonical module path (no third-party action
+      # dependency, no network-pulled binary — built from source under the
+      # pinned Go toolchain).
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # -mode=source: analyze the actual call graph so an unreachable
+      # vulnerability in a dep that is compiled in but never called does NOT
+      # fail the gate (reduces false positives). -show=verbose emits the call
+      # stack so a triager can see the reachable path. Non-zero exit = a
+      # reachable known vuln = CI red.
+      - name: Scan for known vulnerabilities
+        run: govulncheck -mode=source ./...

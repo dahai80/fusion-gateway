@@ -179,3 +179,68 @@ and external rotation is the platform's job (Rule 2 — keep lean).
 The log level is set at startup from `server.log_level` (debug/info/warn/
 error; unknown → info + warn). Hot-reload does NOT re-apply the log level
 (stays at the startup level) — restart to change it.
+
+## Alert triage
+
+Prometheus alerting rules live in `deploy/observability/alerts.yaml`; the
+Grafana dashboard is `deploy/observability/grafana-dashboard.json`. Each alert
+below maps a fired alert to a triage action. The metric source is `/metrics`
+(gated by master-key — scrape config must carry the `X-Fusion-Key` /
+master-key header, or run `server.enable_metrics_noauth` if your deployment
+relies on network policy instead).
+
+### High-error-rate
+
+`FusionGatewayHighErrorRate` (critical): a backend 5xx rate > 2% over 5m.
+1. Confirm the backend: `sum(rate(fusion_gateway_requests_total{status=~"5.."}[5m])) by (backend)`.
+2. If `backend=local`: check fusion-mlx health (`~/claude-home/fusion-mlx/start.sh status` + `/health`); a model OOM or crash is the usual cause. Restart fusion-mlx if down.
+3. If `backend=cloud`: check the cloud vendor status page + the gateway log for upstream error bodies (capped 512 bytes, surfaced via `writeChatFailedError`).
+4. If the circuit breaker is also open (see below), the diversion is working as designed — the error rate alert is then expected; resolve the upstream first.
+
+### Circuit-breaker-open
+
+`FusionGatewayCircuitBreakerOpen` (critical): the local breaker is OPEN for
+> 2m, diverting to cloud.
+1. Inspect the trip reason: `fusion_gateway_circuit_breaker_trips_total` by `reason` (memory_overload / swap_triggered / model_offline / ...).
+2. `memory_overload` → see Memory pressure. `swap_triggered` → see Swap thrashing. `model_offline` → the local backend stopped serving the requested model; restart fusion-mlx or preload the model.
+3. The breaker auto-recovers (`half_open` → probe → `closed`) once the underlying fault clears; do not force-reset.
+
+### Hardware-collection-errors
+
+`FusionGatewayHwCollectionErrors` (warning): a hardware collector source is
+erroring, so hardware-aware routing (P0.5/P1/P2) may be forcing cloud.
+1. Identify the source label (`gopsutil` / `iokit` / `mlx`).
+2. `mlx` source → fusion-mlx `/metrics` unreachable; check it is up and `hardware.mlx_metrics_url` is correct.
+3. `iokit`/`gopsutil` → a node-level collector fault; restart the gateway process (the collector re-inits on startup). This is non-fatal — the gateway stays up and routes by request-level rules until collection recovers.
+
+### Memory-pressure
+
+`FusionGatewayMemoryPressure` (warning): system memory used ratio > 85% for
+5m.
+1. Reduce resident models in fusion-mlx (unload models not in active use) to free UMA.
+2. If sustained, lower `routing.local_priority.max_system_memory_ratio` so the router diverts earlier, or scale the local set down.
+3. Check for a non-gateway memory consumer on the node (`top -o mem`).
+
+### Swap-thrashing
+
+`FusionGatewaySwapThrashing` (critical): swap page-out rate > 1000/s for 3m.
+The node is thrashing; local inference latency is collapsed.
+1. Immediately reduce resident models in fusion-mlx.
+2. If the gateway is the cause (a burst of large contexts), confirm `routing.token_threshold` is diverting long requests to cloud.
+3. Restart fusion-mlx to release fragmented UMA if the thrash persists after unloading.
+
+### MLX-queue-depth
+
+`FusionGatewayMLXQueueDepth` (warning): fusion-mlx inference queue > 16 for
+5m. The local backend is saturating.
+1. Raise `routing.local_priority.max_concurrent` if the node has headroom, OR
+2. Lower `routing.token_threshold` to divert more long requests to cloud, OR
+3. Add a cluster node (the gateway routes across nodes by model availability + load).
+
+### High-p99-latency
+
+`FusionGatewayHighP99Latency` (warning): p99 request duration > 10s for 10m.
+1. Confirm it is not a legitimately long streaming response (a long-thinking model can legitimately exceed this — check the model mix).
+2. Check `fusion_gateway_in_flight_requests` for slot saturation: if pinned at `max_concurrent`, the bounded pool is the bottleneck — raise the cap or divert.
+3. Check for stuck slots: a connected-but-silent upstream should trip `ResponseHeaderTimeout` (30s default); if latency is BELOW 30s but still high, the upstream is slow, not stuck — divert to cloud or a faster node.
+

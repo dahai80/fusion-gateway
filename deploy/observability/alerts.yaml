@@ -1,0 +1,140 @@
+# Prometheus alerting rules for Fusion-Gateway.
+#
+# Metric source: /metrics (gated by master-key via server.withMasterKey).
+# All metric names are prefixed fusion_gateway_ (see internal/observability/metrics.go).
+# Load this group with promtool or via a PrometheusRule CRD in Kubernetes.
+#
+# Severity model:
+#   critical = a user-facing path is failing NOW (errors, circuit open, backend down)
+#   warning  = a precursor / capacity signal (memory climbing, swap thrashing,
+#              queue depth rising) — intervene before it becomes critical.
+#
+# Triage: each alert's runbook links to docs/runbook-recovery.md sections.
+
+groups:
+  - name: fusion-gateway.availability
+    interval: 30s
+    rules:
+      # Error rate: 5xx responses on any backend over 2% for 5m.
+      - alert: FusionGatewayHighErrorRate
+        expr: |
+          sum(rate(fusion_gateway_requests_total{status=~"5.."}[5m])) by (backend)
+            /
+          clamp_min(sum(rate(fusion_gateway_requests_total[5m])) by (backend), 1)
+            > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway backend {{ $labels.backend }} 5xx error rate > 2%"
+          description: |
+            Backend {{ $labels.backend }} is returning >2% 5xx over the last 5m.
+            Check the upstream backend health and the circuit-breaker state.
+          runbook: "docs/runbook-recovery.md#high-error-rate"
+
+      # Circuit breaker open: the gateway is actively diverting a backend to
+      # cloud/fallback because the local backend tripped its breaker.
+      - alert: FusionGatewayCircuitBreakerOpen
+        expr: fusion_gateway_circuit_breaker_state{backend="local"} == 1
+        for: 2m
+        labels:
+          severity: critical
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway local circuit breaker OPEN"
+          description: |
+            The local backend circuit breaker has been open for >2m. Requests are
+            being diverted to cloud/fallback. Investigate the trip reason in
+            fusion_gateway_circuit_breaker_trips_total and the local backend
+            (fusion-mlx) health.
+          runbook: "docs/runbook-recovery.md#circuit-breaker-open"
+
+      # Hardware metric collection failing: the router's hardware-aware
+      # decisions are flying blind (P0.5 protection may force cloud).
+      - alert: FusionGatewayHwCollectionErrors
+        expr: rate(fusion_gateway_hw_collection_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway hardware metric collection errors"
+          description: |
+            Hardware collector ({{ $labels.source }}) is erroring. Hardware-aware
+            routing (P0.5/P1/P2) may be forcing cloud fallback. Check gopsutil /
+            IOKit / fusion-mlx /metrics reachability.
+          runbook: "docs/runbook-recovery.md#hardware-collection-errors"
+
+  - name: fusion-gateway.capacity
+    interval: 30s
+    rules:
+      # System memory pressure: P1 overload threshold. >85% for 5m → warning,
+      # the router is likely already diverting to cloud.
+      - alert: FusionGatewayMemoryPressure
+        expr: fusion_gateway_hw_memory_used_ratio > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway system memory pressure > 85%"
+          description: |
+            System memory used ratio above 85% for 5m. The router (P1) diverts
+            to cloud above this threshold. Investigate resident model memory
+            and other UMA consumers on the node.
+          runbook: "docs/runbook-recovery.md#memory-pressure"
+
+      # Swap thrashing: P2 threshold. Page-out rate sustained → the node is
+      # thrashing and local inference latency will collapse.
+      - alert: FusionGatewaySwapThrashing
+        expr: fusion_gateway_hw_swap_page_out_rate > 1000
+        for: 3m
+        labels:
+          severity: critical
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway swap thrashing (page-out rate > 1000/s)"
+          description: |
+            Swap page-out rate sustained above 1000/s for 3m. The router (P2)
+            diverts to cloud under thrashing. Local inference latency is likely
+            collapsed; reduce resident models or add memory.
+          runbook: "docs/runbook-recovery.md#swap-thrashing"
+
+      # MLX inference queue backing up: local backend is saturating.
+      - alert: FusionGatewayMLXQueueDepth
+        expr: fusion_gateway_hw_mlx_inference_queue_depth > 16
+        for: 5m
+        labels:
+          severity: warning
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway MLX inference queue depth > 16"
+          description: |
+            fusion-mlx inference queue depth sustained above 16 for 5m. Local
+            backend is saturating; the gateway may need to raise
+            routing.local_priority.max_concurrent or divert more to cloud.
+          runbook: "docs/runbook-recovery.md#mlx-queue-depth"
+
+  - name: fusion-gateway.latency
+    interval: 30s
+    rules:
+      # P99 latency regression: 99th-percentile request duration on any
+      # backend above 10s for 10m. LLM streaming can be long, so this is a
+      # coarse guard against a pathological stall, not a tight SLO.
+      - alert: FusionGatewayHighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(fusion_gateway_request_duration_seconds_bucket[5m])) by (backend, le)
+          ) > 10
+        for: 10m
+        labels:
+          severity: warning
+          service: fusion-gateway
+        annotations:
+          summary: "fusion-gateway P99 latency > 10s on {{ $labels.backend }}"
+          description: |
+            99th-percentile request duration above 10s for 10m on backend
+            {{ $labels.backend }}. Check for stuck slots (ResponseHeaderTimeout
+            not firing), upstream slowness, or MaxConnsPerHost saturation.
+          runbook: "docs/runbook-recovery.md#high-p99-latency"
