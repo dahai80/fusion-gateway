@@ -875,6 +875,45 @@ For custom metrics (QPS, latency), add Prometheus Adapter and extend HPA with `m
 
 Add cert-manager annotation for automatic TLS: `cert-manager.io/cluster-issuer: letsencrypt-prod`
 
+### High Availability & Multi-Replica
+
+The chart defaults to `replicaCount: 2` with HPA (2–10) + PDB (minAvailable 1) + topology spread, so multi-replica is the out-of-the-box topology. HA readiness splits into three concerns:
+
+**1. Shared state — set `store.backend: redis` for multi-replica.**
+
+The gateway keeps two classes of state. **Store-backed state** (API keys, channels, teams, quota, cost, request logs, orgs, batch) is shareable across replicas via the Redis store backend; with the default `memory` backend each replica holds an independent in-memory copy (on-disk persistence via `store.data_dir` survives a *restart of the same replica*, but is NOT shared across replicas). For correct multi-replica behavior — one API key valid on every replica, one quota counter, one cost ledger — point all replicas at one Redis:
+
+```yaml
+store:
+  backend: redis
+  redis:
+    addr: redis:6379
+    # password: ...
+    db: 0
+```
+
+The server factory falls back to `memory` (with a logged `ERROR`) if Redis is unreachable, so a Redis outage degrades to per-replica state rather than crashing — but treat that as a warning, not a steady state, for multi-replica.
+
+**2. Routing state is stateless by design — no action needed.**
+
+The routing engine's per-instance state — circuit breakers (`breakers`, `nodeBreakers`), `localInFlight`, the agent `TaskRegistry`, cowork `sessionAffinity` (keyed on `space_id`), and the browser session→node pin map — is deliberately NOT shared across replicas. A request landing on any replica routes correctly from that replica's own view of hardware + cluster health. This is the right model for a stateless proxy: there is no shared-state dependency to make HA-correct, and no single bottleneck replica. Replicas are interchangeable.
+
+**3. Browser scheduling + multi-replica — single-replica or sticky routing.**
+
+The one exception to "replicas are interchangeable" is the cross-node browser-session subsystem (`browser.enabled: true`, issue #130). The session→node pin map (`internal/browser/proxy.go`) is per-instance and non-persistent: a browser session *created* on replica A returns `404 session_not_found` if its *execute* or *close* call lands on replica B. The cowork `sessionAffinity` keys on `space_id`, not browser session ID, so it does not help here. For browser workloads behind a multi-replica deployment, do one of:
+
+- Run browser workloads on a **single replica** (a dedicated `Deployment` with `replicaCount: 1` + `browser.enabled: true`, separate from the scaled inference gateway), OR
+- Add **ingress-level session affinity** (e.g. nginx `nginx.ingress.kubernetes.io/affinity: cookie` scoped to the `/v1/browser/*` paths) so a given browser client's create/execute/close all pin to one replica.
+
+The Cluster module (`cluster.*`) is cross-*gateway-instance*-to-inference-node grid routing, not gateway-replica state sharing — it does not share the browser pin map and does not change this constraint.
+
+**Secret injection (multi-replica).** `master_key` (and `encryption.master_key`) are injected via env (`FG_MASTER_KEY`, `FG_ENCRYPTION_MASTER_KEY`), bound to the config by the gateway's `bindSecretEnv` — the env var is the source of truth, never a configmap literal (viper does not expand inline `${VAR}` in YAML strings; a literal would ship verbatim as a publicly-predictable key). The startup guard is fail-closed: it rejects known placeholders (`CHANGE_ME*`, `fg-*`, `your-*-key`) and unexpanded `${...}` references, so a bare `helm install` without `--set secrets.master_key` ships *without* a master_key (guarded endpoints `/metrics` + `/debug/pprof` deny) rather than with a known value. Set a unique ≥32-char secret for any production deploy:
+
+```bash
+helm install fusion-gateway deploy/helm/fusion-gateway/ \
+  --set secrets.master_key=$(openssl rand -hex 32)
+```
+
 ## Admin Dashboard
 
 Built-in web admin dashboard at `/admin`, served from the single binary via Go `embed`.

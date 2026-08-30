@@ -8,8 +8,13 @@ data:
     server:
       host: "0.0.0.0"
       port: 11432
-    auth:
-      master_key: "${FG_MASTER_KEY}"
+    # auth.master_key is NOT set here. The deployment injects the real master_key
+    # via env FG_MASTER_KEY (secretKeyRef → secret.yaml master_key), bound to
+    # auth.master_key by the gateway's bindSecretEnv. A literal here — especially
+    # "${FG_MASTER_KEY}" — is sent VERBATIM (viper does not expand inline ${VAR}
+    # in YAML strings) and would become a publicly-predictable admin-bypass key.
+    # master_key must come from the env/Secret, never the configmap.
+    auth: {}
     route:
       enable_hardware_judge: false
       token_threshold: 50

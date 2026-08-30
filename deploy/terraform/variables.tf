@@ -35,10 +35,10 @@ variable "replica_count" {
 }
 
 variable "master_key" {
-  description = "Fusion-Gateway master API key"
+  description = "Fusion-Gateway master key (>=32 chars). Injected as env FG_MASTER_KEY and bound to auth.master_key. Empty = ship without a master_key (guarded endpoints deny; admin auth needs auth.enabled + api_keys). The gateway rejects known placeholders at startup."
   type        = string
   sensitive   = true
-  default     = "CHANGE_ME"
+  default     = ""
 }
 
 variable "enable_hpa" {

@@ -76,7 +76,11 @@ func TestC1_JWTSecretPatternDetection(t *testing.T) {
 }
 
 // TestC1_AuthMasterKeyPlaceholderRejected verifies validate() refuses a
-// placeholder auth.master_key when auth is enabled (forcing C1 rotation).
+// placeholder auth.master_key. The guard fires whenever a master_key is SET,
+// not only when auth.enabled=true: withMasterKey (/metrics, /debug/pprof) and
+// the MCP gate honor any non-empty master_key regardless of auth.enabled, so a
+// bare `helm install` (auth.enabled=false) with a placeholder master_key would
+// otherwise expose the protected endpoints to anyone holding the public value.
 func TestC1_AuthMasterKeyPlaceholderRejected(t *testing.T) {
     cfg := DefaultConfig()
     cfg.Auth.Enabled = true
@@ -87,6 +91,61 @@ func TestC1_AuthMasterKeyPlaceholderRejected(t *testing.T) {
     cfg.Auth.MasterKey = "9k2m5n8q1r4s7t0v3w6x9y2b5c8d1e4f7a0b3c6"
     if err := validate(&cfg); err != nil {
         t.Fatalf("C1: expected strong auth.master_key to pass validate, got: %v", err)
+    }
+}
+
+// TestC1_MasterKeyGuardFiresWithoutAuthEnabled pins the broadened guard: a
+// placeholder master_key is rejected even when auth.enabled=false (the Helm
+// chart default). Before the fix the auth.Enabled precondition let a bare
+// `helm install` ship the literal master_key as a live /metrics gate key.
+func TestC1_MasterKeyGuardFiresWithoutAuthEnabled(t *testing.T) {
+    for _, bad := range []string{
+        "fg-master-key-change-me",        // fg- prefix family
+        "CHANGE_ME_MASTER_KEY",           // Helm values.yaml default (underscore)
+        "${FG_MASTER_KEY}",               // unexpanded env-var ref in a configmap
+        "change_me_to_a_real_key",        // underscore variant of change-me
+        "{{ .Values.secrets.master_key }}", // unexpanded Helm template ref
+    } {
+        cfg := DefaultConfig()
+        cfg.Auth.Enabled = false // chart default — guard must still fire
+        cfg.Auth.MasterKey = bad
+        if err := validate(&cfg); err == nil {
+            t.Errorf("C1: expected validate to reject master_key %q with auth.enabled=false, got nil", bad)
+        }
+    }
+}
+
+// TestC1_MasterKeyEnvRefAndUnderscoreDetection is the unit-level guard for the
+// two new placeholder classes added to looksLikePlaceholder: unexpanded
+// ${VAR}/{{ VAR }} references and the underscore change_me marker. These evade
+// the original exact-match table and the hyphen-only substring markers.
+func TestC1_MasterKeyEnvRefAndUnderscoreDetection(t *testing.T) {
+    bad := []string{
+        "${FG_MASTER_KEY}",
+        "${ANY_ENV_VAR}",
+        "prefix-${VAR}-suffix",
+        "CHANGE_ME_MASTER_KEY",
+        "change_me_now",
+        "{{ .Values.secrets.master_key }}",
+        "{{ MASTER_KEY }}",
+    }
+    for _, s := range bad {
+        if !isKnownInsecureSecret(s) {
+            t.Errorf("C1: expected %q to be detected as placeholder, got false", s)
+        }
+    }
+    // A real secret that happens to contain "$" but no braced ref must NOT be
+    // flagged (false-positive guard on looksLikeEnvRef).
+    good := []string{
+        "sk-proj-9z8HJ2$kL4mN7pQ3rS6tV1wX0yB5cD8eF",
+        "a7f3b9c2e1d48605ab3cd91ef27b6e0a",
+        "9k2m5n8q1r4s7t0v3w6x9y2b5c8d1e4f7a0b3c6",
+        "",
+    }
+    for _, s := range good {
+        if isKnownInsecureSecret(s) {
+            t.Errorf("C1: expected %q to be accepted (not a placeholder), got true", s)
+        }
     }
 }
 

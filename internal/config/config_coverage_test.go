@@ -56,6 +56,64 @@ routing:
     t.Logf("loaded snapshot version=%d port=%d", snap.Version, snap.Config.Server.Port)
 }
 
+// TestLoad_MasterKeyEnvOverridesLiteral pins the Helm secret flow: the
+// deployment injects the real master_key via env FG_MASTER_KEY (secretKeyRef),
+// and bindSecretEnv gives that env var precedence over any literal the
+// configmap carries. So a configmap with a placeholder/`${...}` literal still
+// loads cleanly when the env is set — the env value becomes the live
+// master_key, not the literal. This is the fix for the chart defect where
+// `master_key: "${FG_MASTER_KEY}"` was unmarshaled verbatim.
+func TestLoad_MasterKeyEnvOverridesLiteral(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    // configmap carries a literal that would trip the placeholder guard if it
+    // were the final value — the env override must save it.
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+auth:
+  master_key: "${FG_MASTER_KEY}"
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    const realKey = "9k2m5n8q1r4s7t0v3w6x9y2b5c8d1e4f7a0b3c6"
+    t.Setenv("FG_MASTER_KEY", realKey)
+    snap, err := Load(f)
+    if err != nil {
+        t.Fatalf("env FG_MASTER_KEY must override the configmap literal, got error: %v", err)
+    }
+    if snap.Config.Auth.MasterKey != realKey {
+        t.Fatalf("expected master_key from env %q, got %q (configmap literal leaked)", realKey, snap.Config.Auth.MasterKey)
+    }
+}
+
+// TestLoad_MasterKeyLiteralRejectedWithoutEnv is the fail-closed counterpart:
+// with no FG_MASTER_KEY env, a configmap placeholder literal (`${...}` or a
+// CHANGE_ME family) is rejected by the placeholder guard rather than silently
+// becoming a live secret. Pins the defense-in-depth: even if an operator
+// forgets the env injection, the binary refuses to ship a known value.
+func TestLoad_MasterKeyLiteralRejectedWithoutEnv(t *testing.T) {
+    // Ensure no env leak from the test environment affects this case.
+    t.Setenv("FG_MASTER_KEY", "")
+    for _, literal := range []string{
+        "${FG_MASTER_KEY}",
+        "CHANGE_ME_MASTER_KEY",
+        "fg-master-key-change-me",
+    } {
+        dir := t.TempDir()
+        f := filepath.Join(dir, "config.yaml")
+        content := "server:\n  host: \"0.0.0.0\"\n  port: 8100\nauth:\n  master_key: \"" + literal + "\"\n"
+        if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+            t.Fatal(err)
+        }
+        if _, err := Load(f); err == nil {
+            t.Errorf("expected Load to reject master_key literal %q with no env override, got nil", literal)
+        }
+    }
+}
+
 func TestFireReload_CallsHandlers(t *testing.T) {
     var called1, called2 int32
 
