@@ -9,6 +9,19 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added
+- **Namespace-neutral mid-stream SSE resumption route** (#139). The resumable
+  local-MLX stream (from #116) now advertises a self-describing
+  `X-Fusion-Stream-Resume-URL` response header pointing at the replay endpoint,
+  and a namespace-neutral `/v1/stream/{stream_id}/events` replay route is
+  registered alongside the existing `/v1/messages/{stream_id}/events`. An
+  OpenAI-wire client (`/v1/chat/completions`) that breaks mid-stream can now
+  reconnect with `Last-Event-ID` and replay the buffered tail without crossing
+  into the Anthropic namespace or hardcoding a path — closing the upstream
+  primitive fusion-design needs for safe mid-stream retry. Still gated behind
+  `routing.stream.resume_enabled` (default off); cloud/first-party paths remain
+  never resumable.
+
 ## [0.9.6] - 2026-08-30
 
 ### Fixed

@@ -270,3 +270,55 @@ func TestStreamResume_404WhenDisabled(t *testing.T) {
         t.Fatalf("expected 404 when resume disabled, got %d", rec.Code)
     }
 }
+
+// TestStreamResume_NeutralRoute: GET /v1/stream/{sid}/events (the #139
+// namespace-neutral route an OpenAI-wire client uses) replays the same buffer
+// as /v1/messages/{sid}/events. Guard: if the parser only accepted the
+// /v1/messages/ prefix, the neutral path 404s and replay is unreachable.
+func TestStreamResume_NeutralRoute(t *testing.T) {
+    s := newResumableTestServer(t)
+    sid := "req-neutral-route"
+    buf := s.streamBuffers.Open(sid)
+    for i := 0; i < 4; i++ {
+        buf.Append([]byte(fmt.Sprintf(`{"i":%d}`, i)))
+    }
+    buf.MarkFinalized()
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/stream/"+sid+"/events", nil)
+    req.Header.Set("Last-Event-ID", sid+":2")
+    rec := httptest.NewRecorder()
+    s.handleStreamResume(rec, req)
+
+    body := rec.Body.String()
+    gotSeqs := strings.Count(body, "id: "+sid+":")
+    if gotSeqs != 2 {
+        t.Fatalf("neutral route replayed %d frames, want 2 (after cursor seq=2). body:\n%s", gotSeqs, body)
+    }
+    if got := rec.Header().Get("X-Fusion-Stream-Resume-URL"); got != "/v1/stream/"+sid+"/events" {
+        t.Fatalf("X-Fusion-Stream-Resume-URL = %q, want /v1/stream/%s/events", got, sid)
+    }
+}
+
+// TestResumableStream_EmitsResumeURLHeader: the live stream response carries
+// the self-describing X-Fusion-Stream-Resume-URL header so a client discovers
+// the replay path without hardcoding a namespace (#139). Guard: if the header
+// is absent, an OpenAI-wire client cannot know where to reconnect.
+func TestResumableStream_EmitsResumeURLHeader(t *testing.T) {
+    s := newResumableTestServer(t)
+    sid := "req-resume-url-header"
+    provider := &ctxAwareStreamProvider{name: "fusion-mlx", chunks: chunksFor(2)}
+    s.pool.Register("fusion-mlx", provider, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
+
+    ctx := middleware.InjectRequestID(context.Background(), sid)
+    decision := &router.RouteDecision{Backend: router.LocalBackend, Reason: "test"}
+    budget := tokenizer.TokenBudget{InputTokens: 5, TotalBudget: 20}
+    req := &adapter.ChatRequest{Model: "qwen-7b", Messages: []adapter.ChatMessage{{Role: "user", Content: "hi"}}, Stream: true}
+
+    rec := httptest.NewRecorder()
+    s.handleStreamChat(ctx, rec, provider, req, decision, budget, time.Now())
+
+    want := "/v1/stream/" + sid + "/events"
+    if got := rec.Header().Get("X-Fusion-Stream-Resume-URL"); got != want {
+        t.Fatalf("X-Fusion-Stream-Resume-URL = %q, want %q", got, want)
+    }
+}
