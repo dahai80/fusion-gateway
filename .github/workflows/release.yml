@@ -83,7 +83,7 @@ jobs:
 
       - name: Generate SBOM (CycloneDX)
         run: |
-          cyclonedx-gomod app -licenses -version -output fusion-gateway-sbom.cyclonedx.json -main cmd/gateway
+          cyclonedx-gomod app -json -licenses -output fusion-gateway-sbom.cyclonedx.json -main cmd/gateway
           # Sanity: the SBOM is valid JSON and non-empty.
           test -s fusion-gateway-sbom.cyclonedx.json
 
