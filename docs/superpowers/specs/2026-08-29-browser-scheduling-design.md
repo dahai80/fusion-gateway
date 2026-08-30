@@ -53,6 +53,21 @@ body. `ReadFrame(r)` = read 4 bytes BE len, bound-check, `io.ReadFull`
 body, `json.Unmarshal`. Reuse `internal/httpx` line-cap discipline; cap
 at `frame_max_bytes` to prevent OOM (matches SSE hardening convention).
 
+**Auth handshake** (FR-10/H-5, #132 fix): the FIRST frame on every
+connection MUST be `{type:"auth", token}` matching the node's configured
+`authToken`. The node replies `{type:"auth_ack"}` on success, or
+`{type:"error", code:"auth_denied"}` + close on failure. Every node op
+(create/execute/close/capacity/metrics) goes through the same gate on a
+fresh dial — there is no pooled authenticated session (fusion-browser
+runs a per-client read loop and closes after one client, so a pooled conn
+would race the close). A node with no configured token is a deny-all
+sentinel. The gateway stores each node's `token` in the registry
+(alongside `socket_path`) and `NodeClient` sends it as the first frame of
+every `roundTrip`; a missing token fails closed client-side before any
+dial. Wire types: `AuthMessage{type, token}`, `reqTypeAuth="auth"`,
+`respTypeAuthAck="auth_ack"`, `ErrCodeAuthDenied="auth_denied"` — mirrors
+`Protocol.swift`.
+
 **Envelope** (`wire.go`): `{type, payload, sessionId}`. Request `type` ∈
 `create_session`/`execute`/`close`/`metrics`/`capacity`. Response `type`
 ∈ `create_session`/`state`/`closed`/`metrics`/`capacity`/`error`. Go
@@ -116,29 +131,34 @@ This keeps the subsystem coherent and testable in isolation.
 
 `Registry` holds `map[nodeID]*BrowserNode` under a `sync.RWMutex` (one
 owner per field — no lock nesting, per E8 convention). `BrowserNode`:
-`NodeID string`, `SocketPath string`, `Capacity *FBNodeCapacity` (nil
-until first poll), `State` (live|dead), `failures int`, `lastPoll
-time.Time`, `source` (config|dialin).
+`NodeID string`, `SocketPath string`, `Token string` (per-node UDS auth
+credential, FR-10/H-5 — sent as the first frame on every forward dial),
+`Capacity *FBNodeCapacity` (nil until first poll), `State` (live|dead),
+`failures int`, `lastPoll time.Time`, `source` (config|dialin).
 
 **Hybrid discovery:**
 - **Static seed:** on `New(cfg)` + on hot-reload `DrainAndApply(cfg)`,
-  read `browser.nodes` (id + socket_path) into the map with
-  `State=live`, `Capacity=nil`. Config-node ID is the operator label,
-  distinct from the per-process `node_id` returned by capacity poll —
-  the registry keys on the config `id` (stable label), and stores the
-  polled `node_id` inside `Capacity` for the admin map. **Registry key =
-  stable config `id`, NEVER the per-process `node_id`** — this is why a
-  browser restart (new `node_id`) is absorbed without churning the
-  registry: the poll just overwrites the stale `node_id` under the same
-  config-id key. Reconnect re-queries; `node_id` drift is invisible to
-  placement.
+  read `browser.nodes` (id + socket_path + token) into the map with
+  `State=live`, `Capacity=nil`. The `token` MUST be set — config
+  `Validate` rejects an empty token fail-closed (a node without a token
+  is deny-all, so seeding one anonymous is an operator error). Config-node
+  ID is the operator label, distinct from the per-process `node_id`
+  returned by capacity poll — the registry keys on the config `id`
+  (stable label), and stores the polled `node_id` inside `Capacity` for
+  the admin map. **Registry key = stable config `id`, NEVER the
+  per-process `node_id`** — this is why a browser restart (new
+  `node_id`) is absorbed without churning the registry: the poll just
+  overwrites the stale `node_id` under the same config-id key. Reconnect
+  re-queries; `node_id` drift is invisible to placement.
 - **Dial-in register:** when an unregistered connection dials the
   gateway's browser ingress and sends `{type:"capacity}`, the handler
-  records `SocketPath` from the peer UDS address + the decoded capacity,
-  mints a config-style label `dialin-<short-hash(socketPath)>`, adds the
-  node `State=live source=dialin`. (UDS peer address = the socket path
-  the dialer bound; this is how the gateway learns a self-registering
-  node's socket to forward to later.)
+  records `SocketPath` from the peer UDS address + the decoded capacity +
+  the auth `token` the dialer authenticated with, mints a config-style
+  label `dialin-<short-hash(socketPath)>`, adds the node `State=live
+  source=dialin`. (UDS peer address = the socket path the dialer bound;
+  this is how the gateway learns a self-registering node's socket to
+  forward to later. The dialer's token is carried for subsequent forwards
+  — the same FR-10/H-5 handshake runs on every forward dial.)
 
 **Capacity poll** (`lifecycle.Worker` "browser-poll", goroutine via
 `safeGo` — never bare): every `poll_interval` (default 5s, jittered via
@@ -271,6 +291,7 @@ are registered once at `server.New`; hot-disable makes the handler return
 | failure | detection | response | retryable |
 |---|---|---|---|
 | node dial fail / conn-refused | `NodeClient` dial error | poll: `failures++`; request: 503 `node_unreachable` | yes |
+| auth handshake rejected (wrong/empty token) | `NodeClient` reads `auth_denied` | poll: `failures++` (treated as unreachable-for-ops); request: 503 relays node's `auth_denied` code | per-node `retryable` |
 | node dead (failure_threshold) | registry `State=dead` | placement skips; pin op → 503 `session_lost` | yes |
 | global ceiling hit | `Scheduler.Pick` | 503 `quota_exceeded` | no |
 | no headroom anywhere | `Scheduler.Pick` | 503 `no_headroom` | yes |

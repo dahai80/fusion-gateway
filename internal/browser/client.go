@@ -57,12 +57,14 @@ func (c *NodeClient) dialUDS(ctx context.Context, socketPath string) (net.Conn, 
     return conn, nil
 }
 
-// roundTrip sends req as one frame to the node at socketPath and reads one
-// response frame. It returns the raw response envelope bytes (decoded by the
-// caller) and closes the connection before returning (per-call dial). Any
-// error is wrapped distinctly so the proxy can map it to the right HTTP code
-// (dial/frame errors → node_unreachable; FBError from the node → relayed).
-func (c *NodeClient) roundTrip(ctx context.Context, socketPath string, req any) (*ResponseFrame, error) {
+// roundTrip dials the node, performs the auth handshake, then sends req as one
+// frame and reads one response frame. It returns the raw response envelope
+// (decoded by the caller) and closes the connection before returning (per-call
+// dial). Any error is wrapped distinctly so the proxy can map it to the right
+// HTTP code (dial/auth/frame errors → node_unreachable; FBError from the node →
+// relayed). The auth handshake (FR-10/H-5) is sent on EVERY dial — there is no
+// pooled authenticated session because fusion-browser closes after one client.
+func (c *NodeClient) roundTrip(ctx context.Context, socketPath, token string, req any) (*ResponseFrame, error) {
     conn, err := c.dialUDS(ctx, socketPath)
     if err != nil {
         return nil, err
@@ -73,6 +75,14 @@ func (c *NodeClient) roundTrip(ctx context.Context, socketPath string, req any) 
             slog.Debug("browser node conn close error", "socket", socketPath, "error", cerr)
         }
     }()
+
+    // Auth handshake first (FR-10/H-5): the first frame on the connection MUST
+    // be {type:"auth", token}, else the node replies auth_denied and closes.
+    // A node with no configured token is a deny-all sentinel — a missing token
+    // here is a gateway-side misconfig the caller treats as node_unreachable.
+    if err := c.authenticate(conn, socketPath, token); err != nil {
+        return nil, err
+    }
 
     if err := WriteFrame(conn, req); err != nil {
         return nil, fmt.Errorf("browser: write request to %q: %w", socketPath, err)
@@ -90,12 +100,57 @@ func (c *NodeClient) roundTrip(ctx context.Context, socketPath string, req any) 
     return &resp, nil
 }
 
+// authenticate sends the auth handshake frame and asserts an auth_ack reply.
+// On any non-ack response (incl. an {type:"error", code:"auth_denied"} frame)
+// it returns a wrapped error the caller surfaces as node_unreachable 503
+// retryable — the poll's failure-counter + dead-node logic then fires (the
+// node is unreachable-for-ops until its token is reconciled), and a live op
+// relay surfaces the node's own code. Fail-closed: never proceed past a failed
+// handshake, never send an op frame unauthenticated.
+func (c *NodeClient) authenticate(conn net.Conn, socketPath, token string) error {
+    if token == "" {
+        // Misconfig: a node without a token cannot be authenticated. This is
+        // caught at config Validate for static seeds, but guard here too so a
+        // dial-in or runtime path can never dial anonymous.
+        return fmt.Errorf("browser: missing auth token for %q (node is deny-all without a token)", socketPath)
+    }
+    if err := WriteFrame(conn, AuthMessage{Type: reqTypeAuth, Token: token}); err != nil {
+        return fmt.Errorf("browser: write auth to %q: %w", socketPath, err)
+    }
+    body, err := ReadFrame(conn, c.frameMax, c.frameTimeout)
+    if err != nil {
+        return fmt.Errorf("browser: read auth ack from %q: %w", socketPath, err)
+    }
+    var ack ResponseFrame
+    if err := json.Unmarshal(body, &ack); err != nil {
+        return fmt.Errorf("browser: decode auth ack from %q: %w", socketPath, err)
+    }
+    if ack.Type == respTypeAuthAck {
+        slog.Debug("browser node auth ok", "socket", socketPath)
+        return nil
+    }
+    // Non-ack: surface the node's error verbatim (auth_denied carries the
+    // node's own code/retryable) so logs attribute the real refusal, not a
+    // generic decode failure.
+    if ack.Type == respTypeError {
+        if derr := decodeNodeError(ack.Payload, socketPath); derr != nil {
+            if ne := AsNodeError(derr); ne != nil {
+                slog.Warn("browser node auth denied",
+                    "socket", socketPath, "code", ne.Code, "message", ne.Message)
+                return ne
+            }
+            return derr
+        }
+    }
+    return fmt.Errorf("browser: unexpected auth response type %q from %q (expected auth_ack)", ack.Type, socketPath)
+}
+
 // Capacity queries a node's {type:"capacity"} and returns the decoded
 // FBNodeCapacity — the placement signal the registry stores on each poll.
 // This is one of the two fully-decoded ops (create_session is the other);
 // the rest forward verbatim.
-func (c *NodeClient) Capacity(ctx context.Context, socketPath string) (*FBNodeCapacity, error) {
-    resp, err := c.roundTrip(ctx, socketPath, RequestFrame{Type: reqTypeCapacity})
+func (c *NodeClient) Capacity(ctx context.Context, socketPath, token string) (*FBNodeCapacity, error) {
+    resp, err := c.roundTrip(ctx, socketPath, token, RequestFrame{Type: reqTypeCapacity})
     if err != nil {
         return nil, err
     }
@@ -116,13 +171,13 @@ func (c *NodeClient) Capacity(ctx context.Context, socketPath string) (*FBNodeCa
 // CreateSessionResponse (the gateway needs session_id to record the pin). On
 // a node error response, returns the relayed FBError so the proxy maps it to
 // the node's own code/retryable (never coerced to 502 — RC1 lesson).
-func (c *NodeClient) Create(ctx context.Context, socketPath string, req *CreateSessionRequest) (*CreateSessionResponse, error) {
+func (c *NodeClient) Create(ctx context.Context, socketPath, token string, req *CreateSessionRequest) (*CreateSessionResponse, error) {
     payload, err := marshalPayload(req)
     if err != nil {
         return nil, err
     }
     frame := RequestFrame{Type: reqTypeCreateSession, Payload: payload}
-    resp, err := c.roundTrip(ctx, socketPath, frame)
+    resp, err := c.roundTrip(ctx, socketPath, token, frame)
     if err != nil {
         return nil, err
     }
@@ -143,13 +198,13 @@ func (c *NodeClient) Create(ctx context.Context, socketPath string, req *CreateS
 // envelope. The proxy relays the payload VERBATIM (no re-encode) — the
 // gateway does not interpret the AXTree/screenshot fields. Only the envelope
 // type is checked so an error response is surfaced as a relayed FBError.
-func (c *NodeClient) Execute(ctx context.Context, socketPath string, req *BrowserActionRequest) (*ResponseFrame, error) {
+func (c *NodeClient) Execute(ctx context.Context, socketPath, token string, req *BrowserActionRequest) (*ResponseFrame, error) {
     payload, err := marshalPayload(req)
     if err != nil {
         return nil, err
     }
     frame := RequestFrame{Type: reqTypeExecute, Payload: payload}
-    resp, err := c.roundTrip(ctx, socketPath, frame)
+    resp, err := c.roundTrip(ctx, socketPath, token, frame)
     if err != nil {
         return nil, err
     }
@@ -164,9 +219,9 @@ func (c *NodeClient) Execute(ctx context.Context, socketPath string, req *Browse
 // returned distinctly and the proxy treats it as best-effort (evict the pin
 // regardless). On a node FBError the proxy still evicts the pin (the session
 // is gone either way); the error is surfaced for observability only.
-func (c *NodeClient) Close(ctx context.Context, socketPath, sessionID string) error {
+func (c *NodeClient) Close(ctx context.Context, socketPath, token, sessionID string) error {
     frame := RequestFrame{Type: reqTypeClose, SessionID: sessionID}
-    resp, err := c.roundTrip(ctx, socketPath, frame)
+    resp, err := c.roundTrip(ctx, socketPath, token, frame)
     if err != nil {
         return err
     }
@@ -182,9 +237,9 @@ func (c *NodeClient) Close(ctx context.Context, socketPath, sessionID string) er
 // Metrics forwards a metrics request and returns the raw metrics envelope.
 // Admin-only at the proxy; the gateway relays the opaque counters/latency
 // verbatim.
-func (c *NodeClient) Metrics(ctx context.Context, socketPath string) (*ResponseFrame, error) {
+func (c *NodeClient) Metrics(ctx context.Context, socketPath, token string) (*ResponseFrame, error) {
     frame := RequestFrame{Type: reqTypeMetrics}
-    resp, err := c.roundTrip(ctx, socketPath, frame)
+    resp, err := c.roundTrip(ctx, socketPath, token, frame)
     if err != nil {
         return nil, err
     }

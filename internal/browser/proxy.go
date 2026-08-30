@@ -64,7 +64,8 @@ func (p *Proxy) Create(ctx context.Context, req *CreateSessionRequest) (*CreateR
             "node", nodeID)
         return nil, ErrNoNodeHeadroom
     }
-    resp, err := p.client.Create(ctx, socket, req)
+    token, _ := p.registry.TokenOf(nodeID) // node exists (SocketOf ok) → token known
+    resp, err := p.client.Create(ctx, socket, token, req)
     if err != nil {
         return nil, err
     }
@@ -107,7 +108,8 @@ func (p *Proxy) Execute(ctx context.Context, req *BrowserActionRequest) (*Execut
         p.evictPin(req.SessionID)
         return nil, &OpError{Code: "session_lost", Message: "pinned node removed from registry", Retryable: true, HTTPStatus: 503}
     }
-    resp, err := p.client.Execute(ctx, socket, req)
+    token, _ := p.registry.TokenOf(nodeID)
+    resp, err := p.client.Execute(ctx, socket, token, req)
     if err != nil {
         return nil, err
     }
@@ -129,7 +131,8 @@ func (p *Proxy) Close(ctx context.Context, sessionID string) error {
     }
     socket, socketOK := p.registry.SocketOf(nodeID)
     if socketOK && !p.registry.IsDead(nodeID) {
-        if err := p.client.Close(ctx, socket, sessionID); err != nil {
+        token, _ := p.registry.TokenOf(nodeID)
+        if err := p.client.Close(ctx, socket, token, sessionID); err != nil {
             // Log but do not fail the close: the session is gone from the
             // gateway's view, and close is idempotent. A node error here is
             // observability, not a caller-facing failure.
@@ -173,7 +176,8 @@ func (p *Proxy) Metrics(ctx context.Context, nodeID string) (*MetricsResult, err
     if p.registry.IsDead(nodeID) {
         return nil, &OpError{Code: "node_unreachable", Message: "selected node is dead", Retryable: true, HTTPStatus: 503}
     }
-    resp, err := p.client.Metrics(ctx, socket)
+    token, _ := p.registry.TokenOf(nodeID)
+    resp, err := p.client.Metrics(ctx, socket, token)
     if err != nil {
         return nil, err
     }

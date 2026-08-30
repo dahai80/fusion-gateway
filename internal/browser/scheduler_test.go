@@ -22,21 +22,26 @@ func newTestRegistry(t *testing.T) *Registry {
 }
 
 // seedNode adds a config-seed node with the given stable id + socket. Capacity
-// is nil until setCap is called (simulates the pre-poll state).
+// is nil until setCap is called (simulates the pre-poll state). A placeholder
+// token is set so the node round-trips through DrainAndApply with a token even
+// though these white-box tests never dial (the registry stores it for
+// consistency with the auth-requirement added in #132).
 func seedNode(t *testing.T, reg *Registry, id, socket string) {
     t.Helper()
-    reg.DrainAndApply(append(reg.liveConfigSeed(), config.BrowserNodeConfig{ID: id, SocketPath: socket}))
+    reg.DrainAndApply(append(reg.liveConfigSeed(), config.BrowserNodeConfig{ID: id, SocketPath: socket, Token: "seed-token"}))
 }
 
 // liveConfigSeed returns the config-seed nodes currently in the registry as a
 // BrowserNodeConfig slice, so seedNode can append without dropping prior seeds.
+// Token is preserved so a DrainAndApply round-trip does not drop the auth
+// credential (the registry stores it on the node).
 func (r *Registry) liveConfigSeed() []config.BrowserNodeConfig {
     r.mu.RLock()
     defer r.mu.RUnlock()
     var out []config.BrowserNodeConfig
     for _, n := range r.nodes {
         if n.source == sourceConfig {
-            out = append(out, config.BrowserNodeConfig{ID: n.NodeID, SocketPath: n.SocketPath})
+            out = append(out, config.BrowserNodeConfig{ID: n.NodeID, SocketPath: n.SocketPath, Token: n.Token})
         }
     }
     return out

@@ -13,12 +13,27 @@ import "encoding/json"
 // Request / response envelope type discriminants. Must match the Swift enum
 // raw values (Protocol.swift ReqType/RespType).
 const (
+    // reqTypeAuth is the auth handshake request type. The FIRST frame on every
+    // UDS connection must be an auth message (FR-10/H-5): fusion-browser's
+    // UDSServer reads the first frame, and if it is not {type:"auth", token}
+    // rejects with auth_denied and closes the conn. A node with no configured
+    // token is a deny-all sentinel. Every op (create/execute/close/capacity/
+    // metrics) goes through the same auth gate — capacity is no exception.
+    reqTypeAuth          = "auth"
     reqTypeCreateSession = "create_session"
     reqTypeExecute       = "execute"
     reqTypeClose         = "close"
     reqTypeMetrics       = "metrics"
     reqTypeCapacity      = "capacity"
 
+    // respTypeAuthAck is the auth-acknowledgement response. The gateway sends
+    // {type:"auth", token} then reads one frame; type=="auth_ack" means the
+    // token was accepted and the connection is now authorized for ops. Any
+    // other response (incl. {type:"error", code:"auth_denied"}) means the
+    // handshake failed — the connection MUST be dropped and the op retried on
+    // a fresh dial (per-call dial re-auths every time; there is no pooled
+    // authenticated session because fusion-browser closes after one client).
+    respTypeAuthAck      = "auth_ack"
     respTypeCreateSession = "create_session"
     respTypeState         = "state"
     respTypeClosed        = "closed"
@@ -26,6 +41,22 @@ const (
     respTypeCapacity      = "capacity"
     respTypeError         = "error"
 )
+
+// AuthMessage is the auth handshake request {type:"auth", token}. Mirrors
+// fusion-browser Protocol.swift AuthMessage. Sent as the first frame on every
+// UDS dial before any op; the node replies auth_ack on success or an error
+// frame (auth_denied) on failure.
+type AuthMessage struct {
+    Type  string `json:"type"`
+    Token string `json:"token"`
+}
+
+// ErrCodeAuthDenied is the node's auth-failure error code (ErrorModel.swift).
+// The gateway treats it as a dial-level failure: the poll's failure-counter
+// + dead-node logic fires (the node is unreachable-for-ops until its token is
+// reconciled), and a live op relay returns it as a 503 retryable so the caller
+// can retry against a fresh set — never coerced to 502 (RC1 lesson).
+const ErrCodeAuthDenied = "auth_denied"
 
 // RequestFrame is the top-level request envelope {type, payload, sessionId}.
 // payload is held as json.RawMessage so the proxy can forward execute/close

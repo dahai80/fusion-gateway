@@ -722,6 +722,13 @@ type BrowserConfig struct {
 type BrowserNodeConfig struct {
     ID         string `mapstructure:"id"`
     SocketPath string `mapstructure:"socket_path"`
+    // Token is the per-node UDS auth credential, MUST match the node's
+    // configured authToken. fusion-browser requires an {type:"auth", token}
+    // handshake before ANY op (FR-10/H-5, fail-closed); a node with no token
+    // is a deny-all sentinel. Empty here → every poll/auth_denied → node dead.
+    // Required (non-empty) per node when browser.enabled — validated at load so
+    // an operator never dials anonymous.
+    Token string `mapstructure:"token"`
 }
 
 type MCPConfig struct {
@@ -1411,6 +1418,12 @@ func validate(cfg *Config) error {
             }
             if strings.TrimSpace(n.SocketPath) == "" {
                 return fmt.Errorf("browser.nodes[%d].socket_path is required (UDS path the gateway dials to forward)", i)
+            }
+            // Fail-closed: fusion-browser requires an auth handshake (FR-10/H-5)
+            // before any op; a node entry with no token cannot be polled and would
+            // auth_denied on every dial. Reject at load — never dial anonymous.
+            if strings.TrimSpace(n.Token) == "" {
+                return fmt.Errorf("browser.nodes[%d].token is required (must match the node's authToken; fusion-browser denies ops without an auth handshake)", i)
             }
         }
     }

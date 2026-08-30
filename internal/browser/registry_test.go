@@ -76,7 +76,7 @@ func TestIsDeadUnknownIsDead(t *testing.T) {
 
 func TestRegisterDialinAddsNode(t *testing.T) {
     reg, _ := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second, nil)
-    id := reg.RegisterDialin("/tmp/dial.sock", &FBNodeCapacity{NodeID: "p1", MaxSessions: 4, LiveSessions: 1, FreeMemoryMB: 8000})
+    id := reg.RegisterDialin("/tmp/dial.sock", "dial-token", &FBNodeCapacity{NodeID: "p1", MaxSessions: 4, LiveSessions: 1, FreeMemoryMB: 8000})
     if id == "" {
         t.Fatal("RegisterDialin returned empty id")
     }
@@ -107,7 +107,7 @@ func TestRegisterDialinDedupsBySocket(t *testing.T) {
         []config.BrowserNodeConfig{{ID: "cfg", SocketPath: "/tmp/shared.sock"}})
     // Dial-in on the same socket as a config-seed node: should NOT mint a new
     // node; config id wins, capacity is refreshed.
-    id := reg.RegisterDialin("/tmp/shared.sock", &FBNodeCapacity{NodeID: "p2", MaxSessions: 4, LiveSessions: 2, FreeMemoryMB: 4000})
+    id := reg.RegisterDialin("/tmp/shared.sock", "shared-token", &FBNodeCapacity{NodeID: "p2", MaxSessions: 4, LiveSessions: 2, FreeMemoryMB: 4000})
     if id != "cfg" {
         t.Fatalf("dial-in on existing socket should return config id cfg, got %s", id)
     }
@@ -148,7 +148,7 @@ func TestDrainAndApplyDropsRemovedNode(t *testing.T) {
 
 func TestDrainAndApplyPreservesDialin(t *testing.T) {
     reg, _ := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second, nil)
-    reg.RegisterDialin("/tmp/dial.sock", &FBNodeCapacity{NodeID: "p1", MaxSessions: 4, LiveSessions: 1, FreeMemoryMB: 8000})
+    reg.RegisterDialin("/tmp/dial.sock", "dial-token", &FBNodeCapacity{NodeID: "p1", MaxSessions: 4, LiveSessions: 1, FreeMemoryMB: 8000})
     // Reload with a config seed: the dial-in node must survive (runtime-learned).
     reg.DrainAndApply([]config.BrowserNodeConfig{{ID: "cfg", SocketPath: "/tmp/cfg.sock"}})
     views := reg.Snapshot()
@@ -164,7 +164,7 @@ func TestPollFlipsLiveToDead(t *testing.T) {
         reqTypeCapacity: func(req RequestFrame) ResponseFrame { return errResp("boom", "poll failure", false) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 2, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -186,7 +186,7 @@ func TestPollRecoversDeadToLive(t *testing.T) {
         reqTypeCapacity: func(req RequestFrame) ResponseFrame { return errResp("boom", "down", false) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 2, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }

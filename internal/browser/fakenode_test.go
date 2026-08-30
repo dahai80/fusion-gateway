@@ -13,20 +13,24 @@ import (
     "time"
 )
 
-// fakeNode is a mock fusion-browser node listening on a UDS socket. It reads
-// one length-prefixed request frame per accepted connection, dispatches to a
-// per-request-type handler, and writes one response frame. Tests install
-// handlers via the handlers map. Connections are closed after one round trip
-// (matches the gateway's per-call dial). The listener is accepted in a
-// goroutine; tests call Stop() to close + drain.
+// fakeNode is a mock fusion-browser node listening on a UDS socket. It models
+// the FR-10/H-5 auth contract: the FIRST frame on a connection MUST be an
+// {type:"auth", token} frame matching the node's token, else it replies
+// auth_denied and closes (mirrors the real UDSServer first-frame-must-be-auth
+// gate). After auth_ack, it reads the op frame, dispatches to a per-type
+// handler, and writes one response frame. Connections are closed after one
+// auth+op round trip (matches the gateway's per-call dial). The listener is
+// accepted in a goroutine; tests call Stop() to close + drain.
 type fakeNode struct {
     socket   string
+    token    string
     listener net.Listener
     handlers map[string]func(req RequestFrame) ResponseFrame
 
     mu       sync.Mutex
     stopped  bool
     accepted map[string]int // request type -> count, for assertion
+    authDeny int            // count of auth_denied replies (regression assertion)
 }
 
 // fakeNodeCounter mints unique short socket names. macOS limits a UDS path to
@@ -36,11 +40,21 @@ type fakeNode struct {
 // parallel test run.
 var fakeNodeCounter atomic.Uint64
 
-// newFakeNode starts a mock node on a short UDS socket under /tmp. The handlers
-// map keys are request Type strings (reqTypeCapacity, reqTypeCreateSession,
-// ...). A missing handler returns a generic error frame so the test sees a
-// clear failure rather than a hang.
+// newFakeNode starts a mock node on a short UDS socket under /tmp with a fixed
+// test token. The handlers map keys are request Type strings (reqTypeCapacity,
+// reqTypeCreateSession, ...). A missing handler returns a generic error frame
+// so the test sees a clear failure rather than a hang. The auth gate is
+// enforced: a non-auth first frame, or a token mismatch, is rejected with
+// auth_denied — this is what let the #132 bug ship (the prior fake did not
+// model auth, so CI stayed green while the live path was broken).
 func newFakeNode(t *testing.T, handlers map[string]func(req RequestFrame) ResponseFrame) *fakeNode {
+    t.Helper()
+    return newFakeNodeWithToken(t, "test-token", handlers)
+}
+
+// newFakeNodeWithToken starts a mock node with an explicit token (for the
+// token-mismatch / empty-token regression assertions).
+func newFakeNodeWithToken(t *testing.T, token string, handlers map[string]func(req RequestFrame) ResponseFrame) *fakeNode {
     t.Helper()
     n := fakeNodeCounter.Add(1)
     socket := fmt.Sprintf("/tmp/fbtest-%d.sock", n)
@@ -51,6 +65,7 @@ func newFakeNode(t *testing.T, handlers map[string]func(req RequestFrame) Respon
     }
     fn := &fakeNode{
         socket:   socket,
+        token:    token,
         listener: ln,
         handlers: handlers,
         accepted: make(map[string]int),
@@ -76,14 +91,45 @@ func (f *fakeNode) acceptLoop() {
     }
 }
 
+// serve enforces the auth gate then dispatches the op. The first frame must be
+// {type:"auth", token}; a wrong type or token mismatch → auth_denied + close
+// (matching the real node). On auth_ack it reads the op frame and dispatches.
 func (f *fakeNode) serve(conn net.Conn) {
     defer conn.Close()
     body, err := ReadFrame(conn, defaultFrameMaxBytes, 5*time.Second)
     if err != nil {
         return
     }
+    // Decode the first frame as both the generic envelope (for the type) and
+    // the auth message (for the token). AuthMessage uses {type, token}, so the
+    // token is read from the dedicated JSON key, not SessionID.
+    var first RequestFrame
+    if err := json.Unmarshal(body, &first); err != nil {
+        return
+    }
+    var am AuthMessage
+    _ = json.Unmarshal(body, &am)
+    // FR-10/H-5: first frame MUST be auth with the matching token. A non-auth
+    // first frame (e.g. a bare capacity request — the #132 bug) or a token
+    // mismatch is rejected exactly as the real node does: auth_denied + close.
+    if first.Type != reqTypeAuth || am.Token != f.token {
+        f.mu.Lock()
+        f.authDeny++
+        f.mu.Unlock()
+        _ = WriteFrame(conn, errResp(ErrCodeAuthDenied, "authentication token invalid or missing", false))
+        return
+    }
+    // auth_ack — the connection is now authorized for one op.
+    if err := WriteFrame(conn, ResponseFrame{Type: respTypeAuthAck}); err != nil {
+        return
+    }
+    // Read the op frame + dispatch.
+    opBody, err := ReadFrame(conn, defaultFrameMaxBytes, 5*time.Second)
+    if err != nil {
+        return
+    }
     var req RequestFrame
-    if err := json.Unmarshal(body, &req); err != nil {
+    if err := json.Unmarshal(opBody, &req); err != nil {
         return
     }
     f.mu.Lock()
@@ -99,6 +145,13 @@ func (f *fakeNode) serve(conn net.Conn) {
     if err := WriteFrame(conn, resp); err != nil {
         return
     }
+}
+
+// authDeniedCount returns how many connections were rejected at the auth gate.
+func (f *fakeNode) authDeniedCount() int {
+    f.mu.Lock()
+    defer f.mu.Unlock()
+    return f.authDeny
 }
 
 // count returns how many requests of a given type the fake node served.

@@ -446,10 +446,12 @@ browser:
     frame_max_bytes: 8388608             # UDS length-prefixed frame cap (8 MiB, mirrors fusion-browser Framing.swift).
     dial_timeout: "2s"                   # Per-call UDS dial timeout.
     frame_timeout: "30s"                 # Per-frame read timeout (partial-frame slow-drip drop, B-4).
-    nodes: []                            # Static seed: [{id, socket_path}]. id is the stable registry key (survives browser restarts). Dial-in nodes self-register at runtime.
+    nodes: []                            # Static seed: [{id, socket_path, token}]. id is the stable registry key (survives browser restarts). Dial-in nodes self-register at runtime.
     # Example:
     # nodes:
     #     - id: "mbp-node-1"
     #       socket_path: "/tmp/fusion-browser.sock"
+    #       token: "${BROWSER_NODE1_AUTH_TOKEN}"   # MUST match the node's authToken (FR-10/H-5: first frame on every dial is an auth handshake). Empty/missing = node is deny-all; the op is rejected. Use an env-var reference or a secret store rather than a literal.
     #     - id: "mbp-node-2"
     #       socket_path: "/tmp/fusion-browser-2.sock"
+    #       token: "${BROWSER_NODE2_AUTH_TOKEN}"

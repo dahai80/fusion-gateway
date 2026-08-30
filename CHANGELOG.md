@@ -9,6 +9,40 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-30
+
+### Fixed
+- **Browser scheduling auth handshake** (issue #132). The `internal/browser/`
+  `NodeClient` silently skipped the FR-10/H-5 UDS auth handshake on every node
+  op, so a live fusion-browser node (which requires the first frame on a
+  connection to be `{type:"auth", token}` and replies `auth_denied` + close
+  otherwise) rejected all gateway traffic. Root cause: the v0.9.0 client sent
+  the op frame directly with no auth, and the offline fake node did not model
+  the gate, so CI stayed green while the live path was broken. The fix threads
+  a per-node `token` end-to-end:
+  - `internal/browser/wire.go`: added `AuthMessage{type, token}`,
+    `reqTypeAuth="auth"`, `respTypeAuthAck="auth_ack"`,
+    `ErrCodeAuthDenied="auth_denied"` (mirrors `Protocol.swift`).
+  - `internal/browser/client.go`: `roundTrip` now sends the auth frame first
+    and asserts an `auth_ack` before the op frame; a missing token fails closed
+    before any dial; a `auth_denied` reply is surfaced verbatim as a
+    `*NodeError` (never coerced to a generic 502 — RC1 lesson).
+  - `internal/browser/registry.go` + `proxy.go`: every forward reads the node's
+    `token` via `TokenOf` and passes it to the client; `RegisterDialin` carries
+    the dial-in token.
+  - `internal/config/config.go`: `BrowserNodeConfig.Token` field +
+    fail-closed `Validate` (an empty token is rejected — a node without a
+    token is deny-all, seeding one anonymous is an operator error).
+  - `internal/browser/fakenode_test.go`: the fake node now enforces the auth
+    gate (first frame must be `{type:"auth", token}`, else `auth_denied` +
+    close), so a future regression that drops the handshake fails CI instead of
+    shipping green. New `client_test.go` adds the #132 regression guards:
+    correct token served, wrong token rejected with `auth_denied` (op never
+    served), empty token fails closed (no dial), auth runs on every dial.
+- `config.example.yaml`: `browser.nodes` example now includes the `token` field
+  with a note it must match the node's `authToken` and should be an env-var
+  reference rather than a literal.
+
 ## [0.9.2] - 2026-08-30
 
 ### Fixed
