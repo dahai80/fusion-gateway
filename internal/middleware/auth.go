@@ -26,6 +26,17 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             ctx, p := EnsurePrincipal(r.Context())
 
+            // withAdminOnly may have already bridged an admin-login JWT into a
+            // Principal{AuthMethod:"admin-jwt"} (server/admin_handlers.go). The
+            // API-key chain does not own that identity — skip key resolution so
+            // it neither overwrites the bridged role nor 401-rejects a request
+            // whose Bearer is an admin JWT rather than an API key. The admin
+            // route's own IsAdmin gate has already authorized it.
+            if p.AuthMethod == "admin-jwt" {
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
             if !cfg.Enabled || cfg.Passthrough {
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return

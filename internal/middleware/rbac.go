@@ -40,6 +40,16 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
             // 硬伤1 fix: populate Principal instead of separate context keys
             ctx, p := EnsurePrincipal(r.Context())
 
+            // withAdminOnly may have already bridged an admin-login JWT into a
+            // Principal{AuthMethod:"admin-jwt", Role:RoleAdmin}. RBAC derives
+            // role from OIDC claims / default role for the API-key path; for an
+            // already-bridged admin identity it must NOT overwrite the role
+            // (which would drop RoleAdmin back to RoleViewer → admin route 403).
+            if p.AuthMethod == "admin-jwt" {
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
             if !cfg.Enabled {
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
