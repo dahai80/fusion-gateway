@@ -14,7 +14,7 @@ func TestProxyCreatePinsSession(t *testing.T) {
         reqTypeCreateSession: func(req RequestFrame) ResponseFrame { return createResp("sess-42", true) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -74,7 +74,7 @@ func TestProxyExecuteForwardsVerbatim(t *testing.T) {
         },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -99,7 +99,7 @@ func TestProxyExecuteDeadPinEvictsAndErrors(t *testing.T) {
         reqTypeCreateSession: func(req RequestFrame) ResponseFrame { return createResp("sess-1", false) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -137,7 +137,7 @@ func TestProxyCloseEvictsPin(t *testing.T) {
         reqTypeClose:         func(req RequestFrame) ResponseFrame { return ResponseFrame{Type: respTypeClosed} },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -163,7 +163,7 @@ func TestProxyMetricsForwardsFirstLive(t *testing.T) {
         reqTypeMetrics: func(req RequestFrame) ResponseFrame { return metricsResp(map[string]any{"counters": []map[string]any{{"name": "sessions", "value": 5}}}) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }
@@ -197,7 +197,7 @@ func TestProxyCreateRelaysNodeError(t *testing.T) {
         reqTypeCreateSession: func(req RequestFrame) ResponseFrame { return errResp(ErrCodeQuotaExceeded, "node full", false) },
     })
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }

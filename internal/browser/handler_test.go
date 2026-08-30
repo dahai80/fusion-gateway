@@ -19,7 +19,7 @@ func passthrough(h http.HandlerFunc) http.HandlerFunc { return h }
 func newTestHandler(t *testing.T, fn *fakeNode) (*Handler, *Registry) {
     t.Helper()
     reg, err := NewRegistry(dialClient(), 5*time.Second, 3, 30*time.Second,
-        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket}})
+        []config.BrowserNodeConfig{{ID: "n1", SocketPath: fn.socket, Token: "test-token"}})
     if err != nil {
         t.Fatalf("NewRegistry: %v", err)
     }

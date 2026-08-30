@@ -40,6 +40,7 @@ const (
 type BrowserNode struct {
     NodeID     string        // stable config label (registry key)
     SocketPath string        // UDS path the gateway dials to forward
+    Token      string        // per-node UDS auth credential (FR-10/H-5 handshake)
     Capacity   *FBNodeCapacity // nil until first successful poll
     State      NodeState
     failures   int
@@ -53,6 +54,7 @@ type BrowserNode struct {
 type nodeView struct {
     NodeID     string
     SocketPath string
+    Token      string
     Capacity   *FBNodeCapacity
     State      NodeState
     Failures   int
@@ -96,6 +98,7 @@ func NewRegistry(client *NodeClient, pollInterval time.Duration, failureThreshol
         r.nodes[n.ID] = &BrowserNode{
             NodeID:     n.ID,
             SocketPath: n.SocketPath,
+            Token:      n.Token,
             State:      NodeStateLive,
             source:     sourceConfig,
         }
@@ -147,7 +150,7 @@ func (r *Registry) pollLoop(ctx context.Context) {
 func (r *Registry) pollOnce(ctx context.Context) {
     due := r.dueNodes()
     for _, view := range due {
-        cap, err := r.client.Capacity(ctx, view.SocketPath)
+        cap, err := r.client.Capacity(ctx, view.SocketPath, view.Token)
         r.mu.Lock()
         node, ok := r.nodes[view.NodeID]
         if !ok {
@@ -216,10 +219,13 @@ func (r *Registry) recordFailure(node *BrowserNode, err error) {
 
 // RegisterDialin adds a self-registering node learned from a dial-in capacity
 // frame. The socket path is how the gateway will forward later (the dialer's
-// UDS peer address). Mints a config-style label dialin-<short-hash(socket)>.
-// If the socket already has a config-seed node, the dial-in is a no-op (the
-// config id wins — it is the operator's stable label).
-func (r *Registry) RegisterDialin(socketPath string, cap *FBNodeCapacity) string {
+// UDS peer address). token is the auth credential for subsequent ops on this
+// node — a dial-in node that authenticated its registration frame carries the
+// same token for forwarding (FR-10/H-5 handshake on every dial). Mints a
+// config-style label dialin-<short-hash(socket)>. If the socket already has a
+// config-seed node, the dial-in is a no-op (the config id wins — it is the
+// operator's stable label).
+func (r *Registry) RegisterDialin(socketPath, token string, cap *FBNodeCapacity) string {
     id := dialinLabel(socketPath)
     r.mu.Lock()
     defer r.mu.Unlock()
@@ -236,6 +242,7 @@ func (r *Registry) RegisterDialin(socketPath string, cap *FBNodeCapacity) string
     r.nodes[id] = &BrowserNode{
         NodeID:     id,
         SocketPath: socketPath,
+        Token:      token,
         Capacity:   cap,
         State:      NodeStateLive,
         lastPoll:   time.Now(),
@@ -286,6 +293,7 @@ func (r *Registry) view(n *BrowserNode) nodeView {
     return nodeView{
         NodeID:     n.NodeID,
         SocketPath: n.SocketPath,
+        Token:      n.Token,
         Capacity:   n.Capacity,
         State:      n.State,
         Failures:   n.failures,
@@ -305,6 +313,21 @@ func (r *Registry) SocketOf(nodeID string) (string, bool) {
         return "", false
     }
     return n.SocketPath, true
+}
+
+// TokenOf returns the per-node auth token for a node id, for the proxy to send
+// in the auth handshake before forwarding. Returns ok=false for an unknown id.
+// The token travels alongside SocketOf: every forward dials the socket AND
+// authenticates with this token (FR-10/H-5 — the first frame on every dial
+// must be auth).
+func (r *Registry) TokenOf(nodeID string) (string, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    n, ok := r.nodes[nodeID]
+    if !ok {
+        return "", false
+    }
+    return n.Token, true
 }
 
 // IsDead reports whether a node is currently dead (for the proxy's dead-pin
@@ -344,6 +367,7 @@ func (r *Registry) DrainAndApply(seed []config.BrowserNodeConfig) {
         newSet[n.ID] = &BrowserNode{
             NodeID:     n.ID,
             SocketPath: n.SocketPath,
+            Token:      n.Token,
             State:      NodeStateLive,
             source:     sourceConfig,
         }
