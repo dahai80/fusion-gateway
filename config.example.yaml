@@ -451,7 +451,7 @@ browser:
     # nodes:
     #     - id: "mbp-node-1"
     #       socket_path: "/tmp/fusion-browser.sock"
-    #       token: "${BROWSER_NODE1_AUTH_TOKEN}"   # MUST match the node's authToken (FR-10/H-5: first frame on every dial is an auth handshake). Empty/missing = node is deny-all; the op is rejected. Use an env-var reference or a secret store rather than a literal.
+    #       token: "paste-the-node-authToken-here"   # MUST match the node's authToken (FR-10/H-5: first frame on every dial is an auth handshake). Empty/missing = node is deny-all; the op is rejected. NOTE: viper binds env vars to config KEYS, it does NOT expand inline ${VAR} inside string values — so a literal ${...} here would be sent verbatim and denied. Inject the real token via a secrets manager / env-overridden config file / template render before launch; do not commit real tokens.
     #     - id: "mbp-node-2"
     #       socket_path: "/tmp/fusion-browser-2.sock"
-    #       token: "${BROWSER_NODE2_AUTH_TOKEN}"
+    #       token: "paste-the-node2-authToken-here"
