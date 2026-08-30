@@ -76,7 +76,10 @@ jobs:
       # versions, so a consumer can cross-check the release against known
       # advisories and satisfy supply-chain attestation requirements.
       - name: Install cyclonedx-gomod
-        run: go install github.com/CycloneDX/cyclonedx-gomod@latest
+        # The cyclonedx-gomod module's main package lives under cmd/, not at the
+        # module root — `go install <module>@latest` fails with "does not contain
+        # package". Pin the cmd/ subpath.
+        run: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
 
       - name: Generate SBOM (CycloneDX)
         run: |
