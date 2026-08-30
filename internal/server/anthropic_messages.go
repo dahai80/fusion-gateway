@@ -449,27 +449,30 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         return nil
     }
     // emitAnthropicEvent (N3 audit): emit an upstream Anthropic event. When the
-    // provider carried the verbatim upstream payload (Raw) AND the event is not
-    // block-scoped, write Raw directly — skipping the per-frame json.Marshal
-    // the audit found burning serialization at concurrency. Block-scoped events
-    // (content_block_start/delta/stop) keep the marshal path so MarshalJSON
-    // can inject a missing "index":0 (issue #46); emitting raw bytes that omit
-    // index would regress that fix. Events synthesized in-process (Raw nil)
-    // also marshal. Semantically identical output for pass-through events;
-    // raw is more faithful (preserves unknown upstream fields).
+    // provider carried the verbatim upstream payload (Raw), write it directly —
+    // skipping the per-frame json.Marshal the audit found burning serialization
+    // at concurrency AND preserving fields the struct's omitempty drops.
+    //
+    // The re-marshal path was the root cause of "Content block not found" on
+    // thinking streams (glm5.2 via LiteLLM). An upstream thinking
+    // content_block_start carries empty "thinking":"" and "signature":"" keys;
+    // AnthropicContentBlock tags both with omitempty, so json.Marshal dropped
+    // them, emitting {"type":"thinking"} with neither key. The Anthropic SDK
+    // requires a thinking block to carry both keys, so the malformed block
+    // could not be finalized and Claude Code surfaced "Content block not found"
+    // after the thinking deltas drained (the "Thought for N s" then crash
+    // symptom). Raw passthrough preserves the empty keys verbatim.
+    //
+    // The re-marshal path's only purpose was injecting a missing "index":0
+    // (issue #46); emitting raw bytes that omit index would regress that fix.
+    // So block-scoped events still marshal ONLY when Raw is absent or does not
+    // already carry an "index" field. Upstreams that send index (LiteLLM does)
+    // pass through faithfully; upstreams that omit it still get the injection.
+    // Events synthesized in-process (Raw nil) also marshal. Semantically
+    // identical output for pass-through events; raw is more faithful (preserves
+    // unknown upstream fields and empty-value keys the struct drops).
     emitAnthropicEvent := func(event adapter.AnthropicStreamEvent) error {
-        data := event.Raw
-        blockScoped := event.Type == "content_block_start" ||
-            event.Type == "content_block_delta" ||
-            event.Type == "content_block_stop"
-        if len(data) == 0 || blockScoped {
-            marshaled, err := json.Marshal(event)
-            if err != nil {
-                slog.Error("anthropic stream event marshal failed", "error", err, "type", event.Type)
-                return nil
-            }
-            data = marshaled
-        }
+        data := selectAnthropicEventData(event)
         return writeSSE("event: %s\ndata: %s\n\n", event.Type, data)
     }
     writeFailed := false
@@ -738,6 +741,46 @@ func extractAnthropicTextContent(messages []adapter.AnthropicMessage) string {
         }
     }
     return sb.String()
+}
+
+// selectAnthropicEventData chooses the bytes to emit for one upstream Anthropic
+// stream event (N3 audit + thinking-block fix).
+//
+// When the provider carried the verbatim upstream payload (Raw), return it
+// directly — skipping the per-frame json.Marshal the audit found burning
+// serialization at concurrency AND preserving fields the struct's omitempty
+// drops. This is the root-cause fix for "Content block not found" on thinking
+// streams (glm5.2 via LiteLLM): an upstream thinking content_block_start
+// carries empty "thinking":"" and "signature":"" keys; AnthropicContentBlock
+// tags both with omitempty, so json.Marshal dropped them, emitting
+// {"type":"thinking"} with neither key. The Anthropic SDK requires a thinking
+// block to carry both keys, so the malformed block could not be finalized and
+// Claude Code surfaced "Content block not found" after the thinking deltas
+// drained (the "Thought for N s" then crash symptom). Raw passthrough preserves
+// the empty keys verbatim.
+//
+// The re-marshal path's only purpose was injecting a missing "index":0 (issue
+// #46); emitting raw bytes that omit index would regress that fix. So
+// block-scoped events still marshal ONLY when Raw is absent or does not already
+// carry an "index" field. Upstreams that send index (LiteLLM does) pass through
+// faithfully; upstreams that omit it still get the injection. Events
+// synthesized in-process (Raw nil) also marshal. Semantically identical output
+// for pass-through events; raw is more faithful (preserves unknown upstream
+// fields and empty-value keys the struct drops).
+func selectAnthropicEventData(event adapter.AnthropicStreamEvent) []byte {
+    data := event.Raw
+    blockScoped := event.Type == "content_block_start" ||
+        event.Type == "content_block_delta" ||
+        event.Type == "content_block_stop"
+    if len(data) == 0 || (blockScoped && !strings.Contains(string(data), `"index"`)) {
+        marshaled, err := json.Marshal(event)
+        if err != nil {
+            slog.Error("anthropic stream event marshal failed", "error", err, "type", event.Type)
+            return nil
+        }
+        data = marshaled
+    }
+    return data
 }
 
 // anthropicRequestHasImage reports whether any message carries a non-text
