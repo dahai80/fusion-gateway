@@ -9,6 +9,52 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-30
+
+### Fixed
+- **HA / multi-replica security defects in deploy manifests** (enterprise
+  readiness, item 1). Two related defects shipped a publicly-predictable
+  `master_key` on a bare `helm install` / `kubectl apply`, exposing the guarded
+  endpoints (`/metrics`, `/debug/pprof/*`) and (when `auth.enabled`) the full
+  admin bypass to anyone holding the public value:
+  - **Configmap literal sent verbatim.** `deploy/helm` + `deploy/kubernetes`
+    configmaps carried `master_key: "${FG_MASTER_KEY}"`. viper's `AutomaticEnv()`
+    binds env vars to CONFIG KEYS but does NOT expand inline `${VAR}` inside
+    YAML string values, so the literal was unmarshaled verbatim and became the
+    live `master_key`. Fixed at the code layer: `internal/config/config.go`
+    `bindSecretEnv` now explicitly `BindEnv("auth.master_key", "FG_MASTER_KEY")`
+    (and `encryption.master_key`→`FG_ENCRYPTION_MASTER_KEY`) in both `Load` and
+    `Reload`, giving the deployment-injected env var precedence over any
+    configmap literal. The configmaps now omit `master_key` entirely (env/Secret
+    is the source of truth).
+  - **Placeholder evaded the startup guard.** The chart/K8s/Terraform defaults
+    (`CHANGE_ME_MASTER_KEY`, `CHANGE_ME`) and the `${...}` literal all evaded
+    `isKnownInsecureSecret`: the substring table had `change-me` (hyphen) only,
+    and `${...}` matched no marker. The R7 guard also required `auth.enabled`
+    (false by default in the chart), so it never fired — yet `withMasterKey`
+    honors any non-empty `master_key` regardless of `auth.enabled`. Fixed:
+    `looksLikePlaceholder` now catches the `change_me` underscore marker and any
+    unexpanded `${...}` / `{{ }}` env-var reference (`looksLikeEnvRef`); the R7
+    `master_key` guard now fires whenever a `master_key` is SET, not only when
+    `auth.enabled`. The deploy defaults are now empty (ship without a
+    `master_key` — safe-by-default — rather than with a known value).
+  - Regression tests: `TestC1_MasterKeyGuardFiresWithoutAuthEnabled`,
+    `TestC1_MasterKeyEnvRefAndUnderscoreDetection`,
+    `TestLoad_MasterKeyEnvOverridesLiteral`,
+    `TestLoad_MasterKeyLiteralRejectedWithoutEnv`.
+
+### Added
+- **HA / multi-replica guidance** in README under `## Kubernetes & Helm
+  Deployment`. Documents the three HA concerns: (1) multi-replica requires
+  `store.backend: redis` for shared API keys/quota/cost/logs (memory store is
+  per-instance); (2) routing state (breakers, `nodeBreakers`, `localInFlight`,
+  `TaskRegistry`, `sessionAffinity`, browser pin) is per-instance / stateless-
+  by-design — no shared-state dependency, replicas are interchangeable; (3)
+  `browser.enabled` + multi-replica needs single-replica or ingress-level
+  session affinity on `/v1/browser/*` (the pin map is per-instance, so a session
+  created on replica A 404s if execute/close lands on replica B). Plus the
+  env-injected secret convention (`FG_MASTER_KEY` via `bindSecretEnv`).
+
 ## [0.9.3] - 2026-08-30
 
 ### Fixed
@@ -143,8 +189,9 @@ on tag push; this file is the maintained, human-curated counterpart.
 - Agent slot scheduler (ADR-001, #102): per-node cap in
   `SelectNodeByModel`, opt-in `slotQueue`, `POST /v1/agent/tasks/{id}/cancel`.
 
-[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.0
+[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.4
+[0.9.3]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.3
 [0.8.51]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.8.51
 [0.8.50]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.8.50
 [0.8.48]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.8.48

@@ -867,11 +867,33 @@ func decryptBackendAPIKeys(cfg *Config) error {
     return nil
 }
 
+// bindSecretEnv wires named env vars to the config keys that hold secrets,
+// so a secret injected by the deployment (e.g. a Kubernetes Secret via
+// secretKeyRef → env FG_MASTER_KEY) actually flows into the config. viper's
+// AutomaticEnv() alone binds env vars to CONFIG KEYS (with a .→_ replacer
+// viper sets by default only when a prefix is configured), but it does NOT
+// expand inline ${VAR} inside YAML string values — a configmap
+// `master_key: "${FG_MASTER_KEY}"` would otherwise be unmarshaled verbatim and
+// become the live secret (a publicly-predictable value). Explicit BindEnv gives
+// the env var highest precedence, overriding any literal the config file
+// carries, so the secret source is the env, not the file. Same fix shape for
+// every secret the deployment injects via env. Must be called on every viper
+// instance that Unmarshals (Load + Reload); the file-watcher instance in
+// WatchAndReload does not Unmarshal, so it is unaffected.
+func bindSecretEnv(v *viper.Viper) {
+    // auth.master_key — admin-equivalent + /metrics + /debug/pprof gate.
+    // The Helm chart injects FG_MASTER_KEY via a secretKeyRef (deployment.yaml).
+    v.BindEnv("auth.master_key", "FG_MASTER_KEY")
+    // encryption.master_key — protects OAuth2/connector tokens at rest.
+    v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
+}
+
 func Load(path string) (*ConfigSnapshot, error) {
     v := viper.New()
     v.SetConfigFile(path)
     v.SetConfigType("yaml")
     v.AutomaticEnv()
+    bindSecretEnv(v)
 
     if err := v.ReadInConfig(); err != nil {
         return nil, fmt.Errorf("read config: %w", err)
@@ -966,6 +988,7 @@ func Reload(path string) (*ConfigSnapshot, error) {
     v.SetConfigFile(path)
     v.SetConfigType("yaml")
     v.AutomaticEnv()
+    bindSecretEnv(v)
     if err := v.ReadInConfig(); err != nil {
         slog.Error("reload: failed to read config", "error", err)
         return nil, fmt.Errorf("read config: %w", err)
@@ -1263,11 +1286,17 @@ func validate(cfg *Config) error {
     // config-side reject fails fast at startup so the operator learns before a
     // request is ever attempted. Only enforced when auth is enabled; a disabled
     // auth block has no live keys to validate.
-    // R7 (audit): reject a known-placeholder master_key when auth is enabled.
-    // The master_key is admin-equivalent (it bypasses rate limits + opens MCP),
-    // so a publicly-known value is a full bypass. Empty is allowed (master_key
-    // is optional) — only the placeholder literals are refused.
-    if cfg.Auth.Enabled && isKnownInsecureSecret(cfg.Auth.MasterKey) {
+    // R7 (audit): reject a known-placeholder master_key. The master_key is
+    // admin-equivalent (it bypasses rate limits + opens MCP) AND gates
+    // /metrics + /debug/pprof/* via withMasterKey, which honors ANY non-empty
+    // master_key regardless of auth.enabled. So a publicly-known value is a
+    // full bypass of the protected endpoints even when auth.enabled=false
+    // (the chart default). The guard therefore fires whenever a master_key is
+    // SET, not only when auth is enabled — the auth.Enabled precondition would
+    // let a bare `helm install` ship the literal "${FG_MASTER_KEY}" as a live
+    // /metrics key. Empty is allowed (master_key is optional) — only the
+    // placeholder literals (and unexpanded ${VAR} references) are refused.
+    if cfg.Auth.MasterKey != "" && isKnownInsecureSecret(cfg.Auth.MasterKey) {
         return fmt.Errorf("auth.master_key must not be a known placeholder; set a unique strong secret or leave empty to disable")
     }
 
@@ -1555,7 +1584,7 @@ func looksLikePlaceholder(t string) bool {
     }
     // Substring families (case already lowered).
     substringMarkers := []string{
-        "change-me", "changeme",
+        "change-me", "changeme", "change_me",
         "do-not-ship", "do_not_ship",
         "replace-me", "replace_me",
         "placeholder",
@@ -1569,6 +1598,33 @@ func looksLikePlaceholder(t string) bool {
         if strings.Contains(t, m) {
             return true
         }
+    }
+    // Unexpanded env-var reference: a literal "${VAR}" / "$VAR" reaching a
+    // secret field means templating never ran, so the placeholder text itself
+    // becomes the live secret (viper.AutomaticEnv binds env vars to CONFIG
+    // KEYS, it does NOT expand inline ${VAR} inside string values). A Helm
+    // configmap `master_key: "${FG_MASTER_KEY}"` would otherwise be sent
+    // verbatim as the master_key — a publicly-predictable admin-bypass. Reject
+    // the whole class so an unexpanded reference can never become a secret.
+    if looksLikeEnvRef(t) {
+        return true
+    }
+    return false
+}
+
+// looksLikeEnvRef reports whether s is an unexpanded shell/env-var reference
+// ("${VAR}", "$VAR", "{{ VAR }}"). Such a literal in a secret field is always
+// a misconfig: either templating was skipped (literal ships verbatim) or the
+// reference is to a missing binding. Either way it is not a real secret.
+func looksLikeEnvRef(s string) bool {
+    if strings.Contains(s, "${") && strings.Contains(s, "}") {
+        return true
+    }
+    // "$VAR" without a brace is ambiguous (a real key may contain "$"), so only
+    // flag the braced forms ${...} and the templater form {{...}} which are
+    // unambiguous placeholders. Bare "$word" is left to the marker table.
+    if strings.Contains(s, "{{") && strings.Contains(s, "}}") {
+        return true
     }
     return false
 }

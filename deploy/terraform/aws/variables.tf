@@ -23,10 +23,10 @@ variable "replica_count" {
 }
 
 variable "master_key" {
-  description = "Fusion-Gateway master key"
+  description = "Fusion-Gateway master key (>=32 chars). Empty = ship without a master_key. The gateway rejects known placeholders at startup."
   type        = string
   sensitive   = true
-  default     = "CHANGE_ME"
+  default     = ""
 }
 
 variable "ingress_host" {
