@@ -9,6 +9,38 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-08-30
+
+### Fixed
+- **`API Error: Content block not found` on thinking streams** (Claude Code
+  crash after "Thought for N seconds", recursing on `continue`). The
+  `emitAnthropicEvent` closure in `handleStreamAnthropicMessages`
+  (`internal/server/anthropic_messages.go`) re-marshaled block-scoped SSE
+  events through `adapter.AnthropicContentBlock`, whose `Thinking` and
+  `Signature` fields carry `omitempty`. An upstream thinking
+  `content_block_start` carries **empty** `"thinking":""` and
+  `"signature":""` keys; `json.Marshal` dropped both, emitting
+  `{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}`
+  with neither key. The Anthropic SDK requires a thinking block to carry both
+  keys, so the malformed block could not be finalized and Claude Code surfaced
+  `Content block not found` after the thinking deltas drained. Thinking text
+  itself was preserved (`Delta` is `json.RawMessage`), so the crash appeared
+  only once thinking completed — matching the "Thought for 38s then crash"
+  symptom. Affects glm5.2 via LiteLLM (native Anthropic passthrough).
+  - Fix: extracted `selectAnthropicEventData` — **raw passthrough** when the
+    provider's verbatim `Raw` payload already carries an `"index"` field
+    (LiteLLM and well-formed upstreams), preserving empty-value keys and
+    unknown upstream fields verbatim. The re-marshal path is kept **only** as
+    the issue #46 index-injection fallback for upstreams that omit `"index"`;
+    synthesized in-process events (`Raw` nil) still marshal.
+  - Verified live through gateway `:11432` against glm5.2 via LiteLLM:
+    thinking block (idx0, both empty keys present) → text block (idx1) →
+    `message_stop`; 2 starts == 2 stops, 0 `error` events; non-stream
+    aggregate path reconstructs thinking + text blocks.
+  - Tests: 4 regression tests in `anthropic_thinking_block_test.go` pin the
+    fix (empty-key preservation, raw passthrough, index-injection fallback,
+    synthesized-event marshal). `go vet` clean; 26 packages race-green. PR #136.
+
 ## [0.9.4] - 2026-08-30
 
 ### Fixed
