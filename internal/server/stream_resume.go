@@ -109,6 +109,13 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     // Announce the resume cursor namespace so the client knows where to send
     // Last-Event-ID. The per-event id lines carry <sid>:<seq>.
     w.Header().Set("X-Fusion-Stream-ID", sid)
+    // #139: self-describing replay path. A client that breaks mid-stream
+    // reconnects here with Last-Event-ID (or ?last_event_id=) to replay the
+    // buffered tail without duplicating deltas. Namespace-neutral so an
+    // OpenAI-wire client (/v1/chat/completions) resumes without crossing into
+    // the Anthropic /v1/messages/ namespace. Relative path — the client
+    // resolves it against the original request host.
+    w.Header().Set("X-Fusion-Stream-Resume-URL", "/v1/stream/"+sid+"/events")
     flusher, canFlush := w.(http.Flusher)
 
     streamCfg := s.cfg.Config.Routing.Stream
@@ -377,8 +384,11 @@ func (s *Server) handleStreamResume(w http.ResponseWriter, r *http.Request) {
         http.NotFound(w, r)
         return
     }
-    // Path: /v1/messages/{sid}/events
+    // Path: /v1/messages/{sid}/events (Anthropic namespace) OR
+    // /v1/stream/{sid}/events (namespace-neutral, #139). Both map to the same
+    // replay — the buffer key (sid) is protocol-independent (X-Request-ID).
     path := strings.TrimPrefix(r.URL.Path, "/v1/messages/")
+    path = strings.TrimPrefix(path, "/v1/stream/")
     parts := strings.Split(path, "/")
     if len(parts) != 2 || parts[1] != "events" || parts[0] == "" {
         slog.Debug("stream resume: malformed path", "path", r.URL.Path)
@@ -413,6 +423,7 @@ func (s *Server) handleStreamResume(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Connection", "keep-alive")
     w.Header().Set("X-Accel-Buffering", "no")
     w.Header().Set("X-Fusion-Stream-ID", sid)
+    w.Header().Set("X-Fusion-Stream-Resume-URL", "/v1/stream/"+sid+"/events")
     flusher, canFlush := w.(http.Flusher)
 
     slog.Info("stream resume: replaying", "sid", sid, "after_seq", afterSeq, "finalized", buf.IsFinalized())

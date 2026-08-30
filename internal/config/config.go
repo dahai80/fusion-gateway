@@ -306,9 +306,12 @@ type RetryConfig struct {
 type StreamConfig struct {
     KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
     IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
-    // Resume (issue #116): mid-stream-reconnect replay for the local MLX path.
-    // ResumeEnabled gates stream_id assignment + per-event id + the rolling
-    // buffer + the /v1/messages/{stream_id}/events replay endpoint. Disabled by
+    // Resume (issue #116/#139): mid-stream-reconnect replay for the local MLX
+    // path. ResumeEnabled gates stream_id assignment + per-event id + the
+    // rolling buffer + the replay endpoints (/v1/stream/{stream_id}/events
+    // namespace-neutral #139, or /v1/messages/{stream_id}/events). The live
+    // stream response advertises X-Fusion-Stream-Resume-URL so a client
+    // discovers the replay path without hardcoding a namespace. Disabled by
     // default — the buffered local path keeps the upstream pump alive past a
     // client disconnect (so a reconnect can resume), which holds the local slot
     // for the whole generation even after the client left. Cloud/first-party

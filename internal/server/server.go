@@ -602,6 +602,12 @@ func (s *Server) Start() error {
     // (/v1/messages/{stream_id}/events); path parsed in handleStreamResume. Only
     // responds when routing.stream.resume_enabled — otherwise 404.
     mux.HandleFunc("/v1/messages/", s.withMiddleware(s.handleStreamResume))
+    // #139 namespace-neutral replay route: /v1/stream/{stream_id}/events.
+    // Same handler as /v1/messages/{sid}/events so an OpenAI-wire client
+    // (/v1/chat/completions) need not cross into the Anthropic namespace to
+    // resume a broken stream — the self-describing X-Fusion-Stream-Resume-URL
+    // header on the original stream response points here.
+    mux.HandleFunc("/v1/stream/", s.withMiddleware(s.handleStreamResume))
     // #102 ADR-001 sub-task 4: agent task cancel endpoint. Prefix-matched so
     // the {id}/cancel suffix is parsed manually in handleAgentTask (no Go
     // 1.22 path-pattern dep). Auth via withMiddleware (existing key auth).
