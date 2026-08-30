@@ -7,6 +7,7 @@ import (
     "net/http"
     "strings"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/admin"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -27,12 +28,65 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
             http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error"}}`, http.StatusForbidden)
             return
         }
+        // Bridge an admin-login JWT into middleware.Principal BEFORE the IsAdmin
+        // check. The admin module issues its own JWT (AdminClaims{Role:"admin"})
+        // via /admin/api/login; the admin module's own routes validate it through
+        // requireAdminRole -> GetAdminClaims. But withAdminOnly checks
+        // middleware.IsAdmin -> PrincipalFromContext, and the withMiddleware
+        // chain (APIKeyAuth/OIDC/RBAC) never parses the admin JWT into Principal
+        // — so a valid admin Bearer reached 403 on every withAdminOnly route
+        // (/v1/browser/nodes, /admin/gc, /admin/teams, /admin/orgs, ...). This
+        // bridge validates the Bearer as an admin JWT once and sets
+        // Principal{Role:RoleAdmin, AuthMethod:"admin-jwt"}; the chain below
+        // (withMiddleware -> APIKeyAuth/RBAC) honors the preset role instead of
+        // overwriting it (see AuthMethod short-circuits in auth.go + rbac.go).
+        // Fail-closed: an invalid/non-admin token leaves Principal untouched and
+        // the IsAdmin check below denies. The master-key reject above still
+        // fires first, so an inference key never reaches here as admin.
+        r = bridgeAdminJWT(r, s.adminAuth)
         if !middleware.IsAdmin(r.Context()) {
+            slog.Warn("admin endpoint denied: not admin",
+                "path", r.URL.Path, "method", r.Method)
             http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error"}}`, http.StatusForbidden)
             return
         }
         s.withMiddleware(handler)(w, r)
     }
+}
+
+// bridgeAdminJWT validates an Authorization: Bearer admin-login JWT and, when
+// valid, attaches a Principal{Role:RoleAdmin, AuthMethod:"admin-jwt"} to the
+// request context so withAdminOnly's IsAdmin check passes. Returns the request
+// unchanged (no Principal set) when there is no Bearer, the token is not an
+// admin JWT, or admin auth is not configured — the caller then denies via
+// IsAdmin. Non-fatal on adminAuth disabled (Enabled()==false) so a deployment
+// without the admin module still fails closed at IsAdmin rather than panicking.
+func bridgeAdminJWT(r *http.Request, adminAuth *admin.AdminAuth) *http.Request {
+    if adminAuth == nil || !adminAuth.Enabled() {
+        return r
+    }
+    authz := r.Header.Get("Authorization")
+    if !strings.HasPrefix(authz, "Bearer ") {
+        return r
+    }
+    tokenStr := strings.TrimPrefix(authz, "Bearer ")
+    claims, err := adminAuth.ValidateToken(tokenStr)
+    if err != nil || claims == nil {
+        return r
+    }
+    // Only the admin role (set by login.go GenerateToken(_, "admin")) grants the
+    // admin plane. A token claiming a different role is not elevated.
+    if claims.Role != "admin" {
+        slog.Warn("admin endpoint rejected admin JWT with non-admin role",
+            "path", r.URL.Path, "method", r.Method, "role", claims.Role)
+        return r
+    }
+    ctx := middleware.ContextWithPrincipal(r.Context(), &middleware.Principal{
+        AuthMethod: "admin-jwt",
+        Role:       middleware.RoleAdmin,
+    })
+    slog.Debug("admin JWT bridged to Principal", "path", r.URL.Path, "username", claims.Username)
+    return r.WithContext(ctx)
 }
 
 func (s *Server) handleAdminTeams(w http.ResponseWriter, r *http.Request) {

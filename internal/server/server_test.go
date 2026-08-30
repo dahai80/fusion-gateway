@@ -19,6 +19,8 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/admin"
+    "github.com/fusion-gateway/fusion-gateway/internal/browser"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -9734,4 +9736,127 @@ func TestChatCompletions_RR4_LocalSlotFullDivertsToCloud(t *testing.T) {
 
     // Release the blocking local handler so request 1 finishes and the test goroutine exits.
     close(releaseCh)
+}
+
+// --- Admin JWT bridge through withAdminOnly (regression for #137) ---
+//
+// withAdminOnly routes (/v1/browser/nodes, /v1/browser/metrics, /admin/gc,
+// /admin/teams, /admin/orgs, ...) checked middleware.IsAdmin BEFORE the
+// withMiddleware auth chain ran, and the chain never parsed the admin-login
+// JWT (AdminClaims) into middleware.Principal — so a valid admin Bearer hit
+// 403 on every admin route. The fix (bridgeAdminJWT) validates the Bearer as
+// an admin JWT once and sets Principal{Role:RoleAdmin, AuthMethod:"admin-jwt"}
+// before the IsAdmin check; APIKeyAuth/RBAC short-circuit on that AuthMethod.
+// The existing TestWithAdminOnly_AdminUser never exercised this path (it
+// injected Principal but discarded req.WithContext, then only called
+// middleware.IsAdmin directly) — the 403 slipped. This test sends a real
+// admin JWT through a real mux so the bridge is the only thing standing
+// between the request and a 403.
+
+func newAdminBridgeTestServer(t *testing.T) (*Server, string) {
+    t.Helper()
+    s := newTestServer()
+
+    adminAuth, err := admin.NewAdminAuth(
+        "regression-test-jwt-secret-at-least-32-chars-long",
+        map[string]string{"admin": "regression-password-1234"},
+    )
+    if err != nil {
+        t.Fatalf("NewAdminAuth: %v", err)
+    }
+    if !adminAuth.Enabled() {
+        t.Fatalf("adminAuth not enabled")
+    }
+    s.adminAuth = adminAuth
+
+    // Hermetic browser handler: seed a node so handleNodes returns a non-empty
+    // map. NewRegistry does NOT start the poll goroutine (Start is separate),
+    // so this is background-goroutine-free. The NodeClient never dials for a
+    // GET /v1/browser/nodes (only registry.Snapshot() is read), so a dummy
+    // socket path is fine.
+    nodeClient := browser.NewNodeClient(2*time.Second, 1<<20, 30*time.Second)
+    reg, err := browser.NewRegistry(nodeClient, 5*time.Second, 3, 30*time.Second,
+        []config.BrowserNodeConfig{{ID: "node-1", SocketPath: "/tmp/regression-dummy.sock", Token: "dummy"}})
+    if err != nil {
+        t.Fatalf("NewRegistry: %v", err)
+    }
+    sched := browser.NewScheduler(reg, 0, 200)
+    proxy := browser.NewProxy(reg, nodeClient, sched)
+    s.browserHandler = browser.NewHandler(proxy)
+
+    token, err := adminAuth.GenerateToken("admin", "admin")
+    if err != nil {
+        t.Fatalf("GenerateToken: %v", err)
+    }
+    return s, token
+}
+
+func TestWithAdminOnly_AdminJWTBridge_200(t *testing.T) {
+    s, token := newAdminBridgeTestServer(t)
+
+    mux := http.NewServeMux()
+    s.browserHandler.RegisterRoutes(mux, s.withMiddleware, s.withAdminOnly)
+    ts := httptest.NewServer(mux)
+    defer ts.Close()
+
+    // Admin Bearer -> the bridge sets Principal{Role:RoleAdmin} -> IsAdmin
+    // passes -> withMiddleware chain (admin-jwt short-circuits) -> handleNodes
+    // -> 200. Before the fix this was 403 (Principal nil at the IsAdmin check).
+    req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/browser/nodes", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        t.Fatalf("GET /v1/browser/nodes: %v", err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        t.Fatalf("admin Bearer: expected 200, got %d body=%s", resp.StatusCode, string(body))
+    }
+    slog.Info("TestWithAdminOnly_AdminJWTBridge_200 passed", "status", resp.StatusCode)
+}
+
+func TestWithAdminOnly_AdminJWTBridge_Negatives(t *testing.T) {
+    s, token := newAdminBridgeTestServer(t)
+
+    mux := http.NewServeMux()
+    s.browserHandler.RegisterRoutes(mux, s.withMiddleware, s.withAdminOnly)
+    ts := httptest.NewServer(mux)
+    defer ts.Close()
+
+    doGet := func(authz string) int {
+        req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/browser/nodes", nil)
+        if authz != "" {
+            req.Header.Set("Authorization", authz)
+        }
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil {
+            t.Fatalf("GET: %v", err)
+        }
+        resp.Body.Close()
+        return resp.StatusCode
+    }
+
+    // No Authorization header -> no Principal bridged -> IsAdmin false -> 403.
+    if code := doGet(""); code != http.StatusForbidden {
+        t.Fatalf("no Bearer: expected 403, got %d", code)
+    }
+    // Garbage Bearer -> ValidateToken fails -> no Principal -> 403.
+    if code := doGet("Bearer not-a-real-jwt"); code != http.StatusForbidden {
+        t.Fatalf("garbage Bearer: expected 403, got %d", code)
+    }
+    // A token claiming a non-admin role must not be bridged (bridge checks
+    // claims.Role == "admin"). Generate one with role "viewer" -> 403.
+    viewerToken, err := s.adminAuth.GenerateToken("admin", "viewer")
+    if err != nil {
+        t.Fatalf("GenerateToken viewer: %v", err)
+    }
+    if code := doGet("Bearer " + viewerToken); code != http.StatusForbidden {
+        t.Fatalf("viewer-role JWT: expected 403, got %d", code)
+    }
+    // Sanity: the admin token still works (regression guard for the guard).
+    if code := doGet("Bearer " + token); code != http.StatusOK {
+        t.Fatalf("admin Bearer (sanity): expected 200, got %d", code)
+    }
+    slog.Info("TestWithAdminOnly_AdminJWTBridge_Negatives passed")
 }
