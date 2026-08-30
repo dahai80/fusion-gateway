@@ -9,6 +9,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-30
+
 ### Added
 - **Namespace-neutral mid-stream SSE resumption route** (#139). The resumable
   local-MLX stream (from #116) now advertises a self-describing
