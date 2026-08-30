@@ -68,6 +68,35 @@ jobs:
           # Sanity: the binary reports the injected version on /v1/status.
           tar -czf fusion-gateway-darwin-arm64.tar.gz fusion-gateway
 
+      # Enterprise provenance: CycloneDX SBOM of the Go module graph. Built
+      # from source under the pinned Go toolchain (no third-party binary
+      # download) via cyclonedx-gomod, the Go-ecosystem SBOM generator.
+      # Produces fusion-gateway-sbom.cyclonedx.json — a standards-compliant
+      # (CycloneDX v1.x) inventory of direct + transitive deps + their
+      # versions, so a consumer can cross-check the release against known
+      # advisories and satisfy supply-chain attestation requirements.
+      - name: Install cyclonedx-gomod
+        run: go install github.com/CycloneDX/cyclonedx-gomod@latest
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cyclonedx-gomod app -licenses -version -output fusion-gateway-sbom.cyclonedx.json -main cmd/gateway
+          # Sanity: the SBOM is valid JSON and non-empty.
+          test -s fusion-gateway-sbom.cyclonedx.json
+
+      # Enterprise integrity: sha256 checksums of every release artifact, so a
+      # downstream consumer can verify a download against a signed/published
+      # digest. shasum ships with macOS — no install step. Captured AFTER all
+      # artifacts (binary tarball, SBOM, changelog) exist so every file in the
+      # release has a matching line in checksums.txt.
+      - name: Generate checksums
+        run: |
+          shasum -a 256 \
+            fusion-gateway-darwin-arm64.tar.gz \
+            fusion-gateway-sbom.cyclonedx.json \
+            CHANGELOG.md > checksums.txt
+          cat checksums.txt
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -97,6 +126,8 @@ jobs:
           body_path: CHANGELOG.md
           files: |
             fusion-gateway-darwin-arm64.tar.gz
+            fusion-gateway-sbom.cyclonedx.json
+            checksums.txt
             CHANGELOG.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

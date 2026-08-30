@@ -91,6 +91,60 @@ func TestWorker_EI10_NilParentSafe(t *testing.T) {
     }
 }
 
+// TestWorker_H3_RestartsOnPanic: a single panic must NOT permanently kill the
+// worker — H3 restarts it. A counter increments across restarts; a non-
+// restarting worker would observe exactly 1 invocation.
+func TestWorker_H3_RestartsOnPanic(t *testing.T) {
+    t.Parallel()
+    var invocations atomic.Int32
+    w := Start(context.Background(), "test_restart_panic", func(ctx context.Context) {
+        n := invocations.Add(1)
+        if n <= 2 {
+            // First two invocations panic immediately (ran < gracePeriod, so
+            // consecutive counter climbs toward the breaker).
+            panic("test panic: restart me")
+        }
+        // Third invocation: run cleanly until cancelled.
+        <-ctx.Done()
+    })
+    // Wait for the third (clean) invocation to start, then Stop. Allow time for
+    // the two backoffs (100ms, 200ms) before the clean run.
+    if !waitCond(3*time.Second, func() bool { return invocations.Load() >= 3 }) {
+        w.Stop()
+        t.Fatalf("H3: worker did not restart after panic — invocations=%d, want >=3", invocations.Load())
+    }
+    w.Stop()
+    if got := invocations.Load(); got < 3 {
+        t.Fatalf("H3: worker panicked then did not restart — invocations=%d, want >=3", got)
+    }
+}
+
+// TestWorker_H3_BackoffInterruptedByShutdown: when a panic is followed by a
+// backoff sleep, a Stop during that backoff must exit the loop via the
+// ctx.Done() select arm — not wait out the full backoff. Proves the
+// backoff-during-shutdown branch.
+func TestWorker_H3_BackoffInterruptedByShutdown(t *testing.T) {
+    t.Parallel()
+    var invocations atomic.Int32
+    w := Start(context.Background(), "test_backoff_shutdown", func(ctx context.Context) {
+        invocations.Add(1)
+        // Panic once to enter the backoff path (next backoff = 100ms).
+        panic("test panic: then stop during backoff")
+    })
+    // Give the first panic + the start of the 100ms backoff time to land.
+    if !waitCond(time.Second, func() bool { return invocations.Load() >= 1 }) {
+        w.Stop()
+        t.Fatal("H3: worker never entered its first (panicking) invocation")
+    }
+    // Stop NOW — during the backoff window. The select must take ctx.Done(),
+    // not time.After(backoff), so Stop returns promptly.
+    start := time.Now()
+    w.Stop()
+    if elapsed := time.Since(start); elapsed > time.Second {
+        t.Fatalf("H3: Stop during backoff took %s — backoff not interrupted by ctx.Done (expected fast exit)", elapsed)
+    }
+}
+
 func waitCond(max time.Duration, cond func() bool) bool {
     deadline := time.Now().Add(max)
     for time.Now().Before(deadline) {

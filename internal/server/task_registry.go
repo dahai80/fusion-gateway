@@ -86,14 +86,16 @@ func (r *TaskRegistry) Register(taskID, ownerKey string, cancel context.CancelFu
     if _, exists := r.tasks[taskID]; exists {
         slog.Warn("task registry: overwriting existing task id", "task_id", taskID)
         r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey, registeredAt: time.Now()}
+        active := len(r.tasks)
         r.mu.Unlock()
-        slog.Debug("task registry: re-registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", len(r.tasks))
+        slog.Debug("task registry: re-registered in-flight task", "task_id", taskID, "owner", ownerKey, "active", active)
         return
     }
     if r.maxEntries > 0 && len(r.tasks) >= r.maxEntries {
+        active := len(r.tasks)
         r.mu.Unlock()
         slog.Warn("task registry: full, skipping register (task runs uncancelable via endpoint)",
-            "task_id", taskID, "owner", ownerKey, "active", len(r.tasks), "max", r.maxEntries)
+            "task_id", taskID, "owner", ownerKey, "active", active, "max", r.maxEntries)
         return
     }
     r.tasks[taskID] = &taskEntry{cancel: cancel, ownerKey: ownerKey, registeredAt: time.Now()}
@@ -153,12 +155,14 @@ func (r *TaskRegistry) Release(taskID string) {
     }
     r.mu.Lock()
     _, existed := r.tasks[taskID]
+    var active int
     if existed {
         delete(r.tasks, taskID)
+        active = len(r.tasks)
     }
     r.mu.Unlock()
     if existed {
-        slog.Debug("task registry: released completed task", "task_id", taskID, "active", len(r.tasks))
+        slog.Debug("task registry: released completed task", "task_id", taskID, "active", active)
     }
 }
 

@@ -65,3 +65,49 @@ func TestH5_Duration_ZeroBaseNoOp(t *testing.T) {
         t.Fatalf("H5: Duration(-1s)=%s, want 0", d)
     }
 }
+
+// TestH5_After_ZeroBaseFiresImmediately: a zero/negative base short-circuits to
+// an already-ready buffered channel so a caller's select fires at once — no
+// caller should block forever on a misconfigured zero interval.
+func TestH5_After_ZeroBaseFiresImmediately(t *testing.T) {
+    for _, base := range []time.Duration{0, -time.Second} {
+        start := time.Now()
+        ch := After(base)
+        select {
+        case <-ch:
+            if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+                t.Fatalf("H5: After(%s) fired after %s, want immediate (buffered ready chan)", base, elapsed)
+            }
+        case <-time.After(time.Second):
+            t.Fatalf("H5: After(%s) never fired — zero-base short-circuit missing", base)
+        }
+    }
+}
+
+// TestH5_After_PositiveBaseFiresWithinBand: a positive base fires a real
+// time.After at a jittered duration that must land in [base*(1-f), base*(1+f)].
+// Confirms After wires Duration into a live timer (not a no-op).
+func TestH5_After_PositiveBaseFiresWithinBand(t *testing.T) {
+    const base = 100 * time.Millisecond
+    floor := time.Duration(float64(base) * (1 - jitterFactor))
+    ceil := time.Duration(float64(base) * (1 + jitterFactor))
+    start := time.Now()
+    ch := After(base)
+    select {
+    case fired := <-ch:
+        elapsed := time.Since(start)
+        if elapsed < floor {
+            t.Fatalf("H5: After(%s) fired after %s, below floor %s", base, elapsed, floor)
+        }
+        if elapsed > ceil+50*time.Millisecond {
+            t.Fatalf("H5: After(%s) fired after %s, above ceil %s (allowing scheduler slack)", base, elapsed, ceil)
+        }
+        // time.After returns time.Now() on the channel; the received value is a
+        // real timestamp, not the zero value — confirms a live timer.
+        if fired.IsZero() {
+            t.Fatal("H5: After returned a zero time, want a live timer timestamp")
+        }
+    case <-time.After(2 * time.Second):
+        t.Fatalf("H5: After(%s) never fired", base)
+    }
+}
