@@ -9,6 +9,32 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-30
+
+### Fixed
+- **`withAdminOnly` routes returned 403 for a valid admin-login JWT** (#137/#138).
+  `withAdminOnly` checked `middleware.IsAdmin` BEFORE the `withMiddleware` auth
+  chain ran, and the admin module issues its own JWT (`AdminClaims{Role:"admin"}`
+  via `/admin/api/login`) that the chain never parsed into `middleware.Principal`.
+  The two auth systems were unbridged, so a valid admin Bearer reached **403** on
+  every `withAdminOnly` route (`/v1/browser/nodes`, `/v1/browser/metrics`,
+  `/admin/gc`, `/admin/config/reload`, `/admin/teams*`, `/admin/orgs*`).
+  - Fix: `bridgeAdminJWT` validates the Bearer as an admin JWT once in
+    `withAdminOnly` (before the `IsAdmin` check) and sets
+    `Principal{Role:RoleAdmin, AuthMethod:"admin-jwt"}`.
+    `APIKeyAuthWithStore` and `RBACAuth` short-circuit on
+    `AuthMethod=="admin-jwt"` so the chain neither overwrites the bridged role
+    nor 401-rejects an admin-JWT Bearer. Fail-closed: invalid/non-admin token
+    leaves `Principal` untouched and `IsAdmin` denies (403); a no-op when the
+    admin module is disabled. Master-key reject still fires first (plane
+    separation preserved).
+  - Verified live through gateway `:11432`: admin Bearer → `withAdminOnly`
+    route passes auth (downstream handler reached); no Bearer / garbage Bearer
+    → 403.
+  - Tests: 2 regression tests send a real admin JWT through a real mux
+    (`httptest.NewServer` + `browserHandler.RegisterRoutes`); admin → 200,
+    no/garbage/non-admin-role → 403. `go vet` clean; 26 packages green. PR #138.
+
 ## [0.9.5] - 2026-08-30
 
 ### Fixed
