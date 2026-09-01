@@ -1581,6 +1581,75 @@ func TestDecide_GPUMemoryLow(t *testing.T) {
     t.Logf("GPU memory low routes to cloud: reason=%s", dec.Reason)
 }
 
+// #148: a local-exclusive model (in local set, not in model_mapping) must
+// stay local even when P2.5 gpu_memory_low would fire. On a host dedicated to
+// local inference (fusion-mlx loaded a 27B model), GPU memory sits at ~100% by
+// design; without the hoisted P0.2 guard the local-exclusive model was
+// cloud-diverted every request and 400'd ("Invalid model name ...").
+func TestDecide_LocalExclusiveModel_GPUMemoryLowStaysLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{
+        GPUAllocMemory: 17179869184, // 16 GiB
+        GPUInUseMemory: 17179869184, // 100% — a loaded 27B-4bit model
+    })
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.8-27B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.8-27B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for local-exclusive model under GPU memory low, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "local_exclusive_model" {
+        t.Errorf("expected local_exclusive_model, got %s", dec.Reason)
+    }
+    t.Logf("Local-exclusive model stays local under GPU memory low: reason=%s", dec.Reason)
+}
+
+// #148: the hoisted P0.2 guard must NOT bypass the P0 circuit breaker. When
+// local is breaker-tripped (genuinely down), a local-exclusive model still
+// falls through to cloud (least-bad fallback even though cloud will 400) —
+// the breaker is a DOWN signal, not a BUSY signal.
+func TestDecide_LocalExclusiveModel_BreakerOpenStillCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.8-27B-4bit": true}
+    })
+    e.Trip("local", "forced_test_trip")
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "Qwen3.8-27B-4bit", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud when local breaker open (even for local-exclusive), got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "circuit_breaker_open" {
+        t.Errorf("expected circuit_breaker_open, got %s", dec.Reason)
+    }
+}
+
 func TestDecide_MetricsCollectionError(t *testing.T) {
     cfg := defaultTestSnapshot()
     cfg.Config.Hardware.CollectionErrorProtection = true

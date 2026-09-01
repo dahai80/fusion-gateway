@@ -728,6 +728,34 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     return decision
 }
 
+// localExclusiveDecision returns a force-local RouteDecision when req.Model is
+// local-exclusive (in the local model set, not in routing.fallback.model_mapping),
+// or nil when the model is cloud-routable / not in the local set. Hoisted to P0.2
+// in #148 so hardware-overload heuristics (P1/P1.5/P2/P2.5) cannot divert a
+// model that no cloud backend serves to a guaranteed 400.
+func localExclusiveDecision(cfg *config.ConfigSnapshot, req *RouteRequest, snap routeSnapshot) *RouteDecision {
+    localModels := snap.localModels()
+    if localModels == nil || !localModels[req.Model] {
+        return nil
+    }
+    mapping := cfg.Config.Routing.Fallback.ModelMapping
+    if !cfg.Config.Routing.Fallback.Enabled || mapping == nil {
+        slog.Info("local-exclusive model, forcing local",
+            "model", req.Model,
+            "reason", "model_mapping disabled, cloud cannot serve",
+        )
+        return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
+    }
+    if _, mapped := mapping[req.Model]; !mapped {
+        slog.Info("local-exclusive model, forcing local",
+            "model", req.Model,
+            "reason", "not in model_mapping, cloud cannot serve",
+        )
+        return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
+    }
+    return nil
+}
+
 func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string, intent *IntentResult, snap routeSnapshot) *RouteDecision {
 
     // Fast path: embedding/rerank request type routing
@@ -772,6 +800,26 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "circuit_breaker_open"}
+    }
+
+    // P0.2: Local-exclusive model guard (issue #83, hoisted above P0.5/P1-P2.5
+    // in #148). A model present in the local model set but absent from
+    // routing.fallback.model_mapping is local-exclusive: NO cloud backend
+    // serves it, so diverting it cloud on a hardware-overload heuristic
+    // (P1 memory, P1.5 mlx-memory, P2 swap, P2.5 gpu-memory-low) produces a
+    // guaranteed 400 ("Invalid model name ...") instead of a local answer.
+    // The P0 breaker-open check stays upstream: when local is genuinely
+    // tripped (recent failures), cloud is still the least-bad fallback even
+    // for local-exclusive models. But the overload heuristics below describe
+    // a BUSY local, not a DOWN one — and on a host whose entire purpose is
+    // local inference (fusion-mlx loaded a 27B model), GPU memory sits at
+    // ~100% by design, so P2.5 gpu_memory_low fired every request and broke
+    // all local-exclusive routing. Hoisting the guard here means a
+    // local-exclusive model is served locally whenever local is not
+    // breaker-tripped, regardless of load. When model_mapping is disabled or
+    // empty, every model in the local set is treated as local-exclusive.
+    if decision := localExclusiveDecision(cfg, req, snap); decision != nil {
+        return decision
     }
 
     // P0.3: Session affinity — same space_id routes to same provider
@@ -832,35 +880,10 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "local_not_ready"})
     }
 
-    // P3.5: Local-exclusive model guard (issue #83)
-    // A model present in the local model set but absent from
-    // routing.fallback.model_mapping is local-exclusive: no cloud
-    // backend serves it, so a P4/P4.5 token/ratio cloud-divert would
-    // route it to a cloud that rejects the model name with 400
-    // ("Invalid model name ..."). Short-circuit to local before the
-    // token/ratio rules. P0-P2 hardware/breaker cloud-diverts stay
-    // upstream; under those, a local-exclusive 400 is a separate
-    // overload condition (rare). When model_mapping is disabled or
-    // empty, every model in the local set is treated as local-exclusive.
-    if localModels := snap.localModels(); localModels != nil {
-        if localModels[req.Model] {
-            mapping := cfg.Config.Routing.Fallback.ModelMapping
-            if !cfg.Config.Routing.Fallback.Enabled || mapping == nil {
-                slog.Info("local-exclusive model, forcing local",
-                    "model", req.Model,
-                    "reason", "model_mapping disabled, cloud cannot serve",
-                )
-                return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
-            }
-            if _, mapped := mapping[req.Model]; !mapped {
-                slog.Info("local-exclusive model, forcing local",
-                    "model", req.Model,
-                    "reason", "not in model_mapping, cloud cannot serve",
-                )
-                return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
-            }
-        }
-    }
+    // P3.5: Local-exclusive model guard moved up to P0.2 (above the hardware
+    // overload heuristics) in #148. The guard short-circuits to local before
+    // P1/P1.5/P2/P2.5 can divert a local-exclusive model to a cloud that
+    // would 400 it. Nothing to do here; see P0.2.
 
     // P4: Token budget exceeded
     budget, ok := tokenizer.BudgetFromContext(ctx)

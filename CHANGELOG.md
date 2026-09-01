@@ -9,6 +9,26 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed
+- **Local-exclusive models cloud-diverted on a full-GPU host** (#148 follow-up).
+  The P3.5 local-exclusive model guard (issue #83) sat below the hardware
+  overload heuristics P1/P1.5/P2/P2.5 in `decideLocked`. On a host dedicated
+  to local inference (fusion-mlx loaded a 27B-4bit model), GPU memory sits at
+  ~100% by design, so P2.5 `gpu_memory_low` fired every request and diverted
+  local-exclusive models (e.g. `Qwen3.8-27B-4bit`) to cloud, which 400'd with
+  "Invalid model name" — no cloud backend serves them. Hoisted the guard to
+  P0.2 (after the P0 circuit-breaker check, before P0.5/P1/P1.5/P2/P2.5): a
+  local-exclusive model is now served locally whenever local is not
+  breaker-tripped, regardless of load. The P0 breaker stays upstream because
+  breaker-open is a "local DOWN" signal (cloud is still the least-bad fallback
+  even though it will 400), whereas the overload heuristics describe a "local
+  BUSY" signal where local-exclusive has no cloud alternative anyway. Extracted
+  `localExclusiveDecision` helper; two new tests pin both branches
+  (`TestDecide_LocalExclusiveModel_GPUMemoryLowStaysLocal`,
+  `TestDecide_LocalExclusiveModel_BreakerOpenStillCloud`). Verified live:
+  `Qwen3.8-27B-4bit` → `backend=local reason=local_exclusive_model` → "OK
+  local" under a loaded GPU.
+
 ## [0.9.11] - 2026-09-01
 
 ### Fixed
