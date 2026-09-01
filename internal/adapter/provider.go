@@ -44,6 +44,19 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
     for k, v := range headers {
         req.Header.Set(k, v)
     }
+    // #150 Gap1: stamp the gateway-authoritative tenant onto every outbound
+    // upstream request. Derived from the api_key's key->team binding at auth
+    // time (middleware/auth.go -> adapter.WithTenant), NOT from any client-
+    // supplied header, so a tenant-A key cannot reach tenant-B's backend data
+    // by spoofing X-Space-Id. X-Fusion-Tenant is intentionally NOT in
+    // fusionPassthroughHeaders (no client passthrough) — this is the only
+    // place it is set. Empty tenant (master key, legacy keys) omits the
+    // header, preserving the single-tenant default.
+    if tenant, _ := ctx.Value(tenantCtxKey{}).(string); tenant != "" {
+        req.Header.Set("X-Fusion-Tenant", tenant)
+        slog.Debug("injected gateway-authoritative tenant onto upstream",
+            "tenant", tenant, "path", req.URL.Path)
+    }
     // #129 Gap 2: propagate the OTel trace context (traceparent + baggage) onto
     // the outbound upstream request so the distributed trace chain survives the
     // gateway→fusion-mlx / gateway→cloud hop. The handler ctx carries the span
@@ -55,6 +68,28 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
             "trace_id", span.SpanContext().TraceID().String(),
             "span_id", span.SpanContext().SpanID().String())
     }
+}
+
+// tenantCtxKey carries the gateway-derived tenant id through the request ctx.
+// Set by middleware (auth/rbac) via WithTenant after resolving the credential's
+// key->team binding; read by InjectFusionHeaders to stamp X-Fusion-Tenant.
+type tenantCtxKey struct{}
+
+// WithTenant attaches the gateway-authoritative tenant id to ctx so every
+// outbound adapter forward carries X-Fusion-Tenant. Callers pass the tenant
+// resolved from the credential (Store.GetTeamByKey), never a client-supplied
+// value. Empty tenantID is a no-op (returns ctx unchanged).
+func WithTenant(ctx context.Context, tenantID string) context.Context {
+    if tenantID == "" {
+        return ctx
+    }
+    return context.WithValue(ctx, tenantCtxKey{}, tenantID)
+}
+
+// TenantFromContext returns the gateway-derived tenant id, or "".
+func TenantFromContext(ctx context.Context) string {
+    tenant, _ := ctx.Value(tenantCtxKey{}).(string)
+    return tenant
 }
 
 // FusionHeadersFromContext returns the passthrough header map carried in ctx

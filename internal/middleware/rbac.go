@@ -13,6 +13,7 @@ import (
     "net/http"
     "strings"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
@@ -114,6 +115,14 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
                         Role: role,
                     }
                     p.Team = team
+                    // #150 Gap1: attach the OIDC/RBAC-derived tenant to ctx so
+                    // outbound X-Fusion-Tenant is stamped on upstream requests.
+                    // Only fill when auth did not already bind a credential-
+                    // derived tenant (the key->team binding is the stronger,
+                    // credential-backed identity; default_team is config-based).
+                    if adapter.TenantFromContext(ctx) == "" {
+                        ctx = adapter.WithTenant(ctx, teamID)
+                    }
                     slog.Debug("rbac team assigned", "team", teamID, "role", string(role))
                 }
             }

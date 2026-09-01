@@ -9,6 +9,25 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added
+- **Gateway-authoritative tenant identity on every proxied request** (#150
+  Gap 1, gateway-side). The store already held a key→team binding
+  (`Store.BindKeyToTeam` / `GetTeamByKey`) but the request path never
+  consulted it — `X-Space-Id` was a client-supplied passthrough header, so a
+  tenant-A api_key could spoof `X-Space-Id: tenant-B` and reach another
+  tenant's backend data. `lookupKeyByHash` (auth middleware) now resolves the
+  tenant from the credential via `GetTeamByKey(plaintextKey)` and stamps it
+  onto the `Principal` (`p.Team`) and the request ctx (`adapter.WithTenant`).
+  `adapter.InjectFusionHeaders` stamps a gateway-authoritative
+  `X-Fusion-Tenant` header on every outbound upstream request, derived solely
+  from the credential — `X-Fusion-Tenant` is NOT in the client passthrough
+  set, so it cannot be spoofed. RBAC's OIDC/`default_team` path fills the
+  tenant only when the api-key path did not already bind one (credential
+  binding is the stronger identity). Master/legacy keys with no binding omit
+  the header (single-tenant default preserved). The direct-port rejection
+  half (Gap 1c) is backend-side and tracked as upstream issues on
+  fusion-mlx / fusion-kb / fusion-model-hub.
+
 ## [0.9.12] - 2026-09-01
 
 ### Fixed
