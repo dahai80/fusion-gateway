@@ -9,6 +9,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-09-01
+
 ### Fixed
 - **Local-exclusive models cloud-diverted on a full-GPU host** (#148 follow-up).
   The P3.5 local-exclusive model guard (issue #83) sat below the hardware
@@ -405,7 +407,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 - Agent slot scheduler (ADR-001, #102): per-node cap in
   `SelectNodeByModel`, opt-in `slotQueue`, `POST /v1/agent/tasks/{id}/cancel`.
 
-[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.12
 [0.9.11]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.11
 [0.9.10]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.10
 [0.9.9]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.9
