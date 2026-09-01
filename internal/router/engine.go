@@ -87,6 +87,12 @@ type ClusterSelector interface {
     // MarkNodeBreakerClosed clears the breaker-bypass flag (R8): the breaker
     // recovered to closed, the node is selectable again.
     MarkNodeBreakerClosed(nodeID string)
+    // NodePlatform returns the platform tag of the node (#150 Gap2), or "" when
+    // the node is unknown. Used by HA routing to confirm a SelectNodeByModel
+    // pick is a local-class mac peer (not a cuda/other node that also serves
+    // the model). Exposed on the interface so the router does not depend on the
+    // concrete Discovery/Node types.
+    NodePlatform(nodeID string) string
 }
 
 type Engine struct {
@@ -756,6 +762,73 @@ func localExclusiveDecision(cfg *config.ConfigSnapshot, req *RouteRequest, snap 
     return nil
 }
 
+// tryLocalClusterHALocked attempts multi-instance fusion-mlx HA routing for
+// issue #150 Gap2. When cluster.ha_routing is enabled and a healthy cluster
+// node on the mac platform (MacPlatformTag, default "mac") serves the model,
+// it returns a ClusterBackend decision so the request load-balances across
+// MLX peers instead of pinning to the single local upstream. Returns nil when
+// HA routing is disabled, no healthy mac-platform node serves the model, or
+// the cluster/shared breaker is open — the caller falls through to the rule
+// chain unchanged. Reuses SelectNodeByModel (same health + slot-cap + per-node
+// breaker gates as cloud-fallback cluster routing, #95/RR5/RR13). Called inside
+// decideLocked under breakerMu.RLock — uses the lock-free breaker reads.
+func (e *Engine) tryLocalClusterHALocked(cfg *config.ConfigSnapshot, model string, snap routeSnapshot) *RouteDecision {
+    if !cfg.Config.Cluster.Enabled || !cfg.Config.Cluster.HARouting.Enabled {
+        return nil
+    }
+    if snap.cluster == nil {
+        return nil
+    }
+    tag := cfg.Config.Cluster.HARouting.MacPlatformTag
+    if tag == "" {
+        tag = "mac"
+    }
+    if snap.cluster.HealthyNodesByPlatform(tag) == 0 {
+        return nil
+    }
+    if e.breakers["cluster"].State() == StateOpen {
+        slog.Debug("ha_routing: cluster breaker open, skipping mac-platform HA dispatch")
+        return nil
+    }
+    strategy := cfg.Config.Cluster.LoadBalancer
+    if strategy == "" {
+        strategy = "least-connections"
+    }
+    // SelectNodeByModel already restricts to nodes whose model registry
+    // contains `model` and whose slot cap is respected; combine with the mac
+    // platform by filtering HealthyNodesByModel first (cheap count gate), then
+    // let SelectNodeByModel pick among all healthy nodes (it re-checks
+    // servesModel). A model served only by non-mac nodes returns nil here so
+    // the request takes its normal local/cloud path.
+    if snap.cluster.HealthyNodesByModel(model) == 0 {
+        return nil
+    }
+    nodeID, err := snap.cluster.SelectNodeByModel(strategy, model, cfg.Config.Routing.LocalPriority.MaxConcurrent)
+    if err != nil {
+        slog.Debug("ha_routing: no mac-platform node serving model below slot cap, falling through",
+            "model", model, "strategy", strategy, "error", err)
+        return nil
+    }
+    // Confirm the selected node is on the mac platform; SelectNodeByModel does
+    // not filter by platform, so a non-mac node could be picked when it also
+    // serves the model. Only mac-platform peers count as local-class HA — a
+    // cuda node serving a mac model is a cloud-class escape handled elsewhere.
+    if platform := snap.cluster.NodePlatform(nodeID); platform != tag {
+        slog.Debug("ha_routing: selected node not on mac platform, falling through",
+            "node_id", nodeID, "platform", platform)
+        return nil
+    }
+    // RR5: bypass a node whose per-node breaker is open (see tryClusterLocked).
+    if e.nodeBreakerOpenLocked(nodeID) {
+        slog.Info("ha_routing: mac-platform node breaker open, bypassing",
+            "node_id", nodeID, "model", model)
+        return nil
+    }
+    slog.Info("ha_routing: routing to mac-platform cluster peer",
+        "node_id", nodeID, "model", model, "strategy", strategy)
+    return &RouteDecision{Backend: ClusterBackend, Reason: "ha_routing:mac", NodeID: nodeID}
+}
+
 func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, trips *[]string, intent *IntentResult, snap routeSnapshot) *RouteDecision {
 
     // Fast path: embedding/rerank request type routing
@@ -819,6 +892,20 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // breaker-tripped, regardless of load. When model_mapping is disabled or
     // empty, every model in the local set is treated as local-exclusive.
     if decision := localExclusiveDecision(cfg, req, snap); decision != nil {
+        return decision
+    }
+
+    // P0.25: HA routing for multi-instance fusion-mlx (issue #150 Gap2). When
+    // cluster.ha_routing.enabled and a healthy cluster node on the mac platform
+    // serves req.Model, route to the cluster pool (health-weighted load
+    // balancing via SelectNodeByModel) BEFORE the single-local-upstream path
+    // below. This gives clients transparent failover across multiple MLX
+    // instances (fusion-mlx#754): the CLI's pick_alive_mlx_base gets real
+    // alternatives, and a failing/unloaded instance is bypassed by the
+    // per-node health check + breaker (RR5/RR13). Default off (HARouting.Enabled
+    // false) — a single-node deployment's behavior is unchanged. A nil return
+    // falls through to the existing P0.3+ chain unchanged.
+    if decision := e.tryLocalClusterHALocked(cfg, req.Model, snap); decision != nil {
         return decision
     }
 

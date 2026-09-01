@@ -2224,6 +2224,8 @@ func (m *mockClusterDiscovery) SelectNodeByModel(_, _ string, _ int) (string, er
     return "", fmt.Errorf("no healthy nodes serving model")
 }
 
+func (m *mockClusterDiscovery) NodePlatform(_ string) string { return "" }
+
 // --- Completions full path ---
 
 func TestCompletions_Success(t *testing.T) {
@@ -6468,6 +6470,13 @@ func (m *mockClusterDiscoveryWithNode) SelectNodeByModel(_, _ string, _ int) (st
 
 func (m *mockClusterDiscoveryWithNode) MarkNodeBreakerOpen(_ string) {}
 func (m *mockClusterDiscoveryWithNode) MarkNodeBreakerClosed(_ string) {}
+
+func (m *mockClusterDiscoveryWithNode) NodePlatform(_ string) string {
+    if m.node != nil {
+        return m.node.Platform
+    }
+    return ""
+}
 
 type mockStore struct {
     store.Store

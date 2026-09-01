@@ -341,6 +341,18 @@ func decodeResponseArray(t *testing.T, rec *httptest.ResponseRecorder) []interfa
 
 func loadTestConfig(t *testing.T, yamlContent string) {
     t.Helper()
+    // Env-injected fusion-mlx backend (bindSecretEnv binds
+    // backends.fusion-mlx.api_key -> FUSION_MLX_API_KEY, #143) pollutes backend
+    // counts when the test runner's shell exports the key. Unset for hermetic
+    // loads; t.Setenv restores the original on cleanup.
+    if orig, ok := os.LookupEnv("FUSION_MLX_API_KEY"); ok {
+        t.Setenv("FUSION_MLX_API_KEY", orig)
+        os.Unsetenv("FUSION_MLX_API_KEY")
+    }
+    if orig, ok := os.LookupEnv("FUSION_MLX_URL"); ok {
+        t.Setenv("FUSION_MLX_URL", orig)
+        os.Unsetenv("FUSION_MLX_URL")
+    }
     tmpDir := t.TempDir()
     configPath := filepath.Join(tmpDir, "test-config.yaml")
     if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {

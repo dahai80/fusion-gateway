@@ -27,6 +27,21 @@ on tag push; this file is the maintained, human-curated counterpart.
   the header (single-tenant default preserved). The direct-port rejection
   half (Gap 1c) is backend-side and tracked as upstream issues on
   fusion-mlx / fusion-kb / fusion-model-hub.
+- **Multi-instance fusion-mlx HA routing** (#150 Gap 2). The gateway routed
+  MLX `/v1/*` to a single upstream; with multiple MLX instances
+  (fusion-mlx#754) there was no load balancing or failover. New
+  `cluster.ha_routing` config (default off): when enabled and a healthy
+  cluster node on the mac platform (`mac_platform_tag`, default `"mac"`)
+  serves the requested model, `decideLocked` routes to the cluster pool at
+  P0.25 — before the single-local-upstream path — reusing
+  `SelectNodeByModel` (health-weighted least-connections / hardware-aware /
+  round-robin, per-node health check + per-node circuit breaker, #95/RR5/RR13).
+  A non-mac node serving the model (e.g. a cuda node) is NOT a local-class HA
+  peer and falls through to the normal chain. Default off: single-node
+  deployments keep the unchanged single-local behavior. The CLI's
+  `pick_alive_mlx_base` now gets real alternatives. Added
+  `ClusterSelector.NodePlatform` so the router can confirm the selected
+  node's platform without depending on the concrete Discovery/Node types.
 
 ## [0.9.12] - 2026-09-01
 
