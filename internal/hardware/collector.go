@@ -26,6 +26,15 @@ type Collector struct {
 }
 
 func NewCollector(cfg *config.HardwareConfig) *Collector {
+    // Wire hardware.mlx_metrics.url into the package-level mlxMetricsURL. The
+    // collector used a hardcoded http://127.0.0.1:11434/metrics and never read
+    // the config key, so in a container (where fusion-mlx is on the Docker host
+    // via host.docker.internal, not the in-container loopback) /metrics dialed
+    // 127.0.0.1:11434 and failed every collect tick. cfg.MLXMetrics.URL is the
+    // documented override (DefaultConfig seeds 127.0.0.1 for bare-metal parity).
+    if cfg != nil && cfg.MLXMetrics.URL != "" {
+        mlxMetricsURL = cfg.MLXMetrics.URL
+    }
     return &Collector{
         cfg: cfg,
     }

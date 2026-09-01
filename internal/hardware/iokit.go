@@ -1,6 +1,7 @@
 package hardware
 
 import (
+    "errors"
     "fmt"
     "log/slog"
     "os/exec"
@@ -95,6 +96,18 @@ func initIOKit() {
 }
 
 func collectIOKitGPU(m *HardwareMetrics) error {
+    // Non-darwin (e.g. the containerized linux image, #143): IOKit/CoreFoundation
+    // frameworks do not exist. initIOKit already no-ops + clears iokitReady on
+    // non-darwin, but the prior flow fell through to collectIOKitGPUViaIoreg
+    // (shells out to `ioreg`), which also does not exist on linux → a noisy
+    // "ioreg command failed" CollectionError every collect tick. Return a tagged
+    // unsupported error here instead; it joins CollectionError (EI4) so the
+    // router's P0.5 collection_error_protection sees GPU as unavailable rather
+    // than shelling into a missing binary. Operators who want no GPU signal at
+    // all should set hardware.iokit.enabled=false (the container default).
+    if runtime.GOOS != "darwin" {
+        return errors.New("iokit gpu collection unsupported on non-darwin (no IOKit framework)")
+    }
     initIOKit()
 
     if iokitReady {

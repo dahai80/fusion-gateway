@@ -1,0 +1,91 @@
+# Minimal containerized fusion-gateway config (#143).
+#
+# Bundled into the image at /etc/fusion-gateway/config.yaml. Every field here is
+# overridable by env via viper BindEnv (see internal/config bindSecretEnv):
+#   FUSION_GATEWAY_PORT   -> server.port
+#   FUSION_MLX_URL        -> backends.fusion-mlx.base_url
+#   FG_MASTER_KEY         -> auth.master_key
+#   FG_ENCRYPTION_MASTER_KEY -> encryption.master_key
+#
+# Fields omitted below are seeded by DefaultConfig (internal/config.DefaultConfig)
+# so a minimal-but-valid YAML loads: token_threshold=8000, circuit_breaker
+# thresholds 5/3/30s, hybrid mode, etc. Admin dashboard defaults OFF (RR1:
+# enabling needs a real jwt_secret). Auth is OFF here so a bare `docker run`
+# passes /healthz; set FG_MASTER_KEY + api_keys for production.
+#
+# NOTE: this is the HTTP business plane only. fusion-mlx (MLX inference) is
+# bare-metal on the host (UMA memory, Apple Silicon). The container forwards to
+# the host's :11434 via FUSION_MLX_URL (default host.docker.internal:11434). It
+# never runs inference.
+
+server:
+    host: "0.0.0.0"
+    port: 11432
+    # auto_start disabled in-container: the container never launches the
+    # bare-metal fusion-mlx (that lives on the host, owned by fusion-supervisor
+    # or start.sh). auto_start.command points at a host path that does not
+    # exist inside the image.
+    auto_start:
+        enabled: false
+
+auth:
+    enabled: false
+    master_key: ""      # set FG_MASTER_KEY for production (admin-equiv + /metrics gate)
+    api_keys: []
+
+backends:
+    fusion-mlx:
+        type: "fusion-mlx"
+        # Overridden by FUSION_MLX_URL at runtime (default host.docker.internal).
+        base_url: "http://host.docker.internal:11434"
+        timeout: 120s
+        enabled: true
+
+# routing.* namespace (NOT route.* — route: does not exist at runtime, 6aa6477).
+# Defaults seeded by DefaultConfig cover token_threshold, circuit_breaker, etc.
+routing:
+    mode: hybrid
+
+hardware:
+    # Nested keys (NOT enable_iokit / enable_mlx_metrics / mlx_metrics_url —
+    # those are no-op flat key typos that never bind to a struct tag, so
+    # DefaultConfig's enabled=true + URL=127.0.0.1 win). iokit.enabled=false
+    # silences the darwin-only GPU source on linux; collectIOKitGPU also returns
+    # unsupported on non-darwin (defense in depth). gopsutil stays on (portable,
+    # gives memory/swap totals). mlx_metrics.url polls the bare-metal fusion-mlx
+    # on the host via host.docker.internal (overridable by FUSION_MLX_URL's
+    # shared base — but the URL field is the explicit override).
+    iokit:
+        enabled: false
+    gopsutil:
+        enabled: true
+    mlx_metrics:
+        # OFF by default in the container: fusion-mlx on the host enforces API-key
+        # auth, so an unkeyed container polls /metrics and gets 401 every collect
+        # tick (noisy WARN, no routing value — the container is the HTTP business
+        # plane, not the inference host). Operators who want MLX application
+        # metrics (active memory, loaded models, queue depth) feeding the router
+        # should set this enabled=true AND provide a key the host mlx accepts
+        # (FG_MASTER_KEY or a shared api key). The url is wired from
+        # hardware.mlx_metrics.url (NewCollector) — host.docker.internal reaches
+        # the bare-metal engine on the Docker host.
+        enabled: false
+        url: "http://host.docker.internal:11434/metrics"
+    # swap.page_rate_sampling OFF: the page-in/out thrashing signal is a HOST
+    # signal (sensed by the bare-metal gateway), not a container signal. On
+    # linux there is no portable per-container page counter, so the sampling
+    # func returns an unsupported error every collect tick (swap_linux.go) ->
+    # noisy CollectionError with no routing value in the container. Swap
+    # total/used still come from gopsutil (Source 1). Turn off sampling here so
+    # the collector skips the swap source entirely (collector.go PageRateSampling
+    # guard) instead of logging an error every 2s.
+    swap:
+        page_rate_sampling: false
+
+store:
+    backend: "memory"
+    # Absolute path inside the image; the Dockerfile creates it (VOLUME /data)
+    # so the non-root `gateway` user can persist keys/channels/teams across
+    # restarts. ~ would resolve to /home/gateway (writable) but /data is the
+    # conventional container data volume and is mount-friendly.
+    data_dir: "/data"
