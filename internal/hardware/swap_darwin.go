@@ -7,11 +7,6 @@ import (
     "strings"
 )
 
-// readSwapPageCountsFn is the injectable seam used by tests to stub the
-// page-counter source without spawning a process. collector.go reassigns it on
-// init; tests override it per-case.
-var readSwapPageCountsFn = readSwapPageCounts
-
 // vmStatOutputFn is the injectable seam for the `vm_stat` command output, so
 // tests can feed canned Mach-VM text without exec'ing.
 var vmStatOutputFn = defaultVMStatOutput
