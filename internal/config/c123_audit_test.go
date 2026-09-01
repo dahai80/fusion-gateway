@@ -200,6 +200,48 @@ func TestC1_BackendAPIKeyPlaceholderRejected(t *testing.T) {
     }
 }
 
+// TestC1_FusionMLXAPIKeyEnvSkip verifies the FUSION_MLX_API_KEY escape hatch:
+// the ecosystem default mlx key ("fg-admin-key", set by fusion-cli) starts
+// with the "fg-" placeholder prefix and would trip the C1 guard. When an
+// operator injects it via FUSION_MLX_API_KEY (the ecosystem convention),
+// validate must skip the placeholder refusal for the fusion-mlx backend —
+// the env is operator-provided at runtime, not a shipped template stub. A
+// "fg-" key NOT matching the env is still refused (the guard stays intact
+// for config.yaml stubs and for other backends).
+func TestC1_FusionMLXAPIKeyEnvSkip(t *testing.T) {
+    t.Setenv("FUSION_MLX_API_KEY", "fg-admin-key")
+    cfg := DefaultConfig()
+    cfg.Backends = map[string]BackendConfig{
+        "fusion-mlx": {
+            Type:    "fusion-mlx",
+            BaseURL: "http://127.0.0.1:11434",
+            APIKey:  "fg-admin-key",
+            Enabled: true,
+        },
+    }
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("C1: expected fusion-mlx api_key injected via FUSION_MLX_API_KEY to pass, got: %v", err)
+    }
+    // Same "fg-" key but env NOT set (or mismatched) must still be refused —
+    // the escape hatch is opt-in via env, not a blanket local-backend bypass.
+    t.Setenv("FUSION_MLX_API_KEY", "")
+    if err := validate(&cfg); err == nil {
+        t.Fatal("C1: expected fusion-mlx fg- key WITHOUT env to be rejected, got nil")
+    }
+    // A non-fusion-mlx backend with a "fg-" stub key must be rejected even
+    // when FUSION_MLX_API_KEY is set — the env escape is local-mlx-only.
+    t.Setenv("FUSION_MLX_API_KEY", "fg-admin-key")
+    cfg.Backends["glm52"] = BackendConfig{
+        Type:    "anthropic",
+        BaseURL: "http://example.invalid",
+        APIKey:  "fg-some-stub",
+        Enabled: true,
+    }
+    if err := validate(&cfg); err == nil {
+        t.Fatal("C1: expected non-fusion-mlx backend with fg- stub to be rejected even with env, got nil")
+    }
+}
+
 // TestC1_AdminPasswordPlaceholderRejected verifies validate() refuses a
 // placeholder admin password when admin is enabled.
 func TestC1_AdminPasswordPlaceholderRejected(t *testing.T) {
