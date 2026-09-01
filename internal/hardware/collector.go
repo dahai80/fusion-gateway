@@ -196,8 +196,6 @@ func (c *Collector) collectGopsutil(m *HardwareMetrics) error {
     return nil
 }
 
-var readSwapPageCountsFn = readSwapPageCounts
-
 var collectGopsutilFn = (*Collector).collectGopsutil
 
 var collectIOKitGPUFn = collectIOKitGPU

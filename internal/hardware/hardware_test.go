@@ -923,35 +923,31 @@ func TestCollector_ConcurrentLatest(t *testing.T) {
 
 func TestReadSwapPageCounts(t *testing.T) {
     if runtime.GOOS != "darwin" {
-        t.Skip("skipping: sysctl only available on darwin")
+        t.Skip("skipping: vm_stat only available on darwin")
     }
-    t.Log("testing readSwapPageCounts on darwin")
-    _, _, err := readSwapPageCounts()
+    t.Log("testing readSwapPageCounts on darwin (vm_stat Pageins/Pageouts)")
+    pageIn, pageOut, err := readSwapPageCounts()
     if err != nil {
-        t.Logf("readSwapPageCounts failed (vm.pageins/vm.pageouts may not exist): %v", err)
+        t.Fatalf("readSwapPageCounts failed on darwin (vm_stat should expose Pageins/Pageouts): %v", err)
     }
+    t.Logf("pageIn=%d pageOut=%d", pageIn, pageOut)
 }
 
-func TestReadSysctlInt_ValidKey(t *testing.T) {
-    if runtime.GOOS != "darwin" {
-        t.Skip("skipping: sysctl only available on darwin")
+func TestParseVMStatLine(t *testing.T) {
+    t.Log("testing parseVMStatLine extracts trailing integer from vm_stat label lines")
+    sample := []byte("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+        "Pages free:   4211950.\n" +
+        "\"Translation faults\":   1778725387.\n" +
+        "Pageins:   98670869.\n" +
+        "Pageouts:   26941.\n")
+    if in, ok := parseVMStatLine(sample, "Pageins:"); !ok || in != 98670869 {
+        t.Errorf("Pageins: got (%d, %v), want (98670869, true)", in, ok)
     }
-    t.Log("testing readSysctlInt with known sysctl key")
-    val, err := readSysctlInt("hw.memsize")
-    if err != nil {
-        t.Fatalf("unexpected error reading hw.memsize: %v", err)
+    if out, ok := parseVMStatLine(sample, "Pageouts:"); !ok || out != 26941 {
+        t.Errorf("Pageouts: got (%d, %v), want (26941, true)", out, ok)
     }
-    t.Logf("hw.memsize=%d", val)
-    if val == 0 {
-        t.Error("hw.memsize should not be 0")
-    }
-}
-
-func TestReadSysctlInt_InvalidKey(t *testing.T) {
-    t.Log("testing readSysctlInt with invalid sysctl key")
-    _, err := readSysctlInt("nonexistent.sysctl.key.xyz")
-    if err == nil {
-        t.Fatal("expected error for invalid sysctl key")
+    if _, ok := parseVMStatLine(sample, "Nonexistent:"); ok {
+        t.Error("expected ok=false for absent label")
     }
 }
 
@@ -1347,36 +1343,28 @@ func TestCollect_EI4_PartialCollect_JoinsAllSubsystemErrors(t *testing.T) {
     }
 }
 
-func TestReadSwapPageCounts_PageoutsError(t *testing.T) {
-    t.Log("testing readSwapPageCounts when vm.pageouts fails but vm.pageins succeeds")
-    callCount := 0
-    origFn := readSysctlIntFn
-    readSysctlIntFn = func(name string) (uint64, error) {
-        callCount++
-        if name == "vm.pageins" {
-            return 1000, nil
-        }
-        return 0, fmt.Errorf("unknown oid: vm.pageouts")
+func TestReadSwapPageCounts_MissingCounters(t *testing.T) {
+    t.Log("testing readSwapPageCounts when vm_stat output lacks Pageouts")
+    origFn := vmStatOutputFn
+    vmStatOutputFn = func() ([]byte, error) {
+        return []byte("Mach Virtual Memory Statistics:\nPageins:   1000.\n"), nil
     }
-    defer func() { readSysctlIntFn = origFn }()
+    defer func() { vmStatOutputFn = origFn }()
 
     pageIn, pageOut, err := readSwapPageCounts()
     if err == nil {
-        t.Fatal("expected error when vm.pageouts fails")
+        t.Fatal("expected error when vm_stat output missing Pageouts counter")
     }
     t.Logf("pageIn=%d, pageOut=%d, err=%v", pageIn, pageOut, err)
 }
 
 func TestReadSwapPageCounts_Success(t *testing.T) {
-    t.Log("testing readSwapPageCounts success path via mock")
-    origFn := readSysctlIntFn
-    readSysctlIntFn = func(name string) (uint64, error) {
-        if name == "vm.pageins" {
-            return 5000, nil
-        }
-        return 3000, nil
+    t.Log("testing readSwapPageCounts success path via vm_stat mock")
+    origFn := vmStatOutputFn
+    vmStatOutputFn = func() ([]byte, error) {
+        return []byte("Pageins:   5000.\nPageouts:   3000.\n"), nil
     }
-    defer func() { readSysctlIntFn = origFn }()
+    defer func() { vmStatOutputFn = origFn }()
 
     pageIn, pageOut, err := readSwapPageCounts()
     if err != nil {
