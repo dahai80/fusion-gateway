@@ -50,11 +50,45 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
-// autoStartLocal launches the local inference backend and waits for it to become healthy.
-func autoStartLocal(cfg *config.AutoStartConfig) {
+// supervisorActive reports whether fusion-supervisor (fusion-sv) owns the
+// service lifecycle. When active, it starts fusion-mlx in its core layer on
+// `fusion-sv up` and is authoritative for stop on `fusion-sv down`. Gateway's
+// own auto_start for fusion-mlx is then redundant and risks fighting the
+// supervisor (premature stop while the gateway still routes, or the supervisor
+// flagging mlx down and restarting it mid-request). Detection is explicit so
+// the handoff is not left to the supervisor's probe-first heuristic:
+//   - FUSION_SV_ACTIVE=1 env (set by the supervisor or operator), OR
+//   - the supervisor UDS socket exists (probe-first guard is not a
+//     coordination protocol — a present socket is a strong signal the daemon is
+//     running). Issue #141.
+//
+// supervisorSocketPath is a package var (not a const) so tests can point it
+// at a throwaway path instead of touching the real /tmp/fusion-sv.sock.
+var supervisorSocketPath = "/tmp/fusion-sv.sock"
+
+func supervisorActive() bool {
+    if v := os.Getenv("FUSION_SV_ACTIVE"); v == "1" {
+        return true
+    }
+    if _, err := os.Stat(supervisorSocketPath); err == nil {
+        return true
+    }
+    return false
+}
+
+// autoStartLocal launches the local inference backend and waits for it to
+// become healthy. Returns started=true only when gateway actually launched the
+// backend (so autoStopLocal can skip a stop it does not own). When the
+// supervisor is active (#141), auto_start is skipped — the supervisor owns the
+// fusion-mlx lifecycle and will start it in the core layer.
+func autoStartLocal(cfg *config.AutoStartConfig) bool {
 	if cfg == nil || !cfg.Enabled || cfg.Command == "" {
 		slog.Info("auto_start disabled or not configured")
-		return
+		return false
+	}
+	if supervisorActive() {
+		slog.Info("auto_start: skipped — fusion-supervisor is active and owns the fusion-mlx lifecycle (#141); gateway auto_start is a standalone fallback for non-supervisor environments")
+		return false
 	}
 	slog.Info("auto_start: launching local backend", "command", cfg.Command)
 	shell := exec.Command("sh", "-c", cfg.Command)
@@ -62,12 +96,12 @@ func autoStartLocal(cfg *config.AutoStartConfig) {
 	shell.Stderr = os.Stderr
 	if err := shell.Start(); err != nil {
 		slog.Error("auto_start: failed to launch command", "error", err)
-		return
+		return false
 	}
 	slog.Info("auto_start: process started", "pid", shell.Process.Pid)
 
 	if cfg.WaitURL == "" {
-		return
+		return true
 	}
 	waitSecs := cfg.WaitSecs
 	if waitSecs <= 0 {
@@ -81,18 +115,26 @@ func autoStartLocal(cfg *config.AutoStartConfig) {
 			resp.Body.Close()
 			if resp.StatusCode < 500 {
 				slog.Info("auto_start: local backend is healthy", "url", cfg.WaitURL)
-				return
+				return true
 			}
 		}
 		slog.Info("auto_start: waiting for local backend", "url", cfg.WaitURL)
 		time.Sleep(2 * time.Second)
 	}
 	slog.Warn("auto_start: timed out waiting for local backend", "url", cfg.WaitURL, "wait_secs", waitSecs)
+	return true
 }
 
-// autoStopLocal stops the local inference backend on shutdown.
-func autoStopLocal(cfg *config.AutoStartConfig) {
-	if cfg == nil || !cfg.Enabled || cfg.StopCmd == "" {
+// autoStopLocal stops the local inference backend on shutdown. onlyStarted
+// must be the value autoStartLocal returned: gateway stops the backend ONLY
+// when it started it. When the supervisor is active (#141) it owns the stop —
+// gateway must not tear down fusion-mlx out from under the supervisor.
+func autoStopLocal(cfg *config.AutoStartConfig, onlyStarted bool) {
+	if cfg == nil || !cfg.Enabled || cfg.StopCmd == "" || !onlyStarted {
+		return
+	}
+	if supervisorActive() {
+		slog.Info("auto_start: skipping stop — fusion-supervisor is active and owns the fusion-mlx lifecycle (#141)")
 		return
 	}
 	slog.Info("auto_start: stopping local backend", "command", cfg.StopCmd)
@@ -208,14 +250,17 @@ func run(configPath string) error {
 	// only — never blocks startup.
 	config.WarnSharedPortSafety(&snap.Config)
 
-	// Auto-start local inference backend (fusion-mlx) if configured
+	// Auto-start local inference backend (fusion-mlx) if configured. #141:
+	// skipped when fusion-supervisor is active (it owns the mlx lifecycle);
+	// autoStarted tracks whether gateway actually launched it so the
+	// matching autoStopLocal only stops what it started.
 	as := snap.Config.Server.AutoStart
 	if as != nil {
 		slog.Info("auto_start config loaded", "enabled", as.Enabled, "command", as.Command, "wait_url", as.WaitURL)
 	} else {
 		slog.Warn("auto_start config is nil — not configured")
 	}
-	autoStartLocal(as)
+	autoStarted := autoStartLocal(as)
 
 	hwCollector := hardware.NewCollector(&snap.Config.Hardware)
 	hwCtx, hwCancel := context.WithCancel(context.Background())
@@ -497,7 +542,8 @@ func run(configPath string) error {
 	}
 
 	// Local backend + discovery only stop after in-flight requests have drained.
-	autoStopLocal(snap.Config.Server.AutoStart)
+	// autoStarted (#141) gates the stop to what gateway actually started.
+	autoStopLocal(snap.Config.Server.AutoStart, autoStarted)
 
 	if discovery != nil {
 		discovery.Stop()
