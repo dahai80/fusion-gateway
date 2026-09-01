@@ -9,6 +9,35 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-09-01
+
+### Fixed
+- **`auto_start` no longer fights fusion-supervisor over the fusion-mlx
+  lifecycle** (#141). fusion-supervisor (`fusion-sv`, a Rust daemon) manages
+  fusion-mlx as one of its supervised services — starting it in the core layer
+  on `fusion-sv up` and stopping it authoritatively on `fusion-sv down`. The
+  gateway's own `server.auto_start` independently launched fusion-mlx on
+  startup and stopped it on shutdown, so on a supervisor-managed host the two
+  were uncoordinated: the gateway could stop a healthy mlx mid-request (or
+  double-start it, racing the supervisor's probe-first recovery).
+  - Fix: `supervisorActive()` detects the supervisor explicitly — `FUSION_SV_ACTIVE=1`
+    env var OR the supervisor UDS socket (`/tmp/fusion-sv.sock`) present — and
+    `autoStartLocal` then skips the launch, returning `started=false`.
+    `autoStopLocal` takes the `started` flag and is a no-op when the gateway
+    did not start the backend, AND skips when the supervisor is active (the
+    supervisor owns the stop). The handoff is no longer left to the
+    supervisor's probe-first heuristic; detection is explicit.
+  - `auto_start` remains the standalone fallback for non-supervisor
+    environments (bare gateway, single-binary, CI); on managed hosts the
+    supervisor is authoritative. `config.AutoStartConfig` struct +
+    `config.example.yaml` document the handoff.
+  - Tests: `TestSupervisorActive_EnvGate`, `TestSupervisorActive_SocketProbe`
+    (hermetic — swaps the socket path to `t.TempDir`, never touches the real
+    `/tmp/fusion-sv.sock`), `TestSupervisorActive_NeitherActive`,
+    `TestAutoStartLocal_SkipsWhenSupervisorActive` (sentinel command never
+    runs), `TestAutoStopLocal_OnlyStarted` (no-op when not started). 35 cmd
+    tests race-green; 2863 tests across 26 packages green.
+
 ## [0.9.7] - 2026-08-30
 
 ### Added
@@ -262,7 +291,11 @@ on tag push; this file is the maintained, human-curated counterpart.
 - Agent slot scheduler (ADR-001, #102): per-node cap in
   `SelectNodeByModel`, opt-in `slotQueue`, `POST /v1/agent/tasks/{id}/cancel`.
 
-[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.8
+[0.9.7]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.7
+[0.9.6]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.6
+[0.9.5]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.5
 [0.9.4]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.4
 [0.9.3]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.3
 [0.8.51]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.8.51

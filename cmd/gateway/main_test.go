@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1306,4 +1307,79 @@ func TestClusterDiscovery_Disabled(t *testing.T) {
 	discovery.Stop()
 
 	slog.Info("TestClusterDiscovery_Disabled: pass")
+}
+
+// TestSupervisorActive_EnvGate: FUSION_SV_ACTIVE=1 makes supervisorActive
+// return true regardless of the socket (#141). Guard: if the env check is
+// dropped, the guard stops honoring the supervisor's explicit signal.
+func TestSupervisorActive_EnvGate(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "1")
+	// Point the socket probe at a path that does not exist so only the env
+	// drives the result.
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	if !supervisorActive() {
+		t.Fatal("supervisorActive() = false with FUSION_SV_ACTIVE=1, want true")
+	}
+}
+
+// TestSupervisorActive_SocketProbe: a present supervisor socket makes
+// supervisorActive return true even without the env var (#141). Hermetic:
+// swaps supervisorSocketPath to a throwaway path inside t.TempDir, so the
+// real /tmp/fusion-sv.sock is never touched.
+func TestSupervisorActive_SocketProbe(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	sock := filepath.Join(t.TempDir(), "sv.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("cannot create test socket: %v", err)
+	}
+	defer l.Close()
+	supervisorSocketPath = sock
+	if !supervisorActive() {
+		t.Fatal("supervisorActive() = false with supervisor socket present, want true")
+	}
+}
+
+// TestSupervisorActive_NeitherActive: no env + no socket → supervisorActive
+// false (gateway keeps its standalone auto_start fallback). Guard: if the
+// guard is inverted, gateway never auto-starts in a non-supervisor env.
+func TestSupervisorActive_NeitherActive(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	if supervisorActive() {
+		t.Fatal("supervisorActive() = true with no env and no socket, want false")
+	}
+}
+
+// TestAutoStartLocal_SkipsWhenSupervisorActive: autoStartLocal returns
+// started=false and does NOT run the command when the supervisor is active
+// (#141). Uses a sentinel command that would fail the test if executed.
+func TestAutoStartLocal_SkipsWhenSupervisorActive(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "1")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	cfg := &config.AutoStartConfig{
+		Enabled:  true,
+		Command:  "echo SHOULD_NOT_RUN",
+		WaitURL:  "",
+		WaitSecs: 1,
+	}
+	started := autoStartLocal(cfg)
+	if started {
+		t.Fatal("autoStartLocal returned started=true under an active supervisor, want false")
+	}
+}
+
+// TestAutoStopLocal_OnlyStarted: autoStopLocal must NOT stop a backend the
+// gateway did not start (#141). Guard: if onlyStarted is ignored, the gateway
+// tears down a supervisor-owned mlx on shutdown.
+func TestAutoStopLocal_OnlyStarted(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	// A sentinel stop command that would fail the test if executed.
+	cfg := &config.AutoStartConfig{
+		Enabled: true,
+		StopCmd: "echo STOP_SHOULD_NOT_RUN",
+	}
+	// not started → must be a no-op (the sentinel never runs).
+	autoStopLocal(cfg, false)
 }

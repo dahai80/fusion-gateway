@@ -58,6 +58,12 @@ type UnixSocketConfig struct {
     Mode    uint32 `mapstructure:"mode"` // 0 = default 0660
 }
 
+// AutoStartConfig configures the standalone fallback that launches fusion-mlx
+// when the gateway starts. When fusion-supervisor (fusion-sv) owns the service
+// lifecycle (FUSION_SV_ACTIVE=1 or its UDS socket present), gateway auto_start
+// is skipped and stop is a no-op — the supervisor is authoritative (#141). The
+// supervisor is the intended path on managed hosts; auto_start is for
+// non-supervisor environments (bare gateway, single-binary, CI).
 type AutoStartConfig struct {
     Enabled  bool   `mapstructure:"enabled"`
     Command  string `mapstructure:"command"`  // e.g. "~/claude-home/fusion-mlx/start.sh start"

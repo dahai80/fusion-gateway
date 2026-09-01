@@ -5,7 +5,11 @@ server:
     # tls:                                # HTTPS termination (optional, for single-binary deployment)
     #     cert_file: "certs/server.crt"
     #     key_file: "certs/server.key"
-    auto_start:                           # Auto-start fusion-mlx on gateway startup
+    auto_start:                           # Auto-start fusion-mlx on gateway startup (standalone fallback).
+                                          # #141: skipped (and stop is a no-op) when fusion-supervisor
+                                          # owns the lifecycle — FUSION_SV_ACTIVE=1 env or its UDS socket
+                                          # /tmp/fusion-sv.sock present. Keep enabled for non-supervisor
+                                          # hosts; the supervisor is authoritative on managed hosts.
         enabled: true
         command: "~/claude-home/fusion-mlx/start.sh start"
         stop_cmd: "~/claude-home/fusion-mlx/start.sh stop"
