@@ -5,12 +5,14 @@ import (
     "crypto/sha256"
     "encoding/hex"
     "errors"
+    "fmt"
     "log/slog"
     "net/http"
     "net/http/httptest"
     "testing"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -475,6 +477,7 @@ func TestCheckBackendAccess_Wildcard(t *testing.T) {
 
 type mockKeyLookupStore struct {
     entry *store.APIKeyEntry
+    team  *store.Team
     err   error
 }
 
@@ -483,6 +486,16 @@ func (m *mockKeyLookupStore) GetKeyByHash(hash string) (*store.APIKeyEntry, erro
         return nil, m.err
     }
     return m.entry, nil
+}
+
+// GetTeamByKey satisfies the extended keyLookupStore interface (#150 Gap1).
+// Returns the configured team, or nil when no binding is set — mirroring the
+// real store's "no team for key" behavior for legacy/master keys.
+func (m *mockKeyLookupStore) GetTeamByKey(apiKey string) (*store.Team, error) {
+    if m.team == nil {
+        return nil, fmt.Errorf("no team for key")
+    }
+    return m.team, nil
 }
 
 func TestAPIKeyAuthWithStore_HashLookupSuccess(t *testing.T) {
@@ -513,6 +526,88 @@ func TestAPIKeyAuthWithStore_HashLookupSuccess(t *testing.T) {
     handler.ServeHTTP(rec, req)
     if !called {
         t.Fatalf("store-managed key must authenticate, got status %d body %s", rec.Code, rec.Body.String())
+    }
+}
+
+// TestAPIKeyAuthWithStore_TenantResolvedFromKeyBinding (#150 Gap1): a key with
+// a store-side key->team binding must stamp the gateway-authoritative tenant
+// onto both the Principal and the request ctx, so the outbound adapter can
+// inject X-Fusion-Tenant derived from the credential — never a client header.
+func TestAPIKeyAuthWithStore_TenantResolvedFromKeyBinding(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_TenantResolvedFromKeyBinding")
+    rawKey := "sk-tenant-bound-key"
+    sum := sha256.Sum256([]byte(rawKey))
+    hash := hex.EncodeToString(sum[:])
+    st := &mockKeyLookupStore{
+        entry: &store.APIKeyEntry{
+            Name:    "tenant-key",
+            KeyHash: hash,
+            Status:  "active",
+        },
+        team: &store.Team{ID: "tenant-A", Name: "Tenant A"},
+    }
+    cfg := &config.AuthConfig{Enabled: true}
+    var gotTeam, gotCtxTenant, gotKeyTeamID string
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        p := PrincipalFromContext(r.Context())
+        if p.Team != nil {
+            gotTeam = p.Team.ID
+        }
+        gotCtxTenant = adapter.TenantFromContext(r.Context())
+        if p.KeyConfig != nil {
+            gotKeyTeamID = p.KeyConfig.TeamID
+        }
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+    req.Header.Set("Authorization", "Bearer "+rawKey)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d body %s", rec.Code, rec.Body.String())
+    }
+    if gotTeam != "tenant-A" {
+        t.Errorf("Principal.Team.ID: got %q, want tenant-A", gotTeam)
+    }
+    if gotCtxTenant != "tenant-A" {
+        t.Errorf("ctx tenant: got %q, want tenant-A", gotCtxTenant)
+    }
+    if gotKeyTeamID != "tenant-A" {
+        t.Errorf("KeyConfig.TeamID: got %q, want tenant-A", gotKeyTeamID)
+    }
+}
+
+// TestAPIKeyAuthWithStore_NoTeamBindingOmitsTenant (#150 Gap1): a key with no
+// key->team binding (legacy key) authenticates fine but leaves the tenant
+// empty — no X-Fusion-Tenant is stamped downstream (single-tenant default).
+func TestAPIKeyAuthWithStore_NoTeamBindingOmitsTenant(t *testing.T) {
+    slog.Info("test APIKeyAuthWithStore_NoTeamBindingOmitsTenant")
+    rawKey := "sk-legacy-key"
+    sum := sha256.Sum256([]byte(rawKey))
+    hash := hex.EncodeToString(sum[:])
+    st := &mockKeyLookupStore{
+        entry: &store.APIKeyEntry{Name: "legacy-key", KeyHash: hash, Status: "active"},
+        team:  nil,
+    }
+    cfg := &config.AuthConfig{Enabled: true}
+    var ctxTenant string
+    var principalTeam *TeamInfo
+    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        p := PrincipalFromContext(r.Context())
+        principalTeam = p.Team
+        ctxTenant = adapter.TenantFromContext(r.Context())
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+    req.Header.Set("Authorization", "Bearer "+rawKey)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    if principalTeam != nil {
+        t.Errorf("Principal.Team: got %+v, want nil (no binding)", principalTeam)
+    }
+    if ctxTenant != "" {
+        t.Errorf("ctx tenant: got %q, want empty (no binding -> no header)", ctxTenant)
     }
 }
 

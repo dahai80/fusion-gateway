@@ -9,12 +9,19 @@ import (
     "strings"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
 type keyLookupStore interface {
     GetKeyByHash(hash string) (*store.APIKeyEntry, error)
+    // GetTeamByKey resolves the tenant bound to a plaintext api key. Issue
+    // #150 Gap1: the key->team binding lives in the store side-table but was
+    // never consulted on the request path — a tenant-A key could reach
+    // tenant-B's data via a spoofed X-Space-Id. Wired here so the gateway
+    // derives an authoritative tenant from the credential itself.
+    GetTeamByKey(apiKey string) (*store.Team, error)
 }
 
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
@@ -96,7 +103,22 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             p.IsMaster = false
             p.KeyConfig = matchedKey
             p.ModelModules = matchedKey.ModelModules
-            slog.Debug("api key authenticated", "key", matchedKey.Name, "modules", matchedKey.ModelModules)
+            // #150 Gap1: stamp the gateway-derived tenant onto the Principal so
+            // downstream code (and the outbound X-Fusion-Tenant header) uses the
+            // credential's binding, never a client-supplied X-Space-Id. RBAC
+            // middleware may have already set p.Team from an OIDC claim — only
+            // fill it when empty so the stronger OIDC-bound identity wins.
+            if matchedKey.TeamID != "" && p.Team == nil {
+                p.Team = &TeamInfo{
+                    ID:   matchedKey.TeamID,
+                    Name: matchedKey.TeamID,
+                    Role: RoleInference,
+                }
+            }
+            // Attach the tenant to the ctx so adapter.InjectFusionHeaders
+            // stamps X-Fusion-Tenant on every outbound upstream request.
+            ctx = adapter.WithTenant(ctx, matchedKey.TeamID)
+            slog.Debug("api key authenticated", "key", matchedKey.Name, "modules", matchedKey.ModelModules, "team", matchedKey.TeamID)
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
@@ -138,6 +160,21 @@ func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool
     }
     if entry.ExpiresAt != nil && !entry.ExpiresAt.IsZero() {
         kc.ExpiresAt = entry.ExpiresAt.Format(time.RFC3339)
+    }
+    // #150 Gap1: derive the tenant from the credential's key->team binding.
+    // The plaintext key is in hand here, and GetTeamByKey's side-table is
+    // keyed by plaintext. A missing binding (legacy key, master key handled
+    // above) is not an error — kc.TeamID stays empty and no tenant is
+    // asserted downstream. A store error is logged but does not block auth
+    // (fail-open on tenant metadata, fail-closed is the key lookup above);
+    // the downstream X-Fusion-Tenant injection simply omits the header.
+    if team, terr := st.GetTeamByKey(key); terr != nil {
+        slog.Debug("no team binding for api key (tenant header omitted)",
+            "key", entry.Name, "error", terr)
+    } else if team != nil {
+        kc.TeamID = team.ID
+        slog.Debug("tenant resolved from api key binding",
+            "key", entry.Name, "team", team.ID)
     }
     return kc, true
 }

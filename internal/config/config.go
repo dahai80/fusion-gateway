@@ -84,6 +84,11 @@ type AuthKeyConfig struct {
     BudgetLimit      float64           `mapstructure:"budget_limit"`
     DailyBudgetLimit float64           `mapstructure:"daily_budget_limit"`
     Metadata         map[string]string `mapstructure:"metadata"`
+    // TeamID is the tenant this key belongs to, resolved from the store's
+    // key->team binding (Store.GetTeamByKey) at auth time. Issue #150 Gap1:
+    // gateway-derived tenant identity, NOT a client-supplied header. Empty
+    // when the key has no team binding (master key, legacy keys).
+    TeamID           string            `mapstructure:"team_id"`
 }
 
 type AuthConfig struct {

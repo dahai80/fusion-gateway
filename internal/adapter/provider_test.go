@@ -85,3 +85,34 @@ func TestInjectFusionHeaders(t *testing.T) {
         }
     })
 }
+
+// TestInjectFusionHeaders_TenantStamped (#150 Gap1): a ctx carrying a
+// gateway-derived tenant (adapter.WithTenant) must produce an
+// X-Fusion-Tenant header on the outbound request. The tenant is
+// credential-derived, not client-supplied, so it is stamped here regardless of
+// any inbound header.
+func TestInjectFusionHeaders_TenantStamped(t *testing.T) {
+    t.Run("tenant_present", func(t *testing.T) {
+        ctx := WithTenant(context.Background(), "tenant-A")
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(ctx, req)
+        if got := req.Header.Get("X-Fusion-Tenant"); got != "tenant-A" {
+            t.Fatalf("X-Fusion-Tenant: got %q, want tenant-A", got)
+        }
+    })
+
+    t.Run("tenant_absent_omits_header", func(t *testing.T) {
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(context.Background(), req)
+        if got := req.Header.Get("X-Fusion-Tenant"); got != "" {
+            t.Fatalf("X-Fusion-Tenant: got %q, want empty (no tenant)", got)
+        }
+    })
+
+    t.Run("empty_tenant_noop", func(t *testing.T) {
+        ctx := WithTenant(context.Background(), "")
+        if TenantFromContext(ctx) != "" {
+            t.Fatal("WithTenant empty must be a no-op (no ctx value)")
+        }
+    })
+}
