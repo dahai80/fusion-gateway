@@ -1,0 +1,53 @@
+# Build context exclusions for fusion-gateway Docker image (#143).
+# Keeps the build context lean + avoids copying secrets/local state into layers.
+
+# VCS
+.git
+.gitignore
+
+# Local-only / agent tooling (never belong in an image)
+.claude
+.remember
+CLAUDE.md
+plan.md
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Live config (secrets) — the image ships config.container.yaml instead.
+config.yaml
+
+# Test + build artifacts
+*.test
+*.out
+coverage.html
+/fusion-gateway
+/gateway
+
+# Runtime state
+logs/
+.fusion-gateway/
+
+# Frontend dev deps + intermediate build (the checked-in dist/ IS needed for
+# go:embed, so web/admin/dist is NOT excluded; only node_modules + src dev cruft).
+web/admin/node_modules/
+web/admin/.vite/
+
+# E2E + test deps not needed at image build time
+tests/e2e/node_modules/
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+
+# Docker self-reference
+Dockerfile
+.dockerignore
+
+# Helm chart + deploy artifacts (not part of the binary)
+deploy/

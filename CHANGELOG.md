@@ -9,6 +9,50 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added
+- **Containerized deployment** (#143). A multi-stage `Dockerfile` at the repo
+  root builds a stripped Go binary in `golang:1.26-alpine` and runs it on
+  `alpine:3.20` — the HTTP business plane only (fusion-mlx stays bare-metal on
+  the host for UMA memory; the container forwards to it). Acceptance: `docker
+  build -t fusion-gateway .` succeeds; `docker run -p 11432:11432
+  fusion-gateway` → `curl http://127.0.0.1:11432/healthz` returns 200; image
+  ~12.6 MB distributable (<50 MB cap). Non-root `gateway` user (uid 10001),
+  `/data` volume pre-created + chown'd for `store.data_dir` persistence, logs
+  to stdout.
+  - Runtime env overrides via `viper.BindEnv`: `FUSION_GATEWAY_PORT` →
+    `server.port`, `FUSION_MLX_URL` → `backends.fusion-mlx.base_url` (default
+    `host.docker.internal:11434` — reaches the host's bare-metal mlx),
+    `FG_MASTER_KEY` → `auth.master_key`, `FG_ENCRYPTION_MASTER_KEY` →
+    `encryption.master_key`. A minimal `config.container.yaml` (auth off,
+    `auto_start` off, `host: 0.0.0.0`, linux hardware guards) is baked at
+    `/etc/fusion-gateway/config.yaml`; mount a full config there to override.
+  - `.dockerignore` keeps the context lean (excludes `.git`, live `config.yaml`,
+    node_modules, test artifacts, `deploy/`) while keeping `internal/admin/ui/dist`
+    for the `go:embed` admin SPA.
+
+### Fixed
+- **`hardware.mlx_metrics.url` was never read** — `collectMLXMetrics` dialed a
+  hardcoded `http://127.0.0.1:11434/metrics` and ignored the config key, so a
+  containerized gateway (mlx on the Docker host, not the in-container loopback)
+  failed `/metrics` every collect tick. `MLXMetricsConfig.URL` field added,
+  seeded in `DefaultConfig` (bare-metal `127.0.0.1:11434/metrics` parity), and
+  wired in `hardware.NewCollector`. Test `TestNewCollector_WiresMLXMetricsURL`
+  guards the regression. Surfaced by #143 container testing.
+- **Linux build gap** — `readSwapPageCounts` had only a darwin implementation
+  (`swap_darwin.go`); the linux build was undefined (CI is macOS-only, never
+  caught). Added `internal/hardware/swap_linux.go` returning a tagged
+  unsupported error (joins `CollectionError` per EI4 so P0.5
+  collection_error_protection sees swap unavailable, not silent 0). In the
+  container topology the gateway is the HTTP business plane; host swap
+  thrashing is sensed by the bare-metal gateway, so an unsupported error here
+  is correct, not a gap.
+- **IOKit GPU collection on non-darwin** — `collectIOKitGPU` fell through to
+  `collectIOKitGPUViaIoreg` (shells `ioreg`) on non-darwin after `initIOKit`
+  no-op'd, logging a noisy "ioreg command failed" every collect tick. Added a
+  `runtime.GOOS != "darwin"` guard returning a tagged unsupported error
+  (defense in depth alongside `hardware.iokit.enabled: false` in the container
+  config). Darwin build/vet/tests unchanged (2865 green).
+
 ## [0.9.8] - 2026-09-01
 
 ### Fixed

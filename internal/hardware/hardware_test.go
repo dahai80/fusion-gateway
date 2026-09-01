@@ -477,6 +477,31 @@ func TestNewCollector(t *testing.T) {
     }
 }
 
+// TestNewCollector_WiresMLXMetricsURL guards the container-deployment bug
+// (#143): collectMLXMetrics dialed a hardcoded http://127.0.0.1:11434/metrics
+// and never read hardware.mlx_metrics.url, so a containerized gateway (mlx on
+// the Docker host via host.docker.internal) failed /metrics every collect tick.
+// NewCollector must set the package-level mlxMetricsURL from cfg.MLXMetrics.URL.
+func TestNewCollector_WiresMLXMetricsURL(t *testing.T) {
+    t.Log("testing NewCollector wires cfg.MLXMetrics.URL into mlxMetricsURL")
+    saved := mlxMetricsURL
+    defer func() { mlxMetricsURL = saved }()
+
+    want := "http://host.docker.internal:11434/metrics"
+    cfg := &config.HardwareConfig{
+        Enabled:         true,
+        CollectInterval: 1 * time.Second,
+        Gopsutil:        config.GopsutilConfig{Enabled: false},
+        IOKit:           config.IOKitConfig{Enabled: false},
+        MLXMetrics:      config.MLXMetricsConfig{Enabled: true, URL: want},
+        Swap:            config.SwapConfig{PageRateSampling: false},
+    }
+    NewCollector(cfg)
+    if mlxMetricsURL != want {
+        t.Fatalf("mlxMetricsURL = %q, want %q (cfg.MLXMetrics.URL not wired)", mlxMetricsURL, want)
+    }
+}
+
 func TestCollector_Latest_ReturnsZeroInitially(t *testing.T) {
     t.Log("testing Collector.Latest returns zero metrics before Start")
     cfg := &config.HardwareConfig{

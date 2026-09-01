@@ -42,6 +42,34 @@ cp config.example.yaml config.yaml
 
 The gateway listens on **port 11432** by default. With `auto_start.enabled: true`, it automatically launches fusion-mlx on port 11434 and waits for it to become healthy before serving requests.
 
+### Container (#143)
+
+The image is for the **HTTP business plane only** — fusion-mlx (MLX inference, UMA memory, Apple Silicon) stays bare-metal on the host; the container forwards to it. A multi-stage build produces a stripped static-ish Go binary on `alpine:3.20` (~12.6 MB distributable, well under the 50 MB cap).
+
+```bash
+# Build
+docker build -t fusion-gateway .
+
+# Run (gateway on 11432, forwards to host fusion-mlx on 11434)
+docker run -p 11432:11432 fusion-gateway
+
+# Health
+curl http://127.0.0.1:11432/healthz   # -> 200
+```
+
+The image ships a minimal `config.container.yaml` (auth off, `auto_start` off, `host: 0.0.0.0`) baked at `/etc/fusion-gateway/config.yaml`. Runtime env overrides (highest precedence, via `viper.BindEnv`):
+
+| Env | Config key | Default | Purpose |
+|-----|------------|---------|---------|
+| `FUSION_GATEWAY_PORT` | `server.port` | 11432 | In-container listen port (must match `EXPOSE`/`-p`) |
+| `FUSION_MLX_URL` | `backends.fusion-mlx.base_url` | `http://host.docker.internal:11434` | Reach bare-metal fusion-mlx on the Docker host |
+| `FG_MASTER_KEY` | `auth.master_key` | "" | Admin-equivalent key + `/metrics` gate (set for production) |
+| `FG_ENCRYPTION_MASTER_KEY` | `encryption.master_key` | "" | Protects OAuth2/connector tokens at rest |
+
+Override the port, e.g. `docker run -e FUSION_GATEWAY_PORT=12000 -p 12000:12000 fusion-gateway`. Persist keys/channels/teams across restarts with a named volume on `/data` (`store.data_dir`, pre-created + chown'd to the non-root `gateway` user). Mount a full `config.yaml` at `/etc/fusion-gateway/config.yaml` to override every default. Logs go to stdout.
+
+**Notes**: on the Docker host, `host.docker.internal` resolves to the host loopback (OrbStack/Docker Desktop); on Linux without it, use `--add-host=host.docker.internal:host-gateway`. If the host fusion-mlx enforces API-key auth, the container's best-effort model-set/adapter refresh logs `401` WARNs — set `FG_MASTER_KEY` (or a shared api key) to clear them. `hardware.mlx_metrics.url` is wired from config (not hardcoded) so a container points it at `host.docker.internal:11434/metrics`; it defaults off in the container (no key → 401 noise); enable + key it for MLX application metrics feeding the router.
+
 ## Configuration
 
 See `config.example.yaml` for full reference. Key settings:

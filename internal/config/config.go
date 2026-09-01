@@ -454,6 +454,14 @@ type GopsutilConfig struct {
 type MLXMetricsConfig struct {
     Enabled  bool          `mapstructure:"enabled"`
     Interval time.Duration `mapstructure:"interval"`
+    // URL is the fusion-mlx /metrics endpoint the hardware collector polls for
+    // MLX application metrics (active memory, loaded models, queue depth). Bare
+    // metal defaults to http://127.0.0.1:11434/metrics; a containerized gateway
+    // (#143) sets this to http://host.docker.internal:11434/metrics to reach the
+    // bare-metal engine on the Docker host. Previously this field did not exist
+    // and collectMLXMetrics dialed a hardcoded 127.0.0.1 — unreachable in a
+    // container, so /metrics failed every collect tick.
+    URL string `mapstructure:"url"`
 }
 
 type SwapConfig struct {
@@ -895,6 +903,22 @@ func bindSecretEnv(v *viper.Viper) {
     v.BindEnv("auth.master_key", "FG_MASTER_KEY")
     // encryption.master_key — protects OAuth2/connector tokens at rest.
     v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
+    // server.port — containerized deployment overrides the listen port via env
+    // (#143: docker run -p maps the host port, but the in-container port must
+    // match EXPOSE; FUSION_GATEWAY_PORT lets a compose overlay drive it without
+    // mounting a config.yaml). AutomaticEnv maps SERVER_PORT, but the issue
+    // names FUSION_GATEWAY_PORT explicitly, so bind it.
+    v.BindEnv("server.port", "FUSION_GATEWAY_PORT")
+    // backends.fusion-mlx.base_url — in Docker the gateway reaches the
+    // bare-metal fusion-mlx via host.docker.internal:11434 (#143), not the
+    // in-container 127.0.0.1. The backend key has a hyphen so AutomaticEnv's
+    // BACKENDS_FUSION-MLX_BASE_URL is not a valid env name; FUSION_MLX_URL is
+    // the documented override. auto_start.wait_url is typically moot in a
+    // container (auto_start disabled — the supervisor or bare-metal owns mlx).
+    // The mlx /metrics URL is NOT covered by this env — it has its own explicit
+    // hardware.mlx_metrics.url config key (wired in hardware.NewCollector), so
+    // a container sets that to host.docker.internal:11434/metrics directly.
+    v.BindEnv("backends.fusion-mlx.base_url", "FUSION_MLX_URL")
 }
 
 func Load(path string) (*ConfigSnapshot, error) {
@@ -1752,7 +1776,7 @@ func DefaultConfig() Config {
             CollectInterval: 2 * time.Second,
             IOKit:           IOKitConfig{Enabled: true},
             Gopsutil:        GopsutilConfig{Enabled: true},
-            MLXMetrics:      MLXMetricsConfig{Enabled: true, Interval: 5 * time.Second},
+            MLXMetrics:      MLXMetricsConfig{Enabled: true, Interval: 5 * time.Second, URL: "http://127.0.0.1:11434/metrics"},
             Swap:            SwapConfig{PageRateSampling: true, PageRateThreshold: 100},
             CollectionErrorProtection: true,
         },

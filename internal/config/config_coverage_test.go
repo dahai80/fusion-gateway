@@ -114,6 +114,63 @@ func TestLoad_MasterKeyLiteralRejectedWithoutEnv(t *testing.T) {
     }
 }
 
+// TestLoad_FusionGatewayPortEnvOverridesYAML (#143): the containerized
+// deployment sets FUSION_GATEWAY_PORT so a compose overlay drives the
+// in-container listen port without mounting a config.yaml. bindSecretEnv
+// gives the env precedence over any server.port literal the file carries.
+func TestLoad_FusionGatewayPortEnvOverridesYAML(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 11432
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    t.Setenv("FUSION_GATEWAY_PORT", "12000")
+    snap, err := Load(f)
+    if err != nil {
+        t.Fatalf("env FUSION_GATEWAY_PORT must override the YAML port, got error: %v", err)
+    }
+    if snap.Config.Server.Port != 12000 {
+        t.Fatalf("expected port 12000 from env FUSION_GATEWAY_PORT, got %d (YAML literal leaked)", snap.Config.Server.Port)
+    }
+}
+
+// TestLoad_FusionMLXUrlEnvOverridesYAML (#143): in Docker the gateway reaches
+// the bare-metal fusion-mlx via host.docker.internal:11434, not the
+// in-container 127.0.0.1. The backend key has a hyphen so AutomaticEnv cannot
+// map it (BACKENDS_FUSION-MLX_BASE_URL is not a valid env name); FUSION_MLX_URL
+// is the documented override and must win over the file literal.
+func TestLoad_FusionMLXUrlEnvOverridesYAML(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 11432
+backends:
+  fusion-mlx:
+    base_url: "http://127.0.0.1:11434"
+    type: "fusion-mlx"
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+    const dockerURL = "http://host.docker.internal:11434"
+    t.Setenv("FUSION_MLX_URL", dockerURL)
+    snap, err := Load(f)
+    if err != nil {
+        t.Fatalf("env FUSION_MLX_URL must override the YAML base_url, got error: %v", err)
+    }
+    got := snap.Config.Backends["fusion-mlx"].BaseURL
+    if got != dockerURL {
+        t.Fatalf("expected fusion-mlx base_url %q from env FUSION_MLX_URL, got %q (YAML literal leaked)", dockerURL, got)
+    }
+}
+
 func TestFireReload_CallsHandlers(t *testing.T) {
     var called1, called2 int32
 
