@@ -9,6 +9,25 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed
+- **Linux build broken: `readSwapPageCountsFn` undefined** (#147). The
+  test-injectable seam variable `readSwapPageCountsFn` was declared only in
+  `swap_darwin.go`, whose `_darwin` file-suffix build constraint excludes it
+  from linux builds. `collector.go` (build-tag-neutral) references the seam,
+  so `GOOS=linux go build ./cmd/gateway` failed with
+  `undefined: readSwapPageCountsFn` — the containerized-deployment Dockerfile
+  (PR #143) could not build its target image. Moved the seam declaration to a
+  new tag-neutral `swap.go` so it resolves on both platforms (each
+  `swap_{darwin,linux}.go` keeps its own `readSwapPageCounts` behind its suffix
+  constraint). Also moved the four vm_stat-specific tests
+  (`TestReadSwapPageCounts`, `TestParseVMStatLine`,
+  `TestReadSwapPageCounts_MissingCounters`, `TestReadSwapPageCounts_Success`)
+  into `swap_darwin_test.go` (`//go:build darwin`) — they reference darwin-only
+  symbols (`parseVMStatLine`, `vmStatOutputFn`) and broke `GOOS=linux go vet`
+  / `go test` compilation. Verified: `GOOS=linux go build` + `go vet ./...`
+  both clean; darwin `go test ./...` 83/83 hardware, full suite green in clean
+  env.
+
 ## [0.9.10] - 2026-09-01
 
 ### Fixed
