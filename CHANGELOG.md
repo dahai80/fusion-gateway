@@ -9,6 +9,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-09-01
+
 ### Added
 - **Containerized deployment** (#143). A multi-stage `Dockerfile` at the repo
   root builds a stripped Go binary in `golang:1.26-alpine` and runs it on
@@ -335,7 +337,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 - Agent slot scheduler (ADR-001, #102): per-node cap in
   `SelectNodeByModel`, opt-in `slotQueue`, `POST /v1/agent/tasks/{id}/cancel`.
 
-[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.9
 [0.9.8]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.8
 [0.9.7]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.7
 [0.9.6]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.6
