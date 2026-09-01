@@ -9,6 +9,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-09-01
+
 ### Fixed
 - **Linux build broken: `readSwapPageCountsFn` undefined** (#147). The
   test-injectable seam variable `readSwapPageCountsFn` was declared only in
@@ -383,7 +385,8 @@ on tag push; this file is the maintained, human-curated counterpart.
 - Agent slot scheduler (ADR-001, #102): per-node cap in
   `SelectNodeByModel`, opt-in `slotQueue`, `POST /v1/agent/tasks/{id}/cancel`.
 
-[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.10...HEAD
+[Unreleased]: https://github.com/dahai80/fusion-gateway/compare/v0.9.11...HEAD
+[0.9.11]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.11
 [0.9.10]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.10
 [0.9.9]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.9
 [0.9.8]: https://github.com/dahai80/fusion-gateway/releases/tag/v0.9.8
