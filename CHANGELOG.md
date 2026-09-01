@@ -9,6 +9,31 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed
+- **Swap page counts on Darwin 25+ (macOS 26)** — `swap_darwin.go` read the
+  `vm.pageins`/`vm.pageouts` sysctl OIDs, which Darwin 25 removed (`sysctl -n
+  vm.pageins` now returns "unknown oid" exit 1). `readSwapPageCounts` failed
+  every collect tick; the failure joined into `CollectionError` (EI4) and
+  tripped the router's P0.5 `collection_error_protection`, diverting every
+  request — including local-exclusive models — to cloud, where they 400'd with
+  "Invalid model name". Parse `vm_stat` instead (it still exposes
+  `Pageins:`/`Pageouts:` on every Darwin release); an injectable
+  `vmStatOutputFn` seam replaces the removed `readSysctlIntFn` seam for tests.
+  Verified live: local-exclusive model routes `backend=local
+  reason=local_exclusive_model`.
+- **`FUSION_MLX_API_KEY` env bind + C1 placeholder skip** — the ecosystem
+  default mlx api_key is `fg-admin-key` (set by fusion-cli, used by
+  fusion-model-hub docker-compose as `FUSION_MLX_API_KEY`). The `fg-` prefix
+  trips the C1 `looksLikePlaceholder` guard, so setting that key on
+  `backends.fusion-mlx.api_key` hit a fatal at startup ("must not be a known
+  placeholder"). `FUSION_MLX_API_KEY` is now bound via `bindSecretEnv`
+  (ecosystem convention, highest precedence) so the real upstream mlx key is
+  injectable without writing it into config.yaml. The validate C1 check skips
+  the placeholder refusal when the fusion-mlx key arrived via that env (env is
+  operator-provided at runtime, not a shipped template stub); the guard stays
+  intact for cloud providers and for any `fg-` key not matching the env.
+  `TestC1_FusionMLXAPIKeyEnvSkip` pins all three branches.
+
 ## [0.9.9] - 2026-09-01
 
 ### Added

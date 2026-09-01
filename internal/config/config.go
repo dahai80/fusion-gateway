@@ -919,6 +919,16 @@ func bindSecretEnv(v *viper.Viper) {
     // hardware.mlx_metrics.url config key (wired in hardware.NewCollector), so
     // a container sets that to host.docker.internal:11434/metrics directly.
     v.BindEnv("backends.fusion-mlx.base_url", "FUSION_MLX_URL")
+    // backends.fusion-mlx.api_key — the ecosystem default mlx key (set by
+    // fusion-cli as "fg-admin-key") starts with the "fg-" placeholder prefix
+    // and trips the C1 looksLikePlaceholder guard at validate time. Binding an
+    // explicit env lets an operator inject the real upstream key without
+    // writing it into config.yaml, and the validate C1 check skips the
+    // placeholder refusal for a key that arrived via this env (env = operator
+    // explicitly provided, not a shipped template stub). FUSION_MLX_API_KEY is
+    // the ecosystem convention (fusion-model-hub docker-compose already uses
+    // it).
+    v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
 }
 
 func Load(path string) (*ConfigSnapshot, error) {
@@ -1298,8 +1308,21 @@ func validate(cfg *Config) error {
             // auth.APIKeys loop above covers the gateway auth keys; this covers
             // the upstream provider credentials — a separate credential surface
             // the prior R7 blacklist never touched.
+            //
+            // Exception: a key injected via FUSION_MLX_API_KEY is operator-
+            // provided at runtime (not a shipped template stub), so the
+            // placeholder refusal is skipped for it. The ecosystem default mlx
+            // key ("fg-admin-key", set by fusion-cli) starts with the "fg-"
+            // prefix the guard treats as a stub marker; routing it through env
+            // is the documented way to supply it without weakening the guard
+            // for cloud providers in config.yaml.
             if backend.APIKey != "" && isKnownInsecureSecret(backend.APIKey) {
-                return fmt.Errorf("backends.%s.api_key must not be a known placeholder; set the real upstream credential or disable the backend", name)
+                if name == "fusion-mlx" && backend.APIKey == os.Getenv("FUSION_MLX_API_KEY") {
+                    slog.Info("fusion-mlx api_key injected via FUSION_MLX_API_KEY, skipping C1 placeholder check",
+                        "key_prefix", backend.APIKey[:min(3, len(backend.APIKey))]+"***")
+                } else {
+                    return fmt.Errorf("backends.%s.api_key must not be a known placeholder; set the real upstream credential or disable the backend", name)
+                }
             }
         }
     }
