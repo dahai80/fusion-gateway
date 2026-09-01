@@ -1119,6 +1119,20 @@ func (d *Discovery) GetNode(id string) (*Node, bool) {
     return n, ok
 }
 
+// NodePlatform returns the platform tag of the node with the given id, or ""
+// when the node is unknown (issue #150 Gap2). Platform is set at registration
+// and never mutated, so it is read lock-free here — the d.mu.RLock only
+// protects the nodes map lookup, not the Platform field read.
+func (d *Discovery) NodePlatform(id string) string {
+    d.mu.RLock()
+    n, ok := d.nodes[id]
+    d.mu.RUnlock()
+    if !ok {
+        return ""
+    }
+    return n.Platform
+}
+
 func (d *Discovery) Status() []NodeStatus {
     d.mu.RLock()
     defer d.mu.RUnlock()
@@ -1284,6 +1298,11 @@ func (a *ClusterSelectorAdapter) MarkNodeBreakerOpen(nodeID string) {
 // MarkNodeBreakerClosed implements router.ClusterSelector (R8).
 func (a *ClusterSelectorAdapter) MarkNodeBreakerClosed(nodeID string) {
     a.discovery.MarkNodeBreakerClosed(nodeID)
+}
+
+// NodePlatform implements router.ClusterSelector (#150 Gap2 HA routing).
+func (a *ClusterSelectorAdapter) NodePlatform(nodeID string) string {
+    return a.discovery.NodePlatform(nodeID)
 }
 
 func (d *Discovery) selectRoundRobin(nodes []*Node) *Node {

@@ -603,6 +603,22 @@ type ClusterConfig struct {
     // enabled, the semantic intent layer routes heavy_model / diffusion
     // intents to the configured platform's cluster nodes.
     PlatformRouting PlatformRoutingConfig `mapstructure:"platform_routing"`
+    // HARouting enables multi-instance fusion-mlx HA routing (issue #150
+    // Gap2). When enabled, a request for a model served by a healthy cluster
+    // node on MacPlatformTag is routed to the cluster pool (health-weighted
+    // load balancing) at P0.25, before the single-local-upstream path. This
+    // gives clients transparent failover across multiple MLX instances
+    // (fusion-mlx#754) — CLI pick_alive_mlx_base gets real alternatives.
+    // Default off: single-node deployments keep the unchanged single-local
+    // behavior. MacPlatformTag (default "mac") selects which platform tag
+    // counts as a local-class MLX peer.
+    HARouting HARoutingConfig `mapstructure:"ha_routing"`
+}
+
+// HARoutingConfig configures multi-instance local-class HA routing (#150 Gap2).
+type HARoutingConfig struct {
+    Enabled          bool   `mapstructure:"enabled"`
+    MacPlatformTag   string `mapstructure:"mac_platform_tag"`
 }
 
 // PlatformRoutingConfig maps semantic intents to target cluster platforms.
@@ -1440,6 +1456,14 @@ func validate(cfg *Config) error {
             cfg.Cluster.Master.MaxStaleAge = 2 * time.Minute
             slog.Info("cluster.master.max_stale_age defaulted", "max_stale_age", cfg.Cluster.Master.MaxStaleAge)
         }
+    }
+    // #150 Gap2: seed the mac-platform tag for multi-instance fusion-mlx HA
+    // routing when ha_routing is enabled but the operator omitted the tag.
+    // Default "mac" matches the ClusterNodeConfig.Platform convention. Only
+    // matters when ha_routing.enabled is true; otherwise the field is inert.
+    if cfg.Cluster.HARouting.Enabled && cfg.Cluster.HARouting.MacPlatformTag == "" {
+        cfg.Cluster.HARouting.MacPlatformTag = "mac"
+        slog.Info("cluster.ha_routing.mac_platform_tag defaulted", "tag", "mac")
     }
 
     // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the

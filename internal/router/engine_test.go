@@ -287,6 +287,8 @@ type mockClusterSelector struct {
     modelNodes map[string]int
     modelNode  map[string]string
     modelErr   error
+    // #150 Gap2: nodeID -> platform tag for HA-routing tests.
+    nodePlatform map[string]string
     // R8 breaker-bypass push tracking: which nodeIDs the engine pushed open /
     // closed, in order. R8 guard tests assert the engine pushes the right
     // transition on breaker state changes.
@@ -352,6 +354,14 @@ func (m *mockClusterSelector) MarkNodeBreakerOpen(nodeID string) {
 // MarkNodeBreakerClosed implements ClusterSelector (R8).
 func (m *mockClusterSelector) MarkNodeBreakerClosed(nodeID string) {
     m.breakerCloses = append(m.breakerCloses, nodeID)
+}
+
+// NodePlatform implements ClusterSelector (#150 Gap2 HA routing).
+func (m *mockClusterSelector) NodePlatform(nodeID string) string {
+    if m.nodePlatform != nil {
+        return m.nodePlatform[nodeID]
+    }
+    return ""
 }
 
 func TestDecide_ClusterFallback(t *testing.T) {
@@ -458,6 +468,133 @@ func TestDecide_ClusterBreakerOpen_FallsToCloud(t *testing.T) {
     dec := e.Decide(ctx, req)
     if dec.Backend != CloudBackend {
         t.Errorf("expected cloud when cluster breaker open, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// TestDecide_HARouting_MacPeerRoutes tests issue #150 Gap2: when
+// cluster.ha_routing.enabled and a healthy mac-platform node serves the
+// model, the request routes to the cluster pool (ClusterBackend) at P0.25
+// BEFORE the single-local path. Local is ready and untripped here, so without
+// HA routing this would return LocalBackend; HA routing upgrades it to a
+// load-balanced mac peer.
+func TestDecide_HARouting_MacPeerRoutes(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    cfg.Config.Cluster.HARouting.Enabled = true
+    cfg.Config.Cluster.HARouting.MacPlatformTag = "mac"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.SetLocalReady(true)
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:      1,
+        platformNodes: map[string]int{"mac": 1},
+        modelNodes:   map[string]int{"mlx-model": 1},
+        modelNode:    map[string]string{"mlx-model": "mlx-peer-1"},
+        nodePlatform: map[string]string{"mlx-peer-1": "mac"},
+    })
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "mlx-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != ClusterBackend {
+        t.Fatalf("expected ClusterBackend (HA mac peer), got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.NodeID != "mlx-peer-1" {
+        t.Fatalf("expected node mlx-peer-1, got %s", dec.NodeID)
+    }
+    if dec.Reason != "ha_routing:mac" {
+        t.Fatalf("expected reason ha_routing:mac, got %s", dec.Reason)
+    }
+}
+
+// TestDecide_HARouting_DisabledFallsToLocal: with ha_routing disabled
+// (default), a mac-platform cluster node is NOT consulted and the request
+// takes the normal local path. Guards the default-off behavior so a
+// single-node deployment is unchanged.
+func TestDecide_HARouting_DisabledFallsToLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    // ha_routing.Enabled stays false (default)
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.SetLocalReady(true)
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:      1,
+        platformNodes: map[string]int{"mac": 1},
+        modelNodes:   map[string]int{"mlx-model": 1},
+        modelNode:    map[string]string{"mlx-model": "mlx-peer-1"},
+        nodePlatform: map[string]string{"mlx-peer-1": "mac"},
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 100, TotalBudget: 200}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+    req := &RouteRequest{Model: "mlx-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Fatalf("expected LocalBackend (HA disabled), got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// TestDecide_HARouting_NonMacPlatformFallsThrough: when the only node serving
+// the model is on a non-mac platform (e.g. cuda), HA routing falls through to
+// the normal chain. A cuda node serving a mac model is a cloud-class escape,
+// not a local-class HA peer.
+func TestDecide_HARouting_NonMacPlatformFallsThrough(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    cfg.Config.Cluster.HARouting.Enabled = true
+    cfg.Config.Cluster.HARouting.MacPlatformTag = "mac"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.SetLocalReady(true)
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:      1,
+        platformNodes: map[string]int{"mac": 0, "cuda": 1},
+        modelNodes:   map[string]int{"mlx-model": 1},
+        modelNode:    map[string]string{"mlx-model": "cuda-node-1"},
+        nodePlatform: map[string]string{"cuda-node-1": "cuda"},
+    })
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "mlx-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend == ClusterBackend && dec.Reason == "ha_routing:mac" {
+        t.Fatalf("HA routing must not dispatch to non-mac node, got %s: %s node=%s", dec.Backend, dec.Reason, dec.NodeID)
+    }
+}
+
+// TestDecide_HARouting_ClusterBreakerOpenFallsThrough: HA routing respects
+// the shared cluster breaker — when it is open, HA dispatch is skipped and
+// the request takes the normal local path (local is healthy here).
+func TestDecide_HARouting_ClusterBreakerOpenFallsThrough(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Cluster.Enabled = true
+    cfg.Config.Cluster.HARouting.Enabled = true
+    cfg.Config.Cluster.HARouting.MacPlatformTag = "mac"
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+
+    e.SetLocalReady(true)
+    e.Trip("cluster", "cluster overload")
+    e.SetClusterSelector(&mockClusterSelector{
+        healthy:      1,
+        platformNodes: map[string]int{"mac": 1},
+        modelNodes:   map[string]int{"mlx-model": 1},
+        modelNode:    map[string]string{"mlx-model": "mlx-peer-1"},
+        nodePlatform: map[string]string{"mlx-peer-1": "mac"},
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 100, TotalBudget: 200}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+    req := &RouteRequest{Model: "mlx-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Fatalf("expected LocalBackend when cluster breaker open, got %s: %s", dec.Backend, dec.Reason)
     }
 }
 
