@@ -161,6 +161,14 @@ type Server struct {
     // handlers return 503 (matches the mcp toggle behavior); a full unregister
     // needs a restart.
     browserHandler *browser.Handler
+    // managedSettingsSigner (#151) holds the Ed25519 key pair for signing
+    // managed-settings payloads served at /gateway/v1/managed-settings. nil
+    // when managed_settings is disabled — the routes are not registered in
+    // that case. Rebuilt on hot-reload via the ConfigSnapshot read in New (a
+    // key rotation takes effect on the next server.New, not mid-flight; the
+    // endpoint reads s.cfg.Config.ManagedSettings.Payload live per request so
+    // payload edits apply without a rebuild).
+    managedSettingsSigner *managedSettingsSigner
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
@@ -504,6 +512,12 @@ func New(
         shutdownCancel:    shutdownCancel,
         browserHandler:    browserHandler,
     }
+    // #151: build the managed-settings Ed25519 signer when enabled. nil when
+    // disabled — routes are not registered below in that case.
+    srv.managedSettingsSigner = newManagedSettingsSigner(cfg.Config.ManagedSettings)
+    if srv.managedSettingsSigner != nil {
+        slog.Info("managed-settings signing endpoint wired")
+    }
     // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
     // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
     if n := cfg.Config.Routing.Stream.MaxConcurrentStreams; n > 0 {
@@ -666,6 +680,21 @@ func (s *Server) Start() error {
     mux.HandleFunc("/gateway/v1/connection/", s.withMiddleware(s.handleConnectionCRUD))
     mux.HandleFunc("/gateway/v1/oauth2/authorize", s.withMiddleware(s.handleOAuth2Authorize))
     mux.HandleFunc("/gateway/v1/oauth2/callback", s.withMiddleware(s.handleOAuth2Callback))
+
+    // #151: server-side signed managed-settings endpoint. Enterprise fusion-code
+    // clients fetch remote policy here; the payload is signed with an Ed25519
+    // private key (X-Fusion-Signature: ed25519:<base64>) so a compromised/
+    // impersonating server cannot serve a consistently-poisoned payload that
+    // passes the client's local checksum recompute. Pubkey endpoint lets the
+    // client pin the verification key. Registered only when managed_settings
+    // is enabled (signer non-nil); behind withMiddleware (fg-key auth).
+    if s.managedSettingsSigner != nil {
+        mux.HandleFunc("/gateway/v1/managed-settings", s.withMiddleware(s.handleManagedSettings))
+        mux.HandleFunc("/gateway/v1/managed-settings/pubkey", s.withMiddleware(s.handleManagedSettingsPubkey))
+        slog.Info("managed-settings routes registered",
+            "payload_endpoint", "/gateway/v1/managed-settings",
+            "pubkey_endpoint", "/gateway/v1/managed-settings/pubkey")
+    }
 
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/healthz", s.handleHealthz)
@@ -1021,6 +1050,13 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     if s.mcpHandler != nil {
         s.mcpHandler.SetManagedToolAllowlist(newCfg.Config.MCP.ManagedToolAllowlist)
     }
+    // #151: rebuild the managed-settings signer on reload so an Ed25519 key
+    // rotation (private_key change) takes effect without a restart. The routes
+    // are registered once in New; a disable-after-enable keeps the routes
+    // registered but the handlers return 503 (signer nil) — matches the
+    // browser/mcp toggle behavior documented on browserHandler. A nil signer
+    // is the disabled state.
+    s.managedSettingsSigner = newManagedSettingsSigner(newCfg.Config.ManagedSettings)
     slog.Info("middleware chain rebuilt on config reload")
 }
 

@@ -1,6 +1,9 @@
 package config
 
 import (
+    "crypto/ed25519"
+    "encoding/base64"
+    "encoding/json"
     "fmt"
 	"os"
 	"path/filepath"
@@ -799,6 +802,26 @@ type MCPConfig struct {
     ManagedToolAllowlist []string `mapstructure:"managed_tool_allowlist"`
 }
 
+// ManagedSettingsConfig configures the server-side signed managed-settings
+// endpoint (#151). Enterprise fusion-code clients fetch remote policy
+// (managed-settings) from GET /gateway/v1/managed-settings. To defeat a
+// compromised/impersonating server that serves a consistently-poisoned payload
+// + matching checksum (the client's local checksum recompute cannot distinguish
+// a genuine trusted server from a malicious one), the gateway signs the payload
+// with an Ed25519 private key it holds; clients verify against a pinned public
+// key (exposed at GET /gateway/v1/managed-settings/pubkey) before trusting it.
+// Default off (Enabled=false) so the endpoint is not registered on deployments
+// that do not serve managed policy.
+type ManagedSettingsConfig struct {
+    Enabled    bool   `mapstructure:"enabled"`
+    PrivateKey string `mapstructure:"private_key"`
+    // Payload is the raw managed-settings JSON document served to clients. It is
+    // returned verbatim (after JSON re-serialization is NOT performed — the raw
+    // bytes are signed and served so the signature is stable against key-order
+    // drift). Hot-reloadable via the standard ConfigSnapshot path.
+    Payload string `mapstructure:"payload"`
+}
+
 type Config struct {
     Server        ServerConfig             `mapstructure:"server"`
     Auth          AuthConfig               `mapstructure:"auth"`
@@ -829,6 +852,7 @@ type Config struct {
     Connector     *ConnectorConfig         `mapstructure:"connector"`
     MCP           MCPConfig                `mapstructure:"mcp"`
     Browser       BrowserConfig            `mapstructure:"browser"`
+    ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
 }
 
 type ConfigSnapshot struct {
@@ -950,6 +974,12 @@ func bindSecretEnv(v *viper.Viper) {
     // the ecosystem convention (fusion-model-hub docker-compose already uses
     // it).
     v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
+    // managed_settings.private_key (#151) — Ed25519 seed (base64 32 bytes) the
+    // gateway signs managed-settings payloads with. A Kubernetes Secret via
+    // secretKeyRef injects FG_MANAGED_SETTINGS_PRIVATE_KEY; env precedence keeps
+    // the signing key out of config.yaml. The matching public key is derived and
+    // exposed at /gateway/v1/managed-settings/pubkey for client pinning.
+    v.BindEnv("managed_settings.private_key", "FG_MANAGED_SETTINGS_PRIVATE_KEY")
 }
 
 func Load(path string) (*ConfigSnapshot, error) {
@@ -1464,6 +1494,38 @@ func validate(cfg *Config) error {
     if cfg.Cluster.HARouting.Enabled && cfg.Cluster.HARouting.MacPlatformTag == "" {
         cfg.Cluster.HARouting.MacPlatformTag = "mac"
         slog.Info("cluster.ha_routing.mac_platform_tag defaulted", "tag", "mac")
+    }
+
+    // #151: managed_settings payload signing. When enabled, a private key
+    // (Ed25519 seed) is required — the endpoint cannot sign without it, and an
+    // enabled-but-keyless endpoint would serve an unsigned payload that the
+    // client (correctly) rejects, surfacing as a confusing fetch failure rather
+    // than a config error. The seed is base64 of the 32-byte Ed25519 private
+    // key (crypto/ed25519.NewKeyFromSeed). Payload may be empty (serves an empty
+    // document, still signed) but must be valid JSON when non-empty, since the
+    // client parses it. Fail-closed: enabled + missing/invalid key → config
+    // error, not a silently-broken endpoint.
+    if cfg.ManagedSettings.Enabled {
+        if cfg.ManagedSettings.PrivateKey == "" {
+            return fmt.Errorf("managed_settings.enabled is true but managed_settings.private_key is empty (set managed_settings.private_key or FG_MANAGED_SETTINGS_PRIVATE_KEY)")
+        }
+        if isKnownInsecureSecret(cfg.ManagedSettings.PrivateKey) {
+            return fmt.Errorf("managed_settings.private_key must not be a known placeholder")
+        }
+        seed, err := base64.StdEncoding.DecodeString(cfg.ManagedSettings.PrivateKey)
+        if err != nil {
+            return fmt.Errorf("managed_settings.private_key is not valid base64: %w", err)
+        }
+        if len(seed) != ed25519.SeedSize {
+            return fmt.Errorf("managed_settings.private_key must decode to %d bytes (Ed25519 seed), got %d", ed25519.SeedSize, len(seed))
+        }
+        if cfg.ManagedSettings.Payload != "" {
+            var jv json.RawMessage
+            if err := json.Unmarshal([]byte(cfg.ManagedSettings.Payload), &jv); err != nil {
+                return fmt.Errorf("managed_settings.payload must be valid JSON when set: %w", err)
+            }
+        }
+        slog.Info("managed_settings signing endpoint enabled")
     }
 
     // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
