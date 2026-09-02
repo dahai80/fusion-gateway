@@ -9,56 +9,11 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.9.15] - 2026-09-02
+
 ### Added
-- **Gateway-authoritative tenant identity on every proxied request** (#150
-  Gap 1, gateway-side). The store already held a key→team binding
-  (`Store.BindKeyToTeam` / `GetTeamByKey`) but the request path never
-  consulted it — `X-Space-Id` was a client-supplied passthrough header, so a
-  tenant-A api_key could spoof `X-Space-Id: tenant-B` and reach another
-  tenant's backend data. `lookupKeyByHash` (auth middleware) now resolves the
-  tenant from the credential via `GetTeamByKey(plaintextKey)` and stamps it
-  onto the `Principal` (`p.Team`) and the request ctx (`adapter.WithTenant`).
-  `adapter.InjectFusionHeaders` stamps a gateway-authoritative
-  `X-Fusion-Tenant` header on every outbound upstream request, derived solely
-  from the credential — `X-Fusion-Tenant` is NOT in the client passthrough
-  set, so it cannot be spoofed. RBAC's OIDC/`default_team` path fills the
-  tenant only when the api-key path did not already bind one (credential
-  binding is the stronger identity). Master/legacy keys with no binding omit
-  the header (single-tenant default preserved). The direct-port rejection
-  half (Gap 1c) is backend-side and tracked as upstream issues on
-  fusion-mlx / fusion-kb / fusion-model-hub.
-- **Multi-instance fusion-mlx HA routing** (#150 Gap 2). The gateway routed
-  MLX `/v1/*` to a single upstream; with multiple MLX instances
-  (fusion-mlx#754) there was no load balancing or failover. New
-  `cluster.ha_routing` config (default off): when enabled and a healthy
-  cluster node on the mac platform (`mac_platform_tag`, default `"mac"`)
-  serves the requested model, `decideLocked` routes to the cluster pool at
-  P0.25 — before the single-local-upstream path — reusing
-  `SelectNodeByModel` (health-weighted least-connections / hardware-aware /
-  round-robin, per-node health check + per-node circuit breaker, #95/RR5/RR13).
-  A non-mac node serving the model (e.g. a cuda node) is NOT a local-class HA
-  peer and falls through to the normal chain. Default off: single-node
-  deployments keep the unchanged single-local behavior. The CLI's
-  `pick_alive_mlx_base` now gets real alternatives. Added
-  `ClusterSelector.NodePlatform` so the router can confirm the selected
-  node's platform without depending on the concrete Discovery/Node types.
-- **Server-side Ed25519 signing for managed-settings payloads** (#151).
-  Enterprise fusion-code clients fetch remote policy (managed-settings) from
-  the gateway; the client recomputed a checksum locally but the checksum was
-  server-supplied, so a compromised/impersonating server could serve a
-  consistently-poisoned payload + matching checksum. New
-  `managed_settings` config block (default off): when enabled, the gateway
-  signs the payload with an Ed25519 private key (`private_key`, base64 32-byte
-  seed, env `FG_MANAGED_SETTINGS_PRIVATE_KEY`) and serves it at
-  `GET /gateway/v1/managed-settings` with a detached signature header
-  `X-Fusion-Signature: ed25519:<base64>`. The matching public key is exposed
-  at `GET /gateway/v1/managed-settings/pubkey` (`{"alg":"ed25519","public_key":"<base64>"}`)
-  for client pinning — clients verify the signature against a pinned key
-  before trusting the payload, so a server without the private key cannot
-  forge a valid payload. Payload served verbatim (not re-serialized) so the
-  signature is over the exact bytes received. Fail-closed: enabled + missing/
-  invalid key rejected at config load. Hot-reload rebuilds the signer for key
-  rotation without restart. Behind `withMiddleware` (fg-key auth).
 - **fusion-identity gRPC control-plane integration** (#157). Optional
   integration with the sibling `fusion-identity` service: an
   `AuthorizeAndAcquire` RPC on the inference hot path atomically authenticates
@@ -87,7 +42,66 @@ on tag push; this file is the maintained, human-curated counterpart.
   (`internal/identity/pb`). Default off (`identity.enabled: false`); config
   validated fail-closed (enabled requires endpoint + positive numeric knobs).
 
+## [0.9.14] - 2026-09-01
+
+### Added
+- **Server-side Ed25519 signing for managed-settings payloads** (#151).
+  Enterprise fusion-code clients fetch remote policy (managed-settings) from
+  the gateway; the client recomputed a checksum locally but the checksum was
+  server-supplied, so a compromised/impersonating server could serve a
+  consistently-poisoned payload + matching checksum. New
+  `managed_settings` config block (default off): when enabled, the gateway
+  signs the payload with an Ed25519 private key (`private_key`, base64 32-byte
+  seed, env `FG_MANAGED_SETTINGS_PRIVATE_KEY`) and serves it at
+  `GET /gateway/v1/managed-settings` with a detached signature header
+  `X-Fusion-Signature: ed25519:<base64>`. The matching public key is exposed
+  at `GET /gateway/v1/managed-settings/pubkey` (`{"alg":"ed25519","public_key":"<base64>"}`)
+  for client pinning — clients verify the signature against a pinned key
+  before trusting the payload, so a server without the private key cannot
+  forge a valid payload. Payload served verbatim (not re-serialized) so the
+  signature is over the exact bytes received. Fail-closed: enabled + missing/
+  invalid key rejected at config load. Hot-reload rebuilds the signer for key
+  rotation without restart. Behind `withMiddleware` (fg-key auth).
+
+## [0.9.13] - 2026-09-01
+
+### Added
+- **Multi-instance fusion-mlx HA routing** (#150 Gap 2). The gateway routed
+  MLX `/v1/*` to a single upstream; with multiple MLX instances
+  (fusion-mlx#754) there was no load balancing or failover. New
+  `cluster.ha_routing` config (default off): when enabled and a healthy
+  cluster node on the mac platform (`mac_platform_tag`, default `"mac"`)
+  serves the requested model, `decideLocked` routes to the cluster pool at
+  P0.25 — before the single-local-upstream path — reusing
+  `SelectNodeByModel` (health-weighted least-connections / hardware-aware /
+  round-robin, per-node health check + per-node circuit breaker, #95/RR5/RR13).
+  A non-mac node serving the model (e.g. a cuda node) is NOT a local-class HA
+  peer and falls through to the normal chain. Default off: single-node
+  deployments keep the unchanged single-local behavior. The CLI's
+  `pick_alive_mlx_base` now gets real alternatives. Added
+  `ClusterSelector.NodePlatform` so the router can confirm the selected
+  node's platform without depending on the concrete Discovery/Node types.
+
 ## [0.9.12] - 2026-09-01
+
+### Added
+- **Gateway-authoritative tenant identity on every proxied request** (#150
+  Gap 1, gateway-side). The store already held a key→team binding
+  (`Store.BindKeyToTeam` / `GetTeamByKey`) but the request path never
+  consulted it — `X-Space-Id` was a client-supplied passthrough header, so a
+  tenant-A api_key could spoof `X-Space-Id: tenant-B` and reach another
+  tenant's backend data. `lookupKeyByHash` (auth middleware) now resolves the
+  tenant from the credential via `GetTeamByKey(plaintextKey)` and stamps it
+  onto the `Principal` (`p.Team`) and the request ctx (`adapter.WithTenant`).
+  `adapter.InjectFusionHeaders` stamps a gateway-authoritative
+  `X-Fusion-Tenant` header on every outbound upstream request, derived solely
+  from the credential — `X-Fusion-Tenant` is NOT in the client passthrough
+  set, so it cannot be spoofed. RBAC's OIDC/`default_team` path fills the
+  tenant only when the api-key path did not already bind one (credential
+  binding is the stronger identity). Master/legacy keys with no binding omit
+  the header (single-tenant default preserved). The direct-port rejection
+  half (Gap 1c) is backend-side and tracked as upstream issues on
+  fusion-mlx / fusion-kb / fusion-model-hub.
 
 ### Fixed
 - **Local-exclusive models cloud-diverted on a full-GPU host** (#148 follow-up).
