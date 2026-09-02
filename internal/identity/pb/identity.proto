@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package fusion.identity.v1;
+option go_package = "fusion/identity/v1;identityv1";
+
+enum AuthErrorCode {
+  AUTH_ERROR_CODE_UNSPECIFIED = 0;
+  INVALID_API_KEY            = 1;
+  TENANT_DISABLED            = 2;
+  MODULE_UNAUTHORIZED        = 3;
+  MODEL_UNAUTHORIZED         = 4;
+  CONCURRENCY_LIMIT_EXCEEDED = 5;
+  DAILY_QUOTA_EXCEEDED       = 6;
+  RATE_LIMIT_EXCEEDED        = 7;
+}
+
+enum PriorityLevel {
+  PRIORITY_LEVEL_UNSPECIFIED = 0;
+  PRIORITY_LOW               = 1;
+  PRIORITY_NORMAL            = 2;
+  PRIORITY_HIGH              = 3;
+}
+
+enum InferenceStatus {
+  INFERENCE_STATUS_UNSPECIFIED = 0;
+  SUCCESS                      = 1;
+  CANCELED                     = 2;
+  FAILED                       = 3;
+}
+
+service IdentityService {
+  rpc AuthorizeAndAcquire (AuthorizeAndAcquireRequest) returns (AuthorizeAndAcquireResponse);
+  rpc ReleaseLease (ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+  rpc ReportUsage (ReportUsageRequest) returns (ReportUsageResponse);
+}
+
+message AuthorizeAndAcquireRequest {
+  string api_key       = 1;
+  string target_module = 2;
+  string target_model  = 3;
+  string request_id    = 4;
+  string client_ip     = 5;
+}
+
+message TenantContext {
+  string tenant_id     = 1;
+  string tenant_name   = 2;
+  string tier          = 3;
+  PriorityLevel priority = 4;
+}
+
+message AuthorizeAndAcquireResponse {
+  bool is_allowed                = 1;
+  AuthErrorCode error_code       = 2;
+  string error_message           = 3;
+  TenantContext tenant_context   = 4;
+  string lease_id                = 5;
+  int32 max_allowed_tokens       = 6;
+}
+
+message ReleaseLeaseRequest {
+  string lease_id  = 1;
+  string tenant_id = 2;
+  string reason    = 3;
+}
+
+message ReleaseLeaseResponse {
+  bool success = 1;
+}
+
+message ReportUsageRequest {
+  string lease_id         = 1;
+  string tenant_id        = 2;
+  string model_name       = 3;
+  int32 prompt_tokens     = 4;
+  int32 completion_tokens = 5;
+  int64 execution_time_ms = 6;
+  InferenceStatus status  = 7;
+}
+
+message ReportUsageResponse {
+  bool success                = 1;
+  int64 remaining_daily_quota = 2;
+}

@@ -116,3 +116,46 @@ func TestInjectFusionHeaders_TenantStamped(t *testing.T) {
         }
     })
 }
+
+// #157 items 2+3: identity lease scheduling signals forwarded as outbound
+// headers so fusion-mlx can apply VRAM priority + KV cache-tag isolation.
+func TestInjectFusionHeaders_LeaseSignals(t *testing.T) {
+    t.Run("priority_and_max_tokens_stamped", func(t *testing.T) {
+        ctx := WithLeaseSignals(context.Background(), LeaseSignals{Priority: 3, MaxAllowedTokens: 2048})
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(ctx, req)
+        if got := req.Header.Get("X-Fusion-Priority"); got != "3" {
+            t.Fatalf("X-Fusion-Priority: got %q, want 3", got)
+        }
+        if got := req.Header.Get("X-Fusion-Max-Tokens"); got != "2048" {
+            t.Fatalf("X-Fusion-Max-Tokens: got %q, want 2048", got)
+        }
+    })
+    t.Run("zero_signals_omitted", func(t *testing.T) {
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(context.Background(), req)
+        if got := req.Header.Get("X-Fusion-Priority"); got != "" {
+            t.Fatalf("X-Fusion-Priority: got %q, want empty", got)
+        }
+        if got := req.Header.Get("X-Fusion-Max-Tokens"); got != "" {
+            t.Fatalf("X-Fusion-Max-Tokens: got %q, want empty", got)
+        }
+    })
+    t.Run("priority_only_no_max_tokens", func(t *testing.T) {
+        ctx := WithLeaseSignals(context.Background(), LeaseSignals{Priority: 2})
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(ctx, req)
+        if got := req.Header.Get("X-Fusion-Priority"); got != "2" {
+            t.Fatalf("X-Fusion-Priority: got %q, want 2", got)
+        }
+        if got := req.Header.Get("X-Fusion-Max-Tokens"); got != "" {
+            t.Fatalf("X-Fusion-Max-Tokens should be omitted when 0, got %q", got)
+        }
+    })
+    t.Run("zero_signals_noop", func(t *testing.T) {
+        ctx := WithLeaseSignals(context.Background(), LeaseSignals{})
+        if LeaseSignalsFromContext(ctx).Priority != 0 {
+            t.Fatal("WithLeaseSignals zero must be a no-op")
+        }
+    })
+}

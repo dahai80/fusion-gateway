@@ -52,6 +52,24 @@ auth:
           allowed_models:
               - "*"                            # Wildcard: all models allowed
 
+# #157: fusion-identity gRPC control plane. When enabled, every inference
+# request calls AuthorizeAndAcquire before reaching fusion-mlx (tenant
+# authz + concurrency lease), and ReleaseLease + ReportUsage run at stream
+# end. Disabled by default (identityClient nil → middleware pass-through,
+# local APIKeyAuthWithStore remains the auth path). The identity service is
+# a sibling project (dahai80/fusion-identity); point endpoint at its gRPC
+# listener. fallback_to_local=true lets new requests proceed on the local
+# auth path when identity is unreachable (graceful degrade); false = strict
+# (identity outage → new requests 503, active streams keep running).
+identity:
+    enabled: false                              # opt-in; default off
+    endpoint: ""                                # e.g. "127.0.0.1:11440"
+    deadline_ms: 10                             # AuthorizeAndAcquire RPC deadline (hot path)
+    keepalive_sec: 30                           # gRPC keepalive ping interval
+    fallback_to_local: false                    # true=degrade to local auth on outage
+    breaker_threshold: 5                        # consecutive failures to open breaker
+    breaker_open_sec: 30                        # breaker open duration before half-open probe
+
 route:
     mode: hybrid                              # local=全走本地, cloud=全走云端, hybrid=智能路由(按token/比例/硬件)
     enable_hardware_judge: true

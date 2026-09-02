@@ -564,6 +564,30 @@ CLI 和本地客户端可在后端服务的**直连本地端口**（fusion-mlx :
 
 当部署多个 fusion-mlx 实例时，启用 `cluster.ha_routing`（默认关闭），网关在 P0.25 将 `/v1/*` 在健康的 mac 平台节点间负载均衡，先于单本地上游路径——对客户端透明的故障转移。参见[路由逻辑](#路由逻辑)与 `cluster.ha_routing` 配置块。
 
+## 身份控制面 (#157)
+
+与 [`fusion-identity`](https://github.com/dahai80/fusion-identity) 的可选集成——一个高频 gRPC 控制面，在推理到达 fusion-mlx 之前原子地完成认证 + 获取并发租约。默认关闭（`identity.enabled: false`）；关闭或 identity 不可达且 `fallback_to_local: true` 时，本地 `APIKeyAuthWithStore` 路径仍是认证路径。
+
+```yaml
+identity:
+    enabled: true
+    endpoint: "127.0.0.1:11440"      # fusion-identity gRPC 监听（仅环回）
+    deadline_ms: 10                  # AuthorizeAndAcquire RPC 超时（热路径）
+    keepalive_sec: 30
+    fallback_to_local: false         # true = identity 故障时降级到本地认证
+    breaker_threshold: 5             # 连续失败多少次熔断器打开
+    breaker_open_sec: 30             # 打开时长，之后放一个半开探测
+```
+
+启用后，推理热路径经过 `IdentityAuth`（位于本地 key 认证之后、RBAC 之前）：
+
+1. **`AuthorizeAndAcquire`**——将已解析的 api key + 目标模块/模型发给 identity。允许时，identity 派生的租户为权威（覆盖本地 key→team 绑定），租约写入请求上下文。拒绝时，错误码映射为 HTTP（`INVALID_API_KEY→401`、`TENANT_DISABLED/MODULE_UNAUTHORIZED/MODEL_UNAUTHORIZED→403`、`CONCURRENCY_LIMIT_EXCEEDED→429`、`DAILY_QUOTA_EXCEEDED→402`、`RATE_LIMIT_EXCEEDED→429`）。
+2. **熔断器**——连续传输失败打开熔断器；新请求随后返回 `503`（严格模式）或降级到本地认证（`fallback_to_local: true`）。活跃流继续运行——熔断器只门控新请求。认证拒绝（identity 回答"否"）不会触发熔断。
+3. **租约生命周期**——请求结束时，`ReleaseLease` 释放并发槽，`ReportUsage` 将 token 消耗计量到 identity 的配额计数器。两者均为异步 + 尽力而为（独立 context、fire-and-forget），慢/不可达的 identity 不会阻塞已发送的响应。
+4. **VRAM 优先级 + KV cache-tag 隔离**——租约的 `priority`（1=低、2=正常、3=高）与 `max_allowed_tokens` 作为 `X-Fusion-Priority` + `X-Fusion-Max-Tokens` 头转发给 fusion-mlx。网关非侵入（此处无分配器或 KV 缓存）；这些头是 fusion-mlx 在其侧应用 P0 抢占/P2 空闲排队调度与 `tenant:{tenant_id}:` 前缀缓存隔离的信号契约。
+
+Admin-JWT 与 master-key 请求绕过身份控制面（管理面不属于推理租户域）。本地 key-store 降级路径保留为优雅降级，而非替代——启用时 identity 是租户上下文的唯一权威来源。
+
 ## 语义缓存
 
 基于 prompt embedding 余弦相似度的相似度缓存。避免重复计算相同或近似请求。

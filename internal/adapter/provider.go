@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "log/slog"
     "net/http"
+    "strconv"
 
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/propagation"
@@ -57,6 +58,21 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
         slog.Debug("injected gateway-authoritative tenant onto upstream",
             "tenant", tenant, "path", req.URL.Path)
     }
+    // #157 items 2+3: forward identity lease scheduling signals so fusion-mlx
+    // can apply VRAM priority + KV cache-tag isolation on its side. The
+    // gateway is non-invasive (no allocator/cache here); these headers are the
+    // signal contract. X-Fusion-Priority: 1=low, 2=normal, 3=high (P0
+    // preempts, P2 idle-queues). X-Fusion-Max-Tokens caps the generation so a
+    // low-priority batch cannot monopolize KV cache. Omitted when identity is
+    // disabled (single-tenant default preserves back-compat).
+    if sig := LeaseSignalsFromContext(ctx); sig.Priority > 0 {
+        req.Header.Set("X-Fusion-Priority", strconv.Itoa(int(sig.Priority)))
+        if sig.MaxAllowedTokens > 0 {
+            req.Header.Set("X-Fusion-Max-Tokens", strconv.Itoa(int(sig.MaxAllowedTokens)))
+        }
+        slog.Debug("injected identity lease signals onto upstream",
+            "priority", sig.Priority, "max_tokens", sig.MaxAllowedTokens, "path", req.URL.Path)
+    }
     // #129 Gap 2: propagate the OTel trace context (traceparent + baggage) onto
     // the outbound upstream request so the distributed trace chain survives the
     // gateway→fusion-mlx / gateway→cloud hop. The handler ctx carries the span
@@ -90,6 +106,37 @@ func WithTenant(ctx context.Context, tenantID string) context.Context {
 func TenantFromContext(ctx context.Context) string {
     tenant, _ := ctx.Value(tenantCtxKey{}).(string)
     return tenant
+}
+
+// leaseSignalsKey carries the identity-lease scheduling signals (#157 items
+// 2+3) through ctx so InjectFusionHeaders can stamp them onto the outbound
+// upstream request. Set by middleware.IdentityAuth from the
+// AuthorizeAndAcquire response (tenant_context.priority + max_allowed_tokens).
+// The gateway is non-invasive: it does not run a VRAM allocator or KV cache
+// (those live in fusion-mlx). It forwards these signals as headers so
+// fusion-mlx can apply VRAM priority (P0 preempts, P2 idle-queues) and KV
+// cache-tag isolation (tenant:{tenant_id}: prefix) on its side when it
+// implements them. Empty/zero values are omitted (single-tenant default).
+type leaseSignalsKey struct{}
+
+// LeaseSignals holds the per-request scheduling signals from identity.
+type LeaseSignals struct {
+    Priority        int32 // 0=unspecified, 1=low(P2), 2=normal(P1), 3=high(P0)
+    MaxAllowedTokens int32
+}
+
+// WithLeaseSignals attaches identity lease scheduling signals to ctx.
+func WithLeaseSignals(ctx context.Context, s LeaseSignals) context.Context {
+    if s.Priority == 0 && s.MaxAllowedTokens == 0 {
+        return ctx
+    }
+    return context.WithValue(ctx, leaseSignalsKey{}, s)
+}
+
+// LeaseSignalsFromContext returns the identity lease signals, or zero value.
+func LeaseSignalsFromContext(ctx context.Context) LeaseSignals {
+    s, _ := ctx.Value(leaseSignalsKey{}).(LeaseSignals)
+    return s
 }
 
 // FusionHeadersFromContext returns the passthrough header map carried in ctx
