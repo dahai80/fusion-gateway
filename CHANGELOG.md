@@ -59,6 +59,33 @@ on tag push; this file is the maintained, human-curated counterpart.
   signature is over the exact bytes received. Fail-closed: enabled + missing/
   invalid key rejected at config load. Hot-reload rebuilds the signer for key
   rotation without restart. Behind `withMiddleware` (fg-key auth).
+- **fusion-identity gRPC control-plane integration** (#157). Optional
+  integration with the sibling `fusion-identity` service: an
+  `AuthorizeAndAcquire` RPC on the inference hot path atomically authenticates
+  + acquires a concurrency lease before fusion-mlx is reached. A new
+  `internal/identity` package holds the gRPC client (long-lived channel,
+  keepalive, 10ms deadline) + a self-contained consecutive-failure circuit
+  breaker (open after `breaker_threshold` failures, half-open probe after
+  `breaker_open_sec`, denials do not trip). `middleware.IdentityAuth` sits
+  after local key auth: on allow it stamps the identity-derived tenant
+  (authoritative over the local key→team binding) + the lease into the request
+  context; on deny it maps the error code to HTTP
+  (`INVALID_API_KEY→401`, `TENANT_DISABLED/MODULE_UNAUTHORIZED/MODEL_UNAUTHORIZED→403`,
+  `CONCURRENCY_LIMIT_EXCEEDED→429`, `DAILY_QUOTA_EXCEEDED→402`,
+  `RATE_LIMIT_EXCEEDED→429`); on transport/breaker failure it falls back to
+  local auth (`fallback_to_local: true`) or returns 503 (strict). Lease
+  lifecycle: `releaseIdentityLease` calls `ReleaseLease` + `ReportUsage`
+  (async, best-effort) at request end from the `withMiddleware` finalization
+  funnel, covering stream + non-stream paths. VRAM priority + KV cache-tag
+  isolation: the lease `priority` + `max_allowed_tokens` are forwarded to
+  fusion-mlx as `X-Fusion-Priority` + `X-Fusion-Max-Tokens` headers
+  (`adapter.WithLeaseSignals` / `LeaseSignalsFromContext` / injected in
+  `InjectFusionHeaders`, also carried onto the resumable-stream `liveCtx`).
+  The gateway is non-invasive — the allocator and KV cache live in fusion-mlx;
+  these headers are the signal contract. Admin-JWT and master-key requests
+  bypass the control plane. Go stubs generated in-repo from the upstream proto
+  (`internal/identity/pb`). Default off (`identity.enabled: false`); config
+  validated fail-closed (enabled requires endpoint + positive numeric knobs).
 
 ## [0.9.12] - 2026-09-01
 

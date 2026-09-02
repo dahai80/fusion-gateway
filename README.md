@@ -656,6 +656,30 @@ Until a backend ships its origin gate, that backend's direct port remains a tena
 
 When multiple fusion-mlx instances are deployed, enable `cluster.ha_routing` (default off) so the gateway load-balances `/v1/*` across healthy mac-platform peers at P0.25, before the single-local-upstream path — transparent failover for clients. See [Routing Logic](#routing-logic) and the `cluster.ha_routing` config block.
 
+## Identity Control Plane (#157)
+
+Optional integration with [`fusion-identity`](https://github.com/dahai80/fusion-identity) — a high-frequency gRPC control plane that atomically authenticates + acquires a concurrency lease before inference reaches fusion-mlx. Disabled by default (`identity.enabled: false`); the local `APIKeyAuthWithStore` path remains the auth path when disabled or when identity is unreachable with `fallback_to_local: true`.
+
+```yaml
+identity:
+    enabled: true
+    endpoint: "127.0.0.1:11440"      # fusion-identity gRPC listener (loopback)
+    deadline_ms: 10                  # AuthorizeAndAcquire RPC deadline (hot path)
+    keepalive_sec: 30
+    fallback_to_local: false         # true = degrade to local auth on identity outage
+    breaker_threshold: 5             # consecutive failures to open the breaker
+    breaker_open_sec: 30             # open duration before a half-open probe
+```
+
+When enabled, the inference hot path runs through `IdentityAuth` (after local key auth, before RBAC):
+
+1. **`AuthorizeAndAcquire`** — sends the resolved api key + target module/model to identity. On allow, the identity-derived tenant is authoritative (overriding the local key→team binding) and the lease is stamped into the request context. On deny, the error code maps to HTTP (`INVALID_API_KEY→401`, `TENANT_DISABLED/MODULE_UNAUTHORIZED/MODEL_UNAUTHORIZED→403`, `CONCURRENCY_LIMIT_EXCEEDED→429`, `DAILY_QUOTA_EXCEEDED→402`, `RATE_LIMIT_EXCEEDED→429`).
+2. **Circuit breaker** — consecutive transport failures open the breaker; new requests then get `503` (strict) or fall back to local auth (`fallback_to_local: true`). Active streams keep running — the breaker only gates new requests. Auth denials (identity answered "no") do NOT trip the breaker.
+3. **Lease lifecycle** — at request end, `ReleaseLease` frees the concurrency slot and `ReportUsage` meters token consumption into identity's quota counters. Both are async + best-effort (fresh context, fire-and-forget) so a slow/unreachable identity never blocks the already-sent response.
+4. **VRAM priority + KV cache-tag isolation** — the lease's `priority` (1=low, 2=normal, 3=high) and `max_allowed_tokens` are forwarded to fusion-mlx as `X-Fusion-Priority` + `X-Fusion-Max-Tokens` headers on every outbound upstream request. The gateway is non-invasive (no allocator or KV cache here); these headers are the signal contract for fusion-mlx to apply P0-preempts/P2-idle-queues scheduling and `tenant:{tenant_id}:` prefix-cache isolation on its side.
+
+Admin-JWT and master-key requests bypass the identity control plane (the admin surface is not inference-tenant-scoped). The local key-store fallback is kept as a graceful-degrade path, not a replacement — identity is the tenant-context source of truth when enabled.
+
 ## Semantic Cache
 
 Similarity-based caching using cosine similarity on prompt embeddings. Avoids re-computing identical or near-identical requests.

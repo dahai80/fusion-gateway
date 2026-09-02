@@ -26,6 +26,8 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/identity"
+    pb "github.com/fusion-gateway/fusion-gateway/internal/identity/pb"
     "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
@@ -169,6 +171,13 @@ type Server struct {
     // endpoint reads s.cfg.Config.ManagedSettings.Payload live per request so
     // payload edits apply without a rebuild).
     managedSettingsSigner *managedSettingsSigner
+    // #157: fusion-identity gRPC control-plane client. nil when
+    // identity.enabled is false — IdentityAuth middleware is a no-op
+    // pass-through in that case (the local APIKeyAuthWithStore path handles
+    // auth). Constructed in New from cfg.Config.Identity; rebuilt on
+    // hot-reload via RebuildMiddlewareChain (a new identityClient dials the
+    // new endpoint). Closed in Shutdown to tear down the gRPC channel.
+    identityClient *identity.Client
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
@@ -517,6 +526,22 @@ func New(
     srv.managedSettingsSigner = newManagedSettingsSigner(cfg.Config.ManagedSettings)
     if srv.managedSettingsSigner != nil {
         slog.Info("managed-settings signing endpoint wired")
+    }
+    // #157: build the fusion-identity gRPC control-plane client. NewClient
+    // returns nil on empty endpoint (caller convention: nil = disabled,
+    // IdentityAuth middleware pass-through). The local APIKeyAuthWithStore
+    // path remains the fallback when identity is disabled or unreachable
+    // (fallback_to_local). Rebuilt on hot-reload in RebuildMiddlewareChain.
+    srv.identityClient = identity.NewClient(
+        cfg.Config.Identity.Endpoint,
+        cfg.Config.Identity.DeadlineMS,
+        cfg.Config.Identity.KeepAliveSec,
+        cfg.Config.Identity.BreakerThreshold,
+        cfg.Config.Identity.BreakerOpenSec,
+        cfg.Config.Identity.FallbackToLocal,
+    )
+    if srv.identityClient != nil {
+        slog.Info("identity control-plane client wired", "endpoint", cfg.Config.Identity.Endpoint)
     }
     // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
     // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
@@ -947,6 +972,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
     s.rateLimiter.Close()
     s.cache.Close()
     s.semanticCache.Close()
+    // #157: tear down the identity gRPC control-plane channel. Best-effort —
+    // in-flight ReleaseLease/ReportUsage goroutines already finished (they
+    // run under fresh contexts, not the request ctx), so this just closes
+    // the connection. No-op when identity is disabled (client nil).
+    if s.identityClient != nil {
+        if cerr := s.identityClient.Close(); cerr != nil {
+            slog.Warn("identity client close error", "error", cerr)
+        }
+    }
     return err
 }
 
@@ -997,7 +1031,62 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         }
         entry.StatusCode = rec.StatusCode
         middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
+        // #157: release the identity lease + report usage at request end. The
+        // lease was acquired by IdentityAuth (AuthorizeAndAcquire) and stamped
+        // into ctx as *IdentityLease. Both calls are async + best-effort on
+        // the identity.Client side (fresh ctx, fire-and-forget goroutine) so
+        // they never block the response path or fail the request if identity
+        // is slow/unreachable. No-op when no lease (identity disabled or the
+        // request was admin/master/failed-local-auth). ReportUsage carries
+        // the token counts the handler stamped on the request log entry.
+        s.releaseIdentityLease(r.Context(), entry)
     }
+}
+
+// releaseIdentityLease finalizes the per-request identity lease acquired in
+// IdentityAuth. ReleaseLease frees the concurrency slot; ReportUsage meters
+// token consumption into identity's quota counters. Both are async/best-effort
+// on the client (goroutine + fresh ctx) so a slow/unreachable identity never
+// blocks the already-sent response or fails the request. No-op when no lease
+// was acquired (identity disabled, admin/master request, or local-auth denial
+// that rejected before AuthorizeAndAcquire). Status mapping: 2xx/3xx →
+// SUCCESS, client cancel → CANCELED, else FAILED.
+func (s *Server) releaseIdentityLease(ctx context.Context, entry *store.RequestLog) {
+    if s.identityClient == nil {
+        return
+    }
+    lease := middleware.IdentityLeaseFromContext(ctx)
+    if lease == nil || lease.LeaseID == "" {
+        return
+    }
+    status := pb.InferenceStatus_SUCCESS
+    switch {
+    case entry.StatusCode >= 200 && entry.StatusCode < 400:
+        status = pb.InferenceStatus_SUCCESS
+    case entry.StatusCode == 499:
+        status = pb.InferenceStatus_CANCELED
+    case !entry.IsSuccess:
+        status = pb.InferenceStatus_FAILED
+    }
+    reason := "stream-end"
+    if status == pb.InferenceStatus_CANCELED {
+        reason = "client-cancel"
+    } else if status == pb.InferenceStatus_FAILED {
+        reason = "inference-failed"
+    }
+    s.identityClient.ReleaseLease(lease.LeaseID, lease.TenantID, reason)
+    s.identityClient.ReportUsage(identity.UsageReport{
+        LeaseID:          lease.LeaseID,
+        TenantID:         lease.TenantID,
+        ModelName:        entry.Model,
+        PromptTokens:     int32(entry.InputTokens),
+        CompletionTokens: int32(entry.OutputTokens),
+        ExecutionTimeMS:  int64(entry.Latency * 1000),
+        Status:           status,
+    })
+    slog.Debug("identity lease released",
+        "lease_id", lease.LeaseID, "tenant", lease.TenantID,
+        "status", status, "input", entry.InputTokens, "output", entry.OutputTokens)
 }
 
 // buildMiddlewareChain constructs the static middleware chain (everything except ConfigSnapshot)
@@ -1007,6 +1096,11 @@ func (s *Server) buildMiddlewareChain() {
         observability.HTTPMiddleware,
         middleware.CORS(&s.cfg.Config.CORS),
         middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store),
+        // #157: identity gRPC control-plane sits AFTER local key auth (needs
+        // the resolved plaintext key in p.KeyConfig.Key) and BEFORE RBAC so
+        // the identity-derived tenant is authoritative for downstream role
+        // checks. No-op pass-through when identityClient is nil (disabled).
+        middleware.IdentityAuth(s.identityClient, &s.cfg.Config.Identity),
         s.oidcAuth.Middleware(&s.cfg.Config.Auth),
         middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
@@ -1057,6 +1151,21 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     // browser/mcp toggle behavior documented on browserHandler. A nil signer
     // is the disabled state.
     s.managedSettingsSigner = newManagedSettingsSigner(newCfg.Config.ManagedSettings)
+    // #157: rebuild the identity control-plane client on reload so an endpoint
+    // change or enable/disable takes effect without a restart. Close the prior
+    // client first (tear down its gRPC channel) before swapping in the new one.
+    // A disable (endpoint empty) → new client is nil → IdentityAuth pass-through.
+    if s.identityClient != nil {
+        _ = s.identityClient.Close()
+    }
+    s.identityClient = identity.NewClient(
+        newCfg.Config.Identity.Endpoint,
+        newCfg.Config.Identity.DeadlineMS,
+        newCfg.Config.Identity.KeepAliveSec,
+        newCfg.Config.Identity.BreakerThreshold,
+        newCfg.Config.Identity.BreakerOpenSec,
+        newCfg.Config.Identity.FallbackToLocal,
+    )
     slog.Info("middleware chain rebuilt on config reload")
 }
 

@@ -69,6 +69,18 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     if fh := adapter.FusionHeadersFromContext(ctx); fh != nil {
         liveCtx = adapter.WithFusionHeadersMap(liveCtx, fh)
     }
+    // #157: carry the gateway-authoritative tenant + identity lease signals
+    // onto the decoupled liveCtx so the outbound upstream request still gets
+    // X-Fusion-Tenant + X-Fusion-Priority/Max-Tokens (InjectFusionHeaders
+    // reads them off the ctx passed to StreamChat, which is liveCtx here).
+    // Without this, a resumable stream's upstream call would lose the tenant
+    // tag + VRAM priority signal mid-stream.
+    if t := adapter.TenantFromContext(ctx); t != "" {
+        liveCtx = adapter.WithTenant(liveCtx, t)
+    }
+    if sig := adapter.LeaseSignalsFromContext(ctx); sig.Priority > 0 {
+        liveCtx = adapter.WithLeaseSignals(liveCtx, sig)
+    }
     liveCtx, liveCancel := context.WithCancel(liveCtx)
     defer liveCancel()
 

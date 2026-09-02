@@ -33,6 +33,12 @@ auth:
     master_key: ""      # set FG_MASTER_KEY for production (admin-equiv + /metrics gate)
     api_keys: []
 
+# #157: fusion-identity gRPC control plane (disabled by default).
+# See config.example.yaml for the full stanza + semantics.
+identity:
+    enabled: false
+    endpoint: ""
+
 backends:
     fusion-mlx:
         type: "fusion-mlx"

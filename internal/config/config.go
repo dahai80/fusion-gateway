@@ -853,6 +853,32 @@ type Config struct {
     MCP           MCPConfig                `mapstructure:"mcp"`
     Browser       BrowserConfig            `mapstructure:"browser"`
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
+    Identity        IdentityConfig          `mapstructure:"identity"`
+}
+
+// IdentityConfig wires the fusion-identity gRPC control plane (#157). When
+// enabled, the inference hot path calls AuthorizeAndAcquire before reaching
+// fusion-mlx, acquiring a concurrency lease + authoritative tenant context.
+// Default off — the existing local key-store path stays the sole auth method
+// (zero behavior change). The gRPC client owns its own circuit breaker: an
+// identity outage rejects NEW requests with 503 while active streams keep
+// running, avoiding inference-cluster meltdown.
+type IdentityConfig struct {
+    Enabled      bool   `mapstructure:"enabled"`
+    Endpoint     string `mapstructure:"endpoint"`
+    // Deadline for AuthorizeAndAcquire (hot path). PRD §7 targets <5ms TTFT
+    // impact; 10ms matches the Python reference client default.
+    DeadlineMS   int    `mapstructure:"deadline_ms"`
+    // KeepAlive interval for the long-lived gRPC channel (seconds).
+    KeepAliveSec int    `mapstructure:"keepalive_sec"`
+    // FallbackToLocal: when identity is unavailable (breaker open), fall back
+    // to the local key-store auth path instead of 503. Off by default = strict
+    // (503 on identity outage, per #157 acceptance).
+    FallbackToLocal bool `mapstructure:"fallback_to_local"`
+    // BreakerThreshold consecutive failures to open the breaker.
+    BreakerThreshold int `mapstructure:"breaker_threshold"`
+    // BreakerOpenSec breaker open duration before half-open probe (seconds).
+    BreakerOpenSec int `mapstructure:"breaker_open_sec"`
 }
 
 type ConfigSnapshot struct {
@@ -1528,6 +1554,30 @@ func validate(cfg *Config) error {
         slog.Info("managed_settings signing endpoint enabled")
     }
 
+    // #157: fusion-identity gRPC control plane. Fail-closed at config load:
+    // enabled with no endpoint is rejected, not silently bypassed. The gRPC
+    // client + breaker are constructed in main.go only when enabled, so a
+    // missing/invalid endpoint would otherwise mean the hot path never calls
+    // identity and the operator believes isolation is enforced when it is not.
+    if cfg.Identity.Enabled {
+        if cfg.Identity.Endpoint == "" {
+            return fmt.Errorf("identity.enabled is true but identity.endpoint is empty (set the fusion-identity gRPC address, e.g. 127.0.0.1:50051)")
+        }
+        if cfg.Identity.DeadlineMS <= 0 {
+            return fmt.Errorf("identity.deadline_ms must be > 0 when identity enabled, got %d", cfg.Identity.DeadlineMS)
+        }
+        if cfg.Identity.BreakerThreshold <= 0 {
+            return fmt.Errorf("identity.breaker_threshold must be > 0 when identity enabled, got %d", cfg.Identity.BreakerThreshold)
+        }
+        if cfg.Identity.BreakerOpenSec <= 0 {
+            return fmt.Errorf("identity.breaker_open_sec must be > 0 when identity enabled, got %d", cfg.Identity.BreakerOpenSec)
+        }
+        slog.Info("identity gRPC control plane enabled",
+            "endpoint", cfg.Identity.Endpoint,
+            "deadline_ms", cfg.Identity.DeadlineMS,
+            "fallback_to_local", cfg.Identity.FallbackToLocal)
+    }
+
     // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
     // handlers fall back to the maxProxyBodySize const default at read time);
     // negative is rejected. A positive cap is what actually bounds the body —
@@ -1946,6 +1996,15 @@ func DefaultConfig() Config {
             FrameMaxBytes:        8 * 1024 * 1024,
             DialTimeout:          2 * time.Second,
             FrameTimeout:         30 * time.Second,
+        },
+        Identity: IdentityConfig{
+            Enabled:          false,
+            Endpoint:         "",
+            DeadlineMS:       10,
+            KeepAliveSec:     30,
+            FallbackToLocal:  false,
+            BreakerThreshold: 5,
+            BreakerOpenSec:   30,
         },
     }
 }
