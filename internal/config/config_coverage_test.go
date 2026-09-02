@@ -2,6 +2,8 @@ package config
 
 import (
     "context"
+    "crypto/ed25519"
+    "encoding/base64"
     "os"
     "path/filepath"
     "sync"
@@ -1002,6 +1004,66 @@ func TestValidate_MCPEnabled_WithMasterKey_Accepted(t *testing.T) {
     cfg.Auth.MasterKey = "master-secret"
     if err := validate(&cfg); err != nil {
         t.Fatalf("enabled MCP with auth.master_key fallback must be accepted: %v", err)
+    }
+}
+
+// #151: managed_settings payload signing validation. Enabled requires a valid
+// base64 Ed25519 seed (32 bytes); disabled is always accepted.
+func TestValidate_ManagedSettingsDisabled_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = false
+    cfg.ManagedSettings.PrivateKey = ""
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("disabled managed_settings must be accepted: %v", err)
+    }
+}
+
+func TestValidate_ManagedSettingsEnabled_NoKey_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = true
+    cfg.ManagedSettings.PrivateKey = ""
+    if err := validate(&cfg); err == nil {
+        t.Fatal("enabled managed_settings with empty private_key must be rejected (fail-closed)")
+    }
+}
+
+func TestValidate_ManagedSettingsEnabled_BadBase64_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = true
+    cfg.ManagedSettings.PrivateKey = "not!!base64!!"
+    if err := validate(&cfg); err == nil {
+        t.Fatal("enabled managed_settings with non-base64 private_key must be rejected")
+    }
+}
+
+func TestValidate_ManagedSettingsEnabled_WrongSeedLen_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = true
+    cfg.ManagedSettings.PrivateKey = base64.StdEncoding.EncodeToString([]byte("too-short"))
+    if err := validate(&cfg); err == nil {
+        t.Fatal("enabled managed_settings with <32-byte seed must be rejected")
+    }
+}
+
+func TestValidate_ManagedSettingsEnabled_ValidKey_Accepted(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = true
+    _, priv, _ := ed25519.GenerateKey(nil)
+    cfg.ManagedSettings.PrivateKey = base64.StdEncoding.EncodeToString(priv.Seed())
+    cfg.ManagedSettings.Payload = `{"policy":"enterprise"}`
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("enabled managed_settings with valid key+payload must be accepted: %v", err)
+    }
+}
+
+func TestValidate_ManagedSettingsEnabled_InvalidPayloadJSON_Rejected(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.ManagedSettings.Enabled = true
+    _, priv, _ := ed25519.GenerateKey(nil)
+    cfg.ManagedSettings.PrivateKey = base64.StdEncoding.EncodeToString(priv.Seed())
+    cfg.ManagedSettings.Payload = `{not json`
+    if err := validate(&cfg); err == nil {
+        t.Fatal("enabled managed_settings with invalid JSON payload must be rejected")
     }
 }
 

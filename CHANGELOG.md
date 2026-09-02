@@ -42,6 +42,23 @@ on tag push; this file is the maintained, human-curated counterpart.
   `pick_alive_mlx_base` now gets real alternatives. Added
   `ClusterSelector.NodePlatform` so the router can confirm the selected
   node's platform without depending on the concrete Discovery/Node types.
+- **Server-side Ed25519 signing for managed-settings payloads** (#151).
+  Enterprise fusion-code clients fetch remote policy (managed-settings) from
+  the gateway; the client recomputed a checksum locally but the checksum was
+  server-supplied, so a compromised/impersonating server could serve a
+  consistently-poisoned payload + matching checksum. New
+  `managed_settings` config block (default off): when enabled, the gateway
+  signs the payload with an Ed25519 private key (`private_key`, base64 32-byte
+  seed, env `FG_MANAGED_SETTINGS_PRIVATE_KEY`) and serves it at
+  `GET /gateway/v1/managed-settings` with a detached signature header
+  `X-Fusion-Signature: ed25519:<base64>`. The matching public key is exposed
+  at `GET /gateway/v1/managed-settings/pubkey` (`{"alg":"ed25519","public_key":"<base64>"}`)
+  for client pinning — clients verify the signature against a pinned key
+  before trusting the payload, so a server without the private key cannot
+  forge a valid payload. Payload served verbatim (not re-serialized) so the
+  signature is over the exact bytes received. Fail-closed: enabled + missing/
+  invalid key rejected at config load. Hot-reload rebuilds the signer for key
+  rotation without restart. Behind `withMiddleware` (fg-key auth).
 
 ## [0.9.12] - 2026-09-01
 
