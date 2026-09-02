@@ -648,6 +648,7 @@ The CLI and local clients can reach backend services on their **direct local por
 - fusion-mlx#756 — direct-port rejection + `X-Fusion-Tenant` scoping
 - fusion-memory#16 — direct-port rejection + tenant-scoped memory/KG stores
 - fusion-model-hub#53 — **implemented** (gateway-origin + `X-Fusion-Tenant` enforcement shipped)
+- fusion-rag#61 — **implemented** (fusion-kb renamed fusion-rag; gateway-origin + tenant scoping shipped)
 
 Until a backend ships its origin gate, that backend's direct port remains a tenant-isolation boundary the operator must protect at the network layer (bind to loopback, firewall the port, or run behind the gateway exclusively).
 
