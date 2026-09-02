@@ -623,6 +623,38 @@ team:
 - Team cost aggregation via `/admin/teams` — quota tracking per team
 - Key-to-team binding: `BindKeyToTeam(apiKey, teamID)` in TeamsStore
 
+## Multi-Tenant Isolation
+
+The gateway is the **authoritative source of tenant identity** for every proxied request. A request's tenant is derived from the credential (api_key → key→team binding via `GetTeamByKey`), never from a client-supplied header. This closes the cross-tenant spoofing vector in enterprise multi-tenant deployments (#150 Gap 1): a tenant-A api_key cannot reach tenant-B's backend data by sending a spoofed `X-Space-Id`, because the gateway stamps the authoritative tenant after authenticating the credential.
+
+### Gateway → backend contract
+
+On **every** outbound upstream request the gateway injects two headers:
+
+| Header | Value | Meaning |
+|--------|-------|---------|
+| `X-Fusion-Tenant` | `<team_id>` | **Authoritative tenant** for this request, derived solely from the credential. NOT in the client passthrough set — a client cannot set or override it. Omitted only for master/legacy keys with no team binding (single-tenant default). |
+| `X-Fusion-Route` | `gateway-decision` | **Origin signal** — the request passed through the gateway's auth + tenant derivation. A request reaching a backend without this header did NOT originate from the gateway. |
+
+Backends (fusion-mlx, fusion-memory, fusion-model-hub, ...) consume these as follows:
+
+- **`X-Fusion-Tenant` is the tenant** — scope all per-tenant state (model access, KV cache, memory records, KG nodes, KB bases, RAG indexes) by this value. Ignore any client-supplied `X-Space-Id` (non-authoritative passthrough).
+- **`X-Fusion-Route` is the origin gate** — when tenant isolation is enabled on the backend, reject `/v1/*` (or equivalent) requests missing `X-Fusion-Route: gateway-decision` with 403. This prevents a direct-port caller from bypassing the gateway's tenant derivation entirely.
+
+### Direct-port rejection (backend-side, upstream)
+
+The CLI and local clients can reach backend services on their **direct local ports** (fusion-mlx :11434, fusion-memory :11435, ...) without going through the gateway. The gateway cannot close this on its own — each backend must enforce the origin gate. This is tracked as upstream issues:
+
+- fusion-mlx#756 — direct-port rejection + `X-Fusion-Tenant` scoping
+- fusion-memory#16 — direct-port rejection + tenant-scoped memory/KG stores
+- fusion-model-hub#53 — **implemented** (gateway-origin + `X-Fusion-Tenant` enforcement shipped)
+
+Until a backend ships its origin gate, that backend's direct port remains a tenant-isolation boundary the operator must protect at the network layer (bind to loopback, firewall the port, or run behind the gateway exclusively).
+
+### HA routing for multi-instance fusion-mlx
+
+When multiple fusion-mlx instances are deployed, enable `cluster.ha_routing` (default off) so the gateway load-balances `/v1/*` across healthy mac-platform peers at P0.25, before the single-local-upstream path — transparent failover for clients. See [Routing Logic](#routing-logic) and the `cluster.ha_routing` config block.
+
 ## Semantic Cache
 
 Similarity-based caching using cosine similarity on prompt embeddings. Avoids re-computing identical or near-identical requests.
