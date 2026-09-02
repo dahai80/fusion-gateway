@@ -531,6 +531,38 @@ team:
 - 通过 `/admin/teams` 团队成本聚合 — 按团队跟踪配额
 - key 与团队绑定:TeamsStore 中的 `BindKeyToTeam(apiKey, teamID)`
 
+## 多租户隔离
+
+网关是每个代理请求的**权威租户身份来源**。请求的租户由凭据派生（api_key → key→team 绑定，经 `GetTeamByKey` 解析），从不来自客户端提供的 header。这关闭了企业多租户部署中的跨租户伪造向量（#150 Gap 1）：租户 A 的 api_key 无法通过伪造 `X-Space-Id` 访问租户 B 的后端数据，因为网关在认证凭据后加盖权威租户。
+
+### 网关 → 后端契约
+
+在每个出站上游请求上，网关注入两个 header：
+
+| Header | 值 | 含义 |
+|--------|-------|---------|
+| `X-Fusion-Tenant` | `<team_id>` | 此请求的**权威租户**，仅由凭据派生。不在客户端透传集合中——客户端无法设置或覆盖。仅对无 team 绑定的 master/legacy key 省略（单租户默认）。 |
+| `X-Fusion-Route` | `gateway-decision` | **来源信号**——请求经过了网关的认证 + 租户派生。后端收到的请求若缺少此 header，则未经过网关。 |
+
+后端（fusion-mlx、fusion-memory、fusion-model-hub 等）按以下方式消费：
+
+- **`X-Fusion-Tenant` 即租户**——按此值限定所有按租户隔离的状态（模型访问、KV cache、memory 记录、KG 节点、KB 库、RAG 索引）。忽略任何客户端提供的 `X-Space-Id`（非权威透传）。
+- **`X-Fusion-Route` 即来源门**——当后端启用租户隔离时，拒绝缺少 `X-Fusion-Route: gateway-decision` 的 `/v1/*`（或等价）请求并返回 403。这阻止直连端口的调用者完全绕过网关的租户派生。
+
+### 直连端口拒绝（后端侧，上游）
+
+CLI 和本地客户端可在后端服务的**直连本地端口**（fusion-mlx :11434、fusion-memory :11435 等）上访问它们，而无需经过网关。网关无法自行关闭此路径——每个后端必须自行强制来源门。已作为上游 issue 跟踪：
+
+- fusion-mlx#756 — 直连端口拒绝 + `X-Fusion-Tenant` 作用域
+- fusion-memory#16 — 直连端口拒绝 + 租户作用域 memory/KG 存储
+- fusion-model-hub#53 — **已实现**（gateway-origin + `X-Fusion-Tenant` 强制已发布）
+
+在后端发布其来源门之前，该后端的直连端口仍是租户隔离边界，运维人员需在网络层保护（绑定 loopback、防火墙端口，或仅通过网关运行）。
+
+### 多实例 fusion-mlx 的 HA 路由
+
+当部署多个 fusion-mlx 实例时，启用 `cluster.ha_routing`（默认关闭），网关在 P0.25 将 `/v1/*` 在健康的 mac 平台节点间负载均衡，先于单本地上游路径——对客户端透明的故障转移。参见[路由逻辑](#路由逻辑)与 `cluster.ha_routing` 配置块。
+
 ## 语义缓存
 
 基于 prompt embedding 余弦相似度的相似度缓存。避免重复计算相同或近似请求。
