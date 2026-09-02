@@ -556,6 +556,7 @@ CLI 和本地客户端可在后端服务的**直连本地端口**（fusion-mlx :
 - fusion-mlx#756 — 直连端口拒绝 + `X-Fusion-Tenant` 作用域
 - fusion-memory#16 — 直连端口拒绝 + 租户作用域 memory/KG 存储
 - fusion-model-hub#53 — **已实现**（gateway-origin + `X-Fusion-Tenant` 强制已发布）
+- fusion-rag#61 — **已实现**（fusion-kb 改名 fusion-rag；gateway-origin + 租户作用域已发布）
 
 在后端发布其来源门之前，该后端的直连端口仍是租户隔离边界，运维人员需在网络层保护（绑定 loopback、防火墙端口，或仅通过网关运行）。
 
