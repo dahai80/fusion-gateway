@@ -48,6 +48,12 @@ const (
     // cost stay consistent).
     teamQuotaUsedPrefix = "fusion:team:quota_used:"
     teamCostAccumPrefix = "fusion:team:cost_accum:"
+    // #159: per-tenant daily cost counter. Reset to 0 when the date suffix
+    // changes (keyed fusion:team:daily:<teamID>:<YYYY-MM-DD>) so the daily cap
+    // rolls over at local midnight without a background sweep. The Lua script
+    // in AddTeamCostDaily writes both cumulative + the dated daily key in one
+    // atomic EVAL.
+    teamDailyPrefix = "fusion:team:daily:"
 )
 
 type RedisStore struct {
@@ -555,29 +561,47 @@ func (r *RedisStore) GetTeamByKey(apiKey string) (*store.Team, error) {
     return r.GetTeam(teamID)
 }
 
-// addTeamCostScript atomically increments BOTH the team quota-used counter and
-// the lifetime cost-accumulated counter in a single Redis EVAL. R4 (audit P1):
-// two separate INCRBYFLOAT calls are each atomic but not transactional — if the
-// second failed after the first succeeded, the two counters diverge (quota used
-// charged but lifetime cost not recorded, or vice versa). KEYS[1]=quota-used,
-// KEYS[2]=cost-accum, ARGV[1]=cost. Returns the new quota-used so the caller
-// can log it; the script itself cannot error on a well-formed INCRBYFLOAT.
+// addTeamCostScript atomically increments the team quota-used counter, the
+// lifetime cost-accumulated counter, AND the dated daily counter in a single
+// Redis EVAL. R4 (audit P1): two separate INCRBYFLOAT calls are each atomic
+// but not transactional — if the second failed after the first succeeded, the
+// counters diverge. KEYS[1]=quota-used, KEYS[2]=cost-accum, KEYS[3]=daily,
+// ARGV[1]=cost, ARGV[2]=daily-ttl-seconds. The daily key carries a date suffix
+// so rollover is implicit (a new date = a new key starting at 0); a short TTL
+// reaps stale dated keys after the cap window passes. Returns the new
+// quota-used; the script cannot error on a well-formed INCRBYFLOAT.
 const addTeamCostScript = `
 local used = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
 redis.call('INCRBYFLOAT', KEYS[2], ARGV[1])
+redis.call('INCRBYFLOAT', KEYS[3], ARGV[1])
+redis.call('EXPIRE', KEYS[3], ARGV[2])
 return used
 `
 
+// dailyTeamQuotaTTL is the expiry on the dated daily counter key. Set to 48h so
+// a late request near midnight does not lose its record before the admin can
+// inspect it, while stale dated keys from past days are reaped automatically.
+const dailyTeamQuotaTTL = 48 * 60 * 60
+
 func (r *RedisStore) AddTeamCost(teamID string, cost float64) error {
+    return r.addTeamCostDaily(teamID, time.Now().Format("2006-01-02"), cost)
+}
+
+// addTeamCostDaily is the #159 variant: it also increments the per-tenant daily
+// counter (keyed by date) so CheckTeamQuota can enforce a DailyQuotaLimit that
+// rolls over at local midnight. date is "YYYY-MM-DD"; injected so tests can
+// simulate day boundaries without touching the clock.
+func (r *RedisStore) addTeamCostDaily(teamID, date string, cost float64) error {
     // R4 (audit P1): atomic Lua INCRBYFLOAT on dedicated counters, NOT a
     // GetTeam -> mutate QuotaUsed+CostAccumulated -> UpdateTeam blob RMW. The
     // RMW lost a cost on every concurrent AddCost across gateway instances
     // (team billing double-spend): both read the same values, each adds its
-    // cost, each writes back — one cost lost. The Lua script applies both
+    // cost, each writes back — one cost lost. The Lua script applies all
     // increments in one atomic Redis op so the counters stay consistent. The
-    // team blob's QuotaUsed/CostAccumulated fields are NOT updated here (they
-    // are the non-atomic RMW victim, same tradeoff as AH1's per-key path); the
-    // dedicated counters are the authoritative source read by CheckTeamQuota.
+    // team blob's QuotaUsed/CostAccumulated/DailyQuotaUsed fields are NOT
+    // updated here (they are the non-atomic RMW victim, same tradeoff as AH1's
+    // per-key path); the dedicated counters are the authoritative source read
+    // by CheckTeamQuota.
     ctx, cancel := r.withTimeout(redisOpTimeout)
     defer cancel()
     if _, err := r.client.Get(ctx, teamPrefix+teamID).Result(); err != nil {
@@ -585,10 +609,13 @@ func (r *RedisStore) AddTeamCost(teamID string, cost float64) error {
     }
     quotaKey := teamQuotaUsedPrefix + teamID
     costKey := teamCostAccumPrefix + teamID
-    if err := r.client.Eval(ctx, addTeamCostScript, []string{quotaKey, costKey}, cost).Err(); err != nil {
+    dailyKey := teamDailyPrefix + teamID + ":" + date
+    if err := r.client.Eval(ctx, addTeamCostScript,
+        []string{quotaKey, costKey, dailyKey}, cost, dailyTeamQuotaTTL).Err(); err != nil {
         return fmt.Errorf("add team cost atomic increment failed: %w", err)
     }
-    slog.Debug("team cost added atomically", "team", teamID, "amount", cost)
+    slog.Debug("team cost added atomically (cumulative + daily)",
+        "team", teamID, "amount", cost, "date", date)
     return nil
 }
 
@@ -600,6 +627,12 @@ func (r *RedisStore) CheckTeamQuota(teamID string) (limit, used float64, ok bool
     // (admin-set, never mutated by the cost path). A missing counter reads as
     // 0 (no cost recorded yet) — matches the memory store's fresh-team
     // semantics, not a hard error.
+    //
+    // #159: also enforces the per-tenant DailyQuotaLimit against the dated
+    // daily counter. The daily key is implicit-rollover (new date = new key),
+    // so there is no background sweep. If the daily cap is exceeded the request
+    // is refused even when the cumulative cap has room — daily caps protect
+    // against a single-day burst exhausting a monthly budget.
     ctx, cancel := r.withTimeout(redisOpTimeout)
     defer cancel()
     team, err := r.GetTeam(teamID)
@@ -613,6 +646,24 @@ func (r *RedisStore) CheckTeamQuota(teamID string) (limit, used float64, ok bool
     used, _ = strconv.ParseFloat(usedStr, 64)
     limit = team.QuotaLimit
     ok = used < limit
+    if !ok {
+        return limit, used, ok, nil
+    }
+    // Daily cap: a zero/negative DailyQuotaLimit means no daily ceiling.
+    if team.DailyQuotaLimit > 0 {
+        date := time.Now().Format("2006-01-02")
+        dailyStr, derr := r.client.Get(ctx, teamDailyPrefix+teamID+":"+date).Result()
+        if derr != nil && derr != redis.Nil {
+            return limit, used, false, fmt.Errorf("team daily quota read failed: %w", derr)
+        }
+        dailyUsed, _ := strconv.ParseFloat(dailyStr, 64)
+        if dailyUsed >= team.DailyQuotaLimit {
+            ok = false
+            slog.Warn("tenant daily quota exceeded",
+                "team", teamID, "daily_used", dailyUsed,
+                "daily_limit", team.DailyQuotaLimit, "date", date)
+        }
+    }
     return limit, used, ok, nil
 }
 

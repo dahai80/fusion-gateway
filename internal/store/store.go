@@ -177,6 +177,13 @@ type Team struct {
     Members         []TeamMember `json:"members"`
     AllowedModels   []string     `json:"allowed_models,omitempty"`
     CostAccumulated float64      `json:"cost_accumulated"`
+    // #159 multi-tenant quota: tier (heavy/general/light) drives the
+    // priority-queue admission class; DailyQuotaLimit is a per-tenant
+    // daily-reset USD cap enforced above multi-node (which stays Redis-free).
+    Tier            string  `json:"tier,omitempty"`
+    DailyQuotaLimit float64 `json:"daily_quota_limit,omitempty"`
+    DailyQuotaUsed  float64 `json:"daily_quota_used,omitempty"`
+    DailyQuotaDate  string  `json:"daily_quota_date,omitempty"`
     CreatedAt       time.Time    `json:"created_at"`
     UpdatedAt       time.Time    `json:"updated_at"`
 }

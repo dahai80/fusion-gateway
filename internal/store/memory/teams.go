@@ -268,10 +268,19 @@ func (s *TeamsStore) AddCost(teamID string, cost float64) error {
         s.mu.Unlock()
         return fmt.Errorf("team %s not found", teamID)
     }
+    today := time.Now().Format("2006-01-02")
+    // #159: daily rollover — a new calendar day zeros the daily counter. No
+    // background sweep; the first request of the day flips the date and resets.
+    if team.DailyQuotaDate != today {
+        team.DailyQuotaUsed = 0
+        team.DailyQuotaDate = today
+    }
     team.QuotaUsed += cost
     team.CostAccumulated += cost
+    team.DailyQuotaUsed += cost
     team.UpdatedAt = time.Now()
-    slog.Debug("cost added to team", "team", teamID, "cost", cost, "total", team.CostAccumulated)
+    slog.Debug("cost added to team", "team", teamID, "cost", cost,
+        "total", team.CostAccumulated, "daily", team.DailyQuotaUsed, "date", today)
     s.mu.Unlock()
     // F2/P1: persist quota via the debounced path (not the per-request full
     // metadata rewrite). See SetQuotaPersist / FlushQuota. Lock released before
@@ -288,6 +297,26 @@ func (s *TeamsStore) CheckQuota(teamID string) (float64, float64, bool) {
     team, exists := s.teams[teamID]
     if !exists {
         return 0, 0, false
+    }
+    if team.QuotaUsed >= team.QuotaLimit {
+        return team.QuotaLimit, team.QuotaUsed, false
+    }
+    // #159: per-tenant daily cap. A zero/negative DailyQuotaLimit means no
+    // daily ceiling. Roll the daily counter if the date has advanced so a
+    // check after midnight reads fresh usage (AddCost rolls too, but a check
+    // with no new cost must still see a rolled value).
+    if team.DailyQuotaLimit > 0 {
+        today := time.Now().Format("2006-01-02")
+        dailyUsed := team.DailyQuotaUsed
+        if team.DailyQuotaDate != today {
+            dailyUsed = 0
+        }
+        if dailyUsed >= team.DailyQuotaLimit {
+            slog.Warn("tenant daily quota exceeded",
+                "team", teamID, "daily_used", dailyUsed,
+                "daily_limit", team.DailyQuotaLimit, "date", today)
+            return team.QuotaLimit, team.QuotaUsed, false
+        }
     }
     return team.QuotaLimit, team.QuotaUsed, team.QuotaUsed < team.QuotaLimit
 }

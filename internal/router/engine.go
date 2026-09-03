@@ -151,6 +151,12 @@ type Engine struct {
     // engine) calls Acquire before forwarding; the engine stays pure (no
     // blocking). QueueTimeout lives in config so hot-reload can tune it.
     localQueue *slotQueue
+    // tierQueue is the #159 3-tier priority admission queue (heavy/general/
+    // light), an opt-in alternative to localQueue engaged when
+    // routing.tier_queue.enabled (still requires mode=local). nil otherwise —
+    // the handler falls back to localQueue (single-tier) or no queue. The
+    // handler gates before forwarding; the engine stays pure (no blocking).
+    tierQueue *TierQueue
 }
 
 // routeSnapshot is the read-only capture of every wiring field Decide needs,
@@ -197,6 +203,10 @@ func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Eng
     // to cloud (no queue), so localQueue stays nil and the handler never
     // gates — zero behavior change for the default hybrid path.
     e.localQueue = buildLocalQueue(cfg)
+    // #159: opt-in 3-tier priority queue (alternative to localQueue). Still
+    // mode=local only; tier_queue.enabled gates it independently. The handler
+    // prefers tierQueue when set, else localQueue.
+    e.tierQueue = buildTierQueue(cfg)
 
     return e
 }
@@ -323,9 +333,17 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     oldQueueState := queueStateString(e.localQueue)
     e.localQueue = buildLocalQueue(cfg)
     newQueueState := queueStateString(e.localQueue)
+    // #159 RR6 parity: rebuild the tier queue on hot-reload so a tier_queue
+    // toggle is not a silent no-op (same contract as localQueue above).
+    oldTierEnabled := e.tierQueue != nil
+    e.tierQueue = buildTierQueue(cfg)
+    newTierEnabled := e.tierQueue != nil
     e.inFlightMu.Unlock()
     if oldQueueState != newQueueState {
         slog.Info("config applied: local queue rebuilt", "version", cfg.Version, "before", oldQueueState, "after", newQueueState)
+    }
+    if oldTierEnabled != newTierEnabled {
+        slog.Info("config applied: tier queue rebuilt", "version", cfg.Version, "before_enabled", oldTierEnabled, "after_enabled", newTierEnabled)
     }
 
     // EI3: inherit the OLD breakers' trip state onto the NEW ones. Without
@@ -410,6 +428,15 @@ func (e *Engine) LocalQueue() *slotQueue {
     e.inFlightMu.RLock()
     defer e.inFlightMu.RUnlock()
     return e.localQueue
+}
+
+// LocalTierQueue exposes the #159 opt-in 3-tier priority queue. Returns nil
+// when disabled — callers MUST nil-check. The handler prefers this over
+// LocalQueue when set so a #159-enabled deployment gets tiered admission.
+func (e *Engine) LocalTierQueue() *TierQueue {
+    e.inFlightMu.RLock()
+    defer e.inFlightMu.RUnlock()
+    return e.tierQueue
 }
 
 // Shutdown releases engine-owned background goroutines. B9: the session

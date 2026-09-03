@@ -656,6 +656,53 @@ Until a backend ships its origin gate, that backend's direct port remains a tena
 
 When multiple fusion-mlx instances are deployed, enable `cluster.ha_routing` (default off) so the gateway load-balances `/v1/*` across healthy mac-platform peers at P0.25, before the single-local-upstream path — transparent failover for clients. See [Routing Logic](#routing-logic) and the `cluster.ha_routing` config block.
 
+## Tenant Quotas, Priority Queues, Dual-Master LB (#159)
+
+Three opt-in features for multi-tenant local-first deployments. All default-off; a single-node deployment with no tenant config is behaviorally unchanged.
+
+### Per-tenant daily quotas (#159-A)
+
+Each team (tenant) can carry a daily cost cap (`DailyQuotaLimit`, USD) and a per-key request budget. The gateway enforces this **above** the inference pool — a tenant that exhausts its daily budget is blocked at the `BudgetBlock` middleware (fail-closed) before any local slot is consumed. Quota is auto-deducted at every cost-record site (chat, streaming, embeddings, rerank) via a single `recordAndCharge` sink, in both the in-memory store (date-compare rollover, no background sweep) and the Redis store (Lua atomic `INCRBYFLOAT` + `EXPIRE` on a dated daily key). A tenant's `Tier` tag (heavy/general/light) is carried from the credential-bound team onto the request `Principal`.
+
+```yaml
+# teams are managed via /admin/api/teams; each team may set:
+#   daily_quota_limit: 5.0      # USD/day cap (0 = unlimited)
+#   tier: "heavy"               # admission class (see priority queues)
+```
+
+The `BudgetBlock` middleware checks the team daily quota **after** the per-key check, **before** the request reaches the router: exceeded → 403, store error → 503 (fail-closed). Daily counters roll over implicitly on date change — no reaper goroutine needed.
+
+### 3-tier priority admission queue (#159-B)
+
+For local mode under contention, an opt-in priority queue (`routing.tier_queue`) admits requests by class — **heavy** (diffusion, heavy models, or a tenant tagged heavy) gets head-of-line dispatch so a burst of light chat cannot starve a long generation behind it; **light** (embeddings, short chat) gets lowest priority; **general** is the default. Within a tier, FIFO order is preserved. The tenant `Tier` tag wins over the coarse intent heuristic (a tenant that paid for the heavy class is admitted at heavy priority regardless of request shape).
+
+```yaml
+routing:
+  tier_queue:
+    enabled: true               # default false
+    max_concurrent: 2           # local slot cap (clamped >=1)
+    queue_timeout: 30s          # 429 after this if no slot frees
+    heavy_guarantee: 1          # reserved slots for heavy (sum <= max_concurrent)
+    light_guarantee: 0          # reserved slots for light
+```
+
+A `committed` flag closes the dispatch race: a client cancel or timeout landing *after* a slot was handed off does not steal or leak the slot — the goroutine returns the release closure so the slot is eventually freed. The queue rebuilds on hot-reload (RR6 parity). Engaged only in `mode: local`; hybrid mode falls back to cloud rather than queueing.
+
+### Dual-master active-active load balancing (#159-C)
+
+In cluster `master` mode, the gateway can now front **multiple** fusion-multi-node masters (e.g. `:11452` + `:11453` behind Traefik or directly) with a least-conn pool + health-check failover. Each master sync call (`/api/nodes`, `/api/routing/summary`) is routed to the pooled master with the fewest in-flight requests; on error the call fails over to the next candidate before returning. A failing master is circuit-cooled with exponential backoff (5s → 2m cap) and skipped by selection unless no healthy peer remains (fail-open). The singular `cluster.master.address` remains supported for backward-compat — when only it is set, the pool degrades to a single-element list identical to pre-#159 behavior.
+
+```yaml
+cluster:
+  mode: master
+  master:
+    addresses:                  # #159-C: dual-master active-active
+      - "http://127.0.0.1:11452"
+      - "http://127.0.0.1:11453"
+    shared_token: "..."
+    # address: "http://127.0.0.1:11452"   # legacy singular (still works)
+```
+
 ## Identity Control Plane (#157)
 
 Optional integration with [`fusion-identity`](https://github.com/dahai80/fusion-identity) — a high-frequency gRPC control plane that atomically authenticates + acquires a concurrency lease before inference reaches fusion-mlx. Disabled by default (`identity.enabled: false`); the local `APIKeyAuthWithStore` path remains the auth path when disabled or when identity is unreachable with `fallback_to_local: true`.

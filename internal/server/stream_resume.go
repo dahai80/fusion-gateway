@@ -372,13 +372,8 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     if s.latencyTracker != nil {
         s.latencyTracker.Record(provider.Name(), time.Duration(duration*float64(time.Second)))
     }
-    if s.costTracker != nil {
-        keyName := "anonymous"
-        if kc := middleware.GetAuthKeyConfig(ctx); kc != nil && kc.Name != "" {
-            keyName = kc.Name
-        }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, outputTokens)
-    }
+    // Cost tracking (#159: record + charge quota in one sink)
+    s.recordAndCharge(ctx, string(decision.Backend), req.Model, budget.InputTokens, outputTokens)
     // Buffer is retained for the TTL reconnect window — NOT released here.
     // reapExpiredStreamBuffers evicts past-TTL entries.
 }

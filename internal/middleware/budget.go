@@ -55,6 +55,28 @@ func BudgetBlock(st store.Store) func(http.Handler) http.Handler {
                 return
             }
 
+            // #159: per-tenant (team) daily quota check. The gateway is the
+            // quota authority above multi-node (which stays Redis-free); this
+            // gate enforces a tenant's DailyQuotaLimit before a request enters
+            // the inference pool. Fail-closed mirrors the per-key path. Only
+            // checked when a team is bound and configured a daily cap; the
+            // cumulative QuotaLimit cap is still owned by CheckTeamQuota.
+            if p := PrincipalFromContext(r.Context()); p != nil && p.Team != nil && p.Team.ID != "" {
+                _, _, teamOk, teamErr := st.CheckTeamQuota(p.Team.ID)
+                if teamErr != nil {
+                    slog.Error("tenant budget check failed, refusing request (fail-closed)",
+                        "team", p.Team.ID, "error", teamErr)
+                    http.Error(w, `{"error":{"message":"Tenant quota check unavailable","type":"quota_error"}}`, http.StatusServiceUnavailable)
+                    return
+                }
+                if !teamOk {
+                    slog.Warn("tenant budget exceeded, blocking request",
+                        "team", p.Team.ID)
+                    http.Error(w, `{"error":{"message":"Tenant quota exceeded","type":"quota_error"}}`, http.StatusForbidden)
+                    return
+                }
+            }
+
             next.ServeHTTP(w, r)
         })
     }

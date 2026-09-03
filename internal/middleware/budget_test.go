@@ -14,10 +14,13 @@ import (
 )
 
 type mockBudgetStore struct {
-    used     float64
-    limit    float64
-    exceeded bool
-    err      error
+    used          float64
+    limit         float64
+    exceeded      bool
+    err           error
+    teamOk        bool
+    teamErr       error
+    teamCallCount int
 }
 
 func (m *mockBudgetStore) AppendLog(log *store.RequestLog) error                    { return nil }
@@ -72,7 +75,8 @@ func (m *mockBudgetStore) BindKeyToTeam(apiKey, teamID string) error            
 func (m *mockBudgetStore) GetTeamByKey(apiKey string) (*store.Team, error)          { return nil, nil }
 func (m *mockBudgetStore) AddTeamCost(teamID string, cost float64) error            { return nil }
 func (m *mockBudgetStore) CheckTeamQuota(teamID string) (limit, used float64, ok bool, err error) {
-    return 0, 0, true, nil
+    m.teamCallCount++
+    return 0, 0, m.teamOk, m.teamErr
 }
 func (m *mockBudgetStore) AddTeamMember(teamID, userID, role string) error          { return nil }
 func (m *mockBudgetStore) RemoveTeamMember(teamID, userID string) error             { return nil }
@@ -212,5 +216,75 @@ func TestBudgetBlock_StoreError(t *testing.T) {
     handler.ServeHTTP(rec, req)
     if rec.Code != http.StatusServiceUnavailable {
         t.Fatalf("expected 503 on store error (fail-closed), got %d", rec.Code)
+    }
+}
+
+// #159: per-tenant daily quota gate. A bound team with its daily cap exceeded
+// is blocked at admission (403) even when the per-key budget is fine. The
+// gateway is the quota authority above multi-node, so the tenant cap must fire
+// before the request enters the inference pool.
+func TestBudgetBlock_TeamQuotaExceeded(t *testing.T) {
+    slog.Info("test BudgetBlock_TeamQuotaExceeded (#159)")
+    st := &mockBudgetStore{used: 50, limit: 100, exceeded: false, teamOk: false}
+    p := &Principal{
+        KeyConfig: &config.AuthKeyConfig{Name: "test", BudgetLimit: 100},
+        Team:      &TeamInfo{ID: "teamA", Name: "Team A"},
+    }
+    ctx := ContextWithPrincipal(context.Background(), p)
+    handler := BudgetBlock(st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler when tenant cap exceeded")
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusForbidden {
+        t.Fatalf("expected 403 on tenant quota exceeded, got %d", rec.Code)
+    }
+}
+
+// #159: per-tenant gate fail-closed. A tenant-quota store error refuses the
+// request (503), mirroring the per-key AH5 fail-closed contract.
+func TestBudgetBlock_TeamQuotaStoreError(t *testing.T) {
+    slog.Info("test BudgetBlock_TeamQuotaStoreError (#159: fail-closed, expect 503)")
+    st := &mockBudgetStore{used: 50, limit: 100, exceeded: false, teamErr: errors.New("redis down")}
+    p := &Principal{
+        KeyConfig: &config.AuthKeyConfig{Name: "test", BudgetLimit: 100},
+        Team:      &TeamInfo{ID: "teamA", Name: "Team A"},
+    }
+    ctx := ContextWithPrincipal(context.Background(), p)
+    handler := BudgetBlock(st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Error("handler must NOT be called on tenant store error (fail-closed)")
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusServiceUnavailable {
+        t.Fatalf("expected 503 on tenant store error, got %d", rec.Code)
+    }
+}
+
+// #159: a bound team under its daily cap passes; team quota IS checked.
+func TestBudgetBlock_TeamQuotaUnderLimit(t *testing.T) {
+    slog.Info("test BudgetBlock_TeamQuotaUnderLimit (#159)")
+    st := &mockBudgetStore{used: 50, limit: 100, exceeded: false, teamOk: true}
+    p := &Principal{
+        KeyConfig: &config.AuthKeyConfig{Name: "test", BudgetLimit: 100},
+        Team:      &TeamInfo{ID: "teamA", Name: "Team A"},
+    }
+    ctx := ContextWithPrincipal(context.Background(), p)
+    handler := BudgetBlock(st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req = req.WithContext(ctx)
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 with team under cap, got %d", rec.Code)
+    }
+    if st.teamCallCount != 1 {
+        t.Fatalf("expected team quota checked once, got %d", st.teamCallCount)
     }
 }

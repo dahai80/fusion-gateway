@@ -261,6 +261,56 @@ func (s *Server) GetStore() store.Store {
     return s.store
 }
 
+// chargeQuota deducts a billed cost from BOTH the per-key quota (cumulative +
+// daily in the memory store's per-key path) and the per-tenant/team quota
+// (cumulative + daily via AddTeamCost). #159: prior to this the gateway metered
+// cost for the /v1/cost dashboard but never decremented any budget counter on
+// the request path — BudgetBlock checked at request start, so a key could spend
+// past its cap within a single check window, and team quotas were enforced
+// nowhere on the hot path. Both deductions are best-effort: a store error is
+// logged, never surfaced, because the inference response is already delivered
+// to the client (the deduction runs at stream/completion end). keyName/teamID
+// empty → skip that leg (anonymous/master key has no budget; unbound key has
+// no team).
+func (s *Server) chargeQuota(keyName, teamID string, costUSD float64) {
+    if costUSD <= 0 || s.store == nil {
+        return
+    }
+    if keyName != "" && keyName != "anonymous" && keyName != "master" {
+        if err := s.store.DeductQuota(keyName, costUSD); err != nil {
+            slog.Debug("per-key quota deduct failed (best-effort)",
+                "key", keyName, "cost", costUSD, "error", err)
+        }
+    }
+    if teamID != "" {
+        if err := s.store.AddTeamCost(teamID, costUSD); err != nil {
+            slog.Debug("per-tenant quota deduct failed (best-effort)",
+                "team", teamID, "cost", costUSD, "error", err)
+        }
+    }
+}
+
+// recordAndCharge is the #159 request-path cost sink: it records the usage into
+// the cost tracker (for /v1/cost + analytics) AND deducts the billed cost from
+// the per-key + per-tenant quota counters. Replaces the prior
+// costTracker.Record-only call sites so a request actually decrements the
+// budget it consumed. ctx carries the Principal (key name + bound team).
+func (s *Server) recordAndCharge(ctx context.Context, backend, model string, promptTokens, completionTokens int) {
+    if s.costTracker == nil {
+        return
+    }
+    keyName := "anonymous"
+    teamID := ""
+    if keyCfg := middleware.GetAuthKeyConfig(ctx); keyCfg != nil && keyCfg.Name != "" {
+        keyName = keyCfg.Name
+    }
+    if p := middleware.PrincipalFromContext(ctx); p != nil && p.Team != nil {
+        teamID = p.Team.ID
+    }
+    billed := s.costTracker.RecordAndReturn(keyName, backend, model, promptTokens, completionTokens)
+    s.chargeQuota(keyName, teamID, billed)
+}
+
 func (s *Server) Cache() *cache.Cache {
     return s.cache
 }

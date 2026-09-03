@@ -11,6 +11,38 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 _No unreleased changes._
 
+## [0.9.17] - 2026-09-03
+
+### Added
+- **Per-tenant daily quotas (#159-A)**. Each team may carry a `DailyQuotaLimit`
+  (USD/day) cap enforced above the inference pool: a tenant that exhausts its
+  daily budget is blocked at the `BudgetBlock` middleware (fail-closed) before
+  any local slot is consumed. Quota auto-deducts at every cost-record site
+  (chat, streaming, embeddings, rerank) via a single `recordAndCharge` sink,
+  in both the in-memory store (date-compare rollover, no background sweep) and
+  the Redis store (Lua atomic `INCRBYFLOAT` + `EXPIRE` on a dated daily key).
+  The tenant `Tier` tag is carried from the credential-bound team onto the
+  request `Principal`.
+
+- **3-tier priority admission queue (#159-B)**. Opt-in `routing.tier_queue`
+  (default off, `mode: local` only) admits requests by class — heavy
+  (diffusion, heavy models, or a tenant tagged heavy) gets head-of-line
+  dispatch so a burst of light chat cannot starve a long generation; light
+  gets lowest priority; general is default. FIFO within a tier. The tenant
+  `Tier` tag wins over the coarse intent heuristic. A `committed` flag closes
+  the dispatch race (cancel/timeout after handoff does not steal or leak the
+  slot). Hot-reload rebuilds the queue (RR6 parity).
+
+- **Dual-master active-active load balancing (#159-C)**. Cluster `master` mode
+  can now front multiple fusion-multi-node masters via `cluster.master.addresses`
+  with a least-conn pool + health-check failover. Each sync call routes to the
+  pooled master with the fewest in-flight requests; on error the call fails
+  over to the next candidate. A failing master is circuit-cooled with
+  exponential backoff (5s → 2m cap) and skipped unless no healthy peer remains
+  (fail-open). The singular `cluster.master.address` remains supported
+  (backward-compat; single-element pool). `config.Validate` accepts either
+  field for master mode.
+
 ## [0.9.16] - 2026-09-03
 
 ### Fixed

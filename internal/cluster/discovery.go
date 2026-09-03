@@ -216,7 +216,9 @@ type Discovery struct {
     stopCh        chan struct{}
     running       atomic.Bool
     rrIndex       atomic.Uint64
-    masterClient  *MasterClient
+    // #159-C: masterClient is a MasterAPI (single *MasterClient or a
+    // dual-master active-active *masterPool). nil when not in master mode.
+    masterClient  MasterAPI
     // EI10: wg tracks the long-lived healthCheck/masterSync goroutine so Stop
     // joins (waits for exit) instead of just closing stopCh and racing a
     // mid-iteration stop that writes node state after Shutdown returned.
@@ -288,10 +290,14 @@ func NewDiscovery(cfg config.ClusterConfig) *Discovery {
         stopCh: make(chan struct{}),
     }
 
-    if cfg.Mode == config.ClusterModeMaster && cfg.Master.Address != "" {
-        d.masterClient = NewMasterClient(cfg.Master)
-        slog.Info("cluster discovery using master mode",
-            "master_address", cfg.Master.Address,
+    // #159-C: construct the master client as a pool when multiple addresses
+    // are configured (dual-master active-active), or a single-client pool when
+    // only the singular Address is set (backward-compat). NewMasterPool handles
+    // both shapes and returns nil when no address is configured.
+    if cfg.Mode == config.ClusterModeMaster && len(resolveMasterAddresses(cfg.Master)) > 0 {
+        d.masterClient = NewMasterPool(cfg.Master)
+        slog.Info("cluster discovery using master mode (#159-C pool)",
+            "masters", len(resolveMasterAddresses(cfg.Master)),
             "honor_master_strategy", !cfg.Master.IgnoreMasterStrategy)
     }
 

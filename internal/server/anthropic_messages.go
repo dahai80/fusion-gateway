@@ -176,7 +176,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     // /v1/chat/completions. LocalQueue() is nil unless mode=local +
     // queue_enabled, so hybrid/cloud is untouched. 429 on queue_timeout.
     if decision.Backend == router.LocalBackend {
-        if release, err := s.acquireLocalSlot(ctx); err != nil {
+        // #159: 3-tier admission class (tenant Tier tag + coarse intent).
+        tier := router.TierForRequest(coarseIntent{stream: antReq.Stream, model: antReq.Model}, tenantTierFromContext(ctx))
+        if release, err := s.acquireLocalSlot(ctx, tier); err != nil {
             slog.Warn("anthropic local slot queue rejected request", "reason", err.Error(), "model", antReq.Model)
             writeQueue429(w, err)
             return

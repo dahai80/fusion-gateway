@@ -126,14 +126,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
                     if s.latencyTracker != nil {
                         s.latencyTracker.Record(cloudProvider.Name(), embDuration)
                     }
-                    if s.costTracker != nil {
-                        keyCfg := middleware.GetAuthKeyConfig(ctx)
-                        keyName := "anonymous"
-                        if keyCfg != nil && keyCfg.Name != "" {
-                            keyName = keyCfg.Name
-                        }
-                        s.costTracker.Record(keyName, "cloud", cloudReq.Model, inputLen, 0)
-                    }
+                    // Cost tracking (#159: record + charge quota in one sink)
+                    s.recordAndCharge(ctx, "cloud", cloudReq.Model, inputLen, 0)
                     w.Header().Set("Content-Type", "application/json")
                     w.Header().Set("X-Route-Decision", "cloud:rr4_slot_full_redirect")
                     _ = json.NewEncoder(w).Encode(cloudResp)
@@ -155,14 +149,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     if s.latencyTracker != nil {
         s.latencyTracker.Record(provider.Name(), embDuration)
     }
-    if s.costTracker != nil {
-        keyCfg := middleware.GetAuthKeyConfig(ctx)
-        keyName := "anonymous"
-        if keyCfg != nil && keyCfg.Name != "" {
-            keyName = keyCfg.Name
-        }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, inputLen, 0)
-    }
+    // Cost tracking (#159: record + charge quota in one sink)
+    s.recordAndCharge(ctx, string(decision.Backend), req.Model, inputLen, 0)
 
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -261,14 +249,8 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
                     if s.latencyTracker != nil {
                         s.latencyTracker.Record(cloudProvider.Name(), duration)
                     }
-                    if s.costTracker != nil {
-                        keyCfg := middleware.GetAuthKeyConfig(ctx)
-                        keyName := "anonymous"
-                        if keyCfg != nil && keyCfg.Name != "" {
-                            keyName = keyCfg.Name
-                        }
-                        s.costTracker.Record(keyName, "cloud", cloudReq.Model, len(cloudReq.Documents), 0)
-                    }
+                    // Cost tracking (#159: record + charge quota in one sink)
+                    s.recordAndCharge(ctx, "cloud", cloudReq.Model, len(cloudReq.Documents), 0)
                     w.Header().Set("Content-Type", "application/json")
                     w.Header().Set("X-Route-Decision", "cloud:rr4_slot_full_redirect")
                     _ = json.NewEncoder(w).Encode(cloudResp)
@@ -293,14 +275,8 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     if s.latencyTracker != nil {
         s.latencyTracker.Record(provider.Name(), duration)
     }
-    if s.costTracker != nil {
-        keyCfg := middleware.GetAuthKeyConfig(ctx)
-        keyName := "anonymous"
-        if keyCfg != nil && keyCfg.Name != "" {
-            keyName = keyCfg.Name
-        }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, len(req.Documents), 0)
-    }
+    // Cost tracking (#159: record + charge quota in one sink)
+    s.recordAndCharge(ctx, string(decision.Backend), req.Model, len(req.Documents), 0)
 
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))

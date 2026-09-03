@@ -203,7 +203,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     // held for the whole inference; 429 on queue_timeout keeps the local box
     // from being overrun when cloud is off. Engine stays pure (no blocking).
     if decision.Backend == router.LocalBackend {
-        if release, err := s.acquireLocalSlot(ctx); err != nil {
+        // #159: derive the 3-tier admission class. The bound tenant's Tier tag
+        // wins (a tenant flagged "heavy" is admitted at heavy priority); else
+        // a coarse heuristic from the request (streaming + a large-model hint
+        // => heavy, embeddings/light chat => light, default general). The
+        // tier only matters when the opt-in TierQueue is configured; the
+        // single-tier slotQueue ignores it.
+        tier := router.TierForRequest(coarseIntent{stream: req.Stream, model: req.Model}, tenantTierFromContext(ctx))
+        if release, err := s.acquireLocalSlot(ctx, tier); err != nil {
             slog.Warn("local slot queue rejected request", "reason", err.Error(), "model", req.Model)
             writeQueue429(w, err)
             return
@@ -265,12 +272,64 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
 }
 
+// coarseIntent is a lightweight #159 admission heuristic when no semantic
+// Intent is carried on the RouteDecision. It maps request shape to a tier
+// label string understood by router.TierForRequest: streaming + a large-model
+// name hint => heavy_model, else lightweight. Real semantic intent (D4
+// classifier) is not threaded onto RouteDecision, so this is a coarse proxy
+// — the tenant Tier tag is the primary signal and usually set when #159 is
+// enabled.
+type coarseIntent struct {
+    stream bool
+    model  string
+}
+
+func (c coarseIntent) String() string {
+    if c.stream && isHeavyModelHint(c.model) {
+        return "heavy_model"
+    }
+    return "lightweight"
+}
+
+// isHeavyModelHint returns true for model ids that suggest a long/heavy
+// generation (large param count or known heavy family). Conservative: only
+// flags obvious heavy models so the default path stays "general".
+func isHeavyModelHint(model string) bool {
+    switch {
+    case strings.Contains(model, "70b"),
+        strings.Contains(model, "72b"),
+        strings.Contains(model, "405b"),
+        strings.Contains(model, "diffusion"),
+        strings.Contains(model, "dall"):
+        return true
+    }
+    return false
+}
+
+// tenantTierFromContext reads the bound tenant's Tier tag from the auth
+// Principal (#159). Empty when no team is bound or the team has no tier set.
+func tenantTierFromContext(ctx context.Context) string {
+    p := middleware.PrincipalFromContext(ctx)
+    if p == nil || p.Team == nil {
+        return ""
+    }
+    return p.Team.Tier
+}
+
 // acquireLocalSlot gates a local-backend forward on the opt-in wait-queue
-// (#102 ADR-001 sub-task 3). Returns a release closure the caller MUST defer.
-// When the queue is disabled (hybrid/cloud, or mode=local without
-// queue_enabled) it returns a no-op release + nil error immediately — zero
-// behavior change. On timeout returns ErrQueueTimeout (caller writes 429).
-func (s *Server) acquireLocalSlot(ctx context.Context) (func(), error) {
+// (#102 ADR-001 sub-task 3, extended by #159 3-tier priority). Returns a
+// release closure the caller MUST defer. When both queues are disabled
+// (hybrid/cloud, or mode=local without queue_enabled) it returns a no-op
+// release + nil error immediately — zero behavior change. On timeout returns
+// ErrQueueTimeout / ErrTierQueueTimeout (caller writes 429).
+//
+// #159: prefers the 3-tier TierQueue when configured (tiered admission by
+// heavy/general/light), falling back to the single-tier slotQueue otherwise.
+// tier is the admission class derived from the request intent + tenant tag.
+func (s *Server) acquireLocalSlot(ctx context.Context, tier router.Tier) (func(), error) {
+    if tq := s.router.LocalTierQueue(); tq != nil {
+        return tq.Acquire(ctx, tier)
+    }
     q := s.router.LocalQueue()
     if q == nil {
         return func() {}, nil
@@ -688,15 +747,8 @@ streamDone:
         s.latencyTracker.Record(provider.Name(), time.Duration(duration*float64(time.Second)))
     }
 
-    // Cost tracking for stream
-    if s.costTracker != nil {
-        keyCfg := middleware.GetAuthKeyConfig(ctx)
-        keyName := "anonymous"
-        if keyCfg != nil && keyCfg.Name != "" {
-            keyName = keyCfg.Name
-        }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, outputTokens)
-    }
+    // Cost tracking for stream (#159: record + charge quota in one sink)
+    s.recordAndCharge(ctx, string(decision.Backend), req.Model, budget.InputTokens, outputTokens)
 }
 
 func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time, tenantName string) {
@@ -808,14 +860,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                     if s.latencyTracker != nil {
                         s.latencyTracker.Record(fallbackProvider.Name(), duration)
                     }
-                    if s.costTracker != nil {
-                        keyCfg := middleware.GetAuthKeyConfig(ctx)
-                        keyName := "anonymous"
-                        if keyCfg != nil && keyCfg.Name != "" {
-                            keyName = keyCfg.Name
-                        }
-                        s.costTracker.Record(keyName, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
-                    }
+                    s.recordAndCharge(ctx, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
                     if s.cache != nil && cacheKey != "" {
                         if respData, marshalErr := json.Marshal(fallbackResp); marshalErr == nil {
                             s.cache.Set(cacheKey, respData)
@@ -863,15 +908,8 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         s.latencyTracker.Record(provider.Name(), duration)
     }
 
-    // Cost tracking
-    if s.costTracker != nil {
-        keyCfg := middleware.GetAuthKeyConfig(ctx)
-        keyName := "anonymous"
-        if keyCfg != nil && keyCfg.Name != "" {
-            keyName = keyCfg.Name
-        }
-        s.costTracker.Record(keyName, string(decision.Backend), req.Model, budget.InputTokens, resp.Usage.CompletionTokens)
-    }
+    // Cost tracking (#159: record + charge quota in one sink)
+    s.recordAndCharge(ctx, string(decision.Backend), req.Model, budget.InputTokens, resp.Usage.CompletionTokens)
 
     // Cache store
     if s.cache != nil && cacheKey != "" {
