@@ -11,6 +11,25 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 _No unreleased changes._
 
+## [0.9.16] - 2026-09-03
+
+### Fixed
+- **Identity gRPC cross-tenant guard now active (#160)**. The gateway's local
+  proto copy (`internal/identity/pb/identity.proto`) was missing field `= 6`
+  (`tenant_id`) on `AuthorizeAndAcquireRequest`, so `Client.AuthorizeAndAcquire`
+  never populated `TenantId`, the identity servicer's `asserted` was always
+  empty, and the P2-3 cross-tenant guard never triggered — a caller asserting a
+  tenant differing from the api-key's real tenant was not refused at the gRPC
+  plane. Synced the proto with `fusion-identity/grpc/identity.proto` (added
+  `string tenant_id = 6;`), regenerated the Go stubs (`paths=source_relative`),
+  added a `tenantID string` parameter to `Client.AuthorizeAndAcquire`, and
+  thread the credential-resolved tenant (`p.Team.ID`, bound upstream by
+  `APIKeyAuthWithStore` via `GetTeamByKey`) — NOT a client-supplied assertion.
+  The identity servicer compares it against the api-key's real tenant and
+  refuses a mismatch (`MODEL_UNAUTHORIZED` → 403). New tests: middleware-level
+  cross-tenant refusal (`TestIdentityAuth_CrossTenantRefused`) + client-level
+  wire assertion (`TestClient_AuthorizeAndAcquire_PopulatesTenantId`).
+
 ## [0.9.15] - 2026-09-02
 
 ### Added

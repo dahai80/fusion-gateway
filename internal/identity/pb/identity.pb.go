@@ -196,6 +196,7 @@ type AuthorizeAndAcquireRequest struct {
 	TargetModel   string                 `protobuf:"bytes,3,opt,name=target_model,json=targetModel,proto3" json:"target_model,omitempty"`
 	RequestId     string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	ClientIp      string                 `protobuf:"bytes,5,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
+	TenantId      string                 `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -261,6 +262,13 @@ func (x *AuthorizeAndAcquireRequest) GetRequestId() string {
 func (x *AuthorizeAndAcquireRequest) GetClientIp() string {
 	if x != nil {
 		return x.ClientIp
+	}
+	return ""
+}
+
+func (x *AuthorizeAndAcquireRequest) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
 	}
 	return ""
 }
@@ -669,14 +677,15 @@ var File_internal_identity_pb_identity_proto protoreflect.FileDescriptor
 
 const file_internal_identity_pb_identity_proto_rawDesc = "" +
 	"\n" +
-	"#internal/identity/pb/identity.proto\x12\x12fusion.identity.v1\"\xb9\x01\n" +
+	"#internal/identity/pb/identity.proto\x12\x12fusion.identity.v1\"\xd6\x01\n" +
 	"\x1aAuthorizeAndAcquireRequest\x12\x17\n" +
 	"\aapi_key\x18\x01 \x01(\tR\x06apiKey\x12#\n" +
 	"\rtarget_module\x18\x02 \x01(\tR\ftargetModule\x12!\n" +
 	"\ftarget_model\x18\x03 \x01(\tR\vtargetModel\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x04 \x01(\tR\trequestId\x12\x1b\n" +
-	"\tclient_ip\x18\x05 \x01(\tR\bclientIp\"\xa0\x01\n" +
+	"\tclient_ip\x18\x05 \x01(\tR\bclientIp\x12\x1b\n" +
+	"\ttenant_id\x18\x06 \x01(\tR\btenantId\"\xa0\x01\n" +
 	"\rTenantContext\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12\x1f\n" +
 	"\vtenant_name\x18\x02 \x01(\tR\n" +

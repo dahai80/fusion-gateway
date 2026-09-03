@@ -25,10 +25,12 @@ type fakeIdentity struct {
     authCalls  atomic.Int64
     releaseCalls atomic.Int64
     reportCalls  atomic.Int64
+    lastTenantID string // #160: records the asserted tenant_id sent by the client
 }
 
 func (f *fakeIdentity) AuthorizeAndAcquire(ctx context.Context, req *pb.AuthorizeAndAcquireRequest) (*pb.AuthorizeAndAcquireResponse, error) {
     f.authCalls.Add(1)
+    f.lastTenantID = req.TenantId
     if f.dialFail.Load() {
         // simulate unavailable: return via context-cancel by blocking forever
         // — but cheaper to just return a transport-flavored error. Use a
@@ -104,7 +106,7 @@ func TestClient_AuthorizeAndAcquire_Allowed(t *testing.T) {
     f.tenantID = "tenant-a"
     c, cleanup := newTestClient(t, f)
     defer cleanup()
-    ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "1.2.3.4")
+    ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "1.2.3.4", "tenant-a")
     if err != nil {
         t.Fatalf("unexpected err: %v", err)
     }
@@ -114,6 +116,27 @@ func TestClient_AuthorizeAndAcquire_Allowed(t *testing.T) {
     if ar.Priority != pb.PriorityLevel_PRIORITY_NORMAL {
         t.Fatalf("priority not propagated: %v", ar.Priority)
     }
+    // #160: client must populate TenantId from the passed tenantID arg.
+    if f.lastTenantID != "tenant-a" {
+        t.Fatalf("TenantId not populated on request; got %q", f.lastTenantID)
+    }
+}
+
+// TestClient_AuthorizeAndAcquire_PopulatesTenantId (#160): explicit check
+// that the gateway-side tenant_id reaches the gRPC request unchanged.
+func TestClient_AuthorizeAndAcquire_PopulatesTenantId(t *testing.T) {
+    f := &fakeIdentity{}
+    f.allow.Store(true)
+    f.leaseID = "lease-t"
+    f.tenantID = "tenant-t"
+    c, cleanup := newTestClient(t, f)
+    defer cleanup()
+    if _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "1.2.3.4", "tenant-t"); err != nil {
+        t.Fatalf("unexpected err: %v", err)
+    }
+    if f.lastTenantID != "tenant-t" {
+        t.Fatalf("expected tenant_id=tenant-t on wire, got %q", f.lastTenantID)
+    }
 }
 
 func TestClient_AuthorizeAndAcquire_DeniedDoesNotTripBreaker(t *testing.T) {
@@ -122,7 +145,7 @@ func TestClient_AuthorizeAndAcquire_DeniedDoesNotTripBreaker(t *testing.T) {
     c, cleanup := newTestClient(t, f)
     defer cleanup()
     for i := 0; i < 5; i++ {
-        ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "")
+        ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "", "")
         if err != nil || ar.Allowed {
             t.Fatalf("call %d: expected denied, got err=%v ar=%+v", i, err, ar)
         }
@@ -140,13 +163,13 @@ func TestClient_BreakerOpensOnTransportFailure(t *testing.T) {
     defer cleanup()
     // threshold=2: two transport failures open the breaker.
     for i := 0; i < 2; i++ {
-        if _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", ""); err == nil {
+        if _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "", ""); err == nil {
             t.Fatalf("call %d: expected transport err", i)
         }
     }
     // breaker now open → ErrBreakerOpen without hitting the server.
     before := f.authCalls.Load()
-    _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "")
+    _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "", "")
     if err != ErrBreakerOpen {
         t.Fatalf("expected ErrBreakerOpen, got %v", err)
     }
@@ -162,7 +185,7 @@ func TestClient_ReleaseLease_BestEffort(t *testing.T) {
     f.tenantID = "tenant-rel"
     c, cleanup := newTestClient(t, f)
     defer cleanup()
-    ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "")
+    ar, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "", "")
     if err != nil || !ar.Allowed {
         t.Fatalf("acquire failed: %v %v", err, ar)
     }
@@ -186,7 +209,7 @@ func TestClient_ReportUsage_BestEffort(t *testing.T) {
     f.tenantID = "tenant-usage"
     c, cleanup := newTestClient(t, f)
     defer cleanup()
-    ar, _ := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "")
+    ar, _ := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "", "")
     c.ReportUsage(UsageReport{
         LeaseID:          ar.LeaseID,
         TenantID:         ar.TenantID,
