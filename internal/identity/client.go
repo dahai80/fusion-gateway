@@ -98,7 +98,11 @@ type AuthResult struct {
 // AuthorizeAndAcquire calls the identity hot-path RPC. Returns (result, err):
 // err != nil = transport/breaker failure (caller decides 503 vs fallback);
 // err == nil + !Allowed = identity denied (caller maps ErrorCode → HTTP).
-func (c *Client) AuthorizeAndAcquire(ctx context.Context, apiKey, module, model, requestID, clientIP string) (*AuthResult, error) {
+//
+// tenantID is the tenant resolved from the incoming request credential
+// (NOT a client-supplied assertion). The identity servicer compares it
+// against the api-key's real tenant (#160 P2-3 cross-tenant guard).
+func (c *Client) AuthorizeAndAcquire(ctx context.Context, apiKey, module, model, requestID, clientIP, tenantID string) (*AuthResult, error) {
     if !c.breaker.allow() {
         return nil, ErrBreakerOpen
     }
@@ -110,6 +114,7 @@ func (c *Client) AuthorizeAndAcquire(ctx context.Context, apiKey, module, model,
         TargetModel:  model,
         RequestId:    requestID,
         ClientIp:     clientIP,
+        TenantId:     tenantID,
     })
     if err != nil {
         c.breaker.recordFailure()

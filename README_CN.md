@@ -582,6 +582,7 @@ identity:
 启用后，推理热路径经过 `IdentityAuth`（位于本地 key 认证之后、RBAC 之前）：
 
 1. **`AuthorizeAndAcquire`**——将已解析的 api key + 目标模块/模型发给 identity。允许时，identity 派生的租户为权威（覆盖本地 key→team 绑定），租约写入请求上下文。拒绝时，错误码映射为 HTTP（`INVALID_API_KEY→401`、`TENANT_DISABLED/MODULE_UNAUTHORIZED/MODEL_UNAUTHORIZED→403`、`CONCURRENCY_LIMIT_EXCEEDED→429`、`DAILY_QUOTA_EXCEEDED→402`、`RATE_LIMIT_EXCEEDED→429`）。
+   - **跨租户防护 (#160)**——网关将凭据解析出的租户（`p.Team.ID`，由 `APIKeyAuthWithStore` 经 `GetTeamByKey` 在上游绑定）作为 `tenant_id` 发到 RPC，而非客户端断言值。identity 服务端将其与 api-key 的真实租户比对，不一致则拒绝（`MODEL_UNAUTHORIZED` → 403）。这闭合了 P2-3 跨租户冒充路径：租户 A 的 key 不能通过断言别的租户来获取租户 B 的租约。
 2. **熔断器**——连续传输失败打开熔断器；新请求随后返回 `503`（严格模式）或降级到本地认证（`fallback_to_local: true`）。活跃流继续运行——熔断器只门控新请求。认证拒绝（identity 回答"否"）不会触发熔断。
 3. **租约生命周期**——请求结束时，`ReleaseLease` 释放并发槽，`ReportUsage` 将 token 消耗计量到 identity 的配额计数器。两者均为异步 + 尽力而为（独立 context、fire-and-forget），慢/不可达的 identity 不会阻塞已发送的响应。
 4. **VRAM 优先级 + KV cache-tag 隔离**——租约的 `priority`（1=低、2=正常、3=高）与 `max_allowed_tokens` 作为 `X-Fusion-Priority` + `X-Fusion-Max-Tokens` 头转发给 fusion-mlx。网关非侵入（此处无分配器或 KV 缓存）；这些头是 fusion-mlx 在其侧应用 P0 抢占/P2 空闲排队调度与 `tenant:{tenant_id}:` 前缀缓存隔离的信号契约。

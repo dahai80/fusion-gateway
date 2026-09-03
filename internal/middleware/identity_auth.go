@@ -84,7 +84,18 @@ func IdentityAuth(client *identity.Client, cfg *config.IdentityConfig) func(http
             module := inferenceModule(r)
             model := requestModel(r)
             requestID := RequestIDFromContext(ctx)
-            ar, err := client.AuthorizeAndAcquire(ctx, apiKey, module, model, requestID, r.RemoteAddr)
+            // #160: send the tenant resolved from the credential (NOT a
+            // client-supplied assertion). APIKeyAuthWithStore upstream already
+            // bound the key to its team via GetTeamByKey, so p.Team.ID is the
+            // gateway-authoritative tenant. The identity servicer compares it
+            // against the api-key's real tenant — a mismatch is refused
+            // (P2-3 cross-tenant guard). Empty = no local binding (identity
+            // treats asserted=="" as no assertion).
+            resolvedTenantID := ""
+            if p.Team != nil {
+                resolvedTenantID = p.Team.ID
+            }
+            ar, err := client.AuthorizeAndAcquire(ctx, apiKey, module, model, requestID, r.RemoteAddr, resolvedTenantID)
             if err != nil {
                 if client.FallbackToLocal() {
                     // identity unavailable + configured to fall back: proceed

@@ -31,13 +31,31 @@ type fakeIdentityServer struct {
     tenantID  string
     stall     atomic.Bool // stall until ctx deadline → transport failure
     authCalls atomic.Int64
+    // #160 cross-tenant guard: when enforceCrossTenant is set, the asserted
+    // tenant_id (req.TenantId) must equal realTenant, else refuse with
+    // MODEL_UNAUTHORIZED (mimics fusion-identity's P2-3 guard).
+    enforceCrossTenant bool
+    realTenant         string
+    lastAssertedTenant string
 }
 
 func (f *fakeIdentityServer) AuthorizeAndAcquire(ctx context.Context, req *pb.AuthorizeAndAcquireRequest) (*pb.AuthorizeAndAcquireResponse, error) {
     f.authCalls.Add(1)
+    f.lastAssertedTenant = req.TenantId
     if f.stall.Load() {
         <-ctx.Done()
         return nil, ctx.Err()
+    }
+    // P2-3 cross-tenant guard: asserted tenant must match the api-key's real tenant.
+    if f.enforceCrossTenant && f.realTenant != "" {
+        asserted := req.TenantId
+        if asserted != "" && asserted != f.realTenant {
+            return &pb.AuthorizeAndAcquireResponse{
+                IsAllowed:    false,
+                ErrorCode:    pb.AuthErrorCode_MODEL_UNAUTHORIZED,
+                ErrorMessage: "cross-tenant assertion refused",
+            }, nil
+        }
     }
     if !f.allow.Load() {
         return &pb.AuthorizeAndAcquireResponse{
@@ -98,6 +116,59 @@ func principalRequest(apiKey string) *http.Request {
         Role:       RoleInference,
     })
     return r.WithContext(ctx)
+}
+
+// principalRequestWithTenant is like principalRequest but pre-binds the key
+// to a team (p.Team.ID), mimicking APIKeyAuthWithStore's GetTeamByKey
+// resolution (#150). IdentityAuth sends p.Team.ID as the asserted tenant.
+func principalRequestWithTenant(apiKey, tenantID string) *http.Request {
+    r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-x","messages":[]}`))
+    ctx := ContextWithPrincipal(r.Context(), &Principal{
+        AuthMethod: "api-key",
+        KeyConfig:  &config.AuthKeyConfig{Key: apiKey},
+        Role:       RoleInference,
+        Team:       &TeamInfo{ID: tenantID, Role: RoleInference},
+    })
+    return r.WithContext(ctx)
+}
+
+// TestIdentityAuth_CrossTenantRefused (#160): the gateway sends the
+// credential-resolved tenant (p.Team.ID) on AuthorizeAndAcquire. When it
+// matches the api-key's real tenant the request is allowed; when the
+// identity servicer sees a mismatch it refuses. This proves P2-3 is active
+// end-to-end (gateway populates TenantId, identity enforces the guard).
+func TestIdentityAuth_CrossTenantRefused(t *testing.T) {
+    f := &fakeIdentityServer{
+        leaseID:            "lease-7",
+        tenantID:           "tenant-real",
+        enforceCrossTenant: true,
+        realTenant:         "tenant-real",
+    }
+    f.allow.Store(true)
+    c, cleanup := newIdentityClient(t, f, false)
+    defer cleanup()
+    cfg := &config.IdentityConfig{Enabled: true}
+
+    // Matching tenant → allowed.
+    rec := httptest.NewRecorder()
+    h := IdentityAuth(c, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+    h.ServeHTTP(rec, principalRequestWithTenant("k", "tenant-real"))
+    if rec.Code != http.StatusOK {
+        t.Fatalf("matching tenant should be allowed, got %d", rec.Code)
+    }
+    if f.lastAssertedTenant != "tenant-real" {
+        t.Fatalf("gateway did not send resolved tenant_id; got %q", f.lastAssertedTenant)
+    }
+
+    // Mismatched asserted tenant → refused (MODEL_UNAUTHORIZED → 403).
+    rec2 := httptest.NewRecorder()
+    h2 := IdentityAuth(c, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatalf("mismatched tenant must not reach handler")
+    }))
+    h2.ServeHTTP(rec2, principalRequestWithTenant("k", "tenant-spoof"))
+    if rec2.Code != http.StatusForbidden {
+        t.Fatalf("cross-tenant assertion should be refused 403, got %d", rec2.Code)
+    }
 }
 
 func TestIdentityAuth_NilClientPassthrough(t *testing.T) {

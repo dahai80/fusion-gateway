@@ -40,6 +40,7 @@ message AuthorizeAndAcquireRequest {
   string target_model  = 3;
   string request_id    = 4;
   string client_ip     = 5;
+  string tenant_id     = 6;
 }
 
 message TenantContext {
