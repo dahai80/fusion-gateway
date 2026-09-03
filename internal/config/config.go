@@ -229,6 +229,21 @@ type RoutingConfig struct {
     Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
     Multimodal                 MultimodalConfig       `mapstructure:"multimodal"`
     AgentTasks                 AgentTaskConfig        `mapstructure:"agent_tasks"`
+    TierQueue                  TierQueueConfig        `mapstructure:"tier_queue"`
+}
+
+// TierQueueConfig configures the #159 3-tier priority admission queue
+// (heavy/general/light) over local inference slots. Default off — when
+// Enabled is false the engine uses the existing single-tier slotQueue (or no
+// queue in hybrid mode), so existing deployments are unchanged. Engaged ONLY
+// when routing.mode=local AND tier_queue.enabled: in hybrid mode the engine
+// falls back to cloud instead of queueing.
+type TierQueueConfig struct {
+    Enabled        bool          `mapstructure:"enabled"`
+    MaxConcurrent  int           `mapstructure:"max_concurrent"`
+    QueueTimeout   time.Duration `mapstructure:"queue_timeout"`
+    HeavyGuarantee int           `mapstructure:"heavy_guarantee"`
+    LightGuarantee int           `mapstructure:"light_guarantee"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -572,6 +587,14 @@ const (
 
 type ClusterMasterConfig struct {
     Address     string `mapstructure:"address"`
+    // Addresses (#159-C) enables dual-master active-active load balancing
+    // across multiple fusion-multi-node masters (e.g. :11452 + :11453). When
+    // non-empty the gateway fronts them with a least-conn pool + health-check
+    // failover: a failing master is circuit-cooled and traffic shifts to a
+    // healthy peer transparently. Address (singular) remains supported for
+    // backward-compat — if Addresses is empty but Address is set, the pool
+    // degrades to a single-element list (identical to pre-#159 behavior).
+    Addresses   []string `mapstructure:"addresses"`
     SharedToken string `mapstructure:"shared_token"`
     // IgnoreMasterStrategy is the #119 opt-out: when true, master mode still
     // syncs node membership from the master but keeps the LOCAL load_balancer
@@ -1496,8 +1519,8 @@ func validate(cfg *Config) error {
     // no master address would silently fall back to an empty node set (every
     // request cloud-degrades). Fail at load so the misconfig is loud, not a
     // silent cloud-only gateway masquerading as clustered.
-    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" {
-        return fmt.Errorf("cluster.mode=master requires cluster.master.address (the fusion-multi-node master API URL); got empty — set it or use mode=standalone")
+    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" && len(cfg.Cluster.Master.Addresses) == 0 {
+        return fmt.Errorf("cluster.mode=master requires cluster.master.address or cluster.master.addresses (the fusion-multi-node master API URL[s]); got empty — set one or use mode=standalone")
     }
     // R3: seed a sane max_stale_age default when omitted (0 =永久-sticky, the
     // pre-R3 bug). 2m bounds how long a cached master strategy is trusted

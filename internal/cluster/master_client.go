@@ -18,6 +18,21 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
 )
 
+// MasterAPI is the fusion-multi-node master API surface consumed by the
+// discovery loop. The concrete *MasterClient implements it; the #159-C
+// masterPool also implements it (delegating to a healthy pooled master with
+// least-conn selection + failover). Discovery holds a MasterAPI so it is
+// agnostic to single-master vs dual-master active-active — the pool is a
+// drop-in wrapper. GetNode/SubmitTask are included for completeness (task
+// dispatch path) even though discovery only calls ListNodes/RoutingSummary.
+type MasterAPI interface {
+    ListNodes(ctx context.Context) (*MasterNodesResponse, error)
+    GetNode(ctx context.Context, nodeID string) (*MasterNodeInfo, error)
+    SubmitTask(ctx context.Context, req *TaskSubmitRequest) (*TaskSubmitResponse, error)
+    RoutingSummary(ctx context.Context) (*MasterRoutingSummary, error)
+    HealthCheck(ctx context.Context) error
+}
+
 type MasterClient struct {
     address     string
     sharedToken string

@@ -33,6 +33,10 @@ type TeamInfo struct {
     QuotaLimit    float64  `json:"quota_limit,omitempty"`
     QuotaUsed     float64  `json:"quota_used,omitempty"`
     AllowedModels []string `json:"allowed_models,omitempty"`
+    // #159: tier (heavy/general/light) drives the 3-tier priority-queue
+    // admission class. Populated from the bound store.Team.Tier by the auth
+    // layer (APIKeyAuthWithStore, #150).
+    Tier          string   `json:"tier,omitempty"`
 }
 
 func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Handler) http.Handler {

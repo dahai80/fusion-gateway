@@ -109,11 +109,19 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             // middleware may have already set p.Team from an OIDC claim — only
             // fill it when empty so the stronger OIDC-bound identity wins.
             if matchedKey.TeamID != "" && p.Team == nil {
-                p.Team = &TeamInfo{
+                ti := &TeamInfo{
                     ID:   matchedKey.TeamID,
                     Name: matchedKey.TeamID,
                     Role: RoleInference,
                 }
+                // #159: carry the tenant's Tier tag so the 3-tier priority
+                // queue can admit by tenant priority class. Best-effort: a
+                // store miss leaves Tier empty (defaults to general via the
+                // coarse-intent heuristic).
+                if team, terr := st.GetTeamByKey(key); terr == nil && team != nil {
+                    ti.Tier = team.Tier
+                }
+                p.Team = ti
             }
             // Attach the tenant to the ctx so adapter.InjectFusionHeaders
             // stamps X-Fusion-Tenant on every outbound upstream request.

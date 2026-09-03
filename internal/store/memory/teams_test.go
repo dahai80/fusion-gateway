@@ -112,3 +112,61 @@ func TestTeamsStore_DeleteOrgWithTeams(t *testing.T) {
         t.Fatal("should not delete org with teams")
     }
 }
+
+// #159: per-tenant daily quota cap trips when daily spend reaches the limit
+// while the cumulative cap still has room, then rolls over (resets) on a new
+// calendar day — no background sweep, implicit rollover in AddCost.
+func TestTeamsStore_DailyQuotaTripAndReset(t *testing.T) {
+    s := NewTeamsStore()
+    team := &store.Team{
+        ID: "dailyteam", Name: "Daily Team",
+        QuotaLimit: 1000, DailyQuotaLimit: 5,
+    }
+    if err := s.CreateTeam(team); err != nil {
+        t.Fatal(err)
+    }
+    // spend up to but not over the daily cap
+    if err := s.AddCost("dailyteam", 4.5); err != nil {
+        t.Fatal(err)
+    }
+    if _, _, ok := s.CheckQuota("dailyteam"); !ok {
+        t.Fatal("daily cap should not trip below limit")
+    }
+    // cross the daily cap — cumulative (5.1) still far below 1000
+    if err := s.AddCost("dailyteam", 0.6); err != nil {
+        t.Fatal(err)
+    }
+    if _, _, ok := s.CheckQuota("dailyteam"); ok {
+        t.Fatal("daily cap should trip at limit")
+    }
+    // simulate a new day: flip the stored date so AddCost rolls the counter
+    tm, _ := s.GetTeam("dailyteam")
+    tm.DailyQuotaDate = "2020-01-01"
+    tm.DailyQuotaUsed = 0
+    s.UpdateTeam(tm)
+    if err := s.AddCost("dailyteam", 1.0); err != nil {
+        t.Fatal(err)
+    }
+    if _, _, ok := s.CheckQuota("dailyteam"); !ok {
+        t.Fatal("daily cap should reset after rollover")
+    }
+}
+
+// #159: AddCost rolls the daily counter when the calendar day advances, so a
+// check (with no new cost) after midnight still reads fresh usage.
+func TestTeamsStore_DailyQuotaRollOnCheck(t *testing.T) {
+    s := NewTeamsStore()
+    team := &store.Team{
+        ID: "rollteam", Name: "Roll Team",
+        QuotaLimit: 1000, DailyQuotaLimit: 1,
+    }
+    s.CreateTeam(team)
+    s.AddCost("rollteam", 0.9)
+    // force the stored date stale so CheckQuota's rollover branch fires
+    tm, _ := s.GetTeam("rollteam")
+    tm.DailyQuotaDate = "2020-01-01"
+    s.UpdateTeam(tm)
+    if _, _, ok := s.CheckQuota("rollteam"); !ok {
+        t.Fatal("stale daily counter should roll to fresh on check")
+    }
+}

@@ -564,6 +564,53 @@ CLI 和本地客户端可在后端服务的**直连本地端口**（fusion-mlx :
 
 当部署多个 fusion-mlx 实例时，启用 `cluster.ha_routing`（默认关闭），网关在 P0.25 将 `/v1/*` 在健康的 mac 平台节点间负载均衡，先于单本地上游路径——对客户端透明的故障转移。参见[路由逻辑](#路由逻辑)与 `cluster.ha_routing` 配置块。
 
+## 租户配额、优先级队列、双主负载均衡 (#159)
+
+三个面向多租户 local-first 部署的可选特性。全部默认关闭；无租户配置的单节点部署行为不变。
+
+### 按租户日配额 (#159-A)
+
+每个团队（租户）可设置日成本上限（`DailyQuotaLimit`，美元）与按 key 的请求预算。网关在推理池**之上**强制执行——耗尽日预算的租户在 `BudgetBlock` 中间件处被阻断（fail-closed），不消耗任何本地槽位。配额在所有成本记录点（chat、流式、embedding、rerank）通过单一 `recordAndCharge` 槽自动扣减，内存 store（日期比对滚动，无后台扫描）与 Redis store（Lua 原子 `INCRBYFLOAT` + 按日期 key 的 `EXPIRE`）均生效。租户的 `Tier` 标签（heavy/general/light）从凭据绑定的团队带入请求 `Principal`。
+
+```yaml
+# 团队经 /admin/api/teams 管理；每个团队可设：
+#   daily_quota_limit: 5.0      # 美元/日上限（0 = 不限）
+#   tier: "heavy"               # 准入类别（见优先级队列）
+```
+
+`BudgetBlock` 中间件在按 key 检查**之后**、请求进入路由器**之前**检查团队日配额：超限 → 403，store 错误 → 503（fail-closed）。日计数器在日期变更时隐式滚动——无需 reaper goroutine。
+
+### 三级优先级准入队列 (#159-B)
+
+本地模式竞争场景下，可选优先级队列（`routing.tier_queue`）按类别准入——**heavy**（diffusion、重模型、或标记 heavy 的租户）获得队头派发，使短聊天突发不会饿死其后的长生成；**light**（embedding、短聊天）优先级最低；**general** 为默认。同一类别内保持 FIFO。租户 `Tier` 标签优先于粗粒度意图启发式（付费购买 heavy 类别的租户无论请求形态都以 heavy 优先级准入）。
+
+```yaml
+routing:
+  tier_queue:
+    enabled: true               # 默认 false
+    max_concurrent: 2           # 本地槽位上限（钳制 >=1）
+    queue_timeout: 30s          # 超时无槽位释放则 429
+    heavy_guarantee: 1          # 为 heavy 预留槽位（总和 <= max_concurrent）
+    light_guarantee: 0          # 为 light 预留槽位
+```
+
+`committed` 标志消除派发竞争：在槽位交接**之后**到达的客户端取消或超时不会窃取或泄漏槽位——goroutine 返回释放闭包使槽位最终被释放。队列在热重载时重建（RR6 对齐）。仅在 `mode: local` 生效；hybrid 模式回退到云端而非排队。
+
+### 双主主备活跃负载均衡 (#159-C)
+
+集群 `master` 模式下，网关现可前置**多个** fusion-multi-node master（如 Traefik 后的 `:11452` + `:11453`，或直连），采用最少连接池 + 健康检查故障转移。每个 master 同步调用（`/api/nodes`、`/api/routing/summary`）路由到在途请求最少的池内 master；出错时在返回前故障转移到下一候选。失败 master 以指数退避（5s → 2m 上限）熔断冷却，并被选择跳过，除非无健康对等节点（fail-open）。单数 `cluster.master.address` 仍向后兼容——仅设置它时，池退化为与 #159 前行为一致的单元素列表。
+
+```yaml
+cluster:
+  mode: master
+  master:
+    addresses:                  # #159-C: 双主主备活跃
+      - "http://127.0.0.1:11452"
+      - "http://127.0.0.1:11453"
+    shared_token: "..."
+    # address: "http://127.0.0.1:11452"   # 旧单数（仍可用）
+```
+
 ## 身份控制面 (#157)
 
 与 [`fusion-identity`](https://github.com/dahai80/fusion-identity) 的可选集成——一个高频 gRPC 控制面，在推理到达 fusion-mlx 之前原子地完成认证 + 获取并发租约。默认关闭（`identity.enabled: false`）；关闭或 identity 不可达且 `fallback_to_local: true` 时，本地 `APIKeyAuthWithStore` 路径仍是认证路径。

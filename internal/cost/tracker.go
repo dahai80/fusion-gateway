@@ -40,6 +40,17 @@ func NewTracker(maxRecords int) *Tracker {
 }
 
 func (t *Tracker) Record(keyName, backend, model string, promptTokens, completionTokens int) {
+    t.RecordAndReturn(keyName, backend, model, promptTokens, completionTokens)
+}
+
+// RecordAndReturn is #159's variant: it records the usage AND returns the
+// billed USD cost so the caller can deduct it from the per-key and per-tenant
+// quota counters. Without this the gateway metered cost (for the /v1/cost
+// dashboard) but never decremented the budget — BudgetBlock only checked at
+// request start, so a key could spend past its cap within a single check
+// window. The deduction is best-effort: a store error is logged, not surfaced,
+// because the inference response is already delivered.
+func (t *Tracker) RecordAndReturn(keyName, backend, model string, promptTokens, completionTokens int) float64 {
     baseCost := CalculateCost(model, promptTokens, completionTokens)
     billedCost := t.applyMarkup(keyName, baseCost)
     rec := UsageRecord{
@@ -73,6 +84,7 @@ func (t *Tracker) Record(keyName, backend, model string, promptTokens, completio
         "billed_cost", billedCost,
         "total_cost_usd", t.totalCost,
     )
+    return billedCost
 }
 
 func (t *Tracker) applyMarkup(keyName string, baseCost float64) float64 {
