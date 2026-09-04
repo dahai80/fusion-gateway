@@ -375,6 +375,94 @@ func TestDiscovery_Status(t *testing.T) {
     }
 }
 
+// TestDiscovery_Status_AdmissionView covers #163: Status() exposes the
+// gateway-owned per-node concurrency budget + aggregated per-node breaker
+// state + routability, so clients can route around a failed node without
+// per-process rediscovery.
+func TestDiscovery_Status_AdmissionView(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+        config.ClusterNodeConfig{ID: "node-2", Address: "http://localhost:9002", GPU: "M2", MemoryGB: 32},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+    n2, _ := d.GetNode("node-2")
+    n2.markHealthy()
+
+    // Wire the admission view: budget 2, node-2 breaker open.
+    d.SetAdmissionView(2, func(nodeID string) string {
+        if nodeID == "node-2" {
+            return "open"
+        }
+        return "closed"
+    })
+    n2.SetBreakerBypassed(true)
+
+    statuses := d.Status()
+    if len(statuses) != 2 {
+        t.Fatalf("expected 2 statuses, got %d", len(statuses))
+    }
+    byID := map[string]NodeStatus{}
+    for _, s := range statuses {
+        byID[s.ID] = s
+    }
+
+    // node-1: healthy, not bypassed → routable, closed, budget 2.
+    if !byID["node-1"].Routable {
+        t.Errorf("node-1 expected routable=true, got false")
+    }
+    if byID["node-1"].BreakerBypassed {
+        t.Errorf("node-1 expected breaker_bypassed=false, got true")
+    }
+    if byID["node-1"].BreakerState != "closed" {
+        t.Errorf("node-1 expected breaker_state=closed, got %s", byID["node-1"].BreakerState)
+    }
+    if byID["node-1"].MaxConcurrent != 2 {
+        t.Errorf("node-1 expected max_concurrent=2, got %d", byID["node-1"].MaxConcurrent)
+    }
+
+    // node-2: healthy but breaker-bypassed → NOT routable, open, budget 2.
+    if byID["node-2"].Routable {
+        t.Errorf("node-2 expected routable=false (breaker bypassed), got true")
+    }
+    if !byID["node-2"].BreakerBypassed {
+        t.Errorf("node-2 expected breaker_bypassed=true, got false")
+    }
+    if byID["node-2"].BreakerState != "open" {
+        t.Errorf("node-2 expected breaker_state=open, got %s", byID["node-2"].BreakerState)
+    }
+}
+
+// TestDiscovery_Status_AdmissionView_Unwired covers the standalone path
+// (cluster enabled but admission view not wired, or unwired resolver): fields
+// default to uncapped (0) / closed, and routability tracks selectable() only.
+func TestDiscovery_Status_AdmissionView_Unwired(t *testing.T) {
+    cfg := makeClusterCfg(true,
+        config.ClusterNodeConfig{ID: "node-1", Address: "http://localhost:9001", GPU: "M1", MemoryGB: 16},
+    )
+    d := NewDiscovery(cfg)
+    d.loadNodesFromConfig()
+    n1, _ := d.GetNode("node-1")
+    n1.markHealthy()
+
+    statuses := d.Status()
+    if len(statuses) != 1 {
+        t.Fatalf("expected 1 status, got %d", len(statuses))
+    }
+    if !statuses[0].Routable {
+        t.Errorf("unwired healthy node expected routable=true, got false")
+    }
+    if statuses[0].MaxConcurrent != 0 {
+        t.Errorf("unwired expected max_concurrent=0 (uncapped), got %d", statuses[0].MaxConcurrent)
+    }
+    if statuses[0].BreakerState != "closed" {
+        t.Errorf("unwired expected breaker_state=closed, got %s", statuses[0].BreakerState)
+    }
+}
+
 func TestNode_InFlight(t *testing.T) {
     n := &Node{ID: "test", state: NodeStateHealthy}
     if n.InFlight() != 0 {

@@ -434,6 +434,17 @@ func run(configPath string) error {
 			"load_balancer", snap.Config.Cluster.LoadBalancer,
 		)
 
+		// #163: expose the gateway-owned per-node concurrency budget and the
+		// router's aggregated per-node breaker state to clients via Status()
+		// (→ /v1/status cluster[] + /gateway/v1/cluster/health). DI callback
+		// avoids a cluster→router import cycle.
+		discovery.SetAdmissionView(
+			snap.Config.Routing.LocalPriority.MaxConcurrent,
+			func(nodeID string) string {
+				return routerEngine.NodeBreakerState(nodeID).String()
+			},
+		)
+
 		srv.SetClusterDiscovery(discovery)
 	}
 

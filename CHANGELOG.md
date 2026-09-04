@@ -11,6 +11,27 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 _No unreleased changes._
 
+## [0.9.18] - 2026-09-05
+
+### Added
+- **Cluster admission & shared circuit-breaker client visibility (#163)**.
+  Multi-node MLX clusters under concurrent client processes (e.g. several
+  fusion-code instances) previously had no cluster-wide admission or shared
+  breaker: each process ran its own in-process semaphore and per-process
+  circuit breaker, so N processes each rediscovered a failed node and hammered
+  it before backing off (thundering herd). The gateway already owned the
+  per-node concurrency budget (`routing.local_priority.max_concurrent`, RR4
+  hard CAS cap + `SelectNodeByModel` slot skip) and the aggregated per-node
+  breaker state (RR5 per-node breakers + R8 coordinator marking a tripped node
+  `selectable() == false`); the gap was client visibility. `NodeStatus` now
+  exposes `routable`, `breaker_bypassed`, `max_concurrent`, and
+  `breaker_state` (closed/open/half_open), surfaced both under the `cluster`
+  key of `GET /v1/status` and via a new dedicated read-only
+  `GET /gateway/v1/cluster/health` endpoint (fg-key auth, 404 when cluster
+  disabled). Clients poll one source and route around non-routable nodes
+  cluster-wide without per-process rediscovery. No inference-path change;
+  cluster features remain opt-in (`cluster.enabled`, default off).
+
 ## [0.9.17] - 2026-09-03
 
 ### Added
