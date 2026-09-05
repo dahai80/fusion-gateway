@@ -355,6 +355,44 @@ POST /webhooks/model-hub
 | `standalone` | 配置中的静态节点列表 + 本地健康检查 |
 | `master` | 从 fusion-multi-node Master (`:9753`) 同步节点 — 网关周期性调用 `/api/nodes` |
 
+### 集群准入控制与共享熔断器 (#163)
+
+在多节点 MLX 集群下,多个客户端进程并发运行时 (例如多个 fusion-code 实例),进程内的并发信号量或进程级熔断器不够用:N 个进程各自重新发现故障节点并反复冲击它才退避。网关是所有流量都能经过的单一入口,因此由它代客户端持有**集群级准入预算**和**聚合的每节点熔断器状态**。
+
+- **每节点并发预算** — 网关对每个 MLX 节点强制执行
+  `routing.local_priority.max_concurrent` (本地适配器内 RR4 硬 CAS 上限;集群节点在 `SelectNodeByModel` 中跳过已达上限的节点)。节点满额则转移到下一个节点或云端 — 不会出现惊群。
+- **共享的每节点熔断器** — 每个节点有独立熔断器 (RR5),一个节点故障不会污染健康的 N-1 个。连续失败后熔断器打开,R8 协调器将该节点标记为熔断旁路 (`selectable() == false`),路由器对所有流量绕开它。恢复后熔断器关闭,节点重新可选。
+- **客户端可见性** — 客户端轮询**一个**来源,而非各自重新发现故障:
+
+  ```
+  GET /gateway/v1/cluster/health      (fg-key 鉴权)
+  ```
+
+  ```json
+  {
+    "max_concurrent": 2,
+    "total_nodes": 4,
+    "routable_nodes": 3,
+    "total_in_flight": 1,
+    "nodes": [
+      {
+        "id": "node-1", "address": "http://localhost:9001",
+        "state": "healthy", "in_flight": 1,
+        "routable": true, "breaker_bypassed": false,
+        "max_concurrent": 2, "breaker_state": "closed"
+      },
+      {
+        "id": "node-2", "address": "http://localhost:9002",
+        "state": "healthy", "in_flight": 0,
+        "routable": false, "breaker_bypassed": true,
+        "max_concurrent": 2, "breaker_state": "open"
+      }
+    ]
+  }
+  ```
+
+  同样的每节点字段也出现在 `GET /v1/status` 的 `cluster` 键下。**客户端契约:** 客户端**应当**跳过任何 `routable` 为 `false` (或 `breaker_state` 为 `"open"`) 的节点,改路由到 `routable` 节点,从而集群级地避开故障节点,无需各进程重复发现。集群禁用时该端点返回 `404`。
+
 ### 批次分片
 
 对于大批量 embedding 请求 (输入数 > 32),网关自动将批次拆分为分片,并行分发到集群节点。返回前按正确索引顺序合并结果。集群不可用时回退到单 provider。

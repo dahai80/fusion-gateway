@@ -385,6 +385,60 @@ Two discovery modes:
 | `standalone` | Static node list from config + local health checks |
 | `master` | Sync nodes from fusion-multi-node Master (`:9753`) — gateway calls `/api/nodes` periodically |
 
+### Cluster Admission & Shared Circuit Breaker (#163)
+
+In a multi-node MLX cluster under concurrent client processes (e.g. several
+fusion-code instances), an in-process-only concurrency semaphore or
+per-process circuit breaker is insufficient: N processes each rediscover a
+failed node and hammer it before backing off. The gateway is the single point
+all traffic can traverse, so it owns the **cluster-wide admission budget** and
+the **aggregated per-node circuit-breaker state** on behalf of clients.
+
+- **Per-node concurrency budget** — the gateway enforces
+  `routing.local_priority.max_concurrent` per MLX node (RR4 hard CAS cap in the
+  local adapter; `SelectNodeByModel` skips nodes at the cap for cluster nodes).
+  A node at its budget diverts to the next node or cloud — no thundering herd.
+- **Shared per-node circuit breaker** — each node has its own breaker (RR5), so
+  one failing node never poisons the healthy N-1. On repeated failures the
+  breaker opens and the R8 coordinator marks the node breaker-bypassed
+  (`selectable() == false`); the router routes around it for ALL traffic. On
+  recovery the breaker closes and the node becomes selectable again.
+- **Client visibility** — clients poll ONE source instead of each rediscovering
+  failures:
+
+  ```
+  GET /gateway/v1/cluster/health      (fg-key auth)
+  ```
+
+  ```json
+  {
+    "max_concurrent": 2,
+    "total_nodes": 4,
+    "routable_nodes": 3,
+    "total_in_flight": 1,
+    "nodes": [
+      {
+        "id": "node-1", "address": "http://localhost:9001",
+        "state": "healthy", "in_flight": 1,
+        "routable": true, "breaker_bypassed": false,
+        "max_concurrent": 2, "breaker_state": "closed"
+      },
+      {
+        "id": "node-2", "address": "http://localhost:9002",
+        "state": "healthy", "in_flight": 0,
+        "routable": false, "breaker_bypassed": true,
+        "max_concurrent": 2, "breaker_state": "open"
+      }
+    ]
+  }
+  ```
+
+  The same per-node fields are also present under the `cluster` key of
+  `GET /v1/status`. **Client contract:** clients SHOULD skip any node whose
+  `routable` is `false` (or `breaker_state` is `"open"`) and route to a
+  `routable` node, so a failed node is avoided cluster-wide without per-process
+  rediscovery. When cluster is disabled the endpoint returns `404`.
+
 ### Batch Sharding
 
 For large embedding requests (input count > 32), gateway automatically splits the batch into shards and dispatches them to cluster nodes in parallel. Results are merged with correct index ordering before returning. Falls back to single-provider when cluster is unavailable.

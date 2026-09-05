@@ -1905,6 +1905,96 @@ func TestSetClusterDiscovery(t *testing.T) {
     slog.Info("TestSetClusterDiscovery passed")
 }
 
+// mockClusterDiscoveryAdmission serves a fixed enriched NodeStatus slice for
+// the #163 /gateway/v1/cluster/health handler test.
+type mockClusterDiscoveryAdmission struct {
+    nodes []cluster.NodeStatus
+}
+
+func (m *mockClusterDiscoveryAdmission) Status() []cluster.NodeStatus {
+    return m.nodes
+}
+
+func (m *mockClusterDiscoveryAdmission) GetNode(_ string) (*cluster.Node, bool) {
+    return nil, false
+}
+
+// TestHandleClusterHealth_Disabled covers the 404 path: cluster disabled
+// (clusterDiscovery nil) → 404 + error JSON, not 200.
+func TestHandleClusterHealth_Disabled(t *testing.T) {
+    s := newTestServer()
+    // clusterDiscovery intentionally nil (cluster disabled).
+    req := httptest.NewRequest(http.MethodGet, "/gateway/v1/cluster/health", nil)
+    rec := httptest.NewRecorder()
+    s.handleClusterHealth(rec, req)
+
+    if rec.Code != http.StatusNotFound {
+        t.Fatalf("expected 404 when cluster disabled, got %d", rec.Code)
+    }
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    if body["error"] == nil {
+        t.Errorf("expected error body, got %v", body)
+    }
+    slog.Info("TestHandleClusterHealth_Disabled passed")
+}
+
+// TestHandleClusterHealth_Enabled covers the 200 path: wired discovery with
+// one routable + one bypassed node → summary counts + per-node fields.
+func TestHandleClusterHealth_Enabled(t *testing.T) {
+    s := newTestServer()
+    s.SetClusterDiscovery(&mockClusterDiscoveryAdmission{
+        nodes: []cluster.NodeStatus{
+            {ID: "node-1", InFlight: 1, Routable: true, BreakerBypassed: false, MaxConcurrent: 2, BreakerState: "closed"},
+            {ID: "node-2", InFlight: 0, Routable: false, BreakerBypassed: true, MaxConcurrent: 2, BreakerState: "open"},
+        },
+    })
+
+    req := httptest.NewRequest(http.MethodGet, "/gateway/v1/cluster/health", nil)
+    rec := httptest.NewRecorder()
+    s.handleClusterHealth(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    var body map[string]interface{}
+    if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid json: %v", err)
+    }
+    if int(body["total_nodes"].(float64)) != 2 {
+        t.Errorf("expected total_nodes=2, got %v", body["total_nodes"])
+    }
+    if int(body["routable_nodes"].(float64)) != 1 {
+        t.Errorf("expected routable_nodes=1, got %v", body["routable_nodes"])
+    }
+    if int(body["total_in_flight"].(float64)) != 1 {
+        t.Errorf("expected total_in_flight=1, got %v", body["total_in_flight"])
+    }
+    if int(body["max_concurrent"].(float64)) != 2 {
+        t.Errorf("expected max_concurrent=2, got %v", body["max_concurrent"])
+    }
+    nodes := body["nodes"].([]interface{})
+    if len(nodes) != 2 {
+        t.Errorf("expected 2 nodes in response, got %d", len(nodes))
+    }
+    slog.Info("TestHandleClusterHealth_Enabled passed")
+}
+
+// TestHandleClusterHealth_MethodReject covers the non-GET path (405).
+func TestHandleClusterHealth_MethodReject(t *testing.T) {
+    s := newTestServer()
+    s.SetClusterDiscovery(&mockClusterDiscoveryAdmission{nodes: []cluster.NodeStatus{}})
+    req := httptest.NewRequest(http.MethodPost, "/gateway/v1/cluster/health", nil)
+    rec := httptest.NewRecorder()
+    s.handleClusterHealth(rec, req)
+    if rec.Code != http.StatusMethodNotAllowed {
+        t.Fatalf("expected 405, got %d", rec.Code)
+    }
+    slog.Info("TestHandleClusterHealth_MethodReject passed")
+}
+
 func TestGetStore(t *testing.T) {
     s := newTestServer()
     if s.GetStore() == nil {

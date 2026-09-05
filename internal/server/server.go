@@ -777,6 +777,15 @@ func (s *Server) Start() error {
     mux.HandleFunc("/livez", s.handleLivez)
     mux.HandleFunc("/v1/status", s.withMiddleware(s.handleStatus))
 
+    // #163: cluster-wide admission + shared circuit-breaker visibility for
+    // multi-node MLX clients (fusion-code). Read-only, fg-key auth. Returns
+    // the gateway-owned per-node concurrency budget, aggregated per-node
+    // breaker state, and routability so clients poll ONE source and route
+    // around a failed node without per-process rediscovery. 404 when cluster
+    // is disabled (clusterDiscovery nil) — same absence contract as /v1/status
+    // omitting the cluster key.
+    mux.HandleFunc("/gateway/v1/cluster/health", s.withMiddleware(s.handleClusterHealth))
+
     // #34: proxy fusion-mlx /stats through the gateway so clients configured to
     // route mlx traffic via :11432 (e.g. fusion-cli bench mem) can fetch
     // server-side memory stats. Shares the /v1/* fg-key auth chain

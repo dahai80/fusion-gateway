@@ -237,6 +237,15 @@ type Discovery struct {
     // signal). cachedAt lets resolveStrategy bound trust: older than
     // cfg.Master.MaxStaleAge → fall back to local load_balancer + Warn.
     masterStrategy atomic.Value
+    // #163: admission view fields wired by main.go via SetAdmissionView so
+    // Status() can expose the gateway-owned per-node concurrency budget and
+    // the router's aggregated per-node breaker state to clients. DI (not a
+    // direct router.Engine ref) avoids a cluster→router import cycle and
+    // mirrors the callback-DI pattern used for localInFlight/localModels on
+    // the engine. Both zero-value to nil-safe: Status() reports uncapped /
+    // "closed" when unwired (standalone, cluster disabled).
+    maxConcurrent int
+    breakerStateFn func(nodeID string) string
 }
 
 // masterStrategyEntry is the timestamped cached master strategy (R3). The
@@ -1146,7 +1155,7 @@ func (d *Discovery) Status() []NodeStatus {
     result := make([]NodeStatus, 0, len(d.nodes))
     for _, n := range d.nodes {
         n.mu.RLock()
-        result = append(result, NodeStatus{
+        st := NodeStatus{
             ID:           n.ID,
             Address:      n.Address,
             GPU:          n.GPU,
@@ -1158,10 +1167,44 @@ func (d *Discovery) Status() []NodeStatus {
             LastCheck:    n.lastCheck.Format(time.RFC3339),
             MemUsedRatio: n.remoteMetrics.MemoryUsedRatio,
             QueueDepth:   n.remoteMetrics.QueueDepth,
-        })
+            MaxConcurrent: d.maxConcurrent,
+        }
         n.mu.RUnlock()
+        // #163: BreakerBypassed is an atomic.Bool — read lock-free outside
+        // n.mu so we never hold the node lock while calling the router
+        // breaker resolver (avoids any lock-ordering risk with breakerMu).
+        bypassed := n.BreakerBypassed()
+        st.BreakerBypassed = bypassed
+        st.Routable = n.State() == NodeStateHealthy && !bypassed
+        if d.breakerStateFn != nil {
+            st.BreakerState = d.breakerStateFn(n.ID)
+        }
+        if st.BreakerState == "" {
+            // Unknown node or unwired resolver: a node with no recorded
+            // failures is closed by definition (matches engine.NodeBreakerState).
+            if bypassed {
+                st.BreakerState = "open"
+            } else {
+                st.BreakerState = "closed"
+            }
+        }
+        result = append(result, st)
     }
     return result
+}
+
+// SetAdmissionView wires the gateway-owned per-node concurrency budget and the
+// router's aggregated per-node breaker resolver into Discovery (#163), so
+// Status() can expose them to clients. DI from main.go avoids a cluster→router
+// import cycle. maxConcurrent is the per-node slot cap (0 = uncapped/legacy,
+// matching RR4 semantics); breakerState returns "closed"|"open"|"half_open"
+// for a node ID. Safe to call once at startup; reads are lock-free (the two
+// fields are only written here before serving begins).
+func (d *Discovery) SetAdmissionView(maxConcurrent int, breakerState func(nodeID string) string) {
+    d.maxConcurrent = maxConcurrent
+    d.breakerStateFn = breakerState
+    slog.Info("cluster admission view wired (#163 client visibility)",
+        "max_concurrent", maxConcurrent, "resolver_wired", breakerState != nil)
 }
 
 type NodeStatus struct {
@@ -1176,6 +1219,17 @@ type NodeStatus struct {
     LastCheck  string  `json:"last_check"`
     MemUsedRatio float64 `json:"mem_used_ratio"`
     QueueDepth   int     `json:"queue_depth"`
+    // #163: client-visibility fields exposing the gateway's aggregated
+    // admission budget + shared per-node breaker state. BreakerBypassed is the
+    // R8 flag (node tripped open by the router); Routable is the single
+    // selectable() gate (healthy AND not bypassed); MaxConcurrent is the
+    // gateway-owned per-node slot budget (0 = uncapped/legacy); BreakerState
+    // is the granular "closed"|"open"|"half_open". Clients poll these to route
+    // around a failed node without per-process rediscovery (#163 P1-R4).
+    BreakerBypassed bool   `json:"breaker_bypassed"`
+    Routable        bool   `json:"routable"`
+    MaxConcurrent   int    `json:"max_concurrent"`
+    BreakerState    string `json:"breaker_state"`
 }
 
 func (d *Discovery) SelectNode(strategy string) (*Node, error) {

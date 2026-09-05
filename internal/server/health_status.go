@@ -216,6 +216,49 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
     _ = json.NewEncoder(w).Encode(status)
 }
 
+// handleClusterHealth exposes the gateway's aggregated cluster-wide admission
+// budget + shared per-node circuit-breaker state to multi-node clients (#163).
+// Read-only, fg-key auth. Returns 404 when cluster is disabled. The per-node
+// array is the enriched NodeStatus (routable/breaker_bypassed/max_concurrent/
+// breaker_state); the summary counts are derived here from that array so the
+// handler stays dumb and no new Discovery method is needed.
+func (s *Server) handleClusterHealth(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    if s.clusterDiscovery == nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusNotFound)
+        _ = json.NewEncoder(w).Encode(map[string]interface{}{
+            "error": map[string]interface{}{
+                "message": "cluster disabled (set cluster.enabled=true to enable)",
+            },
+        })
+        return
+    }
+    nodes := s.clusterDiscovery.Status()
+    var routable, totalInFlight int
+    var maxConcurrent int
+    for _, n := range nodes {
+        if n.Routable {
+            routable++
+        }
+        totalInFlight += int(n.InFlight)
+        if n.MaxConcurrent > maxConcurrent {
+            maxConcurrent = n.MaxConcurrent
+        }
+    }
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]interface{}{
+        "max_concurrent":  maxConcurrent,
+        "total_nodes":     len(nodes),
+        "routable_nodes":  routable,
+        "total_in_flight": totalInFlight,
+        "nodes":           nodes,
+    })
+}
+
 func (s *Server) handleAdminGC(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
