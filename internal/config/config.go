@@ -1875,7 +1875,7 @@ func WarnSharedPortSafety(cfg *Config) {
 func DefaultConfig() Config {
     return Config{
         Server: ServerConfig{
-            Host:                   "0.0.0.0",
+            Host:                   "127.0.0.1", // single-machine: loopback only
             Port:                   11432,
             LogLevel:               "info",
             GracefulShutdownTimeout: 15,

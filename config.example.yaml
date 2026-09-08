@@ -1,5 +1,5 @@
 server:
-    host: "0.0.0.0"
+    host: "127.0.0.1"                        # single-machine: loopback only (was 0.0.0.0)
     port: 11432                           # Fusion-Gateway default port
     enable_pprof: false                   # Enable pprof debug endpoints (requires master_key auth)
     # tls:                                # HTTPS termination (optional, for single-binary deployment)
