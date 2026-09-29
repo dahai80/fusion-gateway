@@ -400,9 +400,33 @@ func (p *BedrockProvider) deriveSigningKey(dateStamp string) []byte {
 	key := hmacSHA256(kService, []byte("aws4_request"))
 	p.signKeyCacheMu.Lock()
 	p.signKeyCache[dateStamp] = key
+	// #171: drop stale date scopes (previous days, rotated credentials) so the
+	// cache stays ~1 entry per live date — only today's and tomorrow-adjacent
+	// UTC scopes are ever valid for signing.
+	for cached := range p.signKeyCache {
+		if cached != dateStamp && isStaleDateScope(cached, dateStamp) {
+			delete(p.signKeyCache, cached)
+		}
+	}
 	p.signKeyCacheMu.Unlock()
 	slog.Debug("bedrock derived new signing key for date scope", "date_stamp", dateStamp)
 	return key
+}
+
+// isStaleDateScope reports whether a cached SigV4 date scope (YYYYMMDD) is no
+// longer usable relative to the current scope (#171): signing keys are only
+// valid for their own date, so any scope other than the current one can be
+// evicted. Malformed entries are treated as stale.
+func isStaleDateScope(cached, current string) bool {
+	t, err := time.Parse("20060102", cached)
+	if err != nil {
+		return true
+	}
+	cur, err := time.Parse("20060102", current)
+	if err != nil {
+		return false
+	}
+	return t.Before(cur)
 }
 
 func buildCanonicalHeaders(req *http.Request, host string) (signed, canonical string) {

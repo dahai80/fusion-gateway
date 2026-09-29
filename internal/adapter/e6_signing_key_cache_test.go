@@ -116,11 +116,24 @@ func TestE6_SigningKey_DistinctDateScopesCacheSeparately(t *testing.T) {
     keyDay1 := p.deriveSigningKey("19990101")
     keyDay2 := p.deriveSigningKey("19990102")
 
+    // #171: stale date scopes are now evicted on derivation — signing keys are
+    // only valid for their own date, so after deriving the newer scope only
+    // that entry remains (today's and 19990101 are both < 19990102).
     p.signKeyCacheMu.Lock()
+    _, hasDay1 := p.signKeyCache["19990101"]
+    _, hasDay2 := p.signKeyCache["19990102"]
     cached := len(p.signKeyCache)
     p.signKeyCacheMu.Unlock()
-    if cached < 3 {
-        t.Fatalf("E6: distinct dateStamps must cache separate keys, expected >=3 cache entries (today + 2 forced), got %d", cached)
+    if !hasDay2 {
+        t.Fatalf("E6/#171: newest forced dateStamps must be cached, cache has %d entries", cached)
+    }
+    if hasDay1 {
+        t.Fatalf("E6/#171: stale date scope 19990101 must be evicted when a newer scope is derived")
+    }
+    if cached != 2 {
+        // today's scope (2026xx) is newer than the forced 19990102, so it is
+        // legitimately retained; 19990101 is the only stale entry.
+        t.Fatalf("E6/#171: expected newest scope + today's scope after eviction, got %d entries", cached)
     }
 
     // Distinct scopes must produce distinct keys.

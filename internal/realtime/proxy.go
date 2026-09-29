@@ -2,6 +2,7 @@ package realtime
 
 import (
     "context"
+    "io"
     "log/slog"
     "net/http"
     "sync"
@@ -68,6 +69,11 @@ func (p *Proxy) UpgradeAndProxy(w http.ResponseWriter, r *http.Request, backendU
     if err != nil {
         slog.Error("realtime: backend dial failed", "backend_url", backendURL, "error", err)
         if resp != nil {
+            // #169: on a failed handshake gorilla/websocket still returns a
+            // non-nil response (e.g. 401/403) whose body must be drained and
+            // closed, or the underlying connection leaks per failed upgrade.
+            io.Copy(io.Discard, resp.Body)
+            resp.Body.Close()
             errMsg := map[string]interface{}{
                 "type":  "error",
                 "error": map[string]string{"message": "backend connection failed"},

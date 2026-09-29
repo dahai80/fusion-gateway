@@ -254,7 +254,12 @@ func (r *Registry) appendAudit(entry AuditEntry) {
     defer r.mu.Unlock()
     r.auditLog = append(r.auditLog, entry)
     if len(r.auditLog) > r.auditMaxLen {
-        r.auditLog = r.auditLog[len(r.auditLog)-r.auditMaxLen:]
+        // Copy-trim: reslicing keeps the ever-growing backing array alive
+        // after millions of audit events (#167). Same pattern as the B9/EI11
+        // fixes in cost/tracker.go and store/memory/logs.go.
+        trimmed := make([]AuditEntry, r.auditMaxLen)
+        copy(trimmed, r.auditLog[len(r.auditLog)-r.auditMaxLen:])
+        r.auditLog = trimmed
     }
 }
 

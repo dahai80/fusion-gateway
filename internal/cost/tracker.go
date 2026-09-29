@@ -104,11 +104,45 @@ func (t *Tracker) SetGlobalMarkup(markup float64) {
     slog.Info("global cost markup set", "markup", markup)
 }
 
+// SyncConfigMarkup propagates the config file's cost_markup section into the
+// tracker (#172). Before this the admin PUT wrote YAML that nothing read at
+// runtime: markup stayed 0 in production and the knob had no effect. Called
+// from the request path (recordAndCharge) with the live ConfigSnapshot, so
+// hot-reloaded config takes effect on the next billed request without extra
+// reload wiring. Enabled=false means multiplier 1.0 (markup 0).
+func (t *Tracker) SyncConfigMarkup(enabled bool, globalMarkup float64) {
+    m := 0.0
+    if enabled {
+        m = globalMarkup
+    }
+    t.mu.Lock()
+    if t.markup != m {
+        slog.Info("global cost markup synced from config", "markup", m, "enabled", enabled)
+        t.markup = m
+    }
+    t.mu.Unlock()
+}
+
 func (t *Tracker) SetKeyMarkup(keyName string, markup float64) {
     t.mu.Lock()
     defer t.mu.Unlock()
-    t.keyMarkups[keyName] = markup
+    if markup <= 0 {
+        // Zero/negative markup clears the entry so churned keys don't
+        // accumulate forever (#166).
+        delete(t.keyMarkups, keyName)
+    } else {
+        t.keyMarkups[keyName] = markup
+    }
     slog.Info("key cost markup set", "key", keyName, "markup", markup)
+}
+
+// DeleteKeyMarkup removes the per-key markup entry when a key is deleted,
+// keeping keyMarkups bounded over long-running deployments (#166). Falls
+// back to the global markup automatically since applyMarkup misses the key.
+func (t *Tracker) DeleteKeyMarkup(keyName string) {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    delete(t.keyMarkups, keyName)
 }
 
 func (t *Tracker) GetMarkup(keyName string) float64 {

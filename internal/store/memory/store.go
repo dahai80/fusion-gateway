@@ -113,6 +113,9 @@ func (m *MemoryStore) FlushQuota() {
     // A2: drain the per-key quota debounce too so the last burst of Deduct
     // reaches quota.json before shutdown.
     if m.quota != nil {
+        // #170: sweep unknown-key entries idle >7 days before the final
+        // persist so shutdown quota.json drops dead entries too.
+        m.quota.PruneUnknownStale(time.Now().AddDate(0, 0, -7))
         m.quota.FlushKey()
     }
 }
