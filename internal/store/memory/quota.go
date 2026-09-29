@@ -245,3 +245,46 @@ func (q *QuotaStore) ReclaimKey(keyName string) {
         q.scheduleKeyPersist()
     }
 }
+
+// pruneUnknownStaleLocked drops quota entries for key names that (a) have no
+// entry in the KeyStore and (b) were last touched before the cutoff. #170:
+// Deduct deliberately persists usage for unknown key names (A2), so arbitrary
+// key names hitting Deduct (auth-layer derivatives, probes) accumulated in
+// usage/dailyUsage/dailyDate forever — ReclaimKey only runs on real key
+// deletion. Aging uses dailyDate (refreshed on every rollover, i.e. every
+// billed day), so entries not seen for the grace period are safe to drop.
+// Caller must hold q.mu.
+func (q *QuotaStore) pruneUnknownStaleLocked(cutoff time.Time) (pruned int) {
+    for name, date := range q.dailyDate {
+        if _, err := q.keys.Get(name); err == nil {
+            continue
+        }
+        last, err := time.ParseInLocation("2006-01-02", date, time.Local)
+        if err != nil || last.After(cutoff) {
+            continue
+        }
+        delete(q.usage, name)
+        delete(q.dailyUsage, name)
+        delete(q.dailyDate, name)
+        pruned++
+    }
+    return pruned
+}
+
+// PruneUnknownStale sweeps the per-key quota maps for unknown-key entries that
+// have been idle for more than the given duration and drops them (#170).
+// Called on startup (after SeedUsage) and on shutdown (FlushKey path) — low
+// frequency, bounded work. Returns the number of pruned entries.
+func (q *QuotaStore) PruneUnknownStale(idle time.Time) int {
+    q.mu.Lock()
+    pruned := q.pruneUnknownStaleLocked(idle)
+    q.mu.Unlock()
+    if pruned > 0 {
+        slog.Info("pruned stale unknown-key quota entries",
+            "pruned", pruned,
+            "idle_since", idle.Format("2006-01-02"),
+        )
+        q.scheduleKeyPersist()
+    }
+    return pruned
+}

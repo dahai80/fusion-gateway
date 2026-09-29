@@ -63,10 +63,22 @@ func (c *cloudTrackingProvider) StreamChat(ctx context.Context, req *ChatRequest
         observability.DecrCloudInFlight()
         return nil, err
     }
-    safego.Go("cloud_inflight_drain", func() {
-        for range ch {
+    return wrapCloudInFlightStream(ch), nil
+}
+
+// wrapCloudInFlightStream wraps the provider's chunk channel so the in-flight
+// gauge is decremented when the stream is fully drained (channel closed) —
+// no extra racing drain consumer (#168). The previous design spawned a
+// per-request "cloud_inflight_drain" goroutine that raced the real consumer
+// for chunks and could block forever if the channel was never closed.
+func wrapCloudInFlightStream(ch <-chan StreamChunk) <-chan StreamChunk {
+    out := make(chan StreamChunk, cap(ch))
+    safego.Go("cloud_inflight_wrap", func() {
+        defer close(out)
+        defer observability.DecrCloudInFlight()
+        for chunk := range ch {
+            out <- chunk
         }
-        observability.DecrCloudInFlight()
     })
-    return ch, nil
+    return out
 }

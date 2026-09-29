@@ -274,6 +274,9 @@ func (p *Persister) loadQuota() error {
     }
     if p.quota != nil {
         p.quota.SeedUsage(payload.Usage, payload.DailyUsage, payload.DailyDate)
+        // #170: sweep unknown-key entries idle >7 days (auth-layer derived
+        // names, probes) so quota maps stay bounded across restarts.
+        p.quota.PruneUnknownStale(time.Now().AddDate(0, 0, -7))
     }
     slog.Info("persist: loaded quota from disk",
         "usage_keys", len(payload.Usage), "dir", p.dataDir)

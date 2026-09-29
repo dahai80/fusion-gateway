@@ -299,6 +299,13 @@ func (s *Server) recordAndCharge(ctx context.Context, backend, model string, pro
     if s.costTracker == nil {
         return
     }
+    // #172: propagate the config file's cost_markup into the tracker on the
+    // request path so the admin knob actually affects billing. Reads the live
+    // ConfigSnapshot from ctx, so hot-reloaded config takes effect on the next
+    // billed request (same mechanism as the router's Decide).
+    if snap := config.SnapshotFromContext(ctx); snap != nil {
+        s.costTracker.SyncConfigMarkup(snap.Config.CostMarkup.Enabled, snap.Config.CostMarkup.GlobalMarkup)
+    }
     keyName := "anonymous"
     teamID := ""
     if keyCfg := middleware.GetAuthKeyConfig(ctx); keyCfg != nil && keyCfg.Name != "" {
