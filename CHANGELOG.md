@@ -11,6 +11,33 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 _No unreleased changes._
 
+## [0.9.20] - 2026-09-29
+
+### Added
+- **Batch API execution restored (#173)**. `POST /v1/batches` no longer
+  returns a permanent 501: a background batch worker
+  (`internal/server/batch_worker.go`) drains pending submissions, executing
+  each request back through the server's own mux so batch traffic traverses
+  the same middleware chain (auth, rate limit, routing, cost tracking) as
+  direct client calls. Up to 4 requests execute in parallel per batch;
+  per-request failures are recorded as `BatchResult.Error` and counted in
+  `Batch.Failed` — the batch still completes. Creation returns 501 with a
+  clear message when `batch.enabled=false`.
+
+### Tests
+- **`cmd/gateway` autoStart/autoStop coverage (#174)**: disabled/nil/no-command
+  no-op, healthy `WaitURL` success, timeout-still-returns-started semantics,
+  stop command runs with `onlyStarted=true`, and the supervisor-active skip
+  guard.
+
+### Security
+- **Env-first secret injection for the admin JWT secret (#175)**.
+  `admin.jwt_secret` now binds `FG_ADMIN_JWT_SECRET` via `bindSecretEnv`
+  (same treatment as `FG_MASTER_KEY`/`FG_ENCRYPTION_MASTER_KEY`), so the
+  signing key can be injected by Kubernetes secretKeyRef instead of plaintext
+  in config.yaml. README, README_CN, and config.example.yaml document the
+  env vars and the recommendation to prefer env injection.
+
 ## [0.9.19] - 2026-09-29
 
 ### Fixed
