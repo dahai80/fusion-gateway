@@ -107,6 +107,9 @@ type Server struct {
     connectorRegistry *connector.Registry
     oauth2States      map[string]oauth2StateEntry
     mcpHandler        *mcp.Handler
+    // #173: root mux saved by Start so the batch worker can loop batch
+    // requests back through the full middleware chain. nil until Start.
+    mux *http.ServeMux
     // #118: dedicated MCP HTTP listener for security-domain isolation from the
     // main :11432 mux. nil unless mcp.enabled && mcp.listen_enabled. Drained in
     // Shutdown BEFORE the main httpServer so MCP's forwardToNode outbound calls
@@ -684,6 +687,7 @@ func (s *Server) Start() error {
     s.buildMiddlewareChain()
 
     mux := http.NewServeMux()
+    s.mux = mux // #173: batch worker loops requests back through this mux
 
     mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
     mux.HandleFunc("/v1/completions", s.withMiddleware(s.handleCompletions))
@@ -897,6 +901,11 @@ func (s *Server) Start() error {
             return fmt.Errorf("start MCP listener: %w", err)
         }
     }
+
+    // #173: batch worker drains pending /v1/batches submissions. Loops each
+    // request back through s.mux (same middleware chain as client traffic).
+    // No-op when batch.enabled=false in config.
+    s.startBatchWorker()
 
     if s.cfg.Config.Server.TLS != nil && s.cfg.Config.Server.TLS.CertFile != "" && s.cfg.Config.Server.TLS.KeyFile != "" {
         slog.Info("server starting with TLS", "addr", addr, "cert", s.cfg.Config.Server.TLS.CertFile)

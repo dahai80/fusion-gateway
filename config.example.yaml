@@ -400,7 +400,7 @@ admin:
     enabled: true                      # Enable admin dashboard and API
     listen: ""                         # Optional separate listen address (default: same as server)
     log_max_len: 10000                 # Max request log entries (ring buffer)
-    jwt_secret: "change-me-at-least-32-chars-long-random-secret"  # PLACEHOLDER — replace with >=32 random chars; Load refuses as-is (JWT signing secret)
+    jwt_secret: "change-me-at-least-32-chars-long-random-secret"  # PLACEHOLDER — replace with >=32 random chars; Load refuses as-is (JWT signing secret). #175: prefer env injection — set FG_ADMIN_JWT_SECRET (viper BindEnv, highest precedence) instead of a plaintext value here.
     users:                             # Admin login credentials (passwords min 8 chars)
         admin: "change-me-secure-password"   # PLACEHOLDER — replace with a unique strong password; Load refuses as-is
     enable_pprof: false                # Enable pprof profiling endpoints (requires master_key)

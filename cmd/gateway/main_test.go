@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -1382,4 +1383,95 @@ func TestAutoStopLocal_OnlyStarted(t *testing.T) {
 	}
 	// not started → must be a no-op (the sentinel never runs).
 	autoStopLocal(cfg, false)
+}
+
+// TestAutoStartLocal_DisabledOrNotConfigured: autoStartLocal returns
+// started=false without running anything when auto_start is disabled, nil,
+// or has no command (#174). Guard: a nil cfg must not panic.
+func TestAutoStartLocal_DisabledOrNotConfigured(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	if autoStartLocal(nil) {
+		t.Fatal("autoStartLocal(nil) = true, want false")
+	}
+	if autoStartLocal(&config.AutoStartConfig{Enabled: false, Command: "echo X"}) {
+		t.Fatal("autoStartLocal with Enabled=false returned true, want false")
+	}
+	if autoStartLocal(&config.AutoStartConfig{Enabled: true, Command: ""}) {
+		t.Fatal("autoStartLocal with empty Command returned true, want false")
+	}
+}
+
+// TestAutoStartLocal_RunsCommandAndWaitURL: autoStartLocal runs the command
+// and polls WaitURL until a non-5xx response (#174). Uses an httptest server
+// as the healthy backend and a command that just sleeps briefly — hermetic,
+// no real fusion-mlx.
+func TestAutoStartLocal_RunsCommandAndWaitURL(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cfg := &config.AutoStartConfig{
+		Enabled:  true,
+		Command:  "sleep 0.1",
+		WaitURL:  srv.URL,
+		WaitSecs: 5,
+	}
+	started := autoStartLocal(cfg)
+	if !started {
+		t.Fatal("autoStartLocal returned false for a healthy backend, want true")
+	}
+}
+
+// TestAutoStartLocal_TimeoutStillReturnsStarted: when WaitURL never becomes
+// healthy, autoStartLocal logs a warning but still returns started=true —
+// the process WAS launched, so autoStopLocal owns its teardown (#174).
+func TestAutoStartLocal_TimeoutStillReturnsStarted(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	cfg := &config.AutoStartConfig{
+		Enabled:  true,
+		Command:  "sleep 30",
+		WaitURL:  "http://127.0.0.1:1/no-such-endpoint",
+		WaitSecs: 1,
+	}
+	started := autoStartLocal(cfg)
+	if !started {
+		t.Fatal("autoStartLocal returned false on wait timeout, want true (process was launched)")
+	}
+}
+
+// TestAutoStopLocal_RunsStopCommand: autoStopLocal runs the configured stop
+// command when onlyStarted=true (#174). The sentinel writes a marker file;
+// if the command did not run, the file is missing.
+func TestAutoStopLocal_RunsStopCommand(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	marker := filepath.Join(t.TempDir(), "stopped")
+	cfg := &config.AutoStartConfig{
+		Enabled: true,
+		StopCmd: "touch " + marker,
+	}
+	autoStopLocal(cfg, true)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("autoStopLocal did not run the stop command: %v", err)
+	}
+}
+
+// TestAutoStopLocal_SkipsWhenSupervisorActive: under an active supervisor the
+// stop must be skipped even with onlyStarted=true (#141/#174 regression guard).
+func TestAutoStopLocal_SkipsWhenSupervisorActive(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "1")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	marker := filepath.Join(t.TempDir(), "stopped")
+	cfg := &config.AutoStartConfig{
+		Enabled: true,
+		StopCmd: "touch " + marker,
+	}
+	autoStopLocal(cfg, true)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("autoStopLocal ran the stop command under an active supervisor, want skipped")
+	}
 }

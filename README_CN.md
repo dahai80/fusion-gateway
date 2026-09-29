@@ -85,7 +85,7 @@ cp config.example.yaml config.yaml
 | `hot_reload.breaker_warmup_success` | 3 | warmup 后关闭熔断器所需的成功次数 |
 | `admin.enabled` | true | 启用管理后台与 API |
 | `admin.log_max_len` | 10000 | 请求日志最大条数 (环形缓冲) |
-| `admin.jwt_secret` | "" | 管理后台鉴权的 JWT 签名密钥 |
+| `admin.jwt_secret` | "" | 管理后台鉴权的 JWT 签名密钥（推荐用环境变量 `FG_ADMIN_JWT_SECRET` 注入，避免明文写入 config.yaml，#175） |
 | `cost.pricing_file` | "" | 自定义定价 YAML,支持热重载 |
 | `observability.otel_enabled` | false | 启用 OpenTelemetry 链路追踪 |
 | `observability.otel_endpoint` | localhost:4317 | OTel collector 端点 |
