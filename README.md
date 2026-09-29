@@ -65,6 +65,7 @@ The image ships a minimal `config.container.yaml` (auth off, `auto_start` off, `
 | `FUSION_MLX_URL` | `backends.fusion-mlx.base_url` | `http://host.docker.internal:11434` | Reach bare-metal fusion-mlx on the Docker host |
 | `FG_MASTER_KEY` | `auth.master_key` | "" | Admin-equivalent key + `/metrics` gate (set for production) |
 | `FG_ENCRYPTION_MASTER_KEY` | `encryption.master_key` | "" | Protects OAuth2/connector tokens at rest |
+| `FG_ADMIN_JWT_SECRET` | `admin.jwt_secret` | "" | HS256 signing key for admin dashboard sessions (#175) |
 
 Override the port, e.g. `docker run -e FUSION_GATEWAY_PORT=12000 -p 12000:12000 fusion-gateway`. Persist keys/channels/teams across restarts with a named volume on `/data` (`store.data_dir`, pre-created + chown'd to the non-root `gateway` user). Mount a full `config.yaml` at `/etc/fusion-gateway/config.yaml` to override every default. Logs go to stdout.
 

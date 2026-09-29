@@ -997,6 +997,11 @@ func bindSecretEnv(v *viper.Viper) {
     v.BindEnv("auth.master_key", "FG_MASTER_KEY")
     // encryption.master_key — protects OAuth2/connector tokens at rest.
     v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
+    // #175: admin.jwt_secret — HS256 signing key for admin dashboard sessions.
+    // Same env-first treatment as the other secrets: injecting via env avoids
+    // a plaintext secret in config.yaml and lets Kubernetes secretKeyRef drive
+    // rotation without a config rewrite.
+    v.BindEnv("admin.jwt_secret", "FG_ADMIN_JWT_SECRET")
     // server.port — containerized deployment overrides the listen port via env
     // (#143: docker run -p maps the host port, but the in-container port must
     // match EXPOSE; FUSION_GATEWAY_PORT lets a compose overlay drive it without

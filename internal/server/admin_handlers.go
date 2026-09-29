@@ -229,23 +229,32 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
             http.Error(w, `{"error":{"message":"Invalid request body","type":"invalid_request"}}`, http.StatusBadRequest)
             return
         }
-        // M1 (audit): no batch worker exists — the prior path stored the
-        // submission with status=pending and returned 200, silently accepting
-        // work that was never executed (internal/batch package + ProcessFn +
-        // go s.process(b) were deleted in 32a1217 and never replaced). A
-        // commercial release must not advertise execution it cannot perform.
-        // 501 is the OpenAI-correct "endpoint exists, operation unsupported"
-        // signal; submissions are still validated above so malformed input
-        // gets a precise 400. GET list / per-item CRUD stay (harmless on an
-        // empty store). When a worker is wired, restore the CreateBatch path.
-        slog.Warn("batch create rejected: no worker implemented, endpoint not available for commercial release",
-            "endpoint", req.Endpoint, "requests", len(req.Requests))
-        writeJSON(w, http.StatusNotImplemented, map[string]interface{}{
-            "error": map[string]interface{}{
-                "message": "batch execution is not implemented; the endpoint accepts and validates submissions but no worker drains them. Use individual /v1/chat/completions requests.",
-                "type":   "not_implemented",
-            },
-        })
+        // #173: batch worker restored (internal/server/batch_worker.go) —
+        // submissions are persisted and drained by startBatchWorker, each
+        // request looping back through the same mux/middleware chain as
+        // client traffic. Disabled when batch.enabled=false (501 again).
+        if !s.cfg.Config.Batch.Enabled {
+            slog.Warn("batch create rejected: batch.enabled=false",
+                "endpoint", req.Endpoint, "requests", len(req.Requests))
+            writeJSON(w, http.StatusNotImplemented, map[string]interface{}{
+                "error": map[string]interface{}{
+                    "message": "batch execution is disabled (batch.enabled=false). Enable it in config or use individual /v1/chat/completions requests.",
+                    "type":   "not_implemented",
+                },
+            })
+            return
+        }
+        if len(req.Requests) == 0 {
+            http.Error(w, `{"error":{"message":"requests must not be empty","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+        b, err := s.store.CreateBatch(req.Requests, req.Endpoint, req.CompletionWindow)
+        if err != nil {
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+            return
+        }
+        slog.Info("batch created", "batch_id", b.ID, "requests", len(req.Requests), "endpoint", req.Endpoint)
+        writeJSON(w, http.StatusOK, b)
     case http.MethodGet:
         batches, err := s.store.ListBatches()
         if err != nil {
