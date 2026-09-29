@@ -11,6 +11,34 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 _No unreleased changes._
 
+## [0.9.19] - 2026-09-29
+
+### Fixed
+- **Memory-leak audit remediation (#166–#172)** — results of the full
+  memory-leak / dead-code / release-readiness audit:
+  - #166 `cost.Tracker.keyMarkups` grows unboundedly under key churn.
+    `SetKeyMarkup` with a zero/negative markup now clears the entry, and a new
+    `DeleteKeyMarkup` drops it on key deletion.
+  - #167 Connector registry `auditLog` trim resliced instead of copying,
+    keeping the ever-growing backing array alive after millions of audit
+    events. Copy-trim now releases it (same pattern as the B9/EI11 fixes).
+  - #168 Cloud in-flight tracking spawned a per-request `cloud_inflight_drain`
+    goroutine that raced the real stream consumer for chunks and could block
+    forever. Replaced with a pump wrapper that decrements the gauge when the
+    stream closes — no extra goroutine, no racing consumer.
+  - #169 Realtime proxy leaked the upstream response body on a failed
+    WebSocket handshake (gorilla/websocket returns a non-nil response on
+    error). The body is now drained and closed per failed upgrade.
+  - #170 Per-key quota maps (`usage`/`dailyUsage`/`dailyDate`) accumulated
+    entries for unknown key names forever. New `PruneUnknownStale` sweeps
+    unknown-key entries idle > 7 days, wired on quota load and shutdown flush.
+  - #171 Bedrock SigV4 `signKeyCache` never evicted stale date scopes. Stale
+    scopes are now dropped on derivation (signing keys are only valid for
+    their own date). E6 test updated for the new semantics.
+  - #172 The admin `cost_markup` knob wrote config that nothing read at
+    runtime — billing markup was always 0. `recordAndCharge` now syncs the
+    config into the tracker via `ConfigSnapshot` (hot-reload aware).
+
 ## [0.9.18] - 2026-09-05
 
 ### Added
