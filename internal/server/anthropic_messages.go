@@ -147,6 +147,16 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     }
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason, "input_tokens", inputTokens)
 
+    // #log-tokens: stamp model/route info on the request-log entry as soon as
+    // the route is resolved — BEFORE any early-exit (backend gate, slot queue,
+    // stream cap) or the provider calls. The /v1/messages handlers never
+    // touched the entry, so every Claude Code log line showed model "-" and
+    // zero tokens. The deferred stream stamp below adds usage counts.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = antReq.Model
+        logEntry.ChannelType = string(decision.Backend)
+    }
+
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
         return
     }
@@ -170,6 +180,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     if provider == nil {
         http.Error(w, `{"error":{"message":"No provider available","type":"server_error"}}`, http.StatusServiceUnavailable)
         return
+    }
+    // #log-tokens: record the resolved provider so both stream and non-stream
+    // exits carry the channel in the request log.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.ChannelName = provider.Name()
     }
 
     // #102 ADR-001 sub-task 3: opt-in local wait-queue, same gate as
@@ -390,6 +405,14 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         return
     }
     w.Header().Set("Content-Type", "application/json")
+    // #log-tokens: the aggregate response carries final usage — stamp it so
+    // non-stream /v1/messages logs show real token counts (were 0/0/0).
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = req.Model
+        logEntry.InputTokens = resp.Usage.InputTokens
+        logEntry.OutputTokens = resp.Usage.OutputTokens
+        logEntry.TotalTokens = resp.Usage.InputTokens + resp.Usage.OutputTokens
+    }
     _ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -478,6 +501,31 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         return writeSSE("event: %s\ndata: %s\n\n", event.Type, data)
     }
     writeFailed := false
+    // #log-tokens: accumulate usage from message_start / message_delta usage
+    // payloads so the request log gets real prompt/completion/total counts.
+    // Claude Code traffic flows almost entirely through this stream path; the
+    // log previously showed 0/0/0 for all of it.
+    usageInput, usageOutput := 0, 0
+    captureUsage := func(u *adapter.AnthropicUsage) {
+        if u == nil {
+            return
+        }
+        if u.InputTokens > 0 {
+            usageInput = u.InputTokens
+        }
+        if u.OutputTokens > 0 {
+            usageOutput = u.OutputTokens
+        }
+    }
+    stampStreamUsage := func() {
+        logEntry := middleware.GetRequestLog(ctx)
+        if logEntry == nil {
+            return
+        }
+        logEntry.InputTokens = usageInput
+        logEntry.OutputTokens = usageOutput
+        logEntry.TotalTokens = usageInput + usageOutput
+    }
     // Per-stream timing instrumentation (issue #81). "The response stopped
     // arriving" is a Claude Code internal judgment that an upstream stream
     // stopped producing deltas; the gateway previously logged only the
@@ -562,6 +610,9 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             if event.Type == "content_block_delta" {
                 deltaCount++
             }
+            if event.Usage != nil {
+                captureUsage(event.Usage)
+            }
             if event.Type == "message_stop" {
                 sawMessageStop = true
                 if closed := closeOpenBlocks(); closed != nil {
@@ -577,6 +628,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 slog.Warn("anthropic stream client write failed", "error", err)
                 writeFailed = true
                 endReason = "write_failed"
+                stampStreamUsage()
                 break
             }
         }
@@ -690,6 +742,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             writeSSE("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{}}\n\n")
             writeSSE("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
         }
+        stampStreamUsage()
         streamSummary()
         return
     }
@@ -697,6 +750,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         // The client pipe broke mid-stream (logged by the loop). The client is
         // already gone, so synthesizing a terminal to a dead pipe is pointless
         // and risks a second write error. Stop here (issue #79).
+        stampStreamUsage()
         streamSummary()
         return
     }
@@ -725,6 +779,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     } else {
         endReason = "clean"
     }
+    stampStreamUsage()
     streamSummary()
 }
 

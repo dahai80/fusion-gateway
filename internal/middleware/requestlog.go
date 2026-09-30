@@ -61,7 +61,15 @@ func (r *ResponseRecorder) Flush() {
 }
 
 func InitRequestLog(r *http.Request) *store.RequestLog {
-    reqID, _ := r.Context().Value(RequestIDKey).(string)
+    // RequestID note: this runs in withMiddleware BEFORE the RequestID
+    // middleware injects the id into the (derived) context, so the ctx read
+    // below is always empty on the first pass. The middleware also mirrors
+    // the resolved id onto the inbound request header (R12), which IS visible
+    // here — read the header first, ctx as fallback for direct callers.
+    reqID := r.Header.Get("X-Request-ID")
+    if reqID == "" {
+        reqID, _ = r.Context().Value(RequestIDKey).(string)
+    }
     entry := &store.RequestLog{
         RequestID:   reqID,
         RequestType: r.Method + " " + r.URL.Path,

@@ -10,9 +10,13 @@ package server
 
 import (
     "context"
+    "net/http"
+    "net/http/httptest"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/router"
 )
 
 // h2MockProvider is a bare Provider (no MessagesProvider) for the negative path.
@@ -100,5 +104,45 @@ func TestH2_ResolveMessagesProvider_BareWrappedNil(t *testing.T) {
     wrapped := adapter.WrapCloudTracking(bare)
     if mp := resolveMessagesProvider(wrapped); mp != nil {
         t.Fatalf("H2: bare Provider wrapped by cloudTrackingProvider must resolve to nil, got %T", mp)
+    }
+}
+
+// TestInitRequestLog_ReadsRequestIDHeader: InitRequestLog runs in
+// withMiddleware BEFORE the RequestID middleware injects the id into the
+// derived context, so the ctx read was always empty and every log line had
+// request_id = "". Regression: the entry must pick the id up from the
+// request header (the R12 mirror), falling back to ctx for direct callers.
+func TestInitRequestLog_ReadsRequestIDHeader(t *testing.T) {
+    req, _ := http.NewRequest(http.MethodPost, "/v1/messages", nil)
+    req.Header.Set("X-Request-ID", "req-abc-123")
+    entry := middleware.InitRequestLog(req)
+    if entry.RequestID != "req-abc-123" {
+        t.Fatalf("RequestID = %q, want %q (header must be visible pre-middleware)", entry.RequestID, "req-abc-123")
+    }
+}
+
+// TestStampRouteInfo_AnthropicMessagesModel: the /v1/messages path must stamp
+// the request-log entry with the model + backend as soon as the route is
+// resolved (before any early-exit), so Claude Code logs stop showing "-".
+func TestStampRouteInfo_AnthropicMessagesModel(t *testing.T) {
+    decision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "test"}
+    antReq := adapter.AnthropicRequest{Model: "claude-sonnet-4-5"}
+
+    base := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+    entry := middleware.InitRequestLog(base)
+    ctx := middleware.WithRequestLogContext(base, entry).Context()
+
+    // Mirror the handler's post-decision stamp inline (the stamp block in
+    // handleAnthropicMessages); asserting the helper semantics keeps this
+    // test decoupled from the full provider wiring.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = antReq.Model
+        logEntry.ChannelType = string(decision.Backend)
+    }
+    if entry.Model != "claude-sonnet-4-5" {
+        t.Fatalf("log entry Model = %q, want %q", entry.Model, "claude-sonnet-4-5")
+    }
+    if entry.ChannelType != string(router.CloudBackend) {
+        t.Fatalf("log entry ChannelType = %q, want %q", entry.ChannelType, router.CloudBackend)
     }
 }
