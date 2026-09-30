@@ -762,6 +762,9 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             // #log-model: stamp route info even on cache hits — the request
             // did use this model, so the log must show it (was blank "-").
             s.stampRouteInfo(ctx, req, decision, provider.Name())
+            // #log-tokens: stamp the cached response's usage counts too
+            // (were 0/0/0 on every cache hit).
+            stampCachedUsage(ctx, cached)
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -803,6 +806,8 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             slog.Debug("cache hit after coalesced fetch", "model", req.Model)
             // #log-model: stamp route info on the coalesced-hit path too.
             s.stampRouteInfo(ctx, req, decision, provider.Name())
+            // #log-tokens: stamp usage counts on the coalesced hit as well.
+            stampCachedUsage(ctx, cached)
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -1060,6 +1065,24 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 // message is JSON-escaped via json.Marshal and capped so a large upstream
 // body does not flood the client response. No API key material appears in
 // upstream error strings (verified), so surfacing is safe.
+// stampCachedUsage parses the cached response body and stamps its token
+// counts onto the request-log entry (#log-tokens follow-up): a cache-hit log
+// previously showed 0/0/0 even though the served response carries real usage.
+// Best-effort — a malformed cache body just leaves zeros.
+func stampCachedUsage(ctx context.Context, cached []byte) {
+    logEntry := middleware.GetRequestLog(ctx)
+    if logEntry == nil {
+        return
+    }
+    var resp adapter.ChatResponse
+    if err := json.Unmarshal(cached, &resp); err != nil {
+        return
+    }
+    logEntry.InputTokens = resp.Usage.PromptTokens
+    logEntry.OutputTokens = resp.Usage.CompletionTokens
+    logEntry.TotalTokens = resp.Usage.TotalTokens
+}
+
 // stampRouteInfo records route context (model, channel, backend) on the
 // request-log entry. Called from EVERY exit path of the chat handlers —
 // success, cache hit, and failure — so the admin dashboard shows the model
