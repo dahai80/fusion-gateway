@@ -330,3 +330,32 @@ func TestResponseRecorder_Hijack_Success(t *testing.T) {
         t.Error("inner Hijack should have been called")
     }
 }
+
+// TestInitRequestLog_PreGeneratesRequestID: when the client sends no
+// X-Request-ID, InitRequestLog must pre-generate one AND seed the request
+// header with it. InitRequestLog runs BEFORE the RequestID middleware, so
+// neither the header nor the derived ctx has an id at that point; seeding
+// the header makes RequestID reuse the same value (it prefers the incoming
+// header), keeping the log's request_id non-blank and both layers in sync.
+func TestInitRequestLog_PreGeneratesRequestID(t *testing.T) {
+    req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry := InitRequestLog(req)
+    if entry.RequestID == "" {
+        t.Fatal("request_id blank for a client-supplied-none request; InitRequestLog must pre-generate one")
+    }
+    if req.Header.Get("X-Request-ID") != entry.RequestID {
+        t.Fatalf("header id %q != entry id %q; RequestID middleware would generate a DIFFERENT id, breaking log correlation",
+            req.Header.Get("X-Request-ID"), entry.RequestID)
+    }
+}
+
+// TestInitRequestLog_RespectsClientRequestID: an explicit client
+// X-Request-ID must pass through untouched (no regeneration).
+func TestInitRequestLog_RespectsClientRequestID(t *testing.T) {
+    req, _ := http.NewRequest(http.MethodPost, "/v1/messages", nil)
+    req.Header.Set("X-Request-ID", "client-set-id")
+    entry := InitRequestLog(req)
+    if entry.RequestID != "client-set-id" {
+        t.Fatalf("RequestID = %q, want client value %q", entry.RequestID, "client-set-id")
+    }
+}
