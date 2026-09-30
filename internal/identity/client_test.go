@@ -71,6 +71,15 @@ func (f *fakeIdentity) ReportUsage(ctx context.Context, req *pb.ReportUsageReque
 // newTestClient spins a bufconn gRPC server + Client. breakerThreshold=2 +
 // openSec=1 keep breaker tests fast.
 func newTestClient(t *testing.T, f *fakeIdentity) (*Client, func()) {
+    return newTestClientWithOpenSec(t, f, 1*time.Second)
+}
+
+// newTestClientWithOpenSec allows breaker tests to widen the open window:
+// on a loaded CI runner the gap between the two failing calls and the
+// short-circuit assertion can exceed 1s, pushing the breaker into half-open
+// (which admits a probe instead of returning ErrBreakerOpen) and flaking
+// TestClient_BreakerOpensOnTransportFailure.
+func newTestClientWithOpenSec(t *testing.T, f *fakeIdentity, openSec time.Duration) (*Client, func()) {
     t.Helper()
     lis := bufconn.Listen(1024 * 1024)
     srv := grpc.NewServer()
@@ -91,7 +100,7 @@ func newTestClient(t *testing.T, f *fakeIdentity) (*Client, func()) {
     c := &Client{
         conn:     conn,
         stub:     pb.NewIdentityServiceClient(conn),
-        breaker:  newBreaker(2, 1*time.Second),
+        breaker:  newBreaker(2, openSec),
         deadline: 200 * time.Millisecond,
         fallback: false,
         endpoint: "bufnet",
@@ -159,7 +168,11 @@ func TestClient_AuthorizeAndAcquire_DeniedDoesNotTripBreaker(t *testing.T) {
 func TestClient_BreakerOpensOnTransportFailure(t *testing.T) {
     f := &fakeIdentity{}
     f.dialFail.Store(true)
-    c, cleanup := newTestClient(t, f)
+    // openSec=60s: keep the breaker open for the whole assertion window. With
+    // the default 1s, a loaded CI runner can exceed the open window between
+    // the failing calls and the assertion, flip the breaker to half-open, and
+    // admit a probe (transport err) instead of ErrBreakerOpen — flaky red.
+    c, cleanup := newTestClientWithOpenSec(t, f, 60*time.Second)
     defer cleanup()
     // threshold=2: two transport failures open the breaker.
     for i := 0; i < 2; i++ {

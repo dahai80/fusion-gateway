@@ -64,6 +64,7 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
                     Key:  cfg.MasterKey,
                     Name: "master",
                 }
+                StampAPIKeyName(ctx, "master")
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
@@ -103,6 +104,12 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             p.IsMaster = false
             p.KeyConfig = matchedKey
             p.ModelModules = matchedKey.ModelModules
+            // Stamp the resolved key name onto the request-log entry directly:
+            // the Principal only reaches the DERIVED context (r.WithContext),
+            // which the outer withMiddleware defer can never see when it
+            // re-reads the original request's context — that is why
+            // authenticated requests were logged as "anonymous".
+            StampAPIKeyName(ctx, matchedKey.Name)
             // #150 Gap1: stamp the gateway-derived tenant onto the Principal so
             // downstream code (and the outbound X-Fusion-Tenant header) uses the
             // credential's binding, never a client-supplied X-Space-Id. RBAC

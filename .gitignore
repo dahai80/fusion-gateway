@@ -34,3 +34,4 @@ logs/
 # Frontend
 web/admin/node_modules/
 CLAUDE.md
+.gateway.pid

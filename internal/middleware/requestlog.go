@@ -90,11 +90,35 @@ func GetRequestLog(ctx context.Context) *store.RequestLog {
     return entry
 }
 
+// StampAPIKeyName records the authenticated key's display name on the request
+// log entry at the moment auth resolves it. Called from the auth middleware
+// because the Principal it builds lives only in the derived request context —
+// the outer withMiddleware defer reads the ORIGINAL request's context and can
+// never see it (Go context propagation is inward-only), which is why every
+// authenticated request was logged as "anonymous".
+func StampAPIKeyName(ctx context.Context, keyName string) {
+    if keyName == "" {
+        return
+    }
+    if entry := GetRequestLog(ctx); entry != nil {
+        entry.APIKeyName = keyName
+    }
+}
+
 func FinalizeAndAppendLog(entry *store.RequestLog, st store.Store, start time.Time, keyName string) {
     entry.Timestamp = start
     entry.Latency = time.Since(start).Seconds()
     entry.IsSuccess = entry.StatusCode >= 200 && entry.StatusCode < 400
-    entry.APIKeyName = keyName
+    // Key-name precedence: the entry value (stamped by the auth middleware
+    // into the entry itself, see StampAPIKeyName) wins over the ctx-derived
+    // keyName. The ctx read at the outermost withMiddleware defer cannot see
+    // the Principal the auth middleware injected into the derived request
+    // context (Go context propagation is inward-only), so it always reports
+    // "anonymous" for authenticated requests — the entry stamp is the only
+    // reliable source. Keep the fallback for paths that never run auth.
+    if entry.APIKeyName == "" {
+        entry.APIKeyName = keyName
+    }
 
     if st != nil {
         if err := st.AppendLog(entry); err != nil {

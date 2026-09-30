@@ -681,3 +681,67 @@ func TestAPIKeyAuthWithStore_StaticKeyWins(t *testing.T) {
         t.Fatalf("static key must authenticate, got %d", rec.Code)
     }
 }
+
+// TestAPIKeyAuth_StampsRequestLogKeyName: after a successful key auth the
+// request-log entry (created by InitRequestLog on the ORIGINAL request)
+// must carry the key's display name. Regression for the "anonymous" log
+// bug: the Principal only reaches the derived context (r.WithContext),
+// which the outer withMiddleware defer can never see — the entry stamp is
+// the propagation path. Uses WithRequestLogContext to mimic the real
+// middleware chain (InitRequestLog → WithRequestLogContext → auth → next).
+func TestAPIKeyAuth_StampsRequestLogKeyName(t *testing.T) {
+	cfg := &config.AuthConfig{
+		Enabled: true,
+		APIKeys: []config.AuthKeyConfig{{Key: "key1", Name: "claude"}},
+	}
+	handler := APIKeyAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	entry := InitRequestLog(req)
+	req = WithRequestLogContext(req, entry)
+	req.Header.Set("Authorization", "Bearer key1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if entry.APIKeyName != "claude" {
+		t.Fatalf("request log APIKeyName = %q, want %q (auth must stamp the entry)", entry.APIKeyName, "claude")
+	}
+}
+
+// TestAPIKeyAuth_MasterKeyStampsRequestLog: master-key auth must stamp
+// "master" onto the request-log entry, same propagation path as regular keys.
+func TestAPIKeyAuth_MasterKeyStampsRequestLog(t *testing.T) {
+	cfg := &config.AuthConfig{
+		Enabled:   true,
+		MasterKey: "mk-test",
+	}
+	handler := APIKeyAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	entry := InitRequestLog(req)
+	req = WithRequestLogContext(req, entry)
+	req.Header.Set("Authorization", "Bearer mk-test")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if entry.APIKeyName != "master" {
+		t.Fatalf("request log APIKeyName = %q, want %q", entry.APIKeyName, "master")
+	}
+}
+
+// TestFinalizeAndAppendLog_EntryStampWins: FinalizeAndAppendLog must NOT
+// overwrite an entry stamped by auth with the outer ctx-derived name
+// ("anonymous"). The stamp wins; the ctx value is only a fallback for paths
+// that never run auth.
+func TestFinalizeAndAppendLog_EntryStampWins(t *testing.T) {
+	entry := &store.RequestLog{StatusCode: 200}
+	entry.APIKeyName = "claude" // what auth stamped
+	FinalizeAndAppendLog(entry, nil, time.Now(), "anonymous")
+	if entry.APIKeyName != "claude" {
+		t.Fatalf("FinalizeAndAppendLog overwrote the auth-stamped name: got %q, want %q", entry.APIKeyName, "claude")
+	}
+}
