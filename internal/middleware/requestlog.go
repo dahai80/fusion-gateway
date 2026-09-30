@@ -9,6 +9,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/store"
+    "github.com/google/uuid"
 )
 
 type reqLogContextKey string
@@ -65,8 +66,16 @@ func InitRequestLog(r *http.Request) *store.RequestLog {
     // middleware injects the id into the (derived) context, so the ctx read
     // below is always empty on the first pass. The middleware also mirrors
     // the resolved id onto the inbound request header (R12), which IS visible
-    // here — read the header first, ctx as fallback for direct callers.
+    // here — read the header first, ctx as fallback. When the client sent no
+    // header at all, neither source has the id the RequestID middleware will
+    // generate moments later, so pre-generate one here: RequestID reuses any
+    // header value it finds, so seeding the header with this id makes both
+    // layers agree on the same id (and keeps the log non-blank).
     reqID := r.Header.Get("X-Request-ID")
+    if reqID == "" {
+        reqID = uuid.New().String()
+        r.Header.Set("X-Request-ID", reqID)
+    }
     if reqID == "" {
         reqID, _ = r.Context().Value(RequestIDKey).(string)
     }
