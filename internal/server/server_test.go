@@ -10000,6 +10000,12 @@ func TestStampRouteInfo_OnCacheHitAndFailure(t *testing.T) {
     if entry2.Model != "gpt-4" {
         t.Fatalf("cache-hit log entry Model = %q, want %q", entry2.Model, "gpt-4")
     }
+    // #log-tokens: the cache-hit entry must carry the cached response's usage
+    // counts (were 0/0/0 — the cache early-exit never parsed the body).
+    if entry2.InputTokens != 5 || entry2.OutputTokens != 3 || entry2.TotalTokens != 8 {
+        t.Fatalf("cache-hit log entry tokens = %d/%d/%d, want 5/3/8 (from the cached ChatResponse.Usage)",
+            entry2.InputTokens, entry2.OutputTokens, entry2.TotalTokens)
+    }
     if entry2.ChannelType != string(router.CloudBackend) {
         t.Fatalf("cache-hit log entry ChannelType = %q, want %q", entry2.ChannelType, router.CloudBackend)
     }
