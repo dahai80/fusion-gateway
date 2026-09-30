@@ -9959,3 +9959,63 @@ func TestWithAdminOnly_AdminJWTBridge_Negatives(t *testing.T) {
     }
     slog.Info("TestWithAdminOnly_AdminJWTBridge_Negatives passed")
 }
+
+// TestStampRouteInfo_OnCacheHitAndFailure: the request-log entry must carry
+// model/channel/backend on EVERY exit path of handleNonStreamChat — cache
+// hits and 502 "Chat failed" included. Regression: only the success paths
+// stamped the entry, so cache-hit and error logs showed model = "-".
+func TestStampRouteInfo_OnCacheHitAndFailure(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        chatResp: &adapter.ChatResponse{
+            ID: "chatcmpl-stamp", Object: "chat.completion", Created: time.Now().Unix(), Model: "gpt-4",
+            Choices: []adapter.ChatChoice{{Index: 0, Message: map[string]string{"role": "assistant", "content": "ok"}, FinishReason: "stop"}},
+            Usage:   adapter.UsageResponse{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8},
+        },
+    })
+    // Cache must be enabled for the cache-hit early-exit path to trigger.
+    s.cfg.Config.Cache.Enabled = true
+    s.cache = cache.New(s.cfg.Config.Cache)
+    provider, _ := s.pool.Get("test-cloud")
+    decision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "test"}
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    req := &adapter.ChatRequest{Model: "gpt-4", Messages: []adapter.ChatMessage{{Role: "user", Content: "stamp"}}}
+
+    // --- cache-hit path: second identical call exits early via cache; the
+    // entry must still be stamped with the model.
+    rec := httptest.NewRecorder()
+    base1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry := middleware.InitRequestLog(base1)
+    ctx := middleware.WithRequestLogContext(base1, entry).Context()
+    s.handleNonStreamChat(ctx, rec, provider, req, decision, budget, time.Now(), "t") // populates cache
+    rec2 := httptest.NewRecorder()
+    base2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry2 := middleware.InitRequestLog(base2)
+    ctx2 := middleware.WithRequestLogContext(base2, entry2).Context()
+    s.handleNonStreamChat(ctx2, rec2, provider, req, decision, budget, time.Now(), "t")
+    if rec2.Header().Get("X-Cache") != "HIT" {
+        t.Fatalf("expected cache HIT on second call, got header %q", rec2.Header().Get("X-Cache"))
+    }
+    if entry2.Model != "gpt-4" {
+        t.Fatalf("cache-hit log entry Model = %q, want %q", entry2.Model, "gpt-4")
+    }
+    if entry2.ChannelType != string(router.CloudBackend) {
+        t.Fatalf("cache-hit log entry ChannelType = %q, want %q", entry2.ChannelType, router.CloudBackend)
+    }
+
+    // --- failure path: a failing provider must stamp the entry before the
+    // 502 "Chat failed" response.
+    failing := &mockProvider{name: "test-cloud", healthy: true, chatErr: fmt.Errorf("boom")}
+    rec3 := httptest.NewRecorder()
+    base3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry3 := middleware.InitRequestLog(base3)
+    ctx3 := middleware.WithRequestLogContext(base3, entry3).Context()
+    s.handleNonStreamChat(ctx3, rec3, failing, req, decision, budget, time.Now(), "t")
+    if entry3.Model != "gpt-4" {
+        t.Fatalf("failure log entry Model = %q, want %q", entry3.Model, "gpt-4")
+    }
+    if entry3.ChannelName != "test-cloud" {
+        t.Fatalf("failure log entry ChannelName = %q, want %q", entry3.ChannelName, "test-cloud")
+    }
+}

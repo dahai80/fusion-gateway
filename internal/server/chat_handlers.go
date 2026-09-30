@@ -759,6 +759,9 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             "tenant", tenantName, "tools", req.Tools, "tool_choice", req.ToolChoice, "stop", req.Stop)
         if cached, ok := s.cache.Get(cacheKey); ok {
             slog.Debug("cache hit for non-stream chat", "model", req.Model)
+            // #log-model: stamp route info even on cache hits — the request
+            // did use this model, so the log must show it (was blank "-").
+            s.stampRouteInfo(ctx, req, decision, provider.Name())
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -798,6 +801,8 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         // (or this caller, if it WAS the leader) populated it — serve it.
         if cached, ok := s.cache.Get(cacheKey); ok {
             slog.Debug("cache hit after coalesced fetch", "model", req.Model)
+            // #log-model: stamp route info on the coalesced-hit path too.
+            s.stampRouteInfo(ctx, req, decision, provider.Name())
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -880,6 +885,9 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             }
         }
 
+        // #log-model: stamp route info on the failure path too — a 502 log
+        // must still show which model/backend was attempted (was blank "-").
+        s.stampRouteInfo(ctx, req, decision, provider.Name())
         writeChatFailedError(w, "Chat failed", failErr)
         return
     }
@@ -1052,6 +1060,22 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 // message is JSON-escaped via json.Marshal and capped so a large upstream
 // body does not flood the client response. No API key material appears in
 // upstream error strings (verified), so surfacing is safe.
+// stampRouteInfo records route context (model, channel, backend) on the
+// request-log entry. Called from EVERY exit path of the chat handlers —
+// success, cache hit, and failure — so the admin dashboard shows the model
+// even when the request never reaches a provider (cache hit) or fails
+// (502 "Chat failed"). Previously only the success paths stamped the entry,
+// leaving cache-hit and error logs with a blank model (-).
+func (s *Server) stampRouteInfo(ctx context.Context, req *adapter.ChatRequest, decision *router.RouteDecision, providerName string) {
+    logEntry := middleware.GetRequestLog(ctx)
+    if logEntry == nil {
+        return
+    }
+    logEntry.Model = req.Model
+    logEntry.ChannelName = providerName
+    logEntry.ChannelType = string(decision.Backend)
+}
+
 func writeChatFailedError(w http.ResponseWriter, prefix string, err error) {
     detail := ""
     if err != nil {
