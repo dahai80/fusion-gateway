@@ -108,3 +108,23 @@ func TestBnupModeConfigDefaults(t *testing.T) {
         t.Fatalf("expected BnupGrammar=bnup-socratic, got %q", cfg.Routing.BnupGrammar)
     }
 }
+
+// #185: BNUP model not loaded → fallback to default_model (no 404 crash).
+func TestApplyBnupModeFallbackToDefault(t *testing.T) {
+    s, srv := newTestServerWithMLX(t, true, []string{"qwen-7b"})
+    defer srv.Close()
+    s.cfg.Config.Routing.BnupMode = true
+    s.cfg.Config.Routing.BnupModel = "Qwen2.5-32B-BNUP-Final"
+    s.cfg.Config.Routing.BnupGrammar = "bnup-socratic"
+    s.cfg.Config.Routing.DefaultModel = "qwen-7b"
+
+    req := &adapter.ChatRequest{Model: "bnup-math"}
+    s.applyBnupMode(req)
+
+    if req.Model != "qwen-7b" {
+        t.Fatalf("expected fallback to default model qwen-7b, got %q", req.Model)
+    }
+    if req.Grammar != "bnup-socratic" {
+        t.Fatalf("expected grammar=bnup-socratic, got %q", req.Grammar)
+    }
+}
