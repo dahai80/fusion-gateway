@@ -195,6 +195,14 @@ type ChatRequest struct {
     // json_object) through to fusion-mlx (xgrammar/llguidance backend). The
     // gateway does not interpret it; fusion-mlx enforces the structure.
     ResponseFormat interface{}   `json:"response_format,omitempty"`
+    // Grammar passes a GBNF grammar string or alias (e.g. "bnup-socratic")
+    // to fusion-mlx for constrained generation. The gateway does not compile
+    // it — fusion-mlx resolves aliases and compiles via xgraph/llguidance.
+    // Opaque to cloud providers; only fusion-mlx consumes it. Issue #184.
+    Grammar string `json:"grammar,omitempty"`
+    // GrammarBackend optionally selects the constraint backend: "auto"
+    // (default), "llguidance", or "xgraph". Forwarded to fusion-mlx only.
+    GrammarBackend string `json:"grammar_backend,omitempty"`
 }
 
 type StreamOptions struct {

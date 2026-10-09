@@ -60,6 +60,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
     }
 
+    // #185: BNUP mode — when enabled, a model alias starting with "bnup-"
+    // triggers two auto-attachments: (1) model remapped to bnup_model (the
+    // merged Qwen2.5-32B-BNUP-Final weights), (2) grammar bnup_grammar
+    // ("bnup-socratic") auto-set so fusion-mlx constrains output via GBNF.
+    // If the BNUP model is not loaded in fusion-mlx, the router's existing
+    // model-availability check (P4) falls back to default/cloud — no crash.
+    // Backward compatible: bnup_mode=false (default) skips this entirely.
+    s.applyBnupMode(&req)
+
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
         http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
@@ -419,6 +428,36 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
         "config_version", s.cfg.Version,
     )
     return mapped
+}
+
+// applyBnupMode implements #185 BNUP routing: when routing.bnup_mode is true
+// and the request model starts with "bnup-", it remaps the model to the
+// configured bnup_model (default Qwen2.5-32B-BNUP-Final) and auto-attaches
+// the bnup_grammar (default "bnup-socratic") for GBNF-constrained generation.
+// If the request already carries a grammar field (#184 passthrough), the
+// client-supplied value wins. No-op when bnup_mode is false (default).
+func (s *Server) applyBnupMode(req *adapter.ChatRequest) {
+    if !s.cfg.Config.Routing.BnupMode {
+        return
+    }
+    if !strings.HasPrefix(req.Model, "bnup-") {
+        return
+    }
+    originalModel := req.Model
+    if target := strings.TrimSpace(s.cfg.Config.Routing.BnupModel); target != "" {
+        req.Model = target
+    }
+    if req.Grammar == "" {
+        if g := strings.TrimSpace(s.cfg.Config.Routing.BnupGrammar); g != "" {
+            req.Grammar = g
+        }
+    }
+    slog.Info("bnup mode applied",
+        "alias", originalModel,
+        "model", req.Model,
+        "grammar", req.Grammar,
+        "config_version", s.cfg.Version,
+    )
 }
 
 func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
