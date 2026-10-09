@@ -435,7 +435,10 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
 // configured bnup_model (default Qwen2.5-32B-BNUP-Final) and auto-attaches
 // the bnup_grammar (default "bnup-socratic") for GBNF-constrained generation.
 // If the request already carries a grammar field (#184 passthrough), the
-// client-supplied value wins. No-op when bnup_mode is false (default).
+// client-supplied value wins. When the BNUP model is not loaded in the local
+// fusion-mlx instance (e.g. before fusion-trainer #58 merges the weights),
+// the request falls back to routing.default_model so the caller still gets a
+// response instead of a 404. No-op when bnup_mode is false (default).
 func (s *Server) applyBnupMode(req *adapter.ChatRequest) {
     if !s.cfg.Config.Routing.BnupMode {
         return
@@ -444,9 +447,37 @@ func (s *Server) applyBnupMode(req *adapter.ChatRequest) {
         return
     }
     originalModel := req.Model
-    if target := strings.TrimSpace(s.cfg.Config.Routing.BnupModel); target != "" {
+    target := strings.TrimSpace(s.cfg.Config.Routing.BnupModel)
+    if target == "" {
+        target = originalModel
+    }
+
+    // Fallback: if the BNUP model is not loaded locally, use the default
+    // model so the request still gets served (no 404 crash). The grammar is
+    // still attached — fusion-mlx will apply it to whatever model serves.
+    if mlx := s.pool.GetFusionMLX(); mlx != nil {
+        if modelSet := mlx.ModelSet(); modelSet != nil {
+            if !modelSet[target] {
+                if fallback := strings.TrimSpace(s.cfg.Config.Routing.DefaultModel); fallback != "" {
+                    slog.Warn("bnup model not loaded, falling back to default",
+                        "bnup_model", target,
+                        "default_model", fallback,
+                        "alias", originalModel,
+                    )
+                    req.Model = fallback
+                } else {
+                    req.Model = target
+                }
+            } else {
+                req.Model = target
+            }
+        } else {
+            req.Model = target
+        }
+    } else {
         req.Model = target
     }
+
     if req.Grammar == "" {
         if g := strings.TrimSpace(s.cfg.Config.Routing.BnupGrammar); g != "" {
             req.Grammar = g
