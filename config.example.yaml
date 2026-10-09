@@ -100,6 +100,13 @@ route:
             #   backend: "openai"
             # - max_tokens: 0        # 0 = no upper bound (catch-all)
             #   backend: "openai"
+    # #185: BNUP model routing. When bnup_mode=true, a request with model
+    # alias "bnup-*" is remapped to bnup_model and grammar bnup_grammar is
+    # auto-attached for GBNF-constrained generation via fusion-mlx (#184).
+    # Default off — existing routing unchanged.
+    bnup_mode: false
+    bnup_model: "Qwen2.5-32B-BNUP-Final"
+    bnup_grammar: "bnup-socratic"
     fallback:
         cloud_default: "openai"
         enabled: true                        # Enable model_mapping below (alias -> backend model id)

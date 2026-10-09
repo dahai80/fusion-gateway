@@ -230,6 +230,9 @@ type RoutingConfig struct {
     Multimodal                 MultimodalConfig       `mapstructure:"multimodal"`
     AgentTasks                 AgentTaskConfig        `mapstructure:"agent_tasks"`
     TierQueue                  TierQueueConfig        `mapstructure:"tier_queue"`
+    BnupMode                   bool                   `mapstructure:"bnup_mode"`
+    BnupModel                  string                 `mapstructure:"bnup_model"`
+    BnupGrammar                string                 `mapstructure:"bnup_grammar"`
 }
 
 // TierQueueConfig configures the #159 3-tier priority admission queue
@@ -1962,6 +1965,9 @@ func DefaultConfig() Config {
             RateLimit: RateLimitConfig{
                 AnonymousRPM: 60,
             },
+            BnupMode:    false,
+            BnupModel:    "Qwen2.5-32B-BNUP-Final",
+            BnupGrammar:  "bnup-socratic",
         },
         Hardware: HardwareConfig{
             Enabled:         true,
