@@ -7,6 +7,7 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "os"
     "strings"
     "time"
 
@@ -58,6 +59,15 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
     if minConf <= 0 {
         minConf = 0.7
     }
+    // Intent classifier hits the same fusion-mlx endpoint as the local
+    // backend. When intent_classifier.api_key is empty (the documented
+    // default — the "fg-" prefix trips C1 so the key is injected via env),
+    // fall back to FUSION_MLX_API_KEY so laya auth works out of the box
+    // without a redundant config field.
+    apiKey := cfg.APIKey
+    if apiKey == "" {
+        apiKey = os.Getenv("FUSION_MLX_API_KEY")
+    }
     return &LayaClassifier{
         httpClient: &http.Client{
             Timeout:   timeout,
@@ -65,7 +75,7 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
         },
         endpoint:      strings.TrimRight(endpoint, "/"),
         decideURL:     strings.TrimRight(endpoint, "/") + "/v1/laya/decide",
-        apiKey:        cfg.APIKey,
+        apiKey:        apiKey,
         minConfidence: minConf,
     }
 }
