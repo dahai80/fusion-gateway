@@ -156,19 +156,41 @@ func wireIntentClassifier(e *router.Engine, cfg config.IntentClassifierConfig) {
 		slog.Info("intent classifier disabled, using noop")
 		return
 	}
-	c := router.NewRouterLightClassifier(cfg)
-	if c == nil {
-		e.SetIntentClassifier(router.NoopClassifier{})
-		slog.Warn("intent classifier enabled but misconfigured, using noop")
-		return
+	classifierType := cfg.Type
+	if classifierType == "" {
+		classifierType = "router_light"
 	}
-	e.SetIntentClassifier(c)
-	slog.Info("intent classifier wired",
-		"endpoint", cfg.Endpoint,
-		"base_model", cfg.BaseModel,
-		"adapter", cfg.Adapter,
-		"min_confidence", cfg.MinConfidence,
-	)
+	switch classifierType {
+	case "laya":
+		laya := router.NewLayaClassifier(cfg)
+		rl := router.NewRouterLightClassifier(cfg)
+		if rl != nil {
+			laya.SetFallback(rl)
+		}
+		e.SetIntentClassifier(laya)
+		slog.Info("laya intent classifier wired",
+			"endpoint", cfg.Endpoint,
+			"fallback", rl != nil,
+			"min_confidence", cfg.MinConfidence,
+		)
+	case "router_light", "":
+		c := router.NewRouterLightClassifier(cfg)
+		if c == nil {
+			e.SetIntentClassifier(router.NoopClassifier{})
+			slog.Warn("intent classifier enabled but misconfigured, using noop")
+			return
+		}
+		e.SetIntentClassifier(c)
+		slog.Info("intent classifier wired",
+			"endpoint", cfg.Endpoint,
+			"base_model", cfg.BaseModel,
+			"adapter", cfg.Adapter,
+			"min_confidence", cfg.MinConfidence,
+		)
+	default:
+		e.SetIntentClassifier(router.NoopClassifier{})
+		slog.Warn("unknown intent classifier type, using noop", "type", classifierType)
+	}
 }
 
 // wireHeuristicClassifier wires the in-process sub-ms heuristic intent

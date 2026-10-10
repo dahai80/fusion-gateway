@@ -257,6 +257,11 @@ type TierQueueConfig struct {
 // chain decides routing unchanged.
 type IntentClassifierConfig struct {
     Enabled bool `mapstructure:"enabled"`
+    // Type selects the classifier implementation: "router_light" (default,
+    // 1B LoRA adapter via /v1/chat/completions), "laya" (laya-mlx typed
+    // decision model via /v1/laya/decide, sub-15ms), or "noop". When empty
+    // defaults to "router_light" for backward compatibility. Issue #191.
+    Type string `mapstructure:"type"`
     // Endpoint is the fusion-mlx /v1/chat/completions base URL (e.g.
     // "http://127.0.0.1:11434"). Defaults to the local fusion-mlx address.
     Endpoint string `mapstructure:"endpoint"`
@@ -1926,6 +1931,7 @@ func DefaultConfig() Config {
             },
             IntentClassifier: IntentClassifierConfig{
                 Enabled:       false,
+                Type:          "router_light",
                 Endpoint:      "http://127.0.0.1:11434",
                 BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
                 Timeout:       2 * time.Second,
