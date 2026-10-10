@@ -377,7 +377,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
             case <-stopBodyWatch:
             }
         })
-        p.parseAnthropicStreamEvents(ctx, resp.Body, ch)
+        parseAnthropicStreamEvents(ctx, resp.Body, ch)
     })
     return ch, nil
 }
@@ -523,7 +523,7 @@ func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reade
     }
 }
 
-func (p *AnthropicProvider) parseAnthropicStreamEvents(ctx context.Context, body io.Reader, ch chan<- AnthropicStreamEvent) {
+func parseAnthropicStreamEvents(ctx context.Context, body io.Reader, ch chan<- AnthropicStreamEvent) {
     buf := make([]byte, 4096)
     var lineBuf []byte
     const maxLineSize = 1 << 20 // 1 MiB cap per line to prevent unbounded growth

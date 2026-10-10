@@ -70,7 +70,7 @@ func extractUpstreamError(resp *http.Response) *MessagesHTTPError {
 
 // parseAnthropicEventStreamRaw parses a native Anthropic SSE stream (used by
 // vertex / foundry, which forward upstream SSE verbatim) into
-// AnthropicStreamEvent values. Mirrors AnthropicProvider.parseAnthropicStreamEvents
+// AnthropicStreamEvent values. Mirrors parseAnthropicStreamEvents
 // but is a package-level func so the cloud-signed providers can share it.
 // 1 MiB/line cap matches the SSE hardening convention.
 func parseAnthropicEventStreamRaw(body io.Reader, ch chan<- AnthropicStreamEvent) {

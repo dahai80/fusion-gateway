@@ -382,13 +382,12 @@ func (e *errorReader) Read(p []byte) (n int, err error) {
 
 func TestAnthropic_ParseStreamEvents(t *testing.T) {
     slog.Info("test Anthropic_ParseStreamEvents")
-    p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost", APIKey: "test-key"})
     t.Run("valid_events", func(t *testing.T) {
         input := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg1\"}}\n\n" +
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
             "data: [DONE]\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
+        parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         var count int
         for range ch {
@@ -401,7 +400,7 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
     t.Run("bad_json", func(t *testing.T) {
         input := "data: not-json\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
+        parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         for range ch {
         }
@@ -409,14 +408,14 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
     t.Run("comment_line", func(t *testing.T) {
         input := ": this is a comment\n\n"
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
+        parseAnthropicStreamEvents(context.Background(), strings.NewReader(input), ch)
         close(ch)
         for range ch {
         }
     })
     t.Run("read_error", func(t *testing.T) {
         ch := make(chan AnthropicStreamEvent, 64)
-        p.parseAnthropicStreamEvents(context.Background(), &errorReader{}, ch)
+        parseAnthropicStreamEvents(context.Background(), &errorReader{}, ch)
         close(ch)
         for range ch {
         }

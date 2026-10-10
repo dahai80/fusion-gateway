@@ -387,6 +387,132 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     return ch, nil
 }
 
+// Messages implements MessagesProvider (issue #188). fusion-mlx serves a
+// native /v1/messages endpoint with Anthropic SSE, so this is a direct
+// passthrough — no OpenAI conversion. Without this, the gateway's
+// /v1/messages handler fell back to AnthropicToOpenAIChatRequest and
+// returned OpenAI SSE, which Claude Code could not parse ("Streaming
+// response ended before any complete data was received").
+func (p *FusionMLXProvider) Messages(ctx context.Context, req *AnthropicRequest) (*AnthropicResponse, error) {
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, messages diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
+    defer release()
+
+    req.Stream = false
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal messages request: %w", err)
+    }
+
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("create messages request: %w", err)
+    }
+
+    p.setAnthropicHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
+
+    resp, err := p.httpClient.Do(httpReq)
+    if err != nil {
+        return nil, fmt.Errorf("messages request failed: %w", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        respBody := ReadErrorBody(resp)
+        return nil, fmt.Errorf("messages request returned status %d: %s", resp.StatusCode, string(respBody))
+    }
+
+    var antResp AnthropicResponse
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
+        return nil, fmt.Errorf("decode messages response: %w", err)
+    }
+
+    return &antResp, nil
+}
+
+// StreamMessages implements MessagesProvider (issue #188). Streams native
+// Anthropic SSE from fusion-mlx /v1/messages — no OpenAI conversion.
+func (p *FusionMLXProvider) StreamMessages(ctx context.Context, req *AnthropicRequest) (<-chan AnthropicStreamEvent, error) {
+    release, ok := p.tryInFlightAcquire()
+    if !ok {
+        slog.Info("local slot full, stream messages diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
+        return nil, ErrLocalSlotFull
+    }
+    defer func() {
+        if release != nil {
+            release()
+        }
+    }()
+
+    req.Stream = true
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal stream messages request: %w", err)
+    }
+
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("create stream messages request: %w", err)
+    }
+
+    p.setAnthropicHeaders(httpReq)
+    InjectFusionHeaders(ctx, httpReq)
+
+    resp, err := p.streamHTTPClient.Do(httpReq)
+    if err != nil {
+        return nil, fmt.Errorf("stream messages request failed: %w", err)
+    }
+
+    if resp.StatusCode != http.StatusOK {
+        respBody := ReadErrorBody(resp)
+        resp.Body.Close()
+        return nil, fmt.Errorf("stream messages returned status %d: %s", resp.StatusCode, string(respBody))
+    }
+
+    ch := make(chan AnthropicStreamEvent, 64)
+    goroutineRelease := release
+    release = nil
+
+    safego.Go("fusion_mlx_stream_messages", func() {
+        defer close(ch)
+        defer goroutineRelease()
+        defer resp.Body.Close()
+
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("fusion_mlx_stream_messages_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("fusion-mlx stream messages canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
+        parseAnthropicStreamEvents(ctx, resp.Body, ch)
+    })
+
+    return ch, nil
+}
+
+// setAnthropicHeaders sets the Anthropic-style auth headers for /v1/messages.
+// fusion-mlx accepts x-api-key (Anthropic convention) in addition to
+// Authorization: Bearer (OpenAI convention) used by Chat/StreamChat.
+func (p *FusionMLXProvider) setAnthropicHeaders(req *http.Request) {
+    req.Header.Set("Content-Type", "application/json")
+    if p.apiKey != "" {
+        req.Header.Set("x-api-key", p.apiKey)
+    }
+    req.Header.Set("anthropic-version", "2023-06-01")
+    if p.routeHeader != "" {
+        req.Header.Set(p.routeHeader, p.routeHeaderValue)
+    }
+}
+
 func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
     release, ok := p.tryInFlightAcquire()
     if !ok {

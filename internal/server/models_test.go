@@ -186,10 +186,9 @@ func TestHandleAnthropicMessages_AllowlistGatesModel(t *testing.T) {
 // (glm5.2) that rejects images with 400 -> gateway 502. The handler detects
 // the image before Decide so the router's text-only signal cannot divert a
 // multimodal payload to a text-only cloud backend (issue: CC screenshot 502).
-// FusionMLXProvider is NOT a MessagesProvider, so the local path takes the
-// AnthropicToOpenAIChatRequest conversion branch (real MLX behavior); the
-// mock here uses mockProvider (same non-MessagesProvider shape) and records
-// the rewritten model the handler forwards.
+// FusionMLXProvider implements MessagesProvider (issue #188), so the local
+// path now calls Messages/StreamMessages natively; the mock here serves
+// /v1/messages and the handler records the rewritten model it forwards.
 func TestHandleAnthropicMessages_MultimodalRoutesLocalWithVisionModel(t *testing.T) {
     s, srv := newMultimodalMLXServer(t, []string{"mlx-community--Qwen2.5-VL-7B-Instruct-4bit"})
     defer srv.Close()
@@ -452,6 +451,9 @@ func newMultimodalMLXServer(t *testing.T, mlxModels []string) (*Server, *httptes
         case "/v1/chat/completions":
             w.Header().Set("Content-Type", "application/json")
             _, _ = w.Write([]byte(`{"id":"mlx-ok","choices":[{"message":{"role":"assistant","content":"seen"}}]}`))
+        case "/v1/messages":
+            w.Header().Set("Content-Type", "application/json")
+            _, _ = w.Write([]byte(`{"id":"msg_mlx-ok","type":"message","role":"assistant","content":[{"type":"text","text":"seen"}],"model":"mlx","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
         default:
             w.WriteHeader(http.StatusNotFound)
         }

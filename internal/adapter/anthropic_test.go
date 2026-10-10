@@ -600,9 +600,8 @@ func TestParseAnthropicStreamEvents(t *testing.T) {
     sbuf.Write(b2)
     sbuf.WriteString("\n")
 
-    p := NewAnthropicProvider("anthropic", config.BackendConfig{BaseURL: "http://localhost"})
     ch := make(chan AnthropicStreamEvent, 64)
-    p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
+    parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
     close(ch)
 
     var events []AnthropicStreamEvent
@@ -738,12 +737,11 @@ func TestParseAnthropicStreamEvents_SlowConsumerNotTruncated(t *testing.T) {
     }
     sbuf.WriteString("data: {\"type\":\"message_stop\"}\n\n")
 
-    p := NewAnthropicProvider("glm52", config.BackendConfig{BaseURL: "http://localhost"})
     ch := make(chan AnthropicStreamEvent, 64)
     done := make(chan struct{})
     go func() {
         defer close(done)
-        p.parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
+        parseAnthropicStreamEvents(context.Background(), strings.NewReader(sbuf.String()), ch)
         close(ch)
     }()
 
@@ -783,14 +781,13 @@ func TestParseAnthropicStreamEvents_ContextCancelUnblocksProducer(t *testing.T) 
     for i := 0; i < total; i++ {
         sbuf.WriteString("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n")
     }
-    p := NewAnthropicProvider("glm52", config.BackendConfig{BaseURL: "http://localhost"})
     ch := make(chan AnthropicStreamEvent, 64)
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
     done := make(chan struct{})
     go func() {
         defer close(done)
-        p.parseAnthropicStreamEvents(ctx, &blockingReader{data: []byte(sbuf.String())}, ch)
+        parseAnthropicStreamEvents(ctx, &blockingReader{data: []byte(sbuf.String())}, ch)
         close(ch)
     }()
     // Drain the initial buffer, then cancel mid-stream (consumer stops).
