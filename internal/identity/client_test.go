@@ -3,6 +3,7 @@ package identity
 import (
     "context"
     "net"
+    "sync"
     "sync/atomic"
     "testing"
     "time"
@@ -18,19 +19,22 @@ import (
 // canned responses. dialFail toggles a transport failure for breaker tests.
 type fakeIdentity struct {
     pb.UnimplementedIdentityServiceServer
-    allow      atomic.Bool
-    leaseID    string
-    tenantID   string
-    dialFail   atomic.Bool
-    authCalls  atomic.Int64
+    allow        atomic.Bool
+    leaseID      string
+    tenantID     string
+    dialFail     atomic.Bool
+    authCalls    atomic.Int64
     releaseCalls atomic.Int64
     reportCalls  atomic.Int64
+    mu           sync.Mutex
     lastTenantID string // #160: records the asserted tenant_id sent by the client
 }
 
 func (f *fakeIdentity) AuthorizeAndAcquire(ctx context.Context, req *pb.AuthorizeAndAcquireRequest) (*pb.AuthorizeAndAcquireResponse, error) {
     f.authCalls.Add(1)
+    f.mu.Lock()
     f.lastTenantID = req.TenantId
+    f.mu.Unlock()
     if f.dialFail.Load() {
         // simulate unavailable: return via context-cancel by blocking forever
         // — but cheaper to just return a transport-flavored error. Use a
@@ -126,8 +130,11 @@ func TestClient_AuthorizeAndAcquire_Allowed(t *testing.T) {
         t.Fatalf("priority not propagated: %v", ar.Priority)
     }
     // #160: client must populate TenantId from the passed tenantID arg.
-    if f.lastTenantID != "tenant-a" {
-        t.Fatalf("TenantId not populated on request; got %q", f.lastTenantID)
+    f.mu.Lock()
+    got := f.lastTenantID
+    f.mu.Unlock()
+    if got != "tenant-a" {
+        t.Fatalf("TenantId not populated on request; got %q", got)
     }
 }
 
@@ -143,8 +150,11 @@ func TestClient_AuthorizeAndAcquire_PopulatesTenantId(t *testing.T) {
     if _, err := c.AuthorizeAndAcquire(context.Background(), "k", "chat", "m", "rid", "1.2.3.4", "tenant-t"); err != nil {
         t.Fatalf("unexpected err: %v", err)
     }
-    if f.lastTenantID != "tenant-t" {
-        t.Fatalf("expected tenant_id=tenant-t on wire, got %q", f.lastTenantID)
+    f.mu.Lock()
+    got := f.lastTenantID
+    f.mu.Unlock()
+    if got != "tenant-t" {
+        t.Fatalf("expected tenant_id=tenant-t on wire, got %q", got)
     }
 }
 
