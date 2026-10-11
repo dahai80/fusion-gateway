@@ -45,6 +45,12 @@ type RouteDecision struct {
     // forwarding. Empty = no adapter swap (bare base model). Set only by the
     // intent:code path. See fusion-gateway UDS zero-copy + intent-routing.
     Adapter string
+    // Rejected signals the request is blocked by the laya-guard safety check
+    // (issue #195). The server layer must return HTTP 403 with RejectDetail as
+    // the JSON body. When true, Backend is unused — the request never reaches
+    // fusion-mlx. RejectDetail is a JSON string: {"dimension","score","threshold"}.
+    Rejected     bool
+    RejectDetail string
 }
 
 type RouteRequest struct {
@@ -1357,7 +1363,14 @@ func (e *Engine) classifyIntentUnlocked(ctx context.Context, cfg *config.ConfigS
     if res.Params == nil {
         res.Params = map[string]string{}
     }
-    res.Params["_source"] = "llm"
+    // AC8: preserve the classifier-set _source label. LayaClassifier tags
+    // "laya" / "laya_fallback" / "laya_trivial"; RouterLightClassifier leaves
+    // it unset. Only default to "llm" when the classifier did not tag itself,
+    // so downstream dispatch + decision logs can distinguish laya vs
+    // router_light.
+    if _, set := res.Params["_source"]; !set {
+        res.Params["_source"] = "llm"
+    }
     return res
 }
 
@@ -1372,6 +1385,25 @@ func (e *Engine) classifyIntentUnlocked(ctx context.Context, cfg *config.ConfigS
 func (e *Engine) decideIntentLocked(ctx context.Context, cfg *config.ConfigSnapshot, req *RouteRequest, res *IntentResult, snap routeSnapshot) *RouteDecision {
     if res == nil {
         return nil
+    }
+
+    // Issue #195: laya-guard 403 short-circuit. If the classifier flagged the
+    // request as guard-blocked (is_sensitive ≥ threshold → preset=guard → a
+    // dimension exceeded), return a Rejected decision BEFORE any dispatch.
+    // The server layer translates this to HTTP 403 so the request never
+    // reaches fusion-mlx (VRAM never consumed for blocked requests). Fail-open
+    // when the guard endpoint was unavailable — LayaClassifier leaves
+    // _guard_blocked unset in that case (issue #195 §4).
+    if res.Params != nil {
+        if blocked, ok := res.Params["_guard_blocked"]; ok && blocked == "true" {
+            detail := res.Params["_guard_detail"]
+            return &RouteDecision{
+                Backend:      LocalBackend,
+                Reason:       "laya_guard_blocked",
+                Rejected:     true,
+                RejectDetail: detail,
+            }
+        }
     }
 
     // IntentLightweight: prefer Mac local. Don't force — let the rule chain

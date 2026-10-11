@@ -32,9 +32,36 @@ type LayaClassifier struct {
     decideURL     string // cached endpoint + "/v1/laya/decide"
     apiKey        string
     minConfidence float64
+    // Guard thresholds (issue #195). guardSensitiveThreshold=0 disables guard.
+    guardSensitiveThreshold     float64
+    guardJailbreakThreshold     float64
+    guardInjectionThreshold     float64
+    guardSensitiveDataThreshold float64
+    guardHarmSeverityThreshold  float64
     // fallback is the secondary classifier invoked when laya fails or returns
     // low confidence. nil = no fallback (caller defers to rule chain).
     fallback IntentClassifier
+}
+
+// layaTrivialRequests is the AC9 prefix-cache short-circuit set: single-token
+// greetings / acknowledgements ("hi", "thanks", "ok") are unambiguous chitchat
+// with near-zero routing ambiguity. Running them through the typed-decision
+// model burns a 7ms HTTP round-trip and a laya inference slot for a result
+// the rule chain would reach anyway. Matching is case-insensitive on the
+// trimmed query; whole-token only (no prefix match) to keep it conservative.
+var layaTrivialRequests = map[string]struct{}{
+    "hi": {}, "hello": {}, "hey": {}, "howdy": {},
+    "thanks": {}, "thank you": {}, "thx": {}, "ty": {},
+    "ok": {}, "okay": {}, "sure": {}, "yes": {}, "no": {},
+    "bye": {}, "goodbye": {}, "cool": {}, "nice": {},
+    "please": {}, "sorry": {}, "yep": {}, "nope": {},
+}
+
+// isTrivialRequest reports whether the trimmed query is a whole-token
+// greeting/acknowledgement that should short-circuit the laya HTTP call.
+func isTrivialRequest(q string) bool {
+    _, ok := layaTrivialRequests[q]
+    return ok
 }
 
 // NewLayaClassifier builds a LayaClassifier from the intent_classifier config.
@@ -75,11 +102,23 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
             Timeout:   timeout,
             Transport: httpx.TransportForBackend(config.BackendConfig{BaseURL: endpoint}),
         },
-        endpoint:      strings.TrimRight(endpoint, "/"),
-        decideURL:     strings.TrimRight(endpoint, "/") + "/v1/laya/decide",
-        apiKey:        apiKey,
-        minConfidence: minConf,
+        endpoint:                    strings.TrimRight(endpoint, "/"),
+        decideURL:                   strings.TrimRight(endpoint, "/") + "/v1/laya/decide",
+        apiKey:                      apiKey,
+        minConfidence:               minConf,
+        guardSensitiveThreshold:     cfg.GuardSensitiveThreshold,
+        guardJailbreakThreshold:     orDefault(cfg.GuardJailbreakThreshold, 0.5),
+        guardInjectionThreshold:     orDefault(cfg.GuardInjectionThreshold, 0.5),
+        guardSensitiveDataThreshold: orDefault(cfg.GuardSensitiveDataThreshold, 0.5),
+        guardHarmSeverityThreshold:  orDefault(cfg.GuardHarmSeverityThreshold, 2.0),
     }
+}
+
+func orDefault(v, def float64) float64 {
+    if v > 0 {
+        return v
+    }
+    return def
 }
 
 // SetFallback installs the secondary classifier (typically RouterLightClassifier)
@@ -134,6 +173,19 @@ type layaUsage struct {
     LatencyMs   float64 `json:"latency_ms"`
 }
 
+// layaGuardResponse is the response from /v1/laya/decide with preset=guard.
+// Issue #195: guard-preset dimensions for safety scoring.
+type layaGuardResponse struct {
+    Answers layaGuardAnswers `json:"answers"`
+}
+
+type layaGuardAnswers struct {
+    Jailbreak        layaNoulAnswer  `json:"jailbreak"`
+    PromptInjection  layaNoulAnswer  `json:"prompt_injection"`
+    SensitiveData    layaNoulAnswer  `json:"sensitive_data"`
+    HarmSeverity     layaScoreAnswer `json:"harm_severity"`
+}
+
 // Classify calls /v1/laya/decide and maps the domain/difficulty answers to
 // an Intent. On timeout, HTTP error, or low confidence, falls back to the
 // secondary classifier (if set) or returns IntentUnknown.
@@ -144,6 +196,24 @@ func (c *LayaClassifier) Classify(ctx context.Context, req *RouteRequest) (*Inte
     }
     if query == "" {
         return &IntentResult{Intent: IntentUnknown, Confidence: 0}, nil
+    }
+
+    // AC9: prefix-cache short-circuit for trivial greetings / acknowledgements.
+    // "hi", "thanks", "ok" are unambiguous chitchat — skip the 7ms laya HTTP
+    // round-trip + inference slot and return a high-confidence lightweight
+    // result directly. The rule chain + local backend handle these fine.
+    if isTrivialRequest(strings.ToLower(query)) {
+        slog.Debug("laya trivial-request short-circuit",
+            "query", query, "intent", IntentLightweight)
+        return &IntentResult{
+            Intent:     IntentLightweight,
+            Confidence: 0.99,
+            Params: map[string]string{
+                "_source":     "laya_trivial",
+                "domain":      "chitchat",
+                "trivial_hit": "true",
+            },
+        }, nil
     }
 
     start := time.Now()
@@ -177,11 +247,90 @@ func (c *LayaClassifier) Classify(ctx context.Context, req *RouteRequest) (*Inte
     }
     params["_source"] = "laya"
     params["laya_latency_ms"] = fmt.Sprintf("%.1f", latency.Seconds()*1000)
+
+    if c.guardSensitiveThreshold > 0 && res.Answers.IsSensitive.Noul >= c.guardSensitiveThreshold {
+        if blocked, detail := c.checkGuard(ctx, query); blocked {
+            params["_guard_blocked"] = "true"
+            params["_guard_detail"] = detail
+            slog.Info("laya guard blocked request",
+                "is_sensitive", res.Answers.IsSensitive.Noul,
+                "detail", detail,
+                "topic", res.Answers.Domain.Choice,
+            )
+        }
+    }
+
     return &IntentResult{
         Intent:     intent,
         Confidence: confidence,
         Params:     params,
     }, nil
+}
+
+// checkGuard calls /v1/laya/decide with preset=guard and checks each dimension
+// against its threshold. Returns (blocked, detail) where detail is a JSON
+// string {"dimension","score","threshold"}. On endpoint error: fail-open
+// (blocked=false) per issue #195 §4 / fusion-guard #20 §4 fallback semantics.
+func (c *LayaClassifier) checkGuard(ctx context.Context, prompt string) (bool, string) {
+    res, err := c.callLayaGuard(ctx, prompt)
+    if err != nil {
+        slog.Info("laya guard endpoint unavailable, fail-open", "error", err)
+        return false, ""
+    }
+    type dimCheck struct {
+        name      string
+        value     float64
+        threshold float64
+    }
+    checks := []dimCheck{
+        {"jailbreak", res.Answers.Jailbreak.Noul, c.guardJailbreakThreshold},
+        {"prompt_injection", res.Answers.PromptInjection.Noul, c.guardInjectionThreshold},
+        {"sensitive_data", res.Answers.SensitiveData.Noul, c.guardSensitiveDataThreshold},
+        {"harm_severity", res.Answers.HarmSeverity.Score, c.guardHarmSeverityThreshold},
+    }
+    for _, d := range checks {
+        if d.value >= d.threshold {
+            detail, _ := json.Marshal(map[string]any{
+                "dimension": d.name,
+                "score":     d.value,
+                "threshold": d.threshold,
+            })
+            return true, string(detail)
+        }
+    }
+    return false, ""
+}
+
+// callLayaGuard issues the HTTP POST to /v1/laya/decide with preset=guard.
+func (c *LayaClassifier) callLayaGuard(ctx context.Context, prompt string) (*layaGuardResponse, error) {
+    payload, err := json.Marshal(layaDecideRequest{
+        Prompt: prompt,
+        Preset: "guard",
+    })
+    if err != nil {
+        return nil, fmt.Errorf("marshal guard request: %w", err)
+    }
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.decideURL, bytes.NewReader(payload))
+    if err != nil {
+        return nil, fmt.Errorf("create guard request: %w", err)
+    }
+    httpReq.Header.Set("Content-Type", "application/json")
+    if c.apiKey != "" {
+        httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+    }
+    resp, err := c.httpClient.Do(httpReq)
+    if err != nil {
+        return nil, fmt.Errorf("guard request failed: %w", err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("guard decide returned status %d: %s", resp.StatusCode, string(httpx.ReadErrorBody(resp)))
+    }
+    var gr layaGuardResponse
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&gr); err != nil {
+        return nil, fmt.Errorf("decode guard response: %w", err)
+    }
+    return &gr, nil
 }
 
 // callLaya issues the HTTP POST to /v1/laya/decide and decodes the response.

@@ -279,6 +279,17 @@ type IntentClassifierConfig struct {
     APIKey        string        `mapstructure:"api_key"`
     Timeout       time.Duration `mapstructure:"timeout"`
     MinConfidence float64       `mapstructure:"min_confidence"`
+    // GuardSensitiveThreshold is the is_sensitive noul value (0..1) from the
+    // router preset that triggers a guard-preset safety check before the
+    // request proceeds to fusion-mlx. 0 = guard disabled. Issue #195 / AC6.
+    GuardSensitiveThreshold float64 `mapstructure:"guard_sensitive_threshold"`
+    // Guard dimension block thresholds (preset=guard answers). When the guard
+    // check runs, any dimension at or above its threshold blocks the request
+    // with HTTP 403. Issue #195 / AC5.
+    GuardJailbreakThreshold      float64 `mapstructure:"guard_jailbreak_threshold"`
+    GuardInjectionThreshold      float64 `mapstructure:"guard_injection_threshold"`
+    GuardSensitiveDataThreshold  float64 `mapstructure:"guard_sensitive_data_threshold"`
+    GuardHarmSeverityThreshold   float64 `mapstructure:"guard_harm_severity_threshold"`
 }
 
 // HeuristicClassifierConfig configures the in-process sub-ms intent classifier
