@@ -121,6 +121,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
         decision = s.router.Decide(ctx, routeReq)
     }
+
+    // #199/#20: laya-guard 403 short-circuit. /v1/chat/completions previously
+    // skipped decision.Rejected (only /v1/messages checked it), leaving the
+    // primary chat API path unprotected — jailbreak/PII/harm prompts reached
+    // fusion-mlx. Mirror the /v1/messages check (anthropic_messages.go).
+    if decision.Rejected {
+        body := decision.RejectDetail
+        if body == "" {
+            body = `{"dimension":"unknown","score":0,"threshold":0}`
+        }
+        slog.Info("chat request blocked by laya guard", "model", req.Model, "detail", body)
+        http.Error(w, body, http.StatusForbidden)
+        return
+    }
+
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
@@ -1084,6 +1099,19 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         Stream: chatReq.Stream,
     }
     decision := s.router.Decide(ctx, routeReq)
+
+    // #199/#20: laya-guard 403 short-circuit (mirror /v1/chat/completions +
+    // /v1/messages). /v1/completions previously skipped decision.Rejected.
+    if decision.Rejected {
+        body := decision.RejectDetail
+        if body == "" {
+            body = `{"dimension":"unknown","score":0,"threshold":0}`
+        }
+        slog.Info("completions request blocked by laya guard", "model", chatReq.Model, "detail", body)
+        http.Error(w, body, http.StatusForbidden)
+        return
+    }
+
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
