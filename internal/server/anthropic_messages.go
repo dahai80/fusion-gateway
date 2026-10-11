@@ -145,6 +145,17 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     } else {
         decision = s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
     }
+
+    if decision.Rejected {
+        body := decision.RejectDetail
+        if body == "" {
+            body = `{"dimension":"unknown","score":0,"threshold":0}`
+        }
+        slog.Info("anthropic request blocked by laya guard", "model", antReq.Model, "detail", body)
+        http.Error(w, body, http.StatusForbidden)
+        return
+    }
+
     slog.Info("anthropic messages route decision", "model", antReq.Model, "backend", string(decision.Backend), "reason", decision.Reason, "input_tokens", inputTokens)
 
     // #log-tokens: stamp model/route info on the request-log entry as soon as
