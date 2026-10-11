@@ -252,6 +252,22 @@ func TestNewLayaClassifierDefaults(t *testing.T) {
     }
 }
 
+// #191: when intent_classifier.api_key is empty, NewLayaClassifier falls back
+// to FUSION_MLX_API_KEY env so laya auth works without a redundant config
+// field (same pattern as the fusion-mlx backend).
+func TestNewLayaClassifierApiKeyEnvFallback(t *testing.T) {
+    t.Setenv("FUSION_MLX_API_KEY", "fg-test-key-123")
+    c := NewLayaClassifier(config.IntentClassifierConfig{})
+    if c.apiKey != "fg-test-key-123" {
+        t.Fatalf("expected apiKey from FUSION_MLX_API_KEY env, got %q", c.apiKey)
+    }
+    // Explicit config api_key wins over env.
+    c2 := NewLayaClassifier(config.IntentClassifierConfig{APIKey: "explicit-key"})
+    if c2.apiKey != "explicit-key" {
+        t.Fatalf("explicit config api_key should win, got %q", c2.apiKey)
+    }
+}
+
 // #191: wireIntentClassifier type=laya installs LayaClassifier with fallback.
 func TestWireIntentClassifierLayaType(t *testing.T) {
     cfg := config.IntentClassifierConfig{
