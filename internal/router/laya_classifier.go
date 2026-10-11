@@ -143,8 +143,9 @@ type layaDecideRequest struct {
 
 // layaDecideResponse is the response from /v1/laya/decide.
 type layaDecideResponse struct {
-    Answers layaAnswers `json:"answers"`
-    Usage   layaUsage   `json:"usage"`
+    Answers   layaAnswers `json:"answers"`
+    Usage     layaUsage   `json:"usage"`
+    LatencyMs float64     `json:"latency_ms"`
 }
 
 // layaAnswers holds the structured answers from the router preset.
@@ -177,8 +178,8 @@ type layaNoulAnswer struct {
 }
 
 type layaUsage struct {
-    InputTokens int     `json:"input_tokens"`
-    LatencyMs   float64 `json:"latency_ms"`
+    InputTokens  int `json:"input_tokens"`
+    OutputTokens int `json:"output_tokens"`
 }
 
 // layaGuardResponse is the response from /v1/laya/decide with preset=guard.

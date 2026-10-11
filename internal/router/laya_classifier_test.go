@@ -170,7 +170,8 @@ func TestLayaClassifierEndpoint503Fallback(t *testing.T) {
 }
 
 // #191: laya endpoint timeout → fallback. Uses a server that sleeps longer
-// than the classifier timeout (50ms default).
+// than the classifier timeout (500ms cap; raised from 50ms in PR#198 —
+// multi-model contention pushes laya p99 to 40-60ms, 50ms timed out fail-open).
 func TestLayaClassifierTimeoutFallback(t *testing.T) {
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         time.Sleep(200 * time.Millisecond)
@@ -661,6 +662,46 @@ func TestLayaClassifierNonTrivialCallsLaya(t *testing.T) {
     }
     if res.Params["_source"] != "laya" {
         t.Fatalf("expected _source=laya, got %s", res.Params["_source"])
+    }
+}
+
+// TestLayaAC7ServerLatencyUnder15ms is the gateway-side AC7 assertion: the
+// server-reported usage.latency_ms from /v1/laya/decide must be <15ms after
+// warmup. This is the gateway counterpart to fusion-guard's
+// tests/test_laya_guard.py::TestLayaIntegration AC7 tests (issue #20 AC7).
+//
+// Skips when fusion-mlx is not running (CI without a live model server) — the
+// skip is intentional, not a gap: the <15ms bound is a property of the laya
+// model serving, verified where a live model exists. The 500ms classifier
+// timeout cap (NewLayaClassifier) is a fail-open safety bound, NOT a latency
+// assertion; this test is the real <15ms gate on the gateway side.
+//
+// Related: fusion-mlx #1161 (laya latency regression under multi-model load).
+func TestLayaAC7ServerLatencyUnder15ms(t *testing.T) {
+    c := NewLayaClassifier(config.IntentClassifierConfig{
+        Enabled:                 true,
+        Type:                    "laya",
+        Endpoint:                "http://127.0.0.1:11434",
+        MinConfidence:           0.7,
+        GuardSensitiveThreshold: 0.5,
+    })
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
+    // Warmup: first request lazy-loads the laya model. AC7 excludes the
+    // cold-load spike (fusion-guard AC7 does the same).
+    if _, err := c.callLaya(ctx, "warmup prompt"); err != nil {
+        t.Skipf("laya endpoint unavailable, skipping gateway-side AC7 latency: %v", err)
+    }
+    res, err := c.callLaya(ctx, "hello world")
+    if err != nil {
+        t.Skipf("laya endpoint unavailable after warmup: %v", err)
+    }
+    if res.LatencyMs >= 15.0 {
+        t.Errorf("AC7: laya server-reported latency %.1fms >= 15ms threshold "+
+            "(possible fusion-mlx #1161 latency regression — clean restart + warmup required)",
+            res.LatencyMs)
+    } else {
+        t.Logf("AC7: laya server-reported latency %.1fms < 15ms", res.LatencyMs)
     }
 }
 
