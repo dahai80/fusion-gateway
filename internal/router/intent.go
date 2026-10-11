@@ -3,6 +3,7 @@ package router
 import (
     "context"
     "log/slog"
+    "time"
 )
 
 // Intent is the semantic classification of a request, used by the D4
@@ -93,21 +94,33 @@ func PlatformForIntent(i Intent, heavyPlatform, diffusionPlatform string) string
 
 // classifyAndLog runs the classifier with a timeout guard and logs the result.
 // Returns IntentUnknown on any error so the semantic layer fails open (defers
-// to the rule chain) rather than blocking requests.
+// to the rule chain) rather than blocking requests. AC8: logs the classifier
+// source label + round-trip latency so laya vs router_light is distinguishable
+// in decision logs.
 func classifyAndLog(ctx context.Context, c IntentClassifier, req *RouteRequest) *IntentResult {
+    start := time.Now()
     res, err := c.Classify(ctx, req)
+    latency := time.Since(start)
     if err != nil {
         slog.Warn("intent classifier failed, falling back to rule chain",
-            "error", err, "model", req.Model)
+            "error", err, "model", req.Model, "latency_ms", latency.Milliseconds())
         return &IntentResult{Intent: IntentUnknown, Confidence: 0}
     }
     if res == nil {
         return &IntentResult{Intent: IntentUnknown, Confidence: 0}
     }
+    source := "llm"
+    if res.Params != nil {
+        if s, ok := res.Params["_source"]; ok && s != "" {
+            source = s
+        }
+    }
     slog.Info("intent classified",
         "intent", res.Intent,
         "confidence", res.Confidence,
         "model", req.Model,
+        "source", source,
+        "latency_ms", latency.Milliseconds(),
     )
     return res
 }
