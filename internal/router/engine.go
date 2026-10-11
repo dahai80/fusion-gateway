@@ -872,6 +872,27 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return e.decideRerankLocked(ctx, cfg, req.Model, snap)
     }
 
+    // Issue #195 / #20: laya-guard 403 short-circuit — MUST run before the
+    // routing-mode switch. The mode switch (local/cloud/hybrid) returns early
+    // for "local" mode (mode_local), which previously bypassed the guard check
+    // in decideIntentLocked (reached only in hybrid mode). A blocked request
+    // must never reach any backend regardless of routing mode. The classifier
+    // sets _guard_blocked=true when a guard dimension exceeds threshold;
+    // _guard_blocked is unset on fail-open (guard endpoint unavailable).
+    if intent != nil && intent.Params != nil {
+        if blocked, ok := intent.Params["_guard_blocked"]; ok && blocked == "true" {
+            detail := intent.Params["_guard_detail"]
+            slog.Info("laya guard rejected request before routing",
+                "detail", detail, "mode", cfg.Config.Routing.Mode)
+            return &RouteDecision{
+                Backend:      LocalBackend,
+                Reason:       "laya_guard_blocked",
+                Rejected:     true,
+                RejectDetail: detail,
+            }
+        }
+    }
+
     // Mode fast-path: explicit routing mode overrides all other rules
     mode := cfg.Config.Routing.Mode
     switch mode {
@@ -1354,6 +1375,18 @@ func (e *Engine) classifyIntentUnlocked(ctx context.Context, cfg *config.ConfigS
     res := classifyAndLog(ctx, classifier, req)
     if res.Intent == IntentUnknown {
         return nil
+    }
+    // #20 E2E fix: preserve guard-blocked intent even when router confidence
+    // is below threshold. Jailbreak/PII prompts confuse the router's domain
+    // classifier (low confidence), but the guard preset independently detects
+    // the threat. Without this early return, the confidence check below
+    // discards the IntentResult (returns nil), and decideLocked never sees
+    // _guard_blocked → the 403 chain breaks. The guard must win over router
+    // confidence — a blocked request must never reach any backend.
+    if res.Params != nil {
+        if blocked, ok := res.Params["_guard_blocked"]; ok && blocked == "true" {
+            return res
+        }
     }
     if res.Confidence < ic.MinConfidence {
         slog.Info("intent confidence below threshold, deferring to rule chain",

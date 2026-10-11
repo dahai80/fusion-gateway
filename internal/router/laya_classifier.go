@@ -77,12 +77,20 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
     // can spike past 20ms under concurrent load (the gateway is serving
     // the actual chat request on a parallel goroutine). A 20ms cap caused
     // premature fallback to IntentUnknown on real traffic — observed 7ms
-    // steady-state but >20ms spikes. Default 50ms: still fast enough for
-    // the hot path, with headroom for load spikes. An operator setting a
-    // tighter cfg.Timeout (<50ms) is honored; a looser one is capped.
-    timeout := 50 * time.Millisecond
-    if cfg.Timeout > 0 && cfg.Timeout < 50*time.Millisecond {
-        timeout = cfg.Timeout
+    // steady-state but >20ms spikes. Default 500ms: laya steady-state is
+    // 6-8ms, but multi-model fusion-mlx contention (35+ loaded models,
+    // upstream #1161) pushes p99 to 40-60ms, and the prior 50ms cap timed
+    // out on normal variance → guard never fired → 403 chain broken (#20
+    // E2E). 500ms accommodates contention while still failing fast enough
+    // for production. An operator setting a tighter cfg.Timeout is honored;
+    // a looser one is capped at 2s (config default).
+    timeout := 500 * time.Millisecond
+    if cfg.Timeout > 0 {
+        if cfg.Timeout < 2*time.Second {
+            timeout = cfg.Timeout
+        } else {
+            timeout = 2 * time.Second
+        }
     }
     minConf := cfg.MinConfidence
     if minConf <= 0 {
@@ -236,28 +244,46 @@ func (c *LayaClassifier) Classify(ctx context.Context, req *RouteRequest) (*Inte
         "latency_ms", latency.Milliseconds(),
     )
 
-    if confidence < c.minConfidence {
-        slog.Info("laya confidence below threshold, falling back",
-            "confidence", confidence, "min", c.minConfidence)
-        return c.fallbackOrUnknown(ctx, req)
-    }
-
     if params == nil {
         params = map[string]string{}
     }
     params["_source"] = "laya"
     params["laya_latency_ms"] = fmt.Sprintf("%.1f", latency.Seconds()*1000)
 
-    if c.guardSensitiveThreshold > 0 && res.Answers.IsSensitive.Noul >= c.guardSensitiveThreshold {
+    // Guard runs unconditionally on every non-trivial request when enabled
+    // (guardSensitiveThreshold > 0 = guard on), BEFORE the confidence check.
+    // The router preset's is_sensitive dimension asks "does this involve
+    // money/legal/medical/safety consequences" — a TOPIC-sensitivity signal,
+    // NOT a security-threat signal. Jailbreak, prompt-injection and PII-leak
+    // prompts score ~0 on is_sensitive AND often produce low router confidence
+    // (jailbreak prompts confuse the domain classifier), so the guard MUST run
+    // before the confidence fallback — otherwise low-confidence jailbreaks skip
+    // the guard entirely and reach fusion-mlx. The guard preset's own dimensions
+    // (jailbreak/injection/sensitive_data/harm_severity) are the real threat
+    // detectors. Cost: one extra laya call (~7ms) per non-trivial request.
+    if c.guardSensitiveThreshold > 0 {
         if blocked, detail := c.checkGuard(ctx, query); blocked {
             params["_guard_blocked"] = "true"
             params["_guard_detail"] = detail
             slog.Info("laya guard blocked request",
-                "is_sensitive", res.Answers.IsSensitive.Noul,
                 "detail", detail,
-                "topic", res.Answers.Domain.Choice,
+                "domain", res.Answers.Domain.Choice,
             )
+            // Return immediately — a blocked request must not fall through to
+            // the confidence check or routing. The engine's decideLocked reads
+            // _guard_blocked and returns a Rejected decision (HTTP 403).
+            return &IntentResult{
+                Intent:     intent,
+                Confidence: confidence,
+                Params:     params,
+            }, nil
         }
+    }
+
+    if confidence < c.minConfidence {
+        slog.Info("laya confidence below threshold, falling back",
+            "confidence", confidence, "min", c.minConfidence)
+        return c.fallbackOrUnknown(ctx, req)
     }
 
     return &IntentResult{
@@ -277,6 +303,15 @@ func (c *LayaClassifier) checkGuard(ctx context.Context, prompt string) (bool, s
         slog.Info("laya guard endpoint unavailable, fail-open", "error", err)
         return false, ""
     }
+    slog.Debug("laya guard response scores",
+        "jailbreak", res.Answers.Jailbreak.Noul,
+        "prompt_injection", res.Answers.PromptInjection.Noul,
+        "sensitive_data", res.Answers.SensitiveData.Noul,
+        "harm_severity", res.Answers.HarmSeverity.Score,
+        "thresholds", fmt.Sprintf("jb=%.2f inj=%.2f sd=%.2f hs=%.2f",
+            c.guardJailbreakThreshold, c.guardInjectionThreshold,
+            c.guardSensitiveDataThreshold, c.guardHarmSeverityThreshold),
+    )
     type dimCheck struct {
         name      string
         value     float64
