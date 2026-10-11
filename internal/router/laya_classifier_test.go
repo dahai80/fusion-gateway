@@ -168,7 +168,7 @@ func TestLayaClassifierEndpoint503Fallback(t *testing.T) {
 }
 
 // #191: laya endpoint timeout → fallback. Uses a server that sleeps longer
-// than the classifier timeout (20ms default).
+// than the classifier timeout (50ms default).
 func TestLayaClassifierTimeoutFallback(t *testing.T) {
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         time.Sleep(200 * time.Millisecond)

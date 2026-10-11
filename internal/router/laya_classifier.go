@@ -46,12 +46,14 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
     if endpoint == "" {
         endpoint = "http://127.0.0.1:11434"
     }
-    // Laya needs a tighter timeout than the LLM classifier — the spec targets
-    // sub-15ms. Default 20ms per the issue; fall back on any miss. When the
-    // config Timeout is set (backward-compat field, default 2s), use a
-    // laya-specific cap: min(cfg.Timeout, 50ms) so a misconfigured large
-    // timeout does not block the hot path.
-    timeout := 20 * time.Millisecond
+    // Laya targets sub-15ms typical latency, but the typed-decision model
+    // can spike past 20ms under concurrent load (the gateway is serving
+    // the actual chat request on a parallel goroutine). A 20ms cap caused
+    // premature fallback to IntentUnknown on real traffic — observed 7ms
+    // steady-state but >20ms spikes. Default 50ms: still fast enough for
+    // the hot path, with headroom for load spikes. An operator setting a
+    // tighter cfg.Timeout (<50ms) is honored; a looser one is capped.
+    timeout := 50 * time.Millisecond
     if cfg.Timeout > 0 && cfg.Timeout < 50*time.Millisecond {
         timeout = cfg.Timeout
     }
