@@ -121,6 +121,7 @@ cp config.example.yaml config.yaml
 | 端点 | 方法 | 说明 |
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | OpenAI 兼容的 chat completions (流式 + 非流式) |
+| `/v1/solve-stream` | POST | K-12 BNUP 流式端点 — 无论 `routing.bnup_mode` 是否开启,强制使用 `bnup_model` + `bnup_grammar`,始终 SSE (#203) |
 | `/v1/completions` | POST | 传统 completions (自动转换为 chat 格式) |
 | `/v1/embeddings` | POST | 文本 embedding (本地优先,批量时分片到集群) |
 | `/v1/rerank` | POST | 文档重排 (默认走云端,本地有模型时走本地) |

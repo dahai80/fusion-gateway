@@ -150,6 +150,7 @@ See `config.example.yaml` for full reference. Key settings:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | OpenAI-compatible chat completions (stream + non-stream) |
+| `/v1/solve-stream` | POST | K-12 BNUP streaming endpoint — forces `bnup_model` + `bnup_grammar` regardless of `routing.bnup_mode`, always SSE (#203) |
 | `/v1/completions` | POST | Legacy completions (auto-converted to chat format) |
 | `/v1/embeddings` | POST | Text embeddings (local-first, cluster sharding for batch) |
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
