@@ -5,6 +5,18 @@ package cache
 // User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "semantic cache, similarity threshold, local vector store".
 // Schema: SemanticEntry(embedding/response/model/timestamp), SemanticCache with cosine similarity search.
 // API: NewSemanticCache, Search, Store, Stats.
+//
+// #204 caching layering: the gateway is non-invasive (design principle 1) —
+// it does not run inference, so a KV prefix-cache direct-serve path (replaying
+// fusion-mlx KV cache state) belongs in fusion-mlx, not here. The gateway
+// provides two caching layers:
+//   1. This semantic cache — cosine similarity ≥ threshold (default 0.95) serves
+//      repeated/near-identical prompts without hitting fusion-mlx. An exact
+//      repeat (similarity 1.0) is the gateway equivalent of a prefix-cache hit.
+//   2. AC9 trivial short-circuit (laya_classifier.go) — exact-match fast path
+//      for trivial queries ("hi"/"thanks"/"ok") with no HTTP round-trip.
+// KV prefix caching (prompt-prefix reuse inside the engine) is fusion-mlx's
+// responsibility; the gateway delegates to it via the normal routing path.
 
 import (
     "container/list"

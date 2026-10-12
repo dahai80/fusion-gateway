@@ -8,6 +8,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
@@ -27,6 +28,59 @@ func (s stubClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentRes
         return &IntentResult{Intent: IntentUnknown, Confidence: 0}, nil
     }
     return s.result, nil
+}
+
+// slowClassifier sleeps for a configurable duration before returning, used to
+// test the #204 SLO breach metric in classifyAndLog.
+type slowClassifier struct {
+    delay time.Duration
+}
+
+func (s slowClassifier) Classify(_ context.Context, _ *RouteRequest) (*IntentResult, error) {
+    time.Sleep(s.delay)
+    return &IntentResult{
+        Intent:     IntentLightweight,
+        Confidence: 0.9,
+        Params:     map[string]string{"_source": "laya"},
+    }, nil
+}
+
+// TestClassifyAndLog_SLOBreachMetric verifies that classifyAndLog records a
+// SLO breach (latency > 15ms) to the Prometheus counter. A slow classifier
+// (20ms) must increment fusion_gateway_classifier_slo_breach_total{source=laya}.
+func TestClassifyAndLog_SLOBreachMetric(t *testing.T) {
+    ctx := context.Background()
+    req := &RouteRequest{Model: "test-model", Text: "hello world"}
+
+    before := observability.ClassifierSLOBreachValue("laya")
+    res := classifyAndLog(ctx, slowClassifier{delay: 20 * time.Millisecond}, req)
+    after := observability.ClassifierSLOBreachValue("laya")
+
+    if res == nil || res.Intent != IntentLightweight {
+        t.Fatalf("expected IntentLightweight result, got %v", res)
+    }
+    if after != before+1 {
+        t.Fatalf("expected SLO breach count %v, got %v (before=%v)",
+            before+1, after, before)
+    }
+}
+
+// TestClassifyAndLog_NoSLOBreachWhenFast verifies no breach is recorded when
+// the classifier is well under the 15ms threshold.
+func TestClassifyAndLog_NoSLOBreachWhenFast(t *testing.T) {
+    ctx := context.Background()
+    req := &RouteRequest{Model: "test-model", Text: "hi"}
+
+    before := observability.ClassifierSLOBreachValue("llm")
+    classifyAndLog(ctx, stubClassifier{
+        result: &IntentResult{Intent: IntentLightweight, Confidence: 0.9},
+    }, req)
+    after := observability.ClassifierSLOBreachValue("llm")
+
+    if after != before {
+        t.Fatalf("expected no SLO breach for fast classifier, got %v (before=%v)",
+            after, before)
+    }
 }
 
 func newIntentEngine(t *testing.T, cfg *config.ConfigSnapshot, classifier IntentClassifier) *Engine {

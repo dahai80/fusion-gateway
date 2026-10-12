@@ -33,6 +33,12 @@ var (
     configVersion prometheus.Gauge
     inFlightRequests *prometheus.GaugeVec
 
+    // #204: classifier latency SLO. The <15ms SLO is asserted in mock tests
+    // but was only logged at runtime — no metric to alert on. Expose a
+    // histogram (full distribution) + a breach counter (alert trigger).
+    classifierLatency *prometheus.HistogramVec
+    classifierSLOBreaches *prometheus.CounterVec
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -153,6 +159,17 @@ func init() {
         Help: "In-flight request count",
     }, []string{"backend"})
 
+    // #204: classifier latency SLO metrics.
+    classifierLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+        Name:    "fusion_gateway_classifier_latency_seconds",
+        Help:    "Intent classifier round-trip latency (classifyAndLog)",
+        Buckets: []float64{0.005, 0.01, 0.015, 0.025, 0.05, 0.1, 0.25, 0.5},
+    }, []string{"source"})
+    classifierSLOBreaches = prometheus.NewCounterVec(prometheus.CounterOpts{
+        Name: "fusion_gateway_classifier_slo_breach_total",
+        Help: "Intent classifier SLO breaches (latency > 15ms threshold)",
+    }, []string{"source"})
+
     // EI6: tokenizer_calibration_deviation removed — it was declared but never
     // had a write path, so /metrics exposed a permanent 0 that looked like a
     // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
@@ -167,6 +184,7 @@ func init() {
         hwGPUMemoryInUseBytes, hwGPUMemoryAllocBytes,
         hwMLXActiveMemoryBytes, hwMLXModelsLoaded, hwMLXInferenceQueueDepth,
         hwCollectionErrors, configVersion, inFlightRequests,
+        classifierLatency, classifierSLOBreaches,
     )
 }
 
@@ -246,6 +264,47 @@ func UpdateConfigVersion(ver uint64) {
 
 func UpdateInFlight(backend string, count int64) {
     inFlightRequests.WithLabelValues(backend).Set(float64(count))
+}
+
+// RecordClassifierLatency records the intent classifier round-trip latency
+// (#204). source is the classifier tag ("laya", "laya_fallback",
+// "laya_trivial", "llm", "router_light").
+func RecordClassifierLatency(source string, seconds float64) {
+    classifierLatency.WithLabelValues(source).Observe(seconds)
+}
+
+// RecordClassifierSLOBreach increments the SLO breach counter when the
+// classifier latency exceeds the 15ms threshold (#204).
+func RecordClassifierSLOBreach(source string) {
+    classifierSLOBreaches.WithLabelValues(source).Inc()
+}
+
+// ClassifierSLOBreachValue returns the current SLO breach count for a source.
+// Test helper — lets cross-package tests verify classifyAndLog recorded a
+// breach without scraping the /metrics HTTP endpoint.
+func ClassifierSLOBreachValue(source string) float64 {
+    mfs, err := registry.Gather()
+    if err != nil {
+        return 0
+    }
+    for _, mf := range mfs {
+        if mf.GetName() != "fusion_gateway_classifier_slo_breach_total" {
+            continue
+        }
+        for _, m := range mf.GetMetric() {
+            var match bool
+            for _, l := range m.GetLabel() {
+                if l.GetName() == "source" && l.GetValue() == source {
+                    match = true
+                    break
+                }
+            }
+            if match {
+                return m.GetCounter().GetValue()
+            }
+        }
+    }
+    return 0
 }
 
 func IncrCloudInFlight() {
