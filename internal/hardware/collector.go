@@ -35,6 +35,9 @@ func NewCollector(cfg *config.HardwareConfig) *Collector {
     if cfg != nil && cfg.MLXMetrics.URL != "" {
         mlxMetricsURL = cfg.MLXMetrics.URL
     }
+    if cfg != nil && cfg.MLXMetrics.APIKey != "" {
+        mlxMetricsAPIKey = cfg.MLXMetrics.APIKey
+    }
     return &Collector{
         cfg: cfg,
     }

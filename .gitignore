@@ -27,6 +27,7 @@ config.yaml
 *.test
 *.out
 coverage.html
+/target/
 
 # Runtime
 logs/

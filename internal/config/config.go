@@ -504,6 +504,10 @@ type MLXMetricsConfig struct {
     // and collectMLXMetrics dialed a hardcoded 127.0.0.1 — unreachable in a
     // container, so /metrics failed every collect tick.
     URL string `mapstructure:"url"`
+    // APIKey is the Bearer token sent on /metrics fetches. fusion-mlx enables
+    // auth (ENG-08 auth_precheck) and rejects unauthenticated /metrics with
+    // 401, which made the hardware collector log an error every tick.
+    APIKey string `mapstructure:"api_key"`
 }
 
 type SwapConfig struct {

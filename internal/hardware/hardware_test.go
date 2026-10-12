@@ -1033,6 +1033,68 @@ fusion_mlx_inference_queue_depth 5
     }
 }
 
+// TestCollectMLXMetrics_APIKeyAuthHeader verifies that when mlxMetricsAPIKey
+// is set (fusion-mlx ENG-08 auth_precheck), the /metrics fetch carries an
+// `Authorization: Bearer <key>` header. Without it fusion-mlx returns 401
+// and the collector logs an error every tick.
+func TestCollectMLXMetrics_APIKeyAuthHeader(t *testing.T) {
+    cases := []struct {
+        name   string
+        apiKey string
+        want   string
+    }{
+        {"with_key", "fg-test-secret", "Bearer fg-test-secret"},
+        {"without_key", "", ""},
+    }
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            var gotAuth string
+            ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                gotAuth = r.Header.Get("Authorization")
+                w.Header().Set("Content-Type", "text/plain")
+                w.WriteHeader(http.StatusOK)
+                _, _ = w.Write([]byte("fusion_mlx_models_loaded 0\n"))
+            }))
+            defer ts.Close()
+
+            origURL := mlxMetricsURL
+            mlxMetricsURL = ts.URL + "/metrics"
+            origKey := mlxMetricsAPIKey
+            mlxMetricsAPIKey = tc.apiKey
+            defer func() {
+                mlxMetricsURL = origURL
+                mlxMetricsAPIKey = origKey
+            }()
+
+            var m HardwareMetrics
+            if err := collectMLXMetrics(&m); err != nil {
+                t.Fatalf("unexpected error: %v", err)
+            }
+            if gotAuth != tc.want {
+                t.Errorf("Authorization header: got %q, want %q", gotAuth, tc.want)
+            }
+        })
+    }
+}
+
+// TestNewCollector_MLXMetricsAPIKey verifies the collector wires the
+// MLXMetricsConfig.APIKey into the package-level mlxMetricsAPIKey var.
+func TestNewCollector_MLXMetricsAPIKey(t *testing.T) {
+    origKey := mlxMetricsAPIKey
+    defer func() { mlxMetricsAPIKey = origKey }()
+
+    cfg := &config.HardwareConfig{
+        MLXMetrics: config.MLXMetricsConfig{
+            Enabled: true,
+            APIKey:  "fg-wired-key",
+        },
+    }
+    _ = NewCollector(cfg)
+    if mlxMetricsAPIKey != "fg-wired-key" {
+        t.Errorf("mlxMetricsAPIKey: got %q, want %q", mlxMetricsAPIKey, "fg-wired-key")
+    }
+}
+
 func TestCollectMLXMetrics_NonOKStatus(t *testing.T) {
     t.Log("testing collectMLXMetrics with non-200 HTTP status")
     ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

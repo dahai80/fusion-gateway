@@ -15,6 +15,10 @@ import (
 
 var mlxMetricsURL = "http://127.0.0.1:11434/metrics"
 
+// mlxMetricsAPIKey is the optional Bearer token sent on /metrics fetches.
+// Empty means no Authorization header (older fusion-mlx without auth).
+var mlxMetricsAPIKey = ""
+
 var mlxHTTPDoFn func(req *http.Request) (*http.Response, error)
 
 func init() {
@@ -33,6 +37,10 @@ func collectMLXMetrics(m *HardwareMetrics) error {
     req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
     if err != nil {
         return fmt.Errorf("create mlx metrics request: %w", err)
+    }
+
+    if mlxMetricsAPIKey != "" {
+        req.Header.Set("Authorization", "Bearer "+mlxMetricsAPIKey)
     }
 
     resp, err := mlxHTTPDoFn(req)
