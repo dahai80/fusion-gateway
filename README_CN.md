@@ -428,6 +428,26 @@ POST /webhooks/model-hub
 | IOKit (ioreg) | GPU Device/Renderer/Tiler 利用率、GPU 显存 | `ioreg -r -d 1 -w 0 -c AGXAccelerator` |
 | fusion-mlx /metrics | MLX 活跃内存、已加载模型、推理队列深度 | Prometheus 解析器 |
 
+## 可观测性
+
+所有指标在 `/metrics` 导出 (Prometheus 格式,`fusion_gateway_*` 前缀),需 master_key 鉴权。
+
+### 意图分类器 SLO (#204)
+
+意图分类器有 **15ms 延迟 SLO**。两个指标暴露:
+
+- `fusion_gateway_classifier_latency_seconds` (直方图,标签 `source`) — 完整延迟分布 (`laya` / `laya_fallback` / `laya_trivial` / `llm` / `router_light`)。
+- `fusion_gateway_classifier_slo_breach_total` (计数器,标签 `source`) — 分类超过 15ms 时递增。告警规则:`rate(...[5m]) > 0`。
+
+分类器在 SLO 超限时 **fail open** — 仍返回结果 (或回退到规则链);SLO 是可见性信号,不是硬拒绝。
+
+### 缓存分层 (#204)
+
+KV prefix cache (推理引擎内部的 prompt 前缀复用) 属于 **fusion-mlx**,不在网关 — 网关是非侵入的 (不做推理计算)。网关提供两层缓存:
+
+1. **语义缓存** (`routing.semantic_cache`,余弦相似度 ≥ 阈值,默认 0.95) — 重复/近似 prompt 直接返回,不访问 fusion-mlx。完全匹配 (相似度 1.0) 即网关层的 prefix-cache 命中。
+2. **AC9 trivial 短路** (laya_classifier.go) — trivial 查询 ("hi" / "thanks" / "ok") 的精确匹配快速路径,无 HTTP 往返。
+
 ## SSE 背压
 
 当下游 SSE 通道写满 (慢客户端) 时,网关:

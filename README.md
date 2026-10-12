@@ -489,6 +489,33 @@ prefix) behind the master-key. The production monitoring stack ships under
 Alert triage actions are documented in
 [`docs/runbook-recovery.md#alert-triage`](docs/runbook-recovery.md#alert-triage).
 
+### Intent Classifier SLO (#204)
+
+The intent classifier has a **15ms latency SLO**. Two metrics expose it:
+
+- `fusion_gateway_classifier_latency_seconds` (histogram, label `source`) — full
+  latency distribution (`laya` / `laya_fallback` / `laya_trivial` / `llm` /
+  `router_light`).
+- `fusion_gateway_classifier_slo_breach_total` (counter, label `source`) —
+  incremented when classification exceeds 15ms. Alert on `rate(...[5m]) > 0`.
+
+The classifier **fails open** on SLO breach — the result (or fallback to the
+rule chain) is still returned; the SLO is a visibility signal, not a hard
+reject.
+
+### Caching Layering (#204)
+
+KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
+**fusion-mlx**, not the gateway — the gateway is non-invasive (no inference
+computation). The gateway provides two caching layers:
+
+1. **Semantic cache** (`routing.semantic_cache`, cosine similarity ≥ threshold,
+   default 0.95) — serves repeated / near-identical prompts without hitting
+   fusion-mlx. An exact repeat (similarity 1.0) is the gateway equivalent of a
+   prefix-cache hit.
+2. **AC9 trivial short-circuit** (laya_classifier.go) — exact-match fast path
+   for trivial queries ("hi" / "thanks" / "ok") with no HTTP round-trip.
+
 ## SSE Backpressure
 
 When the downstream SSE channel is full (slow client), the gateway:

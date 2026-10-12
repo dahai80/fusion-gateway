@@ -4,7 +4,15 @@ import (
     "context"
     "log/slog"
     "time"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
 )
+
+// ClassifierSLOThreshold is the intent classification latency SLO (#204).
+// Breaches are counted in fusion_gateway_classifier_slo_breach_total and
+// logged at WARN — the classifier still fails open (returns the result or
+// falls back to the rule chain); the SLO is not a hard reject.
+const ClassifierSLOThreshold = 15 * time.Millisecond
 
 // Intent is the semantic classification of a request, used by the D4
 // gateway-semantic layer to dispatch by request type rather than only by
@@ -102,6 +110,23 @@ func classifyAndLog(ctx context.Context, c IntentClassifier, req *RouteRequest) 
     res, err := c.Classify(ctx, req)
     latency := time.Since(start)
     if err != nil {
+        // #204: record latency + SLO breach even on error path so a slow
+        // failing classifier (timeout) is visible in metrics, not just logs.
+        source := "llm"
+        if res != nil && res.Params != nil {
+            if s, ok := res.Params["_source"]; ok && s != "" {
+                source = s
+            }
+        }
+        observability.RecordClassifierLatency(source, latency.Seconds())
+        if latency > ClassifierSLOThreshold {
+            observability.RecordClassifierSLOBreach(source)
+            slog.Warn("intent classifier SLO breach (error path)",
+                "error", err, "model", req.Model,
+                "latency_ms", latency.Milliseconds(),
+                "slo_ms", ClassifierSLOThreshold.Milliseconds(),
+                "source", source)
+        }
         slog.Warn("intent classifier failed, falling back to rule chain",
             "error", err, "model", req.Model, "latency_ms", latency.Milliseconds())
         return &IntentResult{Intent: IntentUnknown, Confidence: 0}
@@ -114,6 +139,16 @@ func classifyAndLog(ctx context.Context, c IntentClassifier, req *RouteRequest) 
         if s, ok := res.Params["_source"]; ok && s != "" {
             source = s
         }
+    }
+    // #204: record classifier latency histogram + SLO breach counter.
+    observability.RecordClassifierLatency(source, latency.Seconds())
+    if latency > ClassifierSLOThreshold {
+        observability.RecordClassifierSLOBreach(source)
+        slog.Warn("intent classifier SLO breach",
+            "model", req.Model,
+            "latency_ms", latency.Milliseconds(),
+            "slo_ms", ClassifierSLOThreshold.Milliseconds(),
+            "source", source)
     }
     slog.Info("intent classified",
         "intent", res.Intent,

@@ -113,3 +113,26 @@ func TestUpdateInFlight(t *testing.T) {
     UpdateInFlight("local", 5)
     UpdateInFlight("cloud", 10)
 }
+
+// #204: classifier latency histogram + SLO breach counter.
+func TestRecordClassifierLatency(t *testing.T) {
+    RecordClassifierLatency("laya", 0.008)
+    RecordClassifierLatency("router_light", 0.020)
+    req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec := httptest.NewRecorder()
+    Handler().ServeHTTP(rec, req)
+    body := rec.Body.String()
+    if !strings.Contains(body, "fusion_gateway_classifier_latency_seconds") {
+        t.Fatal("expected classifier_latency metric in output")
+    }
+}
+
+func TestRecordClassifierSLOBreach(t *testing.T) {
+    before := ClassifierSLOBreachValue("laya")
+    RecordClassifierSLOBreach("laya")
+    RecordClassifierSLOBreach("laya")
+    after := ClassifierSLOBreachValue("laya")
+    if after != before+2 {
+        t.Fatalf("expected breach count %v, got %v", before+2, after)
+    }
+}
