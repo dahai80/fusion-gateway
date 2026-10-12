@@ -690,6 +690,9 @@ func (s *Server) Start() error {
     s.mux = mux // #173: batch worker loops requests back through this mux
 
     mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
+    // #203: dedicated K-12 BNUP streaming endpoint — forces bnup model +
+    // grammar regardless of bnup_mode, always SSE.
+    mux.HandleFunc("/v1/solve-stream", s.withMiddleware(s.handleSolveStream))
     mux.HandleFunc("/v1/completions", s.withMiddleware(s.handleCompletions))
     mux.HandleFunc("/v1/embeddings", s.withMiddleware(s.handleEmbeddings))
     mux.HandleFunc("/v1/rerank", s.withMiddleware(s.handleRerank))

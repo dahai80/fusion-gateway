@@ -67,7 +67,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     // If the BNUP model is not loaded in fusion-mlx, the router's existing
     // model-availability check (P4) falls back to default/cloud — no crash.
     // Backward compatible: bnup_mode=false (default) skips this entirely.
-    s.applyBnupMode(&req)
+    s.applyBnupMode(&req, false)
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
@@ -454,12 +454,23 @@ func (s *Server) applyCloudModelMapping(model, cloudBackend string) string {
 // fusion-mlx instance (e.g. before fusion-trainer #58 merges the weights),
 // the request falls back to routing.default_model so the caller still gets a
 // response instead of a 404. No-op when bnup_mode is false (default).
-func (s *Server) applyBnupMode(req *adapter.ChatRequest) {
-    if !s.cfg.Config.Routing.BnupMode {
-        return
-    }
-    if !strings.HasPrefix(req.Model, "bnup-") {
-        return
+//
+// #203: force=true bypasses the bnup_mode gate — used by /v1/solve-stream
+// (dedicated K-12 endpoint) so BNUP semantics work out of the box without
+// flipping the global default. When forced and the model is not already a
+// "bnup-" alias, it is set to "bnup-socratic" before the remap.
+func (s *Server) applyBnupMode(req *adapter.ChatRequest, force bool) {
+    if !force {
+        if !s.cfg.Config.Routing.BnupMode {
+            return
+        }
+        if !strings.HasPrefix(req.Model, "bnup-") {
+            return
+        }
+    } else {
+        if !strings.HasPrefix(req.Model, "bnup-") {
+            req.Model = "bnup-socratic"
+        }
     }
     originalModel := req.Model
     target := strings.TrimSpace(s.cfg.Config.Routing.BnupModel)
