@@ -874,7 +874,16 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     chatFn := func(ctx context.Context, r *adapter.ChatRequest) (*adapter.ChatResponse, error) {
         return provider.Chat(ctx, r)
     }
-    chatFn = middleware.RetryChat(s.cfg.Config.Routing.Retry, chatFn)
+    // #208: local generation is non-idempotent and expensive — retrying a
+    // header-timeout re-sends the entire prompt and re-triggers the full
+    // prefill+decode, guaranteeing the same timeout while doubling engine
+    // load. Local calls fail fast instead: ErrLocalSlotFull diverts to the
+    // A4 cloud fallback below, and genuine upstream faults surface to the
+    // client immediately. Cloud keeps the retry wrapper (headers arrive
+    // before the first token; a cloud header timeout IS a transient fault).
+    if decision.Backend != router.LocalBackend {
+        chatFn = middleware.RetryChat(s.cfg.Config.Routing.Retry, chatFn)
+    }
 
     // R2: coalesce the upstream fetch per cache key so N concurrent same-key
     // misses don't stampede upstream (N× cost/limit). The leader runs chatFn

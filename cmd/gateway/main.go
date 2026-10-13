@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -550,7 +551,7 @@ func run(configPath string) error {
 
 	// M2 fix: use safeGo for server goroutine
 	safeGo("server_start", func() {
-		if err := srv.Start(); err != nil {
+		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			quit <- syscall.SIGTERM
 		}
@@ -570,8 +571,17 @@ func run(configPath string) error {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("server shutdown error", "error", err)
-		return err
+		// #208: a drain timeout (in-flight requests not idle within the 30s
+		// window) is a degraded shutdown, NOT a process-fatal error. The
+		// prior `return err` propagated to main() which logged "fatal error"
+		// and os.Exit(1) — one slow request turned every restart into a
+		// crash-loop-looking exit and skipped the cleanup below (fusion-mlx
+		// auto-stop, discovery, browser registry). Log it, run the remaining
+		// cleanup, and exit cleanly: the process is going down regardless,
+		// and the affected in-flight requests already got their deadline.
+		slog.Error("server shutdown drain timeout, forcing exit",
+			"error", err,
+			"note", "in-flight requests exceeded the 30s drain window; their connections close at process exit")
 	}
 
 	// Local backend + discovery only stop after in-flight requests have drained.

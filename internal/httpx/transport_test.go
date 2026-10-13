@@ -152,6 +152,79 @@ func TestResolveResponseHeaderTimeout_DefaultApplied(t *testing.T) {
     }
 }
 
+// #208: local backends (loopback base_url, UDS socket, fusion-mlx type)
+// default to a long header wait — local engines compute the full generation
+// before sending headers on non-stream calls.
+func TestResolveResponseHeaderTimeout_LocalDefault(t *testing.T) {
+    cases := []struct {
+        name string
+        cfg  config.BackendConfig
+        want time.Duration
+    }{
+        {"loopback_127", config.BackendConfig{Type: "openai-compatible", BaseURL: "http://127.0.0.1:11434"}, defaultLocalResponseHeaderTimeout},
+        {"loopback_localhost", config.BackendConfig{Type: "openai-compatible", BaseURL: "http://localhost:11434"}, defaultLocalResponseHeaderTimeout},
+        {"loopback_ipv6", config.BackendConfig{Type: "openai-compatible", BaseURL: "http://[::1]:11434"}, defaultLocalResponseHeaderTimeout},
+        {"uds_socket", config.BackendConfig{Type: "openai-compatible", BaseURL: "http://unix/", SocketPath: "/tmp/mlx.sock"}, defaultLocalResponseHeaderTimeout},
+        {"fusion_mlx_type", config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://127.0.0.1:11434"}, defaultLocalResponseHeaderTimeout},
+        {"cloud_remote", config.BackendConfig{Type: "openai-compatible", BaseURL: "https://api.openai.com/v1"}, defaultResponseHeaderTimeout},
+        {"empty_base", config.BackendConfig{}, defaultResponseHeaderTimeout},
+    }
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            if got := resolveResponseHeaderTimeout(tc.cfg); got != tc.want {
+                t.Fatalf("resolveResponseHeaderTimeout(%+v) = %s, want %s", tc.cfg, got, tc.want)
+            }
+        })
+    }
+}
+
+// #208: local default is bounded by the backend's overall Timeout when that
+// is shorter — the header wait must never outlive the client's own deadline.
+func TestResolveResponseHeaderTimeout_LocalBoundedByTimeout(t *testing.T) {
+    cfg := config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://127.0.0.1:11434", Timeout: 120 * time.Second}
+    if got := resolveResponseHeaderTimeout(cfg); got != 120*time.Second {
+        t.Fatalf("local header timeout should follow shorter backend Timeout: got %s want 120s", got)
+    }
+    // Timeout longer than the local default does NOT extend the header wait.
+    cfg.Timeout = 600 * time.Second
+    if got := resolveResponseHeaderTimeout(cfg); got != defaultLocalResponseHeaderTimeout {
+        t.Fatalf("longer backend Timeout must not extend local default: got %s want %s", got, defaultLocalResponseHeaderTimeout)
+    }
+}
+
+// #208: explicit response_header_timeout wins even on local backends.
+func TestResolveResponseHeaderTimeout_LocalOverrideWins(t *testing.T) {
+    cfg := config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://127.0.0.1:11434", ResponseHeaderTimeout: 5 * time.Second}
+    if got := resolveResponseHeaderTimeout(cfg); got != 5*time.Second {
+        t.Fatalf("explicit override must win on local: got %s want 5s", got)
+    }
+}
+
+func TestIsLocalBackendConfig(t *testing.T) {
+    cases := []struct {
+        name string
+        cfg  config.BackendConfig
+        want bool
+    }{
+        {"socket_path", config.BackendConfig{BaseURL: "http://unix/", SocketPath: "/tmp/s.sock"}, true},
+        {"fusion_mlx_type", config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://10.0.0.5:11434"}, true},
+        {"loopback_host", config.BackendConfig{BaseURL: "http://127.0.0.1:11434"}, true},
+        {"localhost_host", config.BackendConfig{BaseURL: "http://localhost:11434"}, true},
+        {"ipv6_loopback", config.BackendConfig{BaseURL: "http://[::1]:11434"}, true},
+        {"remote_host", config.BackendConfig{BaseURL: "https://api.openai.com/v1"}, false},
+        {"private_lan_not_local", config.BackendConfig{BaseURL: "http://10.0.0.5:11434"}, false},
+        {"garbage_url", config.BackendConfig{BaseURL: "://not a url"}, false},
+        {"empty", config.BackendConfig{}, false},
+    }
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            if got := isLocalBackendConfig(tc.cfg); got != tc.want {
+                t.Fatalf("isLocalBackendConfig(%+v) = %v, want %v", tc.cfg, got, tc.want)
+            }
+        })
+    }
+}
+
 func TestResolveMaxConnsPerHost_ConfigOverride(t *testing.T) {
     restore := captureLog()
     defer restore()
@@ -282,8 +355,12 @@ func TestTransportForBackend_UDSPathReturnsTransport(t *testing.T) {
     if tr.MaxIdleConnsPerHost != 64 {
         t.Errorf("UDS MaxIdleConnsPerHost=%d, want default 64", tr.MaxIdleConnsPerHost)
     }
-    if tr.ResponseHeaderTimeout != 30*time.Second {
-        t.Errorf("UDS ResponseHeaderTimeout=%s, want 30s", tr.ResponseHeaderTimeout)
+    // #208: UDS is a local backend — the unset response_header_timeout now
+    // resolves to the 300s local default (local engines compute the full
+    // generation before sending headers), not the 30s cloud stuck-upstream
+    // default. Explicit override still wins (see UDSOverride below).
+    if tr.ResponseHeaderTimeout != defaultLocalResponseHeaderTimeout {
+        t.Errorf("UDS ResponseHeaderTimeout=%s, want %s (local default)", tr.ResponseHeaderTimeout, defaultLocalResponseHeaderTimeout)
     }
     if tr.DialContext == nil {
         t.Fatal("UDS DialContext must be set, got nil")

@@ -94,7 +94,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `route.local_max_mlx_memory_ratio` | 0.7 | Max MLX/GPU memory ratio before forcing cloud |
 | `route.circuit_breaker.failure_threshold` | 5 | Consecutive failures before circuit opens |
 | `route.rate_limit.enabled` | true | Enable per-key RPM/TPM rate limiting |
-| `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests |
+| `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests (cloud only — local generation is non-idempotent, fails fast, #208) |
+| `backends.<name>.response_header_timeout` | 30s (cloud) / 300s (local) | How long the transport waits for upstream response headers. Local backends (loopback base_url, UDS `socket_path`, or `type: fusion-mlx`) default to 300s — local engines compute the full generation before sending headers on non-stream calls (#208). Bounded by `backends.<name>.timeout` when shorter. Explicit value always wins. |
 | `route.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
 | `route.fallback.enabled` | false | Enable `model_mapping` below (alias → cloud model id) |
 | `route.fallback.model_mapping` | {} | Map client/SDK model aliases (e.g. `claude-opus-4-7`) to the cloud backend's real model id (e.g. `glm5.2`); applied before forwarding on `/v1/messages` and `/v1/chat/completions` (avoids upstream 400 → 502 "response stopped arriving", #52) |
