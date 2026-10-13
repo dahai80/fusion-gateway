@@ -200,7 +200,7 @@ func TestResolveResponseHeaderTimeout_LocalOverrideWins(t *testing.T) {
     }
 }
 
-func TestIsLocalBackendConfig(t *testing.T) {
+func TestIsLocalBackendConfig_Exported(t *testing.T) {
     cases := []struct {
         name string
         cfg  config.BackendConfig
@@ -218,8 +218,8 @@ func TestIsLocalBackendConfig(t *testing.T) {
     }
     for _, tc := range cases {
         t.Run(tc.name, func(t *testing.T) {
-            if got := isLocalBackendConfig(tc.cfg); got != tc.want {
-                t.Fatalf("isLocalBackendConfig(%+v) = %v, want %v", tc.cfg, got, tc.want)
+            if got := IsLocalBackendConfig(tc.cfg); got != tc.want {
+                t.Fatalf("IsLocalBackendConfig(%+v) = %v, want %v", tc.cfg, got, tc.want)
             }
         })
     }

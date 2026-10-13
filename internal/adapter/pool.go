@@ -7,6 +7,7 @@ import (
     "sync"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
 )
 
 type Pool struct {
@@ -69,11 +70,23 @@ func (p *Pool) IsLocalProvider(name string) bool {
     if !ok {
         return false
     }
+    return isLocalBackend(bc)
+}
+
+// isLocalBackend reports whether a backend config describes a local engine:
+// an intrinsically local type (fusion-mlx/kb/model-hub) OR any backend whose
+// endpoint is local — loopback base_url or UDS socket_path. Type-only
+// detection misclassified a fusion-mlx instance registered as
+// openai-compatible (switched 2026-10-12 for the Images passthrough) as
+// cloud: /v1/models came back empty under routing.mode=local and local
+// traffic was wrapped in the cloud in-flight tracking decorator. Mirrors the
+// httpx.IsLocalBackendConfig predicate (#208 local header-timeout semantics).
+func isLocalBackend(bc config.BackendConfig) bool {
     switch bc.Type {
     case "fusion-mlx", "fusion-kb", "fusion-model-hub":
         return true
     }
-    return false
+    return httpx.IsLocalBackendConfig(bc)
 }
 
 func (p *Pool) GetFusionMLX() *FusionMLXProvider {
@@ -175,8 +188,7 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
     // Lock on the same goroutine blocks forever).
     for name, prov := range p.providers {
         bc := p.backends[name]
-        switch bc.Type {
-        case "fusion-mlx", "fusion-kb", "fusion-model-hub":
+        if isLocalBackend(bc) {
             continue
         }
         p.providers[name] = WrapCloudTracking(prov)

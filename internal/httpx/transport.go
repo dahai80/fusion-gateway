@@ -132,12 +132,14 @@ const defaultLocalResponseHeaderTimeout = 300 * time.Second
 // cross-package test assertions (httpx transport_test.go, #208).
 const DefaultLocalResponseHeaderTimeout = defaultLocalResponseHeaderTimeout
 
-// isLocalBackendConfig reports whether a backend is local: a UDS dial
+// IsLocalBackendConfig reports whether a backend is local: a UDS dial
 // (SocketPath), the fusion-mlx provider type, or a loopback base_url host.
 // Type alone is insufficient — a fusion-mlx instance may be registered as
 // openai-compatible (e.g. to gain the Images passthrough), so the loopback
 // check catches 127.0.0.1/localhost/::1 base URLs regardless of type (#208).
-func isLocalBackendConfig(cfg config.BackendConfig) bool {
+// Exported so adapter/pool.go can apply the same local-ness predicate when
+// classifying providers (IsLocalProvider / cloud-tracking wrap).
+func IsLocalBackendConfig(cfg config.BackendConfig) bool {
     if cfg.SocketPath != "" {
         return true
     }
@@ -171,7 +173,7 @@ func resolveResponseHeaderTimeout(cfg config.BackendConfig) time.Duration {
     // response headers only after the full generation completes on non-stream
     // calls. Bounded by the backend's overall Timeout when that is shorter,
     // so the header wait never outlives the client's own deadline.
-    if isLocalBackendConfig(cfg) {
+    if IsLocalBackendConfig(cfg) {
         local := defaultLocalResponseHeaderTimeout
         if cfg.Timeout > 0 && cfg.Timeout < local {
             local = cfg.Timeout
