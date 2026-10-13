@@ -106,6 +106,14 @@ func TestPool_IsLocalProvider(t *testing.T) {
     p.Register("kb", &dummyProvider{name: "kb"}, config.BackendConfig{Type: "fusion-kb"})
     p.Register("hub", &dummyProvider{name: "hub"}, config.BackendConfig{Type: "fusion-model-hub"})
     p.Register("cloud", &dummyProvider{name: "cloud"}, config.BackendConfig{Type: "openai-compatible"})
+    // Local-ness must ALSO hold for a fusion-mlx instance registered as
+    // openai-compatible (the 2026-10-12 Images-passthrough switch): loopback
+    // base_url or UDS socket_path mark the SAME local engine. Type-only
+    // detection emptied /v1/models under routing.mode=local.
+    p.Register("loopback-oc", &dummyProvider{name: "loopback-oc"}, config.BackendConfig{Type: "openai-compatible", BaseURL: "http://127.0.0.1:11434"})
+    p.Register("localhost-oc", &dummyProvider{name: "localhost-oc"}, config.BackendConfig{Type: "openai-compatible", BaseURL: "http://localhost:8080"})
+    p.Register("uds-oc", &dummyProvider{name: "uds-oc"}, config.BackendConfig{Type: "openai-compatible", BaseURL: "http://unix/", SocketPath: "/tmp/s.sock"})
+    p.Register("remote-oc", &dummyProvider{name: "remote-oc"}, config.BackendConfig{Type: "openai-compatible", BaseURL: "https://api.openai.com/v1"})
 
     cases := []struct {
         name string
@@ -115,11 +123,54 @@ func TestPool_IsLocalProvider(t *testing.T) {
         {"kb", true},
         {"hub", true},
         {"cloud", false},
+        {"loopback-oc", true},
+        {"localhost-oc", true},
+        {"uds-oc", true},
+        {"remote-oc", false},
         {"nonexistent", false},
     }
     for _, c := range cases {
         if got := p.IsLocalProvider(c.name); got != c.want {
             t.Errorf("IsLocalProvider(%q) = %v, want %v", c.name, got, c.want)
+        }
+    }
+}
+
+// Regression: BuildProviders must NOT wrap a loopback openai-compatible
+// backend (a local fusion-mlx engine registered under that type) in the
+// cloud in-flight tracking decorator — that counted LOCAL requests under
+// the {backend="cloud"} Prometheus series. A remote openai-compatible
+// backend keeps the wrap.
+func TestPool_BuildProviders_LoopbackNotCloudWrapped(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_LoopbackNotCloudWrapped")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "local-oc": {
+                    Enabled: true,
+                    Type:    "openai-compatible",
+                    BaseURL: "http://127.0.0.1:11434",
+                },
+                "remote-oc": {
+                    Enabled: true,
+                    Type:    "openai-compatible",
+                    BaseURL: "https://api.upstream.example/v1",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    for name, wantWrapped := range map[string]bool{"local-oc": false, "remote-oc": true} {
+        prov, ok := p.Get(name)
+        if !ok {
+            t.Fatalf("provider %q not built", name)
+        }
+        _, wrapped := prov.(interface{ Unwrap() Provider })
+        if wrapped != wantWrapped {
+            t.Errorf("provider %q: cloud-tracking wrap = %v, want %v", name, wrapped, wantWrapped)
         }
     }
 }
@@ -361,7 +412,11 @@ func TestEI6_BuildProviders_MixedLocalCloudNoDeadlock(t *testing.T) {
             Config: config.Config{
                 Backends: map[string]config.BackendConfig{
                     "local": {Enabled: true, Type: "fusion-mlx", BaseURL: srv.URL},
-                    "cloud": {Enabled: true, Type: "openai-compatible", BaseURL: srv.URL},
+                    // Remote URL: an openai-compatible backend on a loopback
+                    // URL is a LOCAL engine under the isLocalBackend predicate
+                    // (2026-10-14 fix) and would not be wrapped; the cloud
+                    // side of this test needs a genuinely remote base_url.
+                    "cloud": {Enabled: true, Type: "openai-compatible", BaseURL: "https://api.upstream.example/v1"},
                 },
             },
         }
