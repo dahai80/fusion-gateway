@@ -65,7 +65,8 @@ cp config.example.yaml config.yaml
 | `route.local_max_mlx_memory_ratio` | 0.7 | MLX/GPU 内存占比上限,超过则强制走云端 |
 | `route.circuit_breaker.failure_threshold` | 5 | 连续失败次数,超过则熔断器打开 |
 | `route.rate_limit.enabled` | true | 启用按 key 的 RPM/TPM 限流 |
-| `route.retry.max_retries` | 2 | 非流式请求最大重试次数 |
+| `route.retry.max_retries` | 2 | 非流式请求最大重试次数 (仅云端 — 本地生成非幂等,快速失败, #208) |
+| `backends.<name>.response_header_timeout` | 30s (云端) / 300s (本地) | 传输层等待上游响应头的时长。本地后端 (loopback base_url、UDS `socket_path` 或 `type: fusion-mlx`) 默认 300s — 本地引擎非流式调用在生成完成后才发响应头 (#208)。短于该值时受 `backends.<name>.timeout` 约束。显式配置始终优先。 |
 | `route.fallback.context_window_fallback` | {} | 模型 → 更大模型的映射,用于上下文溢出回退 |
 | `route.fallback.enabled` | false | 启用下方 `model_mapping`(别名 → 云端模型 id) |
 | `route.fallback.model_mapping` | {} | 将客户端/SDK 模型别名(如 `claude-opus-4-7`)映射到云端后端真实模型 id(如 `glm5.2`);在转发前应用于 `/v1/messages` 和 `/v1/chat/completions`(避免上游 400 → 502 "response stopped arriving",#52) |

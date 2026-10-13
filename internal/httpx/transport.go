@@ -19,6 +19,7 @@ import (
     "log/slog"
     "net"
     "net/http"
+    "net/url"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -114,6 +115,43 @@ const defaultResponseHeaderTimeout = 30 * time.Second
 // cross-package test assertions (adapter r5_test.go verifies the R5 timeout).
 const DefaultResponseHeaderTimeout = defaultResponseHeaderTimeout
 
+// defaultLocalResponseHeaderTimeout is the header-wait default for LOCAL
+// backends (fusion-mlx over TCP loopback, UDS, or type fusion-mlx) when
+// ResponseHeaderTimeout is unset (#208). Local engines compute the ENTIRE
+// generation before sending response headers on non-stream calls — a 30KB
+// prompt can legitimately take minutes in prefill+decode before the first
+// header byte. A 30s header timeout there misreads a healthy long generation
+// as a stuck upstream, kills the request, and (pre-#208) re-sends the whole
+// prompt on retry — amplifying load for a guaranteed failure. 300s matches
+// the typical local backend Client.Timeout (config: backends.*.timeout 300s).
+// Cloud backends keep the 30s stuck-upstream fast-fail: their headers arrive
+// before the first token even when TTFB is long (SSE headers precede data).
+const defaultLocalResponseHeaderTimeout = 300 * time.Second
+
+// DefaultLocalResponseHeaderTimeout re-exports the local default for
+// cross-package test assertions (httpx transport_test.go, #208).
+const DefaultLocalResponseHeaderTimeout = defaultLocalResponseHeaderTimeout
+
+// isLocalBackendConfig reports whether a backend is local: a UDS dial
+// (SocketPath), the fusion-mlx provider type, or a loopback base_url host.
+// Type alone is insufficient — a fusion-mlx instance may be registered as
+// openai-compatible (e.g. to gain the Images passthrough), so the loopback
+// check catches 127.0.0.1/localhost/::1 base URLs regardless of type (#208).
+func isLocalBackendConfig(cfg config.BackendConfig) bool {
+    if cfg.SocketPath != "" {
+        return true
+    }
+    if cfg.Type == "fusion-mlx" {
+        return true
+    }
+    u, err := url.Parse(cfg.BaseURL)
+    if err != nil || u.Hostname() == "" {
+        return false
+    }
+    host := u.Hostname()
+    return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+}
+
 // defaultDialTimeout caps the TCP/UDS dial. R5: the prior TCP transport cloned
 // DefaultTransport (which carries a 30s DialContext) but the UDS transport had
 // no dial timeout at all — a dead socket could hang the dial indefinitely. 10s
@@ -128,6 +166,17 @@ const defaultTLSHandshakeTimeout = 10 * time.Second
 func resolveResponseHeaderTimeout(cfg config.BackendConfig) time.Duration {
     if cfg.ResponseHeaderTimeout > 0 {
         return cfg.ResponseHeaderTimeout
+    }
+    // #208: local backends default to a long header wait — local engines send
+    // response headers only after the full generation completes on non-stream
+    // calls. Bounded by the backend's overall Timeout when that is shorter,
+    // so the header wait never outlives the client's own deadline.
+    if isLocalBackendConfig(cfg) {
+        local := defaultLocalResponseHeaderTimeout
+        if cfg.Timeout > 0 && cfg.Timeout < local {
+            local = cfg.Timeout
+        }
+        return local
     }
     return defaultResponseHeaderTimeout
 }

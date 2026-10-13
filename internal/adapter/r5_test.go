@@ -72,9 +72,12 @@ func TestR5_TCP_ResponseHeaderTimeoutFailsFast(t *testing.T) {
 
 // TestR5_TCP_DefaultResponseHeaderTimeout verifies the factory applies a
 // non-zero default when config omits response_header_timeout (the common case).
-// A default of 0 would mean NO cap = the original R5 bug.
+// A default of 0 would mean NO cap = the original R5 bug. #208: a REMOTE base
+// URL is used — loopback/UDS/fusion-mlx backends now resolve to the 300s local
+// default (see httpx transport_test.go), so the 30s cloud default is asserted
+// against a cloud-style URL.
 func TestR5_TCP_DefaultResponseHeaderTimeout(t *testing.T) {
-    rt := TransportForBackend(config.BackendConfig{BaseURL: "http://127.0.0.1:11434"})
+    rt := TransportForBackend(config.BackendConfig{BaseURL: "http://upstream.example:8080"})
     tpt, ok := rt.(*http.Transport)
     if !ok {
         t.Fatalf("expected *http.Transport, got %T", rt)
