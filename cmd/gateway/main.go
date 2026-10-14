@@ -82,6 +82,13 @@ func supervisorActive() bool {
 // backend (so autoStopLocal can skip a stop it does not own). When the
 // supervisor is active (#141), auto_start is skipped — the supervisor owns the
 // fusion-mlx lifecycle and will start it in the core layer.
+// #212: a backend that is ALREADY healthy at startup was started by someone
+// else (operator, predecessor gateway, supervisor) — this gateway does not own
+// it and returns false, so its shutdown never stops the engine. The prior
+// behavior launched the command unconditionally (start.sh no-ops on a running
+// engine) and claimed ownership, so a rolling restart's OLD instance tore the
+// engine down right after the NEW instance's startup probe had seen it
+// healthy — gateway up, local engine down.
 func autoStartLocal(cfg *config.AutoStartConfig) bool {
 	if cfg == nil || !cfg.Enabled || cfg.Command == "" {
 		slog.Info("auto_start disabled or not configured")
@@ -89,6 +96,10 @@ func autoStartLocal(cfg *config.AutoStartConfig) bool {
 	}
 	if supervisorActive() {
 		slog.Info("auto_start: skipped — fusion-supervisor is active and owns the fusion-mlx lifecycle (#141); gateway auto_start is a standalone fallback for non-supervisor environments")
+		return false
+	}
+	if cfg.WaitURL != "" && waitURLHealthy(cfg.WaitURL) {
+		slog.Info("auto_start: local backend already healthy — not gateway-owned, no stop on shutdown (#212)", "url", cfg.WaitURL)
 		return false
 	}
 	slog.Info("auto_start: launching local backend", "command", cfg.Command)
@@ -124,6 +135,18 @@ func autoStartLocal(cfg *config.AutoStartConfig) bool {
 	}
 	slog.Warn("auto_start: timed out waiting for local backend", "url", cfg.WaitURL, "wait_secs", waitSecs)
 	return true
+}
+
+// waitURLHealthy probes a backend health URL once: non-5xx within 2s counts
+// as healthy (same semantics as the auto_start poll loop).
+func waitURLHealthy(url string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode < 500
 }
 
 // autoStopLocal stops the local inference backend on shutdown. onlyStarted

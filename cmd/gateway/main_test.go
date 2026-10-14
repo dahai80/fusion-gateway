@@ -1402,26 +1402,65 @@ func TestAutoStartLocal_DisabledOrNotConfigured(t *testing.T) {
 	}
 }
 
-// TestAutoStartLocal_RunsCommandAndWaitURL: autoStartLocal runs the command
-// and polls WaitURL until a non-5xx response (#174). Uses an httptest server
-// as the healthy backend and a command that just sleeps briefly — hermetic,
-// no real fusion-mlx.
-func TestAutoStartLocal_RunsCommandAndWaitURL(t *testing.T) {
+// TestAutoStartLocal_AlreadyHealthyNotOwned: #212 regression guard. When the
+// WaitURL is ALREADY healthy at startup, the backend was started by someone
+// else — autoStartLocal must return false (no ownership, no stop on shutdown)
+// and must NOT run the command. Guard: sentinel command fails the test if
+// executed. Revert the probe-first check → the old instance of a rolling
+// restart stops the live engine after the new instance already saw it
+// healthy: gateway up, local engine down.
+func TestAutoStartLocal_AlreadyHealthyNotOwned(t *testing.T) {
 	t.Setenv("FUSION_SV_ACTIVE", "")
 	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	marker := filepath.Join(t.TempDir(), "launched")
 	cfg := &config.AutoStartConfig{
 		Enabled:  true,
-		Command:  "sleep 0.1",
+		Command:  "touch " + marker,
+		WaitURL:  srv.URL,
+		WaitSecs: 2,
+	}
+	started := autoStartLocal(cfg)
+	if started {
+		t.Fatal("autoStartLocal returned started=true for an already-healthy backend, want false (#212: not gateway-owned)")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("autoStartLocal ran the launch command for an already-healthy backend, want no-op (#212)")
+	}
+}
+
+// TestAutoStartLocal_RunsCommandAndWaitURL: autoStartLocal runs the command
+// and polls WaitURL until a non-5xx response (#174). The backend serves 503
+// until the command's marker file exists, so this exercises the real LAUNCH
+// path: probe fails → command runs → poll goes healthy → started=true.
+// Hermetic, no real fusion-mlx.
+func TestAutoStartLocal_RunsCommandAndWaitURL(t *testing.T) {
+	t.Setenv("FUSION_SV_ACTIVE", "")
+	supervisorSocketPath = filepath.Join(t.TempDir(), "no-such-sock")
+	marker := filepath.Join(t.TempDir(), "engine-up")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(marker); err == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	cfg := &config.AutoStartConfig{
+		Enabled:  true,
+		Command:  "touch " + marker,
 		WaitURL:  srv.URL,
 		WaitSecs: 5,
 	}
 	started := autoStartLocal(cfg)
 	if !started {
-		t.Fatal("autoStartLocal returned false for a healthy backend, want true")
+		t.Fatal("autoStartLocal returned false after launching and reaching healthy, want true")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("autoStartLocal did not run the launch command: %v", err)
 	}
 }
 
