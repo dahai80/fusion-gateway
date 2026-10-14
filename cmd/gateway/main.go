@@ -403,14 +403,23 @@ func run(configPath string) error {
 		slog.Info("wired local provider to router engine")
 
 		// EI10: model-set refresh is a tracked lifecycle.Worker (joined on shutdown).
+		// #210: re-fetch the engine role from the pool on every tick — a config
+		// reload rebuilds providers (new FusionMLXProvider or shadow instance),
+		// and a worker holding the startup instance would keep refreshing a
+		// provider nobody reads, freezing the router's model set at the reload.
 		modelWorker := lifecycle.Start(context.Background(), "refresh_model_set", func(ctx context.Context) {
-			mlxProvider.RefreshModelSet(ctx)
+			refresh := func() {
+				if mlx := pool.GetFusionMLX(); mlx != nil {
+					mlx.RefreshModelSet(ctx)
+				}
+			}
+			refresh()
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					mlxProvider.RefreshModelSet(ctx)
+					refresh()
 				case <-ctx.Done():
 					return
 				}

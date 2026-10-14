@@ -4,6 +4,7 @@ import (
     "context"
     "fmt"
     "log/slog"
+    "sort"
     "sync"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -14,6 +15,14 @@ type Pool struct {
     mu        sync.RWMutex
     providers map[string]Provider
     backends  map[string]config.BackendConfig
+    // localEngine is the canonical fusion-mlx engine role (#210): the
+    // *FusionMLXProvider that main.go wires into the router (InFlight /
+    // ModelSet / 60s model-set refresh) and that owns the RR4 slot counter.
+    // It is the typed provider when a backend declares type fusion-mlx, or a
+    // SHADOW instance built from a local-classified openai-compatible backend
+    // (same engine, registered under that type for the Images passthrough).
+    localEngine     *FusionMLXProvider
+    localEngineName string
 }
 
 func NewPool() *Pool {
@@ -97,13 +106,16 @@ func (p *Pool) GetFusionMLX() *FusionMLXProvider {
             return mlx
         }
     }
-    return nil
+    // #210: no typed fusion-mlx backend — fall back to the shadow engine role
+    // built from a local-classified openai-compatible backend (same engine).
+    return p.localEngine
 }
 
 // FusionMLXName returns the config key under which the fusion-mlx provider is
 // registered (e.g. "fusion-mlx"), plus the typed provider. Returns "" and nil
 // when no fusion-mlx backend is configured. Callers need the key to render it
-// in the health payload's backends map (#59).
+// in the health payload's backends map (#59). #210: falls back to the shadow
+// engine role name when the engine is registered as openai-compatible.
 func (p *Pool) FusionMLXName() (string, *FusionMLXProvider) {
     p.mu.RLock()
     defer p.mu.RUnlock()
@@ -111,6 +123,9 @@ func (p *Pool) FusionMLXName() (string, *FusionMLXProvider) {
         if mlx, ok := prov.(*FusionMLXProvider); ok {
             return name, mlx
         }
+    }
+    if p.localEngine != nil {
+        return p.localEngineName, p.localEngine
     }
     return "", nil
 }
@@ -193,6 +208,61 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         }
         p.providers[name] = WrapCloudTracking(prov)
         slog.Info("wrapped cloud provider with in-flight tracking", "name", name)
+    }
+
+    // #210: resolve the local-engine role AFTER the cloud wrap, so the role
+    // and the slot decorator layer in the right order. Typed fusion-mlx wins;
+    // otherwise a local-classified backend (loopback/UDS openai-compatible
+    // pointing at the SAME engine) gets a shadow FusionMLXProvider as the
+    // role, and its serving provider is wrapped with the shared slot counter
+    // so RR4 + the router's local in-flight signal actually track local load.
+    p.localEngine = nil
+    p.localEngineName = ""
+    for name, prov := range p.providers {
+        if mlx, ok := prov.(*FusionMLXProvider); ok {
+            p.localEngine = mlx
+            p.localEngineName = name
+            break
+        }
+    }
+    if p.localEngine == nil {
+        candidates := make([]string, 0, len(p.providers))
+        for name, bc := range p.backends {
+            if _, ok := p.providers[name]; !ok {
+                continue
+            }
+            // fusion-kb / fusion-model-hub are local SERVICES, not the mlx
+            // engine — the shadow role must point at the inference engine.
+            switch bc.Type {
+            case "fusion-kb", "fusion-model-hub":
+                continue
+            }
+            if isLocalBackend(bc) {
+                candidates = append(candidates, name)
+            }
+        }
+        sort.Strings(candidates)
+        // Prefer the conventional name so multi-local-backend configs are
+        // deterministic and match operator expectation.
+        for _, name := range candidates {
+            if name == "fusion-mlx" {
+                candidates = []string{name}
+                break
+            }
+        }
+        if len(candidates) > 0 {
+            name := candidates[0]
+            bc := p.backends[name]
+            shadow := NewFusionMLXProvider(bc, cfg.Config.Routing)
+            p.localEngine = shadow
+            p.localEngineName = name
+            p.providers[name] = WrapLocalSlot(p.providers[name], shadow)
+            slog.Info("local engine role: shadow FusionMLXProvider for local-classified backend",
+                "name", name, "type", bc.Type, "base_url", bc.BaseURL,
+                "note", "serving provider wrapped with RR4 slot accounting (#210)")
+        }
+    } else {
+        slog.Info("local engine role: typed fusion-mlx provider", "name", p.localEngineName)
     }
 
     return nil

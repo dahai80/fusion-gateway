@@ -2,6 +2,7 @@ package adapter
 
 import (
     "context"
+    "errors"
     "log/slog"
     "net/http"
     "net/http/httptest"
@@ -168,10 +169,136 @@ func TestPool_BuildProviders_LoopbackNotCloudWrapped(t *testing.T) {
         if !ok {
             t.Fatalf("provider %q not built", name)
         }
-        _, wrapped := prov.(interface{ Unwrap() Provider })
+        // Assert the concrete decorator: localSlotProvider (the #210 wrap for
+        // local backends) also exposes Unwrap, so the anonymous-interface
+        // check can no longer distinguish cloud-tracking from local-slot.
+        _, wrapped := prov.(*cloudTrackingProvider)
         if wrapped != wantWrapped {
             t.Errorf("provider %q: cloud-tracking wrap = %v, want %v", name, wrapped, wantWrapped)
         }
+    }
+}
+
+// #210: a local-classified openai-compatible backend (the Images-passthrough
+// registration of the fusion-mlx engine) must yield a working local-engine
+// role: GetFusionMLX returns a non-nil FusionMLXProvider (shadow), the name
+// matches the backend key, and the SERVING provider is wrapped with RR4 slot
+// accounting whose Unwrap chain still exposes the Images passthrough.
+func TestPool_BuildProviders_ShadowLocalEngineRole(t *testing.T) {
+    slog.Info("test Pool_BuildProviders_ShadowLocalEngineRole")
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "fusion-mlx": {
+                    Enabled: true,
+                    Type:    "openai-compatible",
+                    BaseURL: "http://127.0.0.1:11434",
+                    APIKey:  "fg-test-key",
+                },
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    mlx := p.GetFusionMLX()
+    if mlx == nil {
+        t.Fatal("#210: GetFusionMLX() = nil for local-classified openai-compatible backend, want shadow engine role")
+    }
+    if name, _ := p.FusionMLXName(); name != "fusion-mlx" {
+        t.Errorf("FusionMLXName() = %q, want fusion-mlx", name)
+    }
+    prov, ok := p.Get("fusion-mlx")
+    if !ok {
+        t.Fatal("serving provider missing")
+    }
+    slot, ok := prov.(*localSlotProvider)
+    if !ok {
+        t.Fatalf("serving provider not wrapped with local slot accounting, got %T", prov)
+    }
+    if slot.mlx != mlx {
+        t.Fatal("slot decorator must share the shadow engine role's counter")
+    }
+    // H2 lesson: the Unwrap chain must keep the Images passthrough visible —
+    // the type switch to openai-compatible exists FOR Images.
+    type imager interface {
+        Images(ctx context.Context, req *ImageRequest) (*ImageResponse, error)
+    }
+    if _, ok := prov.(imager); !ok {
+        t.Fatal("Images passthrough lost through the localSlotProvider wrap")
+    }
+}
+
+// #210/RR4: the shadow engine role's max_concurrent cap must be enforced on
+// the SERVING provider's chat path. With max=1 and a first request parked
+// inside the upstream handler, a second concurrent Chat must fail fast with
+// ErrLocalSlotFull (diverts to the A4 cloud fallback) instead of overflowing.
+func TestPool_ShadowLocalEngine_RR4SlotCap(t *testing.T) {
+    slog.Info("test Pool_ShadowLocalEngine_RR4SlotCap")
+    releaseFirst := make(chan struct{})
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/chat/completions" {
+            <-releaseFirst
+        }
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+    }))
+    defer srv.Close()
+    // Close exactly once: explicitly before the release assertion, and via
+    // the flag guard if a t.Fatal aborts earlier (srv.Close would otherwise
+    // block forever on a handler parked on the channel).
+    releaseClosed := false
+    defer func() {
+        if !releaseClosed {
+            close(releaseFirst)
+        }
+    }()
+
+    p := NewPool()
+    cfg := &config.ConfigSnapshot{
+        Config: config.Config{
+            Backends: map[string]config.BackendConfig{
+                "fusion-mlx": {
+                    Enabled: true,
+                    Type:    "openai-compatible",
+                    BaseURL: srv.URL,
+                },
+            },
+            Routing: config.RoutingConfig{
+                LocalPriority: config.LocalPriorityConfig{MaxConcurrent: 1},
+            },
+        },
+    }
+    if err := p.BuildProviders(cfg); err != nil {
+        t.Fatal(err)
+    }
+    prov, _ := p.Get("fusion-mlx")
+
+    firstDone := make(chan error, 1)
+    go func() {
+        _, err := prov.Chat(context.Background(), &ChatRequest{Model: "m"})
+        firstDone <- err
+    }()
+    // Wait until the first request is parked inside the upstream (slot held).
+    deadline := time.Now().Add(5 * time.Second)
+    for p.GetFusionMLX().InFlight() == 0 && time.Now().Before(deadline) {
+        time.Sleep(10 * time.Millisecond)
+    }
+    if p.GetFusionMLX().InFlight() == 0 {
+        t.Fatal("first chat never acquired the local slot")
+    }
+    _, err := prov.Chat(context.Background(), &ChatRequest{Model: "m"})
+    if !errors.Is(err, ErrLocalSlotFull) {
+        t.Fatalf("second chat should fail with ErrLocalSlotFull, got %v", err)
+    }
+    releaseClosed = true
+    close(releaseFirst)
+    if err := <-firstDone; err != nil {
+        t.Fatalf("first chat failed: %v", err)
+    }
+    if got := p.GetFusionMLX().InFlight(); got != 0 {
+        t.Fatalf("slot not released after chat completion: in_flight=%d", got)
     }
 }
 
