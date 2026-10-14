@@ -150,6 +150,16 @@ func (p *FusionMLXProvider) ModelSet() map[string]bool {
     return v.(map[string]bool)
 }
 
+// AcquireLocalSlot exposes the RR4 slot accounting to the local-slot
+// decorator (WrapLocalSlot) so a local-classified serving provider — e.g. an
+// openai-compatible backend pointed at this same fusion-mlx engine (#210) —
+// enforces the same max_concurrent cap and increments the same in-flight
+// counter the router reads. The serving provider holds the slot; this role
+// instance is the counter authority.
+func (p *FusionMLXProvider) AcquireLocalSlot() (func(), bool) {
+    return p.tryInFlightAcquire()
+}
+
 func (p *FusionMLXProvider) RefreshModelSet(ctx context.Context) {
     models, err := p.ListModels(ctx)
     if err != nil {
