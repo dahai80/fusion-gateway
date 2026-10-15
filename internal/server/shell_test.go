@@ -182,16 +182,19 @@ func TestShellManifest_UpsertListHeartbeat(t *testing.T) {
     }
 
     // List shows the registered entry online (bare array — shell host shape).
+    // The built-in fusion-admin manifest (#216) is also auto-registered.
     req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
     w = httptest.NewRecorder()
     s.handleShellManifestList(w, req)
     var listResp []shell.ManifestView
     _ = json.Unmarshal(w.Body.Bytes(), &listResp)
-    if len(listResp) != 1 || listResp[0].Status != shell.StatusOnline {
+    if len(listResp) != 2 {
         t.Fatalf("manifest list = %+v", listResp)
     }
-    if listResp[0].Unreachable {
-        t.Fatalf("online manifest must not be unreachable: %+v", listResp[0])
+    for _, v := range listResp {
+        if v.ID == "fusion-mlx" && (v.Status != shell.StatusOnline || v.Unreachable) {
+            t.Fatalf("fusion-mlx = %+v, want online", v)
+        }
     }
 }
 

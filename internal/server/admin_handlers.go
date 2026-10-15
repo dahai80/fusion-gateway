@@ -44,6 +44,7 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
         // the IsAdmin check below denies. The master-key reject above still
         // fires first, so an inference key never reaches here as admin.
         r = bridgeAdminJWT(r, s.adminAuth)
+        r = s.bridgeShellSession(r)
         if !middleware.IsAdmin(r.Context()) {
             slog.Warn("admin endpoint denied: not admin",
                 "path", r.URL.Path, "method", r.Method)
@@ -61,6 +62,45 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
 // admin JWT, or admin auth is not configured — the caller then denies via
 // IsAdmin. Non-fatal on adminAuth disabled (Enabled()==false) so a deployment
 // without the admin module still fails closed at IsAdmin rather than panicking.
+// bridgeShellSession validates an Authorization: Bearer shell-session token
+// (#216, R-5 ③) and, when the token is valid AND the account still holds the
+// admin role in the live UserStore (server-side role check — token claims
+// alone are trusted for at most the TTL, the store is authoritative), attach
+// Principal{Role:RoleAdmin, AuthMethod:"shell-session"}. Returns the request
+// unchanged when there is no Bearer, web_shell is disabled, the token is not
+// a shell session token, or the account is disabled/demoted — the IsAdmin
+// check then denies. Runs after bridgeAdminJWT so a real admin JWT wins.
+func (s *Server) bridgeShellSession(r *http.Request) *http.Request {
+    if s.shellSessions == nil || s.shellUsers == nil {
+        return r
+    }
+    // A principal already bridged (admin JWT) — shell fallback is skipped.
+    if middleware.PrincipalFromContext(r.Context()) != nil {
+        return r
+    }
+    token := bearerToken(r)
+    if token == "" {
+        return r
+    }
+    claims, err := s.shellSessions.Validate(token)
+    if err != nil {
+        return r
+    }
+    account, ok := s.shellUsers.Get(claims.Sub)
+    if !ok || account.Disabled || !hasAnyRole(account.Roles, "admin") {
+        slog.Warn("admin endpoint rejected shell session (account not admin)",
+            "path", r.URL.Path, "user", claims.Sub, "roles", account.Roles, "disabled", account.Disabled)
+        return r
+    }
+    ctx := middleware.ContextWithPrincipal(r.Context(), &middleware.Principal{
+        AuthMethod: "shell-session",
+        Role:       middleware.RoleAdmin,
+        IsMaster:   false,
+    })
+    slog.Debug("shell session bridged to admin Principal", "path", r.URL.Path, "user", claims.Sub)
+    return r.WithContext(ctx)
+}
+
 func bridgeAdminJWT(r *http.Request, adminAuth *admin.AdminAuth) *http.Request {
     if adminAuth == nil || !adminAuth.Enabled() {
         return r

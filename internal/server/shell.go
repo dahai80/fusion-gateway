@@ -11,6 +11,7 @@ import (
     "path/filepath"
     "strings"
 
+    adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "golang.org/x/crypto/bcrypt"
@@ -52,11 +53,52 @@ func (s *Server) setupShell() {
         return ""
     })
     s.setupShellUsers(&cfg)
+    s.autoRegisterAdminModule()
     slog.Info("shell subsystem initialized",
         "static_manifests", len(cfg.Shell.Manifests),
         "modules", len(cfg.Shell.Modules),
         "users", s.shellUsers.Count(),
         "bootstrap_admin", s.shellBootstrap != nil)
+}
+
+// autoRegisterAdminModule registers the built-in admin console (#216, R-5)
+// into the manifest registry so the shell host menu always carries it
+// without a manual registration step. Metadata comes from the embedded
+// dist/manifest.json (single source with the frontend); entry/health are
+// composed at runtime from the first entry_origin_allowlist origin because
+// the manifest file cannot know the deployment origin. A7 fail-closed: when
+// the allowlist is empty or lacks the gateway origin the registration is
+// skipped with a WARN — never bypassed.
+func (s *Server) autoRegisterAdminModule() {
+    m, ok := adminui.Manifest()
+    if !ok {
+        slog.Warn("shell admin module auto-registration skipped: embedded manifest.json missing or invalid")
+        return
+    }
+    if len(s.cfg.Config.Shell.EntryOriginAllowlist) == 0 {
+        slog.Warn("shell admin module auto-registration skipped: entry_origin_allowlist empty")
+        return
+    }
+    origin := s.cfg.Config.Shell.EntryOriginAllowlist[0]
+    manifest := config.ShellManifest{
+        ID:       m.ID,
+        Title:    m.Title,
+        TitleEn:  m.TitleEn,
+        Version:  m.Version,
+        Path:     m.Path,
+        Entry:    strings.TrimSuffix(origin, "/") + m.Entry,
+        Health:   strings.TrimSuffix(origin, "/") + m.Health,
+        Backend:  m.Backend,
+        Devices:  m.Devices,
+        Category: m.Category,
+    }
+    if err := s.shellRegistry.Upsert(manifest); err != nil {
+        slog.Warn("shell admin module auto-registration rejected",
+            "id", manifest.ID, "entry", manifest.Entry, "error", err)
+        return
+    }
+    slog.Info("shell admin module auto-registered",
+        "id", manifest.ID, "entry", manifest.Entry, "health", manifest.Health)
 }
 
 // setupShellUsers wires the durable RBAC user store (PRD R-1 ③). The store

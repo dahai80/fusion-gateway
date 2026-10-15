@@ -1,0 +1,12 @@
+{
+    "id": "fusion-admin",
+    "title": "管理控制台",
+    "title_en": "Admin Console",
+    "version": "0.9.33",
+    "path": "/admin",
+    "entry": "/admin/",
+    "health": "/healthz",
+    "backend": "gateway",
+    "devices": ["desktop"],
+    "category": "infra"
+}

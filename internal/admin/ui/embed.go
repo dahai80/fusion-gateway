@@ -2,6 +2,7 @@ package ui
 
 import (
     "embed"
+    "encoding/json"
     "io/fs"
     "log"
     "net/http"
@@ -10,6 +11,39 @@ import (
 
 //go:embed dist/*
 var distFS embed.FS
+
+// AdminManifest mirrors the PRD §5.1 manifest schema fields the gateway
+// needs to auto-register the built-in admin module (#216). The file lives at
+// web/admin/public/manifest.json (vite copies it into dist) so the frontend
+// and the gateway auto-registration share one source of truth.
+type AdminManifest struct {
+    ID       string   `json:"id"`
+    Title    string   `json:"title"`
+    TitleEn  string   `json:"title_en"`
+    Version  string   `json:"version"`
+    Path     string   `json:"path"`
+    Entry    string   `json:"entry"`
+    Health   string   `json:"health"`
+    Backend  string   `json:"backend"`
+    Devices  []string `json:"devices"`
+    Category string   `json:"category"`
+}
+
+// Manifest parses the embedded dist/manifest.json. ok=false when the file is
+// missing or corrupt — the caller logs and skips auto-registration rather
+// than failing the gateway (the manifest is an optimization, not a
+// dependency; shell still works via manual/static registration).
+func Manifest() (AdminManifest, bool) {
+    raw, err := distFS.ReadFile("dist/manifest.json")
+    if err != nil {
+        return AdminManifest{}, false
+    }
+    var m AdminManifest
+    if err := json.Unmarshal(raw, &m); err != nil || m.ID == "" {
+        return AdminManifest{}, false
+    }
+    return m, true
+}
 
 func Handler() http.Handler {
     sub, err := fs.Sub(distFS, "dist")
