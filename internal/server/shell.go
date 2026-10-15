@@ -8,6 +8,7 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "path/filepath"
     "strings"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -50,32 +51,97 @@ func (s *Server) setupShell() {
         }
         return ""
     })
-    // PRD §4.1.5: no configured users -> bootstrap admin with a random
-    // password logged once. The hash lives only in memory.
-    if len(cfg.Shell.Session.Users) == 0 {
+    s.setupShellUsers(&cfg)
+    slog.Info("shell subsystem initialized",
+        "static_manifests", len(cfg.Shell.Manifests),
+        "modules", len(cfg.Shell.Modules),
+        "users", s.shellUsers.Count(),
+        "bootstrap_admin", s.shellBootstrap != nil)
+}
+
+// setupShellUsers wires the durable RBAC user store (PRD R-1 ③). The store
+// file (store.data_dir/shell_users.json) is the source of truth once it
+// exists; config users only seed an empty store. The bootstrap admin (no
+// configured users) is seeded with must_change_password so the first login
+// rotates its random password into the store.
+func (s *Server) setupShellUsers(cfg *config.Config) {
+    var path string
+    if cfg.Store.DataDir != "" {
+        // Tilde paths in config.yaml expand here (mirrors EnablePersistence).
+        path = filepath.Join(config.ExpandPath(cfg.Store.DataDir), "shell_users.json")
+    }
+    s.shellUsers = shell.NewUserStore(path)
+    if err := s.shellUsers.Load(); err != nil {
+        // A corrupt store must not wedge the whole shell subsystem: log
+        // loudly and start empty (config re-seeds; existing sessions still
+        // validate, admin re-creates accounts).
+        slog.Error("shell user store load failed — starting empty", "path", path, "error", err)
+        s.shellUsers = shell.NewUserStore(path)
+    }
+    if len(cfg.Shell.Session.Users) == 0 && s.shellUsers.Count() == 0 {
+        // PRD §4.1.5: no configured users -> bootstrap admin with a random
+        // password logged once. The plaintext lives only in memory (the log
+        // already carries it) so operators can complete the first login.
         username, password := shell.GenerateBootstrapAdmin()
         hash, err := hashShellPassword(password)
         if err != nil {
             slog.Error("shell bootstrap admin hash failed — session login unavailable", "error", err)
-        } else {
-            // The plaintext lives only in memory (the log already carries it
-            // per PRD §4.1.5) so tests/operators can complete the first login
-            // before the forced password change.
-            s.shellBootstrap = &shellUserRecord{username: username, password: password, bcryptHash: hash, mustChange: true}
+            return
         }
+        s.shellBootstrap = &shellUserRecord{username: username, password: password, bcryptHash: hash, mustChange: true}
+        err = s.shellUsers.Create(shell.UserAccount{
+            Username:           username,
+            DisplayName:        username,
+            PasswordHash:       hash,
+            Roles:              []string{"admin"},
+            Permissions:        []string{"*"},
+            MustChangePassword: true,
+        })
+        if err != nil {
+            slog.Error("shell bootstrap admin store create failed", "error", err)
+        }
+        return
     }
-    slog.Info("shell subsystem initialized",
-        "static_manifests", len(cfg.Shell.Manifests),
-        "modules", len(cfg.Shell.Modules),
-        "bootstrap_admin", s.shellBootstrap != nil)
+    accounts := make([]shell.UserAccount, 0, len(cfg.Shell.Session.Users))
+    for _, u := range cfg.Shell.Session.Users {
+        hash := u.PasswordBcrypt
+        if hash == "" && u.Password != "" {
+            h, err := hashShellPassword(u.Password)
+            if err != nil {
+                slog.Error("shell config user hash failed — user skipped", "username", u.Username, "error", err)
+                continue
+            }
+            hash = h
+        }
+        displayName := u.Username
+        roles := u.Roles
+        if len(roles) == 0 {
+            roles = []string{"user"}
+        }
+        permissions := u.Modules
+        if hasAnyRole(roles, "admin") {
+            permissions = []string{"*"}
+        }
+        accounts = append(accounts, shell.UserAccount{
+            Username:     u.Username,
+            DisplayName:  displayName,
+            PasswordHash: hash,
+            Roles:        roles,
+            Permissions:  permissions,
+        })
+    }
+    if err := s.shellUsers.SeedFromConfig(accounts); err != nil {
+        slog.Error("shell user store seed failed", "error", err)
+    }
 }
 
-// registerShellRoutes wires the /api/v1/shell/* control plane and the
-// /shell/<module_id>/ proxy onto the mux. Auth surfaces:
+// registerShellRoutes wires the /api/v1/shell/* control plane, the RBAC user
+// APIs (R-1 ③), and the /shell/<module_id>/ proxy onto the mux. Auth surfaces:
 //   - login: unauthenticated (the login itself is the credential check)
 //   - manifest registration + heartbeat: fg-key auth (withMiddleware) — the
 //     registering module start.sh carries a gateway API key
-//   - everything else (list, me, logout, proxy): shell session Bearer token
+//   - everything else (list, me, logout, users, password, proxy): shell
+//     session Bearer token; user management additionally requires admin role
 func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/session", s.handleShellSessionIssue)
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
@@ -83,6 +149,12 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.handleShellManifestUpsert))
     mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.handleShellManifestHeartbeat))
+    mux.HandleFunc("GET /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserList)))
+    mux.HandleFunc("POST /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserCreate)))
+    mux.HandleFunc("PATCH /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserUpdate)))
+    mux.HandleFunc("DELETE /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserDelete)))
+    mux.HandleFunc("POST /api/v1/shell/users/{id}/password-reset", s.withShellSession(requireShellAdmin(s.handleShellUserPasswordReset)))
+    mux.HandleFunc("POST /api/v1/password", s.withShellSession(s.handleShellPasswordChange))
     mux.HandleFunc("/shell/", s.withShellSession(s.shellProxy.ServeHTTP))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
@@ -94,6 +166,7 @@ type shellUserRecord struct {
     username    string
     password    string // plaintext (config WARN path)
     bcryptHash  string
+    displayName string
     roles       []string
     modules     []string
     mustChange  bool
@@ -182,33 +255,46 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
     }
     slog.Info("shell session issued", "username", user.username, "roles", user.roles)
     w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]any{
-        "token":                 token,
-        "token_type":            "bearer",
-        "tenant_id":             "local",
-        "must_change_password":  user.mustChange,
+    _ = json.NewEncoder(w).Encode(shellSessionResponse{
+        Token:              token,
+        TokenType:          "bearer",
+        TenantID:           "local",
+        MustChangePassword: user.mustChange,
+        UserID:             user.username,
+        DisplayName:        user.displayName,
+        Roles:              user.roles,
+        Permissions:        user.modules,
     })
 }
 
-// resolveShellUser finds the account by username: config users first, then
-// the bootstrap admin. Roles/modules resolve to full access for role=admin.
+// shellSessionResponse is the POST /api/v1/shell/session body (PRD §4.1):
+// the bearer token plus the full SessionUser shape the shell host renders.
+type shellSessionResponse struct {
+    Token              string   `json:"token"`
+    TokenType          string   `json:"token_type,omitempty"`
+    TenantID           string   `json:"tenant_id"`
+    MustChangePassword bool     `json:"must_change_password"`
+    UserID             string   `json:"user_id"`
+    DisplayName        string   `json:"display_name"`
+    Roles              []string `json:"roles"`
+    Permissions        []string `json:"permissions"`
+}
+
+// resolveShellUser finds the login-able account: the durable user store
+// (config-seeded + API-managed) first, then the in-memory bootstrap admin
+// record. Disabled accounts never authenticate.
 func (s *Server) resolveShellUser(username string) (*shellUserRecord, bool) {
-    cfg := s.cfg.Config
-    for _, u := range cfg.Shell.Session.Users {
-        if u.Username == username {
+    if s.shellUsers != nil {
+        if a, ok := s.shellUsers.Get(username); ok && a.PasswordHash != "" {
             rec := &shellUserRecord{
-                username:   u.Username,
-                password:   u.Password,
-                bcryptHash: u.PasswordBcrypt,
-                roles:      u.Roles,
-                modules:    u.Modules,
+                username:    a.Username,
+                bcryptHash:  a.PasswordHash,
+                roles:       a.Roles,
+                modules:     a.Permissions,
+                mustChange:  a.MustChangePassword,
+                displayName: a.DisplayName,
             }
-            for _, role := range u.Roles {
-                if role == "admin" {
-                    rec.modules = []string{"*"}
-                }
-            }
-            return rec, true
+            return rec, !a.Disabled
         }
     }
     if s.shellBootstrap != nil && s.shellBootstrap.username == username {
@@ -237,26 +323,37 @@ func (s *Server) handleShellSessionLogout(w http.ResponseWriter, r *http.Request
     shell.WriteEnvelope(w, http.StatusOK, "ok", "logged out", "", false)
 }
 
-// handleShellMe: GET /api/v1/shell/me — the caller's own claims so the shell
-// host can filter the menu by permissions[].
+// handleShellMe: GET /api/v1/shell/me — the caller's own identity (PRD §4.1):
+// token claims overlaid with the live account record so a password change
+// (must_change_password cleared in the store) is reflected without waiting
+// for re-login.
 func (s *Server) handleShellMe(w http.ResponseWriter, r *http.Request) {
     claims := shellClaimsFrom(r.Context())
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]any{
+    resp := map[string]any{
         "user_id":              claims.Sub,
+        "display_name":         claims.Sub,
         "roles":                claims.Roles,
         "permissions":          claims.Modules,
         "tenant_id":            claims.TenantID,
         "must_change_password": claims.MustChangePassword,
-    })
+    }
+    if a, ok := s.shellUsers.Get(claims.Sub); ok {
+        // The store is the live state: a completed password change clears
+        // must_change_password even for a token minted before the change.
+        resp["display_name"] = a.DisplayName
+        resp["must_change_password"] = a.MustChangePassword
+    }
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
-// handleShellManifestList: GET /api/v1/shell/manifests — full list with
-// derived status (online/unreachable/offline), static fallback included.
+// handleShellManifestList: GET /api/v1/shell/manifests — a bare array of the
+// manifest fields + derived status; `unreachable` is the host-menu greying
+// flag (stale heartbeat or never-registered static fallback).
 func (s *Server) handleShellManifestList(w http.ResponseWriter, r *http.Request) {
     views := s.shellRegistry.List()
     w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]any{"manifests": views})
+    _ = json.NewEncoder(w).Encode(views)
 }
 
 // handleShellManifestUpsert: POST /api/v1/shell/manifests — module

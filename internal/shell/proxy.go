@@ -165,6 +165,13 @@ func (h *HealthPoller) pollAll(ctx context.Context) {
         err := h.probe(reqCtx, view.Health)
         cancel()
         h.registry.RecordHealth(view.ID, err == nil)
+        if err == nil {
+            // A successful probe proves liveness for dynamic registrations
+            // too: nobody else heartbeats them after the initial register,
+            // otherwise a healthy module flips unreachable after
+            // heartbeat_timeout despite a green probe.
+            _ = h.registry.Heartbeat(view.ID)
+        }
         if err != nil {
             slog.Debug("shell module health probe failed", "module", view.ID, "health", view.Health, "error", err)
         }

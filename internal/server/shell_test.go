@@ -181,16 +181,17 @@ func TestShellManifest_UpsertListHeartbeat(t *testing.T) {
         t.Fatalf("unknown heartbeat code = %d", w.Code)
     }
 
-    // List shows the registered entry online.
+    // List shows the registered entry online (bare array — shell host shape).
     req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
     w = httptest.NewRecorder()
     s.handleShellManifestList(w, req)
-    var listResp struct {
-        Manifests []shell.ManifestView `json:"manifests"`
-    }
+    var listResp []shell.ManifestView
     _ = json.Unmarshal(w.Body.Bytes(), &listResp)
-    if len(listResp.Manifests) != 1 || listResp.Manifests[0].Status != shell.StatusOnline {
-        t.Fatalf("manifest list = %+v", listResp.Manifests)
+    if len(listResp) != 1 || listResp[0].Status != shell.StatusOnline {
+        t.Fatalf("manifest list = %+v", listResp)
+    }
+    if listResp[0].Unreachable {
+        t.Fatalf("online manifest must not be unreachable: %+v", listResp[0])
     }
 }
 
