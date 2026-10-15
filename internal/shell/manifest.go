@@ -170,16 +170,25 @@ func statusOf(e *entry, now time.Time, expiry time.Duration) Status {
     return StatusUnreachable
 }
 
-// checkEntryAllowlist enforces the entry origin whitelist (A7). An empty
-// allowlist means unrestricted — but config.Validate rejects shell.enabled
-// with an empty list, so empty here only occurs in tests.
+// checkEntryAllowlist enforces the entry origin whitelist (A7). Gateway-hosted
+// relative entries (#223, PRD §5.1 prod convention) start with "/" and are
+// always same-origin — allowed without an origin check, but path traversal
+// ("..") is rejected. An empty allowlist means unrestricted — but
+// config.Validate rejects shell.enabled with an empty list, so empty here
+// only occurs in tests.
 func (r *Registry) checkEntryAllowlist(entryURL string) error {
+    if strings.HasPrefix(entryURL, "/") {
+        if strings.Contains(entryURL, "..") {
+            return fmt.Errorf("manifest entry %q must not contain path traversal", entryURL)
+        }
+        return nil
+    }
     if len(r.allowlist) == 0 {
         return nil
     }
     u, err := url.Parse(entryURL)
     if err != nil || u.Scheme == "" || u.Host == "" {
-        return fmt.Errorf("manifest entry %q is not a valid absolute URL", entryURL)
+        return fmt.Errorf("manifest entry %q is not a valid absolute URL or /shell/<id>/ relative path", entryURL)
     }
     origin := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
     for _, allowed := range r.allowlist {

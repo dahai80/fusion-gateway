@@ -21,7 +21,7 @@ func TestProxy_ForwardsToUpstream(t *testing.T) {
     }))
     defer upstream.Close()
 
-    p := NewProxy(func(string) string { return upstream.URL })
+    p := NewProxy(func(string) (string, string) { return upstream.URL, "" })
     w := httptest.NewRecorder()
     p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/index.html", nil))
     if w.Code != http.StatusOK || w.Body.String() != "hello-from-module" {
@@ -33,11 +33,11 @@ func TestProxy_ForwardsToUpstream(t *testing.T) {
 }
 
 func TestProxy_UpstreamDownEnvelope(t *testing.T) {
-    p := NewProxy(func(id string) string {
+    p := NewProxy(func(id string) (string, string) {
         if id == "fusion-dead" {
-            return "http://127.0.0.1:1"
+            return "http://127.0.0.1:1", ""
         }
-        return ""
+        return "", ""
     })
     w := httptest.NewRecorder()
     p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-dead/api/models", nil))
@@ -53,7 +53,7 @@ func TestProxy_UpstreamDownEnvelope(t *testing.T) {
 }
 
 func TestProxy_ModuleNotMapped(t *testing.T) {
-    p := NewProxy(func(string) string { return "" })
+    p := NewProxy(func(string) (string, string) { return "", "" })
     w := httptest.NewRecorder()
     p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-unknown/x", nil))
     if w.Code != http.StatusNotFound {
@@ -65,7 +65,7 @@ func TestProxy_ModuleNotMapped(t *testing.T) {
 }
 
 func TestProxy_MissingModuleID(t *testing.T) {
-    p := NewProxy(func(string) string { return "http://127.0.0.1:1" })
+    p := NewProxy(func(string) (string, string) { return "http://127.0.0.1:1", "" })
     w := httptest.NewRecorder()
     p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/", nil))
     if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "missing module id") {
@@ -74,7 +74,7 @@ func TestProxy_MissingModuleID(t *testing.T) {
 }
 
 func TestProxy_InvalidUpstreamURL(t *testing.T) {
-    p := NewProxy(func(string) string { return "not-a-url" })
+    p := NewProxy(func(string) (string, string) { return "not-a-url", "" })
     w := httptest.NewRecorder()
     p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-x/y", nil))
     if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "upstream_invalid") {
@@ -119,5 +119,35 @@ func TestHealthPoller_MarksDown(t *testing.T) {
     views := r.List()
     if views[0].Status != StatusOffline {
         t.Fatalf("want offline after failed probes, got %s", views[0].Status)
+    }
+}
+
+func TestProxy_UpstreamCredentialInjection(t *testing.T) {
+    var gotAuth, gotCookie string
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotAuth = r.Header.Get("Authorization")
+        gotCookie = r.Header.Get("Cookie")
+        _, _ = w.Write([]byte(`{"ok":true}`))
+    }))
+    defer upstream.Close()
+    p := NewProxy(func(id string) (string, string) {
+        if id == "fusion-mlx" {
+            return upstream.URL, "module-secret-key"
+        }
+        return "", ""
+    })
+    req := httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer user-session-token") // caller token must NOT leak upstream
+    req.Header.Set("Cookie", "fusion_shell_session=leak-me")
+    w := httptest.NewRecorder()
+    p.ServeHTTP(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
+    }
+    if gotAuth != "Bearer module-secret-key" {
+        t.Fatalf("upstream Authorization = %q, want injected module key", gotAuth)
+    }
+    if gotCookie != "" {
+        t.Fatalf("session cookie leaked upstream: %q", gotCookie)
     }
 }

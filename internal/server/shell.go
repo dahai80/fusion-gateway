@@ -46,11 +46,11 @@ func (s *Server) setupShell() {
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
-    s.shellProxy = shell.NewProxy(func(moduleID string) string {
+    s.shellProxy = shell.NewProxy(func(moduleID string) (string, string) {
         if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok {
-            return m.Upstream
+            return m.Upstream, m.APIKey
         }
-        return ""
+        return "", ""
     })
     s.setupShellUsers(&cfg)
     s.autoRegisterAdminModule()
@@ -197,10 +197,41 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("DELETE /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserDelete)))
     mux.HandleFunc("POST /api/v1/shell/users/{id}/password-reset", s.withShellSession(requireShellAdmin(s.handleShellUserPasswordReset)))
     mux.HandleFunc("POST /api/v1/password", s.withShellSession(s.handleShellPasswordChange))
-    mux.HandleFunc("/shell/", s.withShellSession(s.shellProxy.ServeHTTP))
+    mux.HandleFunc("/shell/", s.withShellSession(s.withShellModuleAccess(s.shellProxy.ServeHTTP)))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
         "proxy", "/shell/{module_id}/")
+}
+
+// withShellModuleAccess enforces the module-level permission check in the
+// proxy layer (PRD §4.2, acceptance F-2 / S-8): menu visibility is only the
+// first check — the /shell/<module>/ API validates the session's module
+// permissions again (the "*" wildcard expands to everything). Unauthorized
+// access returns 403 with the standard error envelope, NOT an upstream dial.
+// Must run inside withShellSession (reads the session claims from context).
+func (s *Server) withShellModuleAccess(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        claims := shellClaimsFrom(r.Context())
+        moduleID, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/shell/"), "/")
+        if !shellModuleAllowed(claims.Modules, moduleID) {
+            slog.Warn("shell proxy denied: module not in session permissions",
+                "module", moduleID, "user", claims.Sub, "permissions", claims.Modules)
+            shell.WriteEnvelope(w, http.StatusForbidden, "module_forbidden",
+                fmt.Sprintf("module %q is not in your permissions", moduleID), moduleID, false)
+            return
+        }
+        next(w, r)
+    }
+}
+
+// shellModuleAllowed expands the permission list against one module id.
+func shellModuleAllowed(permissions []string, moduleID string) bool {
+    for _, p := range permissions {
+        if p == "*" || p == moduleID {
+            return true
+        }
+    }
+    return false
 }
 
 // shellUserRecord is one login-able shell account (config or bootstrap).
@@ -215,6 +246,11 @@ type shellUserRecord struct {
 }
 
 const maxShellBody = 1 << 20 // 1 MiB
+
+// shellSessionCookieName is the HttpOnly session cookie (#220) set at
+// issuance and cleared at logout, so iframe navigation requests (which
+// cannot attach an Authorization header) authenticate on /shell/*.
+const shellSessionCookieName = "fusion_shell_session"
 
 func hashShellPassword(password string) (string, error) {
     hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -234,6 +270,14 @@ func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
             return
         }
         token := bearerToken(r)
+        if token == "" {
+            // #220: iframe navigation requests cannot attach an Authorization
+            // header. The session issuance also sets an HttpOnly cookie, so
+            // the browser carries the session on iframe loads automatically.
+            if c, err := r.Cookie(shellSessionCookieName); err == nil {
+                token = c.Value
+            }
+        }
         if token == "" {
             w.Header().Set("WWW-Authenticate", `Bearer realm="fusion-shell"`)
             shell.WriteEnvelope(w, http.StatusUnauthorized, "session_required", "shell session token required", "", false)
@@ -296,6 +340,18 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         return
     }
     slog.Info("shell session issued", "username", user.username, "roles", user.roles)
+    // #220: also set an HttpOnly SameSite=Strict session cookie so iframe
+    // navigation requests (no Authorization header possible) authenticate on
+    // /shell/*. Secure flag mirrors the transport (TLS deployment = Secure).
+    http.SetCookie(w, &http.Cookie{
+        Name:     shellSessionCookieName,
+        Value:    token,
+        Path:     "/",
+        MaxAge:   int(s.shellSessions.TTL().Seconds()),
+        HttpOnly: true,
+        Secure:   r.TLS != nil,
+        SameSite: http.SameSiteStrictMode,
+    })
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(shellSessionResponse{
         Token:              token,
@@ -361,6 +417,18 @@ func (s *Server) handleShellSessionLogout(w http.ResponseWriter, r *http.Request
     if token := bearerToken(r); token != "" {
         s.shellSessions.Revoke(token)
     }
+    if c, err := r.Cookie(shellSessionCookieName); err == nil && c.Value != "" {
+        s.shellSessions.Revoke(c.Value)
+    }
+    http.SetCookie(w, &http.Cookie{
+        Name:     shellSessionCookieName,
+        Value:    "",
+        Path:     "",
+        MaxAge:   -1,
+        HttpOnly: true,
+        Secure:   r.TLS != nil,
+        SameSite: http.SameSiteStrictMode,
+    })
     slog.Info("shell session logged out")
     shell.WriteEnvelope(w, http.StatusOK, "ok", "logged out", "", false)
 }
