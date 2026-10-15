@@ -352,3 +352,20 @@ func TestRateLimit_TokenCountZero(t *testing.T) {
         t.Error("should call next when token count is zero")
     }
 }
+
+func TestRateLimitBridgedAdminPrincipalSkipsKeyLimit(t *testing.T) {
+    cfg := &config.RateLimitConfig{Enabled: true, KeyEnforcement: true}
+    rl := NewRateLimiter()
+    h := RateLimit(cfg, rl, func(ctx context.Context) int { return 0 })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    for _, method := range []string{"admin-jwt", "shell-session"} {
+        ctx := ContextWithPrincipal(context.Background(), &Principal{AuthMethod: method, Role: RoleAdmin})
+        req := httptest.NewRequest(http.MethodGet, "/admin/teams", nil).WithContext(ctx)
+        rr := httptest.NewRecorder()
+        h.ServeHTTP(rr, req)
+        if rr.Code != http.StatusOK {
+            t.Fatalf("%s principal code = %d, want 200", method, rr.Code)
+        }
+    }
+}
