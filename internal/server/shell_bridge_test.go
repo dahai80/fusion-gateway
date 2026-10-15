@@ -98,8 +98,8 @@ func TestAutoRegister_AdminManifest(t *testing.T) {
     if admin.Category != "infra" || admin.Backend != "gateway" {
         t.Fatalf("admin manifest = %+v", admin.ShellManifest)
     }
-    if !strings.HasPrefix(admin.Entry, "http://127.0.0.1:11432") {
-        t.Fatalf("entry = %s, want allowlist origin prefix", admin.Entry)
+    if !strings.HasPrefix(admin.Entry, "/") {
+        t.Fatalf("entry = %s, want relative /admin/ path (same-origin)", admin.Entry)
     }
 }
 
