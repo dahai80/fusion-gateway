@@ -974,6 +974,10 @@ type ShellManifest struct {
 
 type ShellModuleConfig struct {
     Upstream string `mapstructure:"upstream"`
+    // APIKey is the upstream credential injected by the /shell/ proxy as
+    // `Authorization: Bearer` (acceptance F-3). The caller's shell session
+    // token is never forwarded upstream — it is gateway-internal only.
+    APIKey string `mapstructure:"api_key"`
 }
 
 // IdentityConfig wires the fusion-identity gRPC control plane (#157). When

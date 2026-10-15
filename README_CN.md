@@ -206,6 +206,7 @@ web_shell:
   modules:
     fusion-mlx:
       upstream: http://127.0.0.1:11434
+      api_key: "<上游凭证,以 Authorization: Bearer 注入>"
 ```
 
 - **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。
@@ -213,7 +214,10 @@ web_shell:
 - **RBAC 账号存储** — 持久账号存储(`store.data_dir/shell_users.json`,仅 bcrypt),支撑 `/api/v1/shell/users` CRUD + 密码重置(需 admin 角色,保护最后一个可用管理员)与 `POST /api/v1/password`(自助改密,清除 `must_change_password`)。config 用户仅作种子数据:存储文件一旦存在即为唯一事实源。
 - **错误信封** — `/shell/{module}/` 代理失败一律返回 `{code, message, module_id, retryable}`(503 `backend_unavailable` / 404 `module_not_found`),宿主据此弹非阻塞 Toast 而非无限 Loading(A5)。
 - **健康轮询** — lifecycle 管理的 worker 轮询每个 manifest 的 `health` URL,探测结果汇入状态面。
-- **Entry 来源白名单** — `entry` 来源不在 `entry_origin_allowlist` 内的注册直接 403 拒绝(A7)。核心端点只经网关访问:模块 `upstream` 指向网关,不要把引擎端口暴露给浏览器。
+- **Entry 来源白名单** — `entry` 来源不在 `entry_origin_allowlist` 内的注册直接 403 拒绝(A7)。网关托管的相对路径 entry(`/shell/<id>/`,PRD §5.1 生产约定)天然同源,无需来源校验直接接受;路径穿越(`..`)拒绝。核心端点只经网关访问:模块 `upstream` 指向网关,不要把引擎端口暴露给浏览器。
+- **iframe 会话 Cookie**(#220,F-1)— 会话签发同时下发 HttpOnly `fusion_shell_session` Cookie(SameSite=Strict,Max-Age = token TTL,TLS 下 Secure),`/shell/*` 在无 Authorization 头时回退校验 Cookie,iframe 导航请求由此通过鉴权。登出吊销 Cookie token 并清除。
+- **代理层模块级 RBAC**(#221,F-2/S-8)— `/shell/<module>/` 转发前再次校验会话的模块权限(`*` 通配);未授权模块直接 403 `module_forbidden`,不触达上游。菜单隐藏只是第一层。
+- **上游凭证注入**(#222,F-3)— `web_shell.modules.<id>` 支持 `api_key`;代理剥离调用方的 `Authorization` 与 `Cookie` 头,向上游注入 `Authorization: Bearer <api_key>`。shell 会话 token 永不出网关。
 
 ### 管理控制台作为 shell 远程模块(#216)
 

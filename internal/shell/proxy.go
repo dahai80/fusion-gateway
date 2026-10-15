@@ -15,10 +15,11 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
 )
 
-// upstreamFn resolves a module id to its proxy upstream base URL ("_" when
-// the module has no proxy mapping). A function — not a static map — so a
-// config hot-reload takes effect without rebuilding the proxy.
-type upstreamFn func(moduleID string) string
+// upstreamFn resolves a module id to its proxy upstream base URL and its
+// upstream credential ("_" when the module has no proxy mapping). A function
+// — not a static map — so a config hot-reload takes effect without
+// rebuilding the proxy.
+type upstreamFn func(moduleID string) (string, string)
 
 // Proxy forwards /shell/<module_id>/... requests to the module's upstream
 // and degrades failures into the standardized error envelope (PRD §7.2):
@@ -73,7 +74,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         rest = ""
     }
 
-    upstream := p.resolveUpstream(moduleID)
+    upstream, apiKey := p.resolveUpstream(moduleID)
     if upstream == "" || upstream == "_" {
         WriteEnvelope(w, http.StatusNotFound, "module_not_found",
             fmt.Sprintf("module %q has no proxy upstream configured", moduleID), moduleID, false)
@@ -94,6 +95,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
             pr.Out.URL.Path = strings.TrimSuffix(target.Path, "/") + "/" + rest
             pr.Out.URL.RawPath = ""
             pr.Out.Host = target.Host
+            // #222: never forward the caller's shell session token (or any
+            // ambient cookie) upstream — the upstream credential is the
+            // per-module static api_key, not the user identity.
+            pr.Out.Header.Del("Authorization")
+            pr.Out.Header.Del("Cookie")
+            if apiKey != "" {
+                pr.Out.Header.Set("Authorization", "Bearer "+apiKey)
+            }
         },
         Transport: client.Transport,
         FlushInterval: 100 * time.Millisecond, // stream-friendly

@@ -50,6 +50,12 @@ func NewManager(secret []byte, ttl time.Duration) *Manager {
     }
 }
 
+// TTL returns the session lifetime used at issuance (cookie Max-Age must
+// match the token TTL so the browser and the signature share one clock).
+func (m *Manager) TTL() time.Duration {
+    return m.ttl
+}
+
 // Issue signs a session for the given claims, stamping the expiry.
 func (m *Manager) Issue(claims SessionClaims) (string, error) {
     now := m.nowFn()

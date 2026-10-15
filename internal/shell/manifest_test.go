@@ -164,3 +164,22 @@ func indexOf(s, sub string) int {
     }
     return -1
 }
+
+func TestRegistry_RelativeEntryAcceptedAndTraversalRejected(t *testing.T) {
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    // F-5: PRD §5.1 prod convention — gateway-hosted relative path is
+    // same-origin by construction, accepted without an origin check.
+    if err := r.Upsert(config.ShellManifest{ID: "fusion-rel", Title: "R", Path: "/r",
+        Entry: "/shell/fusion-rel/", Devices: []string{"desktop"}, Category: "domain"}); err != nil {
+        t.Fatalf("relative entry rejected: %v", err)
+    }
+    if err := r.Upsert(config.ShellManifest{ID: "fusion-evil", Title: "E", Path: "/e",
+        Entry: "/shell/../../admin", Devices: []string{"desktop"}, Category: "domain"}); err == nil {
+        t.Fatal("path traversal entry accepted")
+    }
+    // Absolute out-of-allowlist origin still rejected (A7 unchanged).
+    if err := r.Upsert(config.ShellManifest{ID: "fusion-abs", Title: "A", Path: "/a",
+        Entry: "http://evil.example:99/", Devices: []string{"desktop"}, Category: "domain"}); err == nil {
+        t.Fatal("out-of-allowlist absolute entry accepted")
+    }
+}

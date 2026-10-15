@@ -235,6 +235,7 @@ web_shell:
   modules:
     fusion-mlx:
       upstream: http://127.0.0.1:11434
+      api_key: "<upstream credential injected as Authorization: Bearer>"
 ```
 
 - **Manifest registry** — modules self-register via `POST /api/v1/shell/manifests` (idempotent upsert by id, fg-key auth); heartbeat keepalive; expired heartbeats mark the module `unreachable` (menu greyed, never deleted); static fallback keeps the menu non-empty.
@@ -242,7 +243,10 @@ web_shell:
 - **RBAC user store** — durable account store (`store.data_dir/shell_users.json`, bcrypt-only) behind `/api/v1/shell/users` CRUD + password-reset (admin role required, last-enabled-admin protected) and `POST /api/v1/password` (self-service change, clears `must_change_password`). Config users are seed data: the store file is the source of truth once created.
 - **Error envelope** — every `/shell/{module}/` proxy failure returns `{code, message, module_id, retryable}` (503 `backend_unavailable` / 404 `module_not_found`), so the shell host renders a non-blocking toast instead of hanging (A5).
 - **Health polling** — a lifecycle-managed worker probes each manifest `health` URL; probe results feed the status surface.
-- **Entry origin whitelist** — registrations whose `entry` origin is outside `entry_origin_allowlist` are rejected 403 at admission (A7). Core endpoints stay behind the gateway: point module `upstream`s at the gateway, never expose the engine port to the browser directly.
+- **Entry origin whitelist** — registrations whose `entry` origin is outside `entry_origin_allowlist` are rejected 403 at admission (A7). Gateway-hosted relative entries (`/shell/<id>/`, PRD §5.1 prod convention) are same-origin by construction and accepted without an origin check; path traversal (`..`) is rejected. Core endpoints stay behind the gateway: point module `upstream`s at the gateway, never expose the engine port to the browser directly.
+- **Iframe session cookie** (#220, F-1) — session issuance also sets an HttpOnly `fusion_shell_session` cookie (SameSite=Strict, Max-Age = token TTL, Secure on TLS) and `/shell/*` falls back to it when no Authorization header is present, so iframe navigation requests authenticate. Logout revokes the cookie token and clears it.
+- **Per-module RBAC in the proxy** (#221, F-2/S-8) — `/shell/<module>/` re-validates the session's module permissions (`*` expands) before proxying; unauthorized modules get 403 `module_forbidden` without an upstream dial. Menu hiding is only the first layer.
+- **Upstream credential injection** (#222, F-3) — each `web_shell.modules.<id>` accepts `api_key`; the proxy strips the caller's `Authorization` and `Cookie` headers and injects `Authorization: Bearer <api_key>` upstream. The shell session token never leaves the gateway.
 
 ### Admin console as a shell remote module (#216)
 
