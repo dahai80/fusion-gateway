@@ -167,6 +167,48 @@ cp config.example.yaml config.yaml
 | `/mcp/v1/health` | GET | MCP 网关健康检查 |
 | `/api/v1/` | ANY | model-hub 反向代理 (带模块权限校验) |
 | `/admin/api/fine-tune/*` | ANY | fusion-mlx admin 微调 API 反向代理 (#30) — 任务 CRUD、SSE 进度流、adapters;与 `/v1/*` 同一套 fg-key 鉴权链,网关内部注入 `X-Fusion-Route` |
+| `/api/v1/shell/session` | POST | Union Web Shell:签发本地单租户会话 token (`web_shell.enabled`,#215) |
+| `/api/v1/shell/session/logout` | POST | Union Web Shell:吊销当前会话 token |
+| `/api/v1/shell/me` | GET | Union Web Shell:返回调用方 claims(用户、角色、模块权限) |
+| `/api/v1/shell/manifests` | GET/POST | Union Web Shell:带存活状态的 manifest 列表 / 模块幂等注册(fg-key 鉴权,entry 来源白名单校验) |
+| `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union Web Shell:模块心跳保活(心跳超时标记 unreachable,不删除) |
+| `/shell/{module_id}/` | ANY | Union Web Shell:模块代理 — 转发到模块 upstream,失败返回标准化错误信封 `{code, message, module_id, retryable}`(后端宕机不裸 502) |
+
+## Union Web Shell (#215)
+
+可选子系统,支撑 fusion-web-shell 宿主(PRD R-1)。默认**关闭** — 不注册路由、不启动轮询 worker,完全惰性:
+
+```yaml
+web_shell:
+  enabled: true
+  entry_origin_allowlist:            # 必填 — A7 fail-closed
+    - "http://127.0.0.1:11432"
+  session:
+    ttl: 12h
+    secret: ""                       # 留空 = 从 auth.master_key 派生(域分隔摘要)
+    users:                           # 留空 = 引导管理员(随机密码打印一次,强制首登改密)
+      - username: admin
+        password_bcrypt: "$2a$..."   # 明文 password 也支持,但会 WARN
+        roles: [admin]
+  manifests:                         # 静态兜底菜单(离线模块仍然可见)
+    - id: fusion-mlx
+      title: MLX 推理监控
+      path: /mlx
+      entry: http://127.0.0.1:11432/shell/fusion-mlx/
+      devices: [desktop]
+      category: platform
+  heartbeat_timeout: 30s
+  health_poll_interval: 30s
+  modules:
+    fusion-mlx:
+      upstream: http://127.0.0.1:11434
+```
+
+- **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。
+- **会话签发** — `POST /api/v1/shell/session` 校验本地账号表(优先 bcrypt)或首启引导管理员;token 为 HMAC 签名,与管理员 JWT、API key 处于独立密钥空间;`tenant_id` claim 预留(单租户固定 `local`)。
+- **错误信封** — `/shell/{module}/` 代理失败一律返回 `{code, message, module_id, retryable}`(503 `backend_unavailable` / 404 `module_not_found`),宿主据此弹非阻塞 Toast 而非无限 Loading(A5)。
+- **健康轮询** — lifecycle 管理的 worker 轮询每个 manifest 的 `health` URL,探测结果汇入状态面。
+- **Entry 来源白名单** — `entry` 来源不在 `entry_origin_allowlist` 内的注册直接 403 拒绝(A7)。核心端点只经网关访问:模块 `upstream` 指向网关,不要把引擎端口暴露给浏览器。
 
 ## 路由逻辑
 
