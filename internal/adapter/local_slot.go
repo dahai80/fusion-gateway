@@ -62,12 +62,18 @@ func (l *localSlotProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     return l.inner.Chat(ctx, req)
 }
 
-// StreamChat acquires the slot up front and hands ownership to a release
-// watcher that fires when the inner pump closes the chunk channel. No extra
-// channel hop: the consumer reads the inner channel directly, so cancel
-// semantics (ctx-watcher closes resp.Body, pump exits, channel closes) are
-// identical to the typed FusionMLXProvider path — the slot releases exactly
-// when the stream pump finishes.
+// StreamChat acquires the slot up front and hands ownership to a single
+// forwarding goroutine: it reads the inner channel, re-sends every chunk on
+// the returned channel, and releases the slot when the inner pump closes.
+//
+// The prior release watcher ran `for range ch` directly against the SAME
+// channel the handler consumes — two concurrent receivers raced, and each
+// chunk was delivered to exactly one of them at random. The handler saw only
+// a random subset of the stream (repro: 10-token local generation, handler
+// forwarded 1–6 tokens; tee between gateway and fusion-mlx showed all 13 SSE
+// data lines arriving intact). The extra hop costs one goroutine per stream;
+// cancel semantics are preserved (inner ctx-watcher closes resp.Body, pump
+// exits, inner channel closes, forwarder releases the slot and closes out).
 func (l *localSlotProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
     release, ok := l.mlx.AcquireLocalSlot()
     if !ok {
@@ -78,12 +84,24 @@ func (l *localSlotProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
         release()
         return nil, err
     }
-    safego.Go("local_slot_release_watch", func() {
-        for range ch {
+    out := make(chan StreamChunk, cap(ch))
+    if cap(ch) == 0 {
+        out = make(chan StreamChunk, 64)
+    }
+    safego.Go("local_slot_forward", func() {
+        defer close(out)
+        defer release()
+        for chunk := range ch {
+            select {
+            case out <- chunk:
+            case <-ctx.Done():
+                // Consumer gone: inner pump's own ctx-watcher closes its body,
+                // so its send-select unblocks and the pump exits on its own.
+                return
+            }
         }
-        release()
     })
-    return ch, nil
+    return out, nil
 }
 
 // Embedding and Rerank forward without a slot acquire — the typed
