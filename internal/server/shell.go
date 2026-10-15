@@ -64,11 +64,16 @@ func (s *Server) setupShell() {
 // autoRegisterAdminModule registers the built-in admin console (#216, R-5)
 // into the manifest registry so the shell host menu always carries it
 // without a manual registration step. Metadata comes from the embedded
-// dist/manifest.json (single source with the frontend); entry/health are
-// composed at runtime from the first entry_origin_allowlist origin because
-// the manifest file cannot know the deployment origin. A7 fail-closed: when
-// the allowlist is empty or lacks the gateway origin the registration is
-// skipped with a WARN — never bypassed.
+// dist/manifest.json (single source with the frontend). Entry/health stay
+// RELATIVE paths (/admin/, /healthz): the shell host serves same-origin from
+// the gateway (prod) or proxies /admin/ in dev (#223 relative-entry
+// convention). An absolute entry composed from entry_origin_allowlist would
+// break the session cookie cross-origin — a dev host on :11430 embedding
+// http://127.0.0.1:11432 is cross-site (localhost vs 127.0.0.1), so the
+// SameSite cookie never attaches and the iframe 401s. Relative entries are
+// same-origin by construction (#223) and never need the allowlist — but a
+// non-empty allowlist still gates whether shell mode is safe at all, so the
+// A7 fail-closed skip on an empty allowlist stays.
 func (s *Server) autoRegisterAdminModule() {
     m, ok := adminui.Manifest()
     if !ok {
@@ -79,15 +84,14 @@ func (s *Server) autoRegisterAdminModule() {
         slog.Warn("shell admin module auto-registration skipped: entry_origin_allowlist empty")
         return
     }
-    origin := s.cfg.Config.Shell.EntryOriginAllowlist[0]
     manifest := config.ShellManifest{
         ID:       m.ID,
         Title:    m.Title,
         TitleEn:  m.TitleEn,
         Version:  m.Version,
         Path:     m.Path,
-        Entry:    strings.TrimSuffix(origin, "/") + m.Entry,
-        Health:   strings.TrimSuffix(origin, "/") + m.Health,
+        Entry:    m.Entry,
+        Health:   m.Health,
         Backend:  m.Backend,
         Devices:  m.Devices,
         Category: m.Category,
