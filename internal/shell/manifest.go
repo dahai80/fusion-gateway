@@ -30,6 +30,10 @@ type ManifestView struct {
     Status         Status    `json:"status"`
     LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
     Registered     bool      `json:"registered"`
+    // Unreachable is the host-menu flag (PRD §5.2 greyed-not-removed): any
+    // status below online — stale heartbeat (unreachable) or never
+    // registered (offline static fallback).
+    Unreachable bool `json:"unreachable"`
 }
 
 type entry struct {
@@ -119,11 +123,13 @@ func (r *Registry) List() []ManifestView {
 
     views := make([]ManifestView, 0, len(r.dynamic)+len(r.staticFallback))
     for _, e := range r.dynamic {
+        status := statusOf(e, now, r.heartbeatExpiry)
         views = append(views, ManifestView{
             ShellManifest: e.manifest,
-            Status:        statusOf(e, now, r.heartbeatExpiry),
+            Status:        status,
             LastHeartbeat: e.lastHeartbeat,
             Registered:    true,
+            Unreachable:   status != StatusOnline,
         })
     }
     for _, m := range r.staticFallback {
@@ -138,6 +144,7 @@ func (r *Registry) List() []ManifestView {
             ShellManifest: m,
             Status:        status,
             Registered:    false,
+            Unreachable:   status != StatusOnline,
         })
     }
     return views

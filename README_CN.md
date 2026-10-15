@@ -173,6 +173,10 @@ cp config.example.yaml config.yaml
 | `/api/v1/shell/manifests` | GET/POST | Union Web Shell:带存活状态的 manifest 列表 / 模块幂等注册(fg-key 鉴权,entry 来源白名单校验) |
 | `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union Web Shell:模块心跳保活(心跳超时标记 unreachable,不删除) |
 | `/shell/{module_id}/` | ANY | Union Web Shell:模块代理 — 转发到模块 upstream,失败返回标准化错误信封 `{code, message, module_id, retryable}`(后端宕机不裸 502) |
+| `/api/v1/shell/users` | GET/POST | Union Web Shell RBAC:账号列表 / 创建账号(需 admin 角色;密码仅存 bcrypt 哈希) |
+| `/api/v1/shell/users/{id}` | PATCH/DELETE | Union Web Shell RBAC:修改 display_name/disabled/permissions/roles / 删除账号(保护最后一个可用管理员) |
+| `/api/v1/shell/users/{id}/password-reset` | POST | Union Web Shell RBAC:生成随机临时密码并强制 `must_change_password`(需 admin 角色) |
+| `/api/v1/password` | POST | Union Web Shell:修改调用方自身密码(shell 会话鉴权;清除 `must_change_password`) |
 
 ## Union Web Shell (#215)
 
@@ -206,6 +210,7 @@ web_shell:
 
 - **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。
 - **会话签发** — `POST /api/v1/shell/session` 校验本地账号表(优先 bcrypt)或首启引导管理员;token 为 HMAC 签名,与管理员 JWT、API key 处于独立密钥空间;`tenant_id` claim 预留(单租户固定 `local`)。
+- **RBAC 账号存储** — 持久账号存储(`store.data_dir/shell_users.json`,仅 bcrypt),支撑 `/api/v1/shell/users` CRUD + 密码重置(需 admin 角色,保护最后一个可用管理员)与 `POST /api/v1/password`(自助改密,清除 `must_change_password`)。config 用户仅作种子数据:存储文件一旦存在即为唯一事实源。
 - **错误信封** — `/shell/{module}/` 代理失败一律返回 `{code, message, module_id, retryable}`(503 `backend_unavailable` / 404 `module_not_found`),宿主据此弹非阻塞 Toast 而非无限 Loading(A5)。
 - **健康轮询** — lifecycle 管理的 worker 轮询每个 manifest 的 `health` URL,探测结果汇入状态面。
 - **Entry 来源白名单** — `entry` 来源不在 `entry_origin_allowlist` 内的注册直接 403 拒绝(A7)。核心端点只经网关访问:模块 `upstream` 指向网关,不要把引擎端口暴露给浏览器。

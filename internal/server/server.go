@@ -191,6 +191,7 @@ type Server struct {
     shellSessions *shell.Manager
     shellRegistry *shell.Registry
     shellProxy    *shell.Proxy
+    shellUsers    *shell.UserStore
     shellPoller   *lifecycle.Worker
     // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
     // shell.session.users are configured; hash lives only in memory.

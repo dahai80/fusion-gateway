@@ -202,6 +202,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `/api/v1/shell/manifests` | GET/POST | Union-web shell: list manifests with liveness status / idempotent module registration (fg-key auth, entry origin whitelist enforced) |
 | `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union-web shell: module keepalive (expired heartbeat marks the module unreachable, not deleted) |
 | `/shell/{module_id}/` | ANY | Union-web shell: module proxy — forwards to the module upstream with the standardized error envelope `{code, message, module_id, retryable}` (backend down never leaks a bare 502) |
+| `/api/v1/shell/users` | GET/POST | Union-web shell RBAC: list accounts / create an account (admin role required; password stored bcrypt-hashed) |
+| `/api/v1/shell/users/{id}` | PATCH/DELETE | Union-web shell RBAC: patch display_name/disabled/permissions/roles / delete an account (last enabled admin protected) |
+| `/api/v1/shell/users/{id}/password-reset` | POST | Union-web shell RBAC: mint a random temp password and force `must_change_password` on next login (admin role required) |
+| `/api/v1/password` | POST | Union-web shell: change the caller's own password (shell session auth; clears `must_change_password`) |
 
 ## Union Web Shell (#215)
 
@@ -235,6 +239,7 @@ web_shell:
 
 - **Manifest registry** — modules self-register via `POST /api/v1/shell/manifests` (idempotent upsert by id, fg-key auth); heartbeat keepalive; expired heartbeats mark the module `unreachable` (menu greyed, never deleted); static fallback keeps the menu non-empty.
 - **Session issuance** — `POST /api/v1/shell/session` checks the local account list (bcrypt preferred) or the first-run bootstrap admin; tokens are HMAC-signed in a separate secret space from admin JWTs and API keys; `tenant_id` claim reserved (fixed `local`).
+- **RBAC user store** — durable account store (`store.data_dir/shell_users.json`, bcrypt-only) behind `/api/v1/shell/users` CRUD + password-reset (admin role required, last-enabled-admin protected) and `POST /api/v1/password` (self-service change, clears `must_change_password`). Config users are seed data: the store file is the source of truth once created.
 - **Error envelope** — every `/shell/{module}/` proxy failure returns `{code, message, module_id, retryable}` (503 `backend_unavailable` / 404 `module_not_found`), so the shell host renders a non-blocking toast instead of hanging (A5).
 - **Health polling** — a lifecycle-managed worker probes each manifest `health` URL; probe results feed the status surface.
 - **Entry origin whitelist** — registrations whose `entry` origin is outside `entry_origin_allowlist` are rejected 403 at admission (A7). Core endpoints stay behind the gateway: point module `upstream`s at the gateway, never expose the engine port to the browser directly.
