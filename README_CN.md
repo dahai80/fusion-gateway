@@ -215,6 +215,15 @@ web_shell:
 - **健康轮询** — lifecycle 管理的 worker 轮询每个 manifest 的 `health` URL,探测结果汇入状态面。
 - **Entry 来源白名单** — `entry` 来源不在 `entry_origin_allowlist` 内的注册直接 403 拒绝(A7)。核心端点只经网关访问:模块 `upstream` 指向网关,不要把引擎端口暴露给浏览器。
 
+### 管理控制台作为 shell 远程模块(#216)
+
+内置管理控制台本身就是一个 shell 远程模块(PRD R-5),无需手动注册:
+
+- **单一事实源 manifest** — `web/admin/public/manifest.json` 构建时随 UI 一起拷入内嵌产物(vite `outDir: internal/admin/ui/dist`);`adminui.Manifest()` 解析内嵌文件,网关启动时自动注册 `fusion-admin`。`entry`/`health` 由首个 `entry_origin_allowlist` 来源在运行时拼出(manifest 文件无法预知部署来源);白名单为空则跳过注册并 WARN(A7 fail-closed)。
+- **内嵌模式** — 管理 SPA 由网关在 `/admin/` 提供,由 shell 宿主以 iframe 渲染。iframe 导航无法携带 Bearer 头,因此模块 entry 直接指向 `/admin/`,SPA 保留自己的 admin-JWT 登录;API 层调用方(SDK 中转请求)可改走下面的 shell 会话桥接。
+- **Shell 会话桥接** — `/admin/api/*` 路由上有效 shell 会话 Bearer,在账号于实时用户存储中仍持有 admin 角色时桥接为 admin Principal(服务端角色校验 — 被降级或禁用的账号即使 token 有效也 403)。在 admin-JWT 桥接之后执行,真实 admin JWT 优先。
+- **开发端口** — shell 宿主 dev server `:11430`,admin dev server `:11431`(`/admin/api` 代理到 `:11432`);均遵循 monorepo 端口注册约定。
+
 ## 路由逻辑
 
 双维度决策:**请求维度** + **硬件负载维度**

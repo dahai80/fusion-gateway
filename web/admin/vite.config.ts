@@ -9,9 +9,10 @@ export default defineConfig({
         emptyOutDir: true,
     },
     server: {
+        port: 11431,
         proxy: {
             "/admin/api": {
-                target: "http://localhost:8100",
+                target: "http://localhost:11432",
                 changeOrigin: true,
             },
         },

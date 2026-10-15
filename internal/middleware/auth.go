@@ -39,7 +39,7 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             // it neither overwrites the bridged role nor 401-rejects a request
             // whose Bearer is an admin JWT rather than an API key. The admin
             // route's own IsAdmin gate has already authorized it.
-            if p.AuthMethod == "admin-jwt" {
+            if p.AuthMethod == "admin-jwt" || p.AuthMethod == "shell-session" {
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }

@@ -244,6 +244,15 @@ web_shell:
 - **Health polling** — a lifecycle-managed worker probes each manifest `health` URL; probe results feed the status surface.
 - **Entry origin whitelist** — registrations whose `entry` origin is outside `entry_origin_allowlist` are rejected 403 at admission (A7). Core endpoints stay behind the gateway: point module `upstream`s at the gateway, never expose the engine port to the browser directly.
 
+### Admin console as a shell remote module (#216)
+
+The built-in admin console is itself a shell remote module (PRD R-5) — no manual registration:
+
+- **Single-source manifest** — `web/admin/public/manifest.json` is copied into the embedded UI at build time (vite `outDir: internal/admin/ui/dist`); `adminui.Manifest()` parses the embedded file and the gateway auto-registers `fusion-admin` at startup. `entry`/`health` are composed at runtime from the first `entry_origin_allowlist` origin (the manifest file cannot know the deployment origin); allowlist empty = registration skipped with a WARN (A7 fail-closed).
+- **Embedded mode** — the admin SPA is served at `/admin/` and rendered by the shell host in an iframe. Iframe navigation cannot carry a Bearer header, so the module entry points directly at `/admin/` and the SPA keeps its own admin-JWT login; API-level callers (SDK-relayed requests) can instead use the shell-session bridge below.
+- **Shell-session bridge** — a valid shell-session Bearer on `/admin/api/*` routes is bridged into an admin Principal when the account still holds the admin role in the live user store (server-side role check — a demoted or disabled account is rejected 403 even with a valid token). Runs after the admin-JWT bridge, so a real admin JWT wins.
+- **Dev ports** — shell host dev server `:11430`, admin dev server `:11431` (proxies `/admin/api` to `:11432`); both follow the monorepo port-registry conventions.
+
 ## Routing Logic
 
 Dual-dimension decision: **request dimension** + **hardware load dimension**

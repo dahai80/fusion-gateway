@@ -745,3 +745,17 @@ func TestFinalizeAndAppendLog_EntryStampWins(t *testing.T) {
 		t.Fatalf("FinalizeAndAppendLog overwrote the auth-stamped name: got %q, want %q", entry.APIKeyName, "claude")
 	}
 }
+
+func TestAPIKeyAuthShellSessionPrincipalSkipsKeyResolution(t *testing.T) {
+    cfg := &config.AuthConfig{Enabled: true, MasterKey: "mk"}
+    h := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    ctx := ContextWithPrincipal(context.Background(), &Principal{AuthMethod: "shell-session", Role: RoleAdmin})
+    req := httptest.NewRequest(http.MethodGet, "/admin/teams", nil).WithContext(ctx)
+    rr := httptest.NewRecorder()
+    h.ServeHTTP(rr, req)
+    if rr.Code != http.StatusOK {
+        t.Fatalf("shell-session principal code = %d, want pass-through 200", rr.Code)
+    }
+}

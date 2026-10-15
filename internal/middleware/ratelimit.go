@@ -189,6 +189,15 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
                 next.ServeHTTP(w, r)
                 return
             }
+            // #216: bridged management-plane identities (admin-login JWT and
+            // shell-session) carry no inference API key — key-based rate limit
+            // does not apply to them. Their authorization was already decided
+            // by the admin gate (withAdminOnly / admin requireAdminRole) before
+            // this middleware runs.
+            if p != nil && (p.AuthMethod == "admin-jwt" || p.AuthMethod == "shell-session") {
+                next.ServeHTTP(w, r)
+                return
+            }
 
             var keyCfg *config.AuthKeyConfig
             if p != nil {
