@@ -196,6 +196,48 @@ See `config.example.yaml` for full reference. Key settings:
 | `/mcp/v1/health` | GET | MCP gateway health check |
 | `/api/v1/` | ANY | Model-hub reverse proxy (with module permission enforcement) |
 | `/admin/api/fine-tune/*` | ANY | fusion-mlx admin fine-tune API reverse proxy (#30) — jobs CRUD, SSE progress stream, adapters; same fg-key auth chain as `/v1/*`, gateway injects `X-Fusion-Route` internally |
+| `/api/v1/shell/session` | POST | Union-web shell: issue a local single-tenant session token (`web_shell.enabled`, #215) |
+| `/api/v1/shell/session/logout` | POST | Union-web shell: revoke the presented session token |
+| `/api/v1/shell/me` | GET | Union-web shell: return the caller's claims (user, roles, module permissions) |
+| `/api/v1/shell/manifests` | GET/POST | Union-web shell: list manifests with liveness status / idempotent module registration (fg-key auth, entry origin whitelist enforced) |
+| `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union-web shell: module keepalive (expired heartbeat marks the module unreachable, not deleted) |
+| `/shell/{module_id}/` | ANY | Union-web shell: module proxy — forwards to the module upstream with the standardized error envelope `{code, message, module_id, retryable}` (backend down never leaks a bare 502) |
+
+## Union Web Shell (#215)
+
+Optional subsystem backing the fusion-web-shell host (PRD R-1). Default **off** — no routes, no poll worker, fully inert until enabled:
+
+```yaml
+web_shell:
+  enabled: true
+  entry_origin_allowlist:            # required — A7 fail-closed
+    - "http://127.0.0.1:11432"
+  session:
+    ttl: 12h
+    secret: ""                       # empty = derived (domain-separated) from auth.master_key
+    users:                           # empty = bootstrap admin (random password logged once, must_change_password)
+      - username: admin
+        password_bcrypt: "$2a$..."   # plaintext password: supported but WARNs
+        roles: [admin]
+  manifests:                         # static fallback menu (offline modules stay visible)
+    - id: fusion-mlx
+      title: MLX Inference
+      path: /mlx
+      entry: http://127.0.0.1:11432/shell/fusion-mlx/
+      devices: [desktop]
+      category: platform
+  heartbeat_timeout: 30s
+  health_poll_interval: 30s
+  modules:
+    fusion-mlx:
+      upstream: http://127.0.0.1:11434
+```
+
+- **Manifest registry** — modules self-register via `POST /api/v1/shell/manifests` (idempotent upsert by id, fg-key auth); heartbeat keepalive; expired heartbeats mark the module `unreachable` (menu greyed, never deleted); static fallback keeps the menu non-empty.
+- **Session issuance** — `POST /api/v1/shell/session` checks the local account list (bcrypt preferred) or the first-run bootstrap admin; tokens are HMAC-signed in a separate secret space from admin JWTs and API keys; `tenant_id` claim reserved (fixed `local`).
+- **Error envelope** — every `/shell/{module}/` proxy failure returns `{code, message, module_id, retryable}` (503 `backend_unavailable` / 404 `module_not_found`), so the shell host renders a non-blocking toast instead of hanging (A5).
+- **Health polling** — a lifecycle-managed worker probes each manifest `health` URL; probe results feed the status surface.
+- **Entry origin whitelist** — registrations whose `entry` origin is outside `entry_origin_allowlist` are rejected 403 at admission (A7). Core endpoints stay behind the gateway: point module `upstream`s at the gateway, never expose the engine port to the browser directly.
 
 ## Routing Logic
 

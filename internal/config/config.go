@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+    "net/url"
     "sync"
     "sync/atomic"
     "time"
@@ -900,6 +901,79 @@ type Config struct {
     Browser       BrowserConfig            `mapstructure:"browser"`
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
+    Shell           ShellConfig             `mapstructure:"web_shell"`
+}
+
+// ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
+// manifest registry, local session issuance, the /shell/<module>/ proxy with
+// the standardized error envelope, module health polling, and the entry
+// origin whitelist. Default off — no routes registered, no poll worker, the
+// subsystem is inert until shell.enabled=true (fail-closed, mirrors
+// browser/identity opt-in gates).
+type ShellConfig struct {
+    Enabled bool `mapstructure:"enabled"`
+    Session ShellSessionConfig `mapstructure:"session"`
+    // Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
+    // have not registered still render in the shell menu (greyed offline) so
+    // the menu is never empty. Seeded into the registry at construction.
+    Manifests []ShellManifest `mapstructure:"manifests"`
+    // EntryOriginAllowlist restricts which origins a manifest entry URL may
+    // point at (A7: whitelist + token enforcement). Registration with an
+    // entry outside the list is rejected 403. Required non-empty when
+    // shell.enabled — without it any registered module could inject scripts
+    // into the shell host.
+    EntryOriginAllowlist []string `mapstructure:"entry_origin_allowlist"`
+    // HeartbeatTimeout: a dynamic manifest whose last heartbeat is older than
+    // this is marked unreachable (menu greyed, NOT deleted). Default 30s.
+    HeartbeatTimeout time.Duration `mapstructure:"heartbeat_timeout"`
+    // HealthPollInterval is the module health poll cadence on the manifest
+    // health URL. Default 30s.
+    HealthPollInterval time.Duration `mapstructure:"health_poll_interval"`
+    // Modules maps manifest id -> upstream base URL for the /shell/<id>/
+    // proxy. Modules without an entry get the module_not_found envelope.
+    Modules map[string]ShellModuleConfig `mapstructure:"modules"`
+}
+
+type ShellSessionConfig struct {
+    // Secret signs session tokens (HMAC-SHA256). Empty = derived from
+    // master_key (logged); both empty is a validate error when shell.enabled.
+    Secret string `mapstructure:"secret"`
+    // TTL is the session token lifetime. Default 12h.
+    TTL time.Duration `mapstructure:"ttl"`
+    // Users is the local single-tenant account list. Empty = a bootstrap
+    // admin with a random password is generated and logged once at startup
+    // (PRD §4.1.5), with must_change_password in the claims.
+    Users []ShellUser `mapstructure:"users"`
+}
+
+type ShellUser struct {
+    Username       string   `mapstructure:"username"`
+    Password       string   `mapstructure:"password"`
+    PasswordBcrypt string   `mapstructure:"password_bcrypt"`
+    Roles          []string `mapstructure:"roles"`
+    // Modules lists the manifest ids this user may see (token permissions[]).
+    // "admin" role implies all modules.
+    Modules []string `mapstructure:"modules"`
+}
+
+// ShellManifest mirrors the PRD §5.1 schema v1. Static fallback entries use
+// the same struct as dynamic registrations.
+type ShellManifest struct {
+    ID       string   `json:"id" mapstructure:"id"`
+    Title    string   `json:"title" mapstructure:"title"`
+    TitleEn  string   `json:"title_en,omitempty" mapstructure:"title_en"`
+    Version  string   `json:"version,omitempty" mapstructure:"version"`
+    Path     string   `json:"path" mapstructure:"path"`
+    Icon     string   `json:"icon,omitempty" mapstructure:"icon"`
+    Entry    string   `json:"entry" mapstructure:"entry"`
+    Health   string   `json:"health,omitempty" mapstructure:"health"`
+    Backend  string   `json:"backend,omitempty" mapstructure:"backend"`
+    Devices  []string `json:"devices" mapstructure:"devices"`
+    Category string   `json:"category" mapstructure:"category"`
+}
+
+type ShellModuleConfig struct {
+    Upstream string `mapstructure:"upstream"`
 }
 
 // IdentityConfig wires the fusion-identity gRPC control plane (#157). When
@@ -1629,6 +1703,64 @@ func validate(cfg *Config) error {
             "fallback_to_local", cfg.Identity.FallbackToLocal)
     }
 
+    // #215: shell subsystem. Fail-closed checks — enabled with no entry
+    // allowlist would let any registered module inject scripts into the shell
+    // host (A7); enabled with neither session secret nor master_key leaves no
+    // usable signing key; a module upstream that does not parse means the
+    // proxy would 503-envelope every request.
+    if cfg.Shell.Enabled {
+        if len(cfg.Shell.EntryOriginAllowlist) == 0 {
+            return fmt.Errorf("web_shell.enabled is true but web_shell.entry_origin_allowlist is empty (whitelist the shell host origin, e.g. http://127.0.0.1:11432)")
+        }
+        for _, origin := range cfg.Shell.EntryOriginAllowlist {
+            if u, err := url.Parse(origin); err != nil || u.Scheme == "" || u.Host == "" {
+                return fmt.Errorf("web_shell.entry_origin_allowlist entry %q is not a valid absolute origin", origin)
+            }
+        }
+        if cfg.Shell.Session.Secret == "" && cfg.Auth.MasterKey == "" {
+            return fmt.Errorf("web_shell.enabled is true but web_web_shell.session.secret is empty and auth.master_key is unset (set one to sign session tokens)")
+        }
+        if cfg.Shell.Session.TTL <= 0 {
+            return fmt.Errorf("web_shell.session.ttl must be positive when shell enabled, got %s", cfg.Shell.Session.TTL)
+        }
+        if cfg.Shell.HeartbeatTimeout <= 0 {
+            return fmt.Errorf("web_shell.heartbeat_timeout must be positive when shell enabled, got %s", cfg.Shell.HeartbeatTimeout)
+        }
+        if cfg.Shell.HealthPollInterval <= 0 {
+            return fmt.Errorf("web_shell.health_poll_interval must be positive when shell enabled, got %s", cfg.Shell.HealthPollInterval)
+        }
+        usernames := make(map[string]bool, len(cfg.Shell.Session.Users))
+        for i, u := range cfg.Shell.Session.Users {
+            if u.Username == "" {
+                return fmt.Errorf("web_shell.session.users[%d].username is empty", i)
+            }
+            if usernames[u.Username] {
+                return fmt.Errorf("web_shell.session.users[%d] duplicates username %q", i, u.Username)
+            }
+            usernames[u.Username] = true
+            if u.Password == "" && u.PasswordBcrypt == "" {
+                return fmt.Errorf("web_shell.session.users[%d] (%s) has no password or password_bcrypt", i, u.Username)
+            }
+            if u.Password != "" {
+                slog.Warn("shell.session.users entry uses plaintext password — prefer password_bcrypt",
+                    "username", u.Username)
+            }
+        }
+        for id, m := range cfg.Shell.Modules {
+            if m.Upstream == "" {
+                continue
+            }
+            if u, err := url.Parse(m.Upstream); err != nil || u.Scheme == "" || u.Host == "" {
+                return fmt.Errorf("web_shell.modules[%s].upstream %q is not a valid absolute URL", id, m.Upstream)
+            }
+        }
+        slog.Info("shell subsystem enabled",
+            "static_manifests", len(cfg.Shell.Manifests),
+            "users", len(cfg.Shell.Session.Users),
+            "modules", len(cfg.Shell.Modules),
+            "allowlist", len(cfg.Shell.EntryOriginAllowlist))
+    }
+
     // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
     // handlers fall back to the maxProxyBodySize const default at read time);
     // negative is rejected. A positive cap is what actually bounds the body —
@@ -2060,6 +2192,14 @@ func DefaultConfig() Config {
             FallbackToLocal:  false,
             BreakerThreshold: 5,
             BreakerOpenSec:   30,
+        },
+        Shell: ShellConfig{
+            Enabled:            false,
+            HeartbeatTimeout:   30 * time.Second,
+            HealthPollInterval: 30 * time.Second,
+            Session: ShellSessionConfig{
+                TTL: 12 * time.Hour,
+            },
         },
     }
 }

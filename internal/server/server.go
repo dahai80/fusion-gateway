@@ -29,6 +29,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/identity"
     pb "github.com/fusion-gateway/fusion-gateway/internal/identity/pb"
     "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
+    "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
@@ -181,6 +182,19 @@ type Server struct {
     // hot-reload via RebuildMiddlewareChain (a new identityClient dials the
     // new endpoint). Closed in Shutdown to tear down the gRPC channel.
     identityClient *identity.Client
+
+    // #215: union-web shell subsystem. All nil when shell.enabled=false (no
+    // routes, no poll worker — inert). Sessions sign /api/v1/shell/* tokens;
+    // registry holds dynamic + static-fallback manifests; proxy forwards
+    // /shell/<id>/ with the standardized error envelope; pollWorker is the
+    // lifecycle-managed health poller (Stop on Shutdown).
+    shellSessions *shell.Manager
+    shellRegistry *shell.Registry
+    shellProxy    *shell.Proxy
+    shellPoller   *lifecycle.Worker
+    // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
+    // shell.session.users are configured; hash lives only in memory.
+    shellBootstrap *shellUserRecord
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
@@ -652,6 +666,15 @@ func New(
         "server_reap_expired_tasks", srv.reapExpiredTasks)
     srv.evictOAuth2Worker = lifecycle.Start(context.Background(),
         "server_evict_oauth2_states", srv.evictOAuth2States)
+
+    // #215: construct the shell subsystem + start the health poller when
+    // enabled. Poller is a lifecycle worker (R1 lesson) so Shutdown cancels
+    // and joins it.
+    srv.setupShell()
+    if srv.shellRegistry != nil {
+        poller := shell.NewHealthPoller(srv.shellRegistry, cfg.Config.Shell.HealthPollInterval)
+        srv.shellPoller = lifecycle.Start(context.Background(), "shell_health_poller", poller.Run)
+    }
     return srv
 }
 
@@ -759,6 +782,13 @@ func (s *Server) Start() error {
         s.browserHandler.RegisterRoutes(mux, s.withMiddleware, s.withAdminOnly)
         slog.Info("browser scheduling routes registered",
             "node_count", len(s.cfg.Config.Browser.Nodes))
+    }
+
+    // #215: union-web shell routes — manifest registry, session issuance,
+    // and the /shell/<module_id>/ proxy with the standardized error envelope.
+    // No-op when shell.enabled=false (nothing registered, subsystem inert).
+    if s.shellSessions != nil {
+        s.registerShellRoutes(mux)
     }
 
     // Connector plugin framework routes
@@ -1046,6 +1076,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
     }
     if s.evictOAuth2Worker != nil {
         s.evictOAuth2Worker.Stop()
+    }
+    // #215: stop the shell health poller (cancel + join) so it does not tick
+    // against a torn-down registry.
+    if s.shellPoller != nil {
+        s.shellPoller.Stop()
     }
     s.rateLimiter.Close()
     s.cache.Close()
