@@ -58,8 +58,16 @@ func (s *Server) setupShell() {
         }
     }
     s.shellProxy = shell.NewProxy(func(moduleID string) (string, string) {
-        if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok {
+        // #232: static config wins (override); a dynamic manifest carrying
+        // its own upstream is the fallback so self-registering modules are
+        // proxied without a config edit + restart. Both paths keep the same
+        // entry-origin allowlist (checked at registration) and api_key
+        // injection semantics.
+        if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok && m.Upstream != "" {
             return m.Upstream, m.APIKey
+        }
+        if up, key, ok := s.shellRegistry.UpstreamFor(moduleID); ok {
+            return up, key
         }
         return "", ""
     })

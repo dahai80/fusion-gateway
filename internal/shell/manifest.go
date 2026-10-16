@@ -100,6 +100,9 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
     if err := r.checkEntryAllowlist(m.Entry); err != nil {
         return err
     }
+    if err := validateUpstreamURL(m); err != nil {
+        return err
+    }
 
     r.mu.Lock()
     _, exists := r.dynamic[m.ID]
@@ -183,6 +186,9 @@ func (r *Registry) validateForStoreLocked(m config.ShellManifest) error {
     if !strings.HasPrefix(m.ID, "fusion-") {
         return fmt.Errorf("manifest id %q must use the fusion-<name> prefix", m.ID)
     }
+    if err := validateUpstreamURL(m); err != nil {
+        return err
+    }
     return r.checkEntryAllowlist(m.Entry)
 }
 
@@ -237,7 +243,8 @@ func (r *Registry) Heartbeat(id string) error {
 // List returns static fallback entries plus dynamic registrations, each with
 // its derived status. Static entries whose id has a dynamic registration are
 // suppressed (the dynamic one wins). Stale dynamic entries stay listed as
-// unreachable — never deleted.
+// unreachable — never deleted. APIKey is always zeroed (#232): the list is
+// session-visible, and the upstream credential must never reach the client.
 func (r *Registry) List() []ManifestView {
     now := time.Now()
     r.mu.RLock()
@@ -246,8 +253,10 @@ func (r *Registry) List() []ManifestView {
     views := make([]ManifestView, 0, len(r.dynamic)+len(r.staticFallback))
     for _, e := range r.dynamic {
         status := statusOf(e, now, r.heartbeatExpiry)
+        m := e.manifest
+        m.APIKey = ""
         views = append(views, ManifestView{
-            ShellManifest: e.manifest,
+            ShellManifest: m,
             Status:        status,
             LastHeartbeat: e.lastHeartbeat,
             Registered:    true,
@@ -262,6 +271,7 @@ func (r *Registry) List() []ManifestView {
         if t, ok := r.lastHealthy[m.ID]; ok && now.Sub(t) <= r.heartbeatExpiry {
             status = StatusOnline
         }
+        m.APIKey = ""
         views = append(views, ManifestView{
             ShellManifest: m,
             Status:        status,
@@ -270,6 +280,20 @@ func (r *Registry) List() []ManifestView {
         })
     }
     return views
+}
+
+// UpstreamFor resolves the /shell/<id>/ proxy target from a dynamic
+// registration's own routing fields (#232). ok=false when the manifest did
+// not carry an upstream (static-config-only module). Secrets stay inside the
+// gateway — only the proxy consumes this.
+func (r *Registry) UpstreamFor(id string) (string, string, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    e, ok := r.dynamic[id]
+    if !ok || e.manifest.Upstream == "" {
+        return "", "", false
+    }
+    return e.manifest.Upstream, e.manifest.APIKey, true
 }
 
 // RecordHealth stores a health-probe observation for one manifest id. A
@@ -319,6 +343,20 @@ func (r *Registry) checkEntryAllowlist(entryURL string) error {
         }
     }
     return fmt.Errorf("manifest entry origin %q is not in shell.entry_origin_allowlist", origin)
+}
+
+// validateUpstreamURL gates the optional #232 dynamic routing fields: an
+// upstream, when carried, must be an absolute http(s) URL (the proxy dials
+// it directly).
+func validateUpstreamURL(m config.ShellManifest) error {
+    if m.Upstream == "" {
+        return nil
+    }
+    u, err := url.Parse(m.Upstream)
+    if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+        return fmt.Errorf("manifest %q upstream %q must be an absolute http(s) URL", m.ID, m.Upstream)
+    }
+    return nil
 }
 
 func validateManifest(m config.ShellManifest) error {

@@ -219,6 +219,7 @@ web_shell:
 - **iframe 会话 Cookie**(#220,F-1)— 会话签发同时下发 HttpOnly `fusion_shell_session` Cookie(SameSite=Strict,Max-Age = token TTL,TLS 下 Secure),`/shell/*` 在无 Authorization 头时回退校验 Cookie,iframe 导航请求由此通过鉴权。登出吊销 Cookie token 并清除。
 - **代理层模块级 RBAC**(#221,F-2/S-8)— `/shell/<module>/` 转发前再次校验会话的模块权限(`*` 通配);未授权模块直接 403 `module_forbidden`,不触达上游。菜单隐藏只是第一层。
 - **上游凭证注入**(#222,F-3)— `web_shell.modules.<id>` 支持 `api_key`;代理剥离调用方的 `Authorization` 与 `Cookie` 头,向上游注入 `Authorization: Bearer <api_key>`。shell 会话 token 永不出网关。
+- **动态代理路由**(#232)— manifest 注册可携带 `upstream`(及 `api_key`),自注册模块无需改配置+重启即可经 `/shell/<id>/` 代理;静态 `web_shell.modules` 仍优先生效(override)。`upstream` 必须为绝对 http(s) URL;entry 来源白名单与凭证注入语义完全一致。manifest 列表 API 永不外泄 `api_key`(服务端置零)。WebSocket 升级经代理双向透传(原始握手测试验证),与 SSE 并存。
 
 ### 管理控制台作为 shell 远程模块(#216)
 

@@ -970,6 +970,16 @@ type ShellManifest struct {
     Backend  string   `json:"backend,omitempty" mapstructure:"backend"`
     Devices  []string `json:"devices" mapstructure:"devices"`
     Category string   `json:"category" mapstructure:"category"`
+    // Upstream is the module's proxy base URL (optional, #232). When set, a
+    // dynamically registered module is proxied at /shell/<id>/ without a
+    // static web_shell.modules entry; static config still wins as override.
+    Upstream string `json:"upstream,omitempty" mapstructure:"upstream"`
+    // APIKey is the upstream credential injected by the /shell/ proxy for a
+    // dynamically routed module. It decodes from registration bodies but is
+    // NEVER surfaced in manifest list output: Registry.List zeroes it on the
+    // returned copies and omitempty drops the empty field (the shell host
+    // must not receive secrets).
+    APIKey string `json:"api_key,omitempty" mapstructure:"api_key"`
 }
 
 type ShellModuleConfig struct {
