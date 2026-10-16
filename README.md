@@ -248,6 +248,7 @@ web_shell:
 - **Iframe session cookie** (#220, F-1) — session issuance also sets an HttpOnly `fusion_shell_session` cookie (SameSite=Strict, Max-Age = token TTL, Secure on TLS) and `/shell/*` falls back to it when no Authorization header is present, so iframe navigation requests authenticate. Logout revokes the cookie token and clears it.
 - **Per-module RBAC in the proxy** (#221, F-2/S-8) — `/shell/<module>/` re-validates the session's module permissions (`*` expands) before proxying; unauthorized modules get 403 `module_forbidden` without an upstream dial. Menu hiding is only the first layer.
 - **Upstream credential injection** (#222, F-3) — each `web_shell.modules.<id>` accepts `api_key`; the proxy strips the caller's `Authorization` and `Cookie` headers and injects `Authorization: Bearer <api_key>` upstream. The shell session token never leaves the gateway.
+- **Dynamic proxy routing** (#232) — a manifest registration may carry `upstream` (+ `api_key`) so a self-registering module is proxied at `/shell/<id>/` without a config edit + restart; static `web_shell.modules` still wins as override. `upstream` must be an absolute http(s) URL; the entry-origin allowlist and credential-injection semantics apply identically. The manifest list API never surfaces `api_key` (zeroed server-side). WebSocket upgrades pass through the proxy bidirectionally (verified by a raw-handshake test) alongside SSE.
 
 ### Admin console as a shell remote module (#216)
 
