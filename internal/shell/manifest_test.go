@@ -1,8 +1,12 @@
 package shell
 
 import (
+    "encoding/json"
     "net/http"
     "net/http/httptest"
+    "os"
+    "path/filepath"
+    "strings"
     "testing"
     "time"
 
@@ -181,5 +185,118 @@ func TestRegistry_RelativeEntryAcceptedAndTraversalRejected(t *testing.T) {
     if err := r.Upsert(config.ShellManifest{ID: "fusion-abs", Title: "A", Path: "/a",
         Entry: "http://evil.example:99/", Devices: []string{"desktop"}, Category: "domain"}); err == nil {
         t.Fatal("out-of-allowlist absolute entry accepted")
+    }
+}
+
+// TestRegistry_Persistence_RoundTrip (#230): an upserted registration lands
+// in the store file and a fresh registry restores it with the persisted
+// heartbeat (still online right after save).
+func TestRegistry_Persistence_RoundTrip(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    r1 := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r1.SetPersistence(path)
+    if err := r1.Upsert(validManifest("fusion-agent-studio")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    raw, err := os.ReadFile(path)
+    if err != nil {
+        t.Fatalf("store file missing after upsert: %v", err)
+    }
+    if strings.Contains(string(raw), "fusion-admin") {
+        t.Fatal("static/admin entries must not leak into the dynamic store")
+    }
+
+    r2 := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r2.SetPersistence(path)
+    if err := r2.Load(); err != nil {
+        t.Fatalf("load: %v", err)
+    }
+    views := r2.List()
+    if len(views) != 1 || views[0].ID != "fusion-agent-studio" || !views[0].Registered {
+        t.Fatalf("restored views = %+v", views)
+    }
+    if views[0].Status != StatusOnline {
+        t.Fatalf("fresh heartbeat should restore online, got %s", views[0].Status)
+    }
+
+    // Stale heartbeat survives the round-trip as unreachable — a restart
+    // never resurrects a dead module to online (heartbeat offline marking
+    // still applies).
+    stale := []persistedManifest{{
+        ShellManifest: validManifest("fusion-stale"),
+        LastHeartbeat: time.Now().Add(-time.Hour),
+    }}
+    staleRaw, _ := json.MarshalIndent(stale, "", "    ")
+    if err := os.WriteFile(path, staleRaw, 0o600); err != nil {
+        t.Fatalf("write stale store: %v", err)
+    }
+    r3 := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r3.SetPersistence(path)
+    if err := r3.Load(); err != nil {
+        t.Fatalf("load stale: %v", err)
+    }
+    if views := r3.List(); len(views) != 1 || views[0].Status != StatusUnreachable {
+        t.Fatalf("stale views = %+v, want unreachable", views)
+    }
+}
+
+// TestRegistry_Persistence_SkipsInvalidEntries (#230): store entries that no
+// longer validate against the CURRENT rules (allowlist tightened, bad shape)
+// are skipped with a warning, never fatal.
+func TestRegistry_Persistence_SkipsInvalidEntries(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    store := []persistedManifest{
+        {ShellManifest: validManifest("fusion-good"), LastHeartbeat: time.Now()},
+        {ShellManifest: validManifest("fusion-evil2"), LastHeartbeat: time.Now()},
+        {ShellManifest: validManifest("badshape"), LastHeartbeat: time.Now()},
+    }
+    store[1].ShellManifest.Entry = "http://evil.example:99/x/"
+    raw, _ := json.MarshalIndent(store, "", "    ")
+    if err := os.WriteFile(path, raw, 0o600); err != nil {
+        t.Fatalf("write store: %v", err)
+    }
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r.SetPersistence(path)
+    if err := r.Load(); err != nil {
+        t.Fatalf("load must not fail on invalid entries: %v", err)
+    }
+    views := r.List()
+    if len(views) != 1 || views[0].ID != "fusion-good" {
+        t.Fatalf("views = %+v, want only fusion-good", views)
+    }
+}
+
+// TestRegistry_Persistence_CorruptStore: a corrupt file returns an error
+// (caller logs and continues memory-only) and leaves the registry usable.
+func TestRegistry_Persistence_CorruptStore(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+        t.Fatalf("write: %v", err)
+    }
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r.SetPersistence(path)
+    if err := r.Load(); err == nil {
+        t.Fatal("corrupt store must return an error")
+    }
+    if err := r.Upsert(validManifest("fusion-mlx")); err != nil {
+        t.Fatalf("registry unusable after corrupt store: %v", err)
+    }
+}
+
+// TestRegistry_NoPersistence_MemoryOnly: no path set — Load is a no-op and
+// nothing is written anywhere.
+func TestRegistry_NoPersistence_MemoryOnly(t *testing.T) {
+    r := NewRegistry(nil, nil, time.Second)
+    if err := r.Load(); err != nil {
+        t.Fatalf("memory-only Load must be a no-op: %v", err)
+    }
+    if err := r.Upsert(validManifest("fusion-mlx")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if r.path != "" {
+        t.Fatal("path must stay empty without SetPersistence")
     }
 }

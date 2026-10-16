@@ -1,9 +1,12 @@
 package shell
 
 import (
+    "encoding/json"
     "fmt"
     "log/slog"
     "net/url"
+    "os"
+    "path/filepath"
     "strings"
     "sync"
     "time"
@@ -42,6 +45,14 @@ type entry struct {
     dynamic       bool
 }
 
+// persistedManifest is the on-disk shape of a dynamic registration
+// (store.data_dir/shell_manifests.json, #230). Only dynamic registrations
+// persist — static fallback entries live in config.yaml by definition.
+type persistedManifest struct {
+    config.ShellManifest
+    LastHeartbeat time.Time `json:"last_heartbeat"`
+}
+
 // Registry holds dynamic registrations plus the static fallback list.
 // Idempotent upsert by id (PRD §5.2): a re-registration overwrites the
 // manifest fields and resets the heartbeat, never duplicates.
@@ -55,6 +66,12 @@ type Registry struct {
     // manifest id (health.go poller). A static fallback entry with a fresh
     // probe is surfaced online even though no dynamic registration exists.
     lastHealthy map[string]time.Time
+    // path is the persistence file for dynamic registrations ("" = memory
+    // only). When set, Upsert persists and Load restores on boot (#230);
+    // the loaded lastHeartbeat is kept as-is, so a stale entry comes back
+    // unreachable and the heartbeat/health-poll offline marking still
+    // applies — a restart never resurrects a dead module to online.
+    path string
 }
 
 func NewRegistry(staticFallback []config.ShellManifest, allowlist []string, heartbeatExpiry time.Duration) *Registry {
@@ -85,7 +102,6 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
     }
 
     r.mu.Lock()
-    defer r.mu.Unlock()
     _, exists := r.dynamic[m.ID]
     r.dynamic[m.ID] = &entry{
         manifest:      m,
@@ -96,6 +112,112 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         slog.Info("shell manifest re-registered (idempotent upsert)", "id", m.ID, "entry", m.Entry)
     } else {
         slog.Info("shell manifest registered", "id", m.ID, "entry", m.Entry, "category", m.Category)
+    }
+    r.mu.Unlock()
+    // Persist the dynamic registration after releasing the lock (#230).
+    // A failed write must not fail the registration itself — log loudly;
+    // the next upsert retries the write.
+    if err := r.save(); err != nil {
+        slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
+    }
+    return nil
+}
+
+// SetPersistence points the registry at a store file (must be called before
+// Load). Empty path keeps the registry memory-only.
+func (r *Registry) SetPersistence(path string) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.path = path
+}
+
+// Load restores dynamic registrations from the store file (#230). A missing
+// file is not an error (fresh install). Each entry is re-validated against
+// the CURRENT manifest rules and entry allowlist — a stale store entry that
+// no longer validates (config allowlist tightened, bad shape) is skipped
+// with a warning, never fatal. Load must be called before any Upsert.
+func (r *Registry) Load() error {
+    r.mu.RLock()
+    path := r.path
+    r.mu.RUnlock()
+    if path == "" {
+        return nil
+    }
+    raw, err := os.ReadFile(path)
+    if os.IsNotExist(err) {
+        return nil
+    }
+    if err != nil {
+        return fmt.Errorf("read shell manifest store: %w", err)
+    }
+    var persisted []persistedManifest
+    if err := json.Unmarshal(raw, &persisted); err != nil {
+        return fmt.Errorf("parse shell manifest store %s: %w", path, err)
+    }
+    r.mu.Lock()
+    for i := range persisted {
+        p := persisted[i]
+        m := p.ShellManifest
+        if err := r.validateForStoreLocked(m); err != nil {
+            slog.Warn("shell manifest store entry skipped (no longer valid)", "id", m.ID, "error", err)
+            continue
+        }
+        r.dynamic[m.ID] = &entry{
+            manifest:      m,
+            lastHeartbeat: p.LastHeartbeat,
+            dynamic:       true,
+        }
+    }
+    n := len(r.dynamic)
+    r.mu.Unlock()
+    slog.Info("shell manifest store loaded", "path", path, "manifests", n)
+    return nil
+}
+
+// validateForStoreLocked applies the same gates as Upsert. Called with r.mu
+// held (Lock or RLock) — it reads allowlist only.
+func (r *Registry) validateForStoreLocked(m config.ShellManifest) error {
+    if err := validateManifest(m); err != nil {
+        return err
+    }
+    if !strings.HasPrefix(m.ID, "fusion-") {
+        return fmt.Errorf("manifest id %q must use the fusion-<name> prefix", m.ID)
+    }
+    return r.checkEntryAllowlist(m.Entry)
+}
+
+// save snapshots the dynamic registrations and writes them atomically
+// (temp file + rename, 0600). Heartbeat-only refreshes are NOT persisted —
+// a restart drops at most the last heartbeat interval of liveness, and the
+// next keepalive re-marks the module online.
+func (r *Registry) save() error {
+    r.mu.RLock()
+    path := r.path
+    if path == "" {
+        r.mu.RUnlock()
+        return nil
+    }
+    persisted := make([]persistedManifest, 0, len(r.dynamic))
+    for _, e := range r.dynamic {
+        persisted = append(persisted, persistedManifest{
+            ShellManifest: e.manifest,
+            LastHeartbeat: e.lastHeartbeat,
+        })
+    }
+    r.mu.RUnlock()
+    if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+        return fmt.Errorf("create shell manifest store dir: %w", err)
+    }
+    raw, err := json.MarshalIndent(persisted, "", "    ")
+    if err != nil {
+        return fmt.Errorf("marshal shell manifests: %w", err)
+    }
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+        return fmt.Errorf("write shell manifest temp: %w", err)
+    }
+    if err := os.Rename(tmp, path); err != nil {
+        return fmt.Errorf("rename shell manifest store: %w", err)
     }
     return nil
 }
