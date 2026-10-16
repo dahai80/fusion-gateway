@@ -46,6 +46,17 @@ func (s *Server) setupShell() {
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
+    if cfg.Store.DataDir != "" {
+        // Dynamic registrations survive restarts (#230). Load before the
+        // admin auto-register so an upsert collision resolves to the fresh
+        // embedded manifest. A corrupt store must not wedge the shell
+        // subsystem: log loudly and continue memory-only.
+        path := filepath.Join(config.ExpandPath(cfg.Store.DataDir), "shell_manifests.json")
+        s.shellRegistry.SetPersistence(path)
+        if err := s.shellRegistry.Load(); err != nil {
+            slog.Error("shell manifest store load failed — continuing memory-only", "path", path, "error", err)
+        }
+    }
     s.shellProxy = shell.NewProxy(func(moduleID string) (string, string) {
         if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok {
             return m.Upstream, m.APIKey
@@ -463,11 +474,22 @@ func (s *Server) handleShellMe(w http.ResponseWriter, r *http.Request) {
 
 // handleShellManifestList: GET /api/v1/shell/manifests — a bare array of the
 // manifest fields + derived status; `unreachable` is the host-menu greying
-// flag (stale heartbeat or never-registered static fallback).
+// flag (stale heartbeat or never-registered static fallback). Filtered to
+// the session's permission subset (#229, PRD §4 menu visibility): a limited
+// session must not be able to enumerate module ids/titles/health URLs it
+// cannot access. `*` sees all; an empty permission list sees nothing
+// (fail-closed, same gate as the proxy RBAC).
 func (s *Server) handleShellManifestList(w http.ResponseWriter, r *http.Request) {
+    claims := shellClaimsFrom(r.Context())
     views := s.shellRegistry.List()
+    filtered := make([]shell.ManifestView, 0, len(views))
+    for _, v := range views {
+        if shellModuleAllowed(claims.Modules, v.ID) {
+            filtered = append(filtered, v)
+        }
+    }
     w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(views)
+    _ = json.NewEncoder(w).Encode(filtered)
 }
 
 // handleShellManifestUpsert: POST /api/v1/shell/manifests — module

@@ -722,6 +722,19 @@ func TestLayaAC7ServerLatencyUnder15ms(t *testing.T) {
     if _, err := c.callLaya(ctx, "warmup prompt"); err != nil {
         t.Skipf("laya endpoint unavailable, skipping gateway-side AC7 latency: %v", err)
     }
+    // Re-check isolation after warmup (TOCTOU): a concurrent test hitting
+    // the shared live engine can lazy-load a second model between the guard
+    // above and the measurement, inflating latency and flaking the suite.
+    if health2, err := http.Get("http://127.0.0.1:11434/health"); err == nil {
+        var h2 struct {
+            LoadedModels []string `json:"loaded_models"`
+        }
+        _ = json.NewDecoder(health2.Body).Decode(&h2)
+        health2.Body.Close()
+        if n := len(h2.LoadedModels); n > 1 {
+            t.Skipf("AC7 isolation lost during warmup: %d models loaded (%v)", n, h2.LoadedModels)
+        }
+    }
     res, err := c.callLaya(ctx, "hello world")
     if err != nil {
         t.Skipf("laya endpoint unavailable after warmup: %v", err)

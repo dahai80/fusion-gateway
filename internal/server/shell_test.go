@@ -183,9 +183,14 @@ func TestShellManifest_UpsertListHeartbeat(t *testing.T) {
 
     // List shows the registered entry online (bare array — shell host shape).
     // The built-in fusion-admin manifest (#216) is also auto-registered.
+    // #229: the list is permission-filtered, so this goes through the
+    // session auth as admin (`*` sees all).
+    _, loginResp := loginShell(t, s, "admin", "s3cret")
+    adminToken := loginResp["token"].(string)
     req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
+    req.Header.Set("Authorization", "Bearer "+adminToken)
     w = httptest.NewRecorder()
-    s.handleShellManifestList(w, req)
+    s.withShellSession(s.handleShellManifestList)(w, req)
     var listResp []shell.ManifestView
     _ = json.Unmarshal(w.Body.Bytes(), &listResp)
     if len(listResp) != 2 {
@@ -195,6 +200,52 @@ func TestShellManifest_UpsertListHeartbeat(t *testing.T) {
         if v.ID == "fusion-mlx" && (v.Status != shell.StatusOnline || v.Unreachable) {
             t.Fatalf("fusion-mlx = %+v, want online", v)
         }
+    }
+}
+
+// TestShellManifestList_PermissionFiltered (#229): a limited session sees
+// only its granted manifest subset; admin (`*`) still sees all.
+func TestShellManifestList_PermissionFiltered(t *testing.T) {
+    s := newShellTestServer(t, false)
+    // Register fusion-mlx so the registry carries 2 entries (fusion-mlx +
+    // auto-registered fusion-admin); alice has only [fusion-mlx].
+    m := map[string]any{
+        "id": "fusion-mlx", "title": "MLX", "path": "/mlx",
+        "entry": "http://127.0.0.1:11432/shell/fusion-mlx/",
+        "devices": []string{"desktop"}, "category": "platform",
+    }
+    body, _ := json.Marshal(m)
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", strings.NewReader(string(body)))
+    w := httptest.NewRecorder()
+    s.handleShellManifestUpsert(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("upsert code = %d body=%s", w.Code, w.Body.String())
+    }
+
+    // Alice: exactly one manifest, and it is the granted one.
+    _, resp := loginShell(t, s, "alice", "alicepw")
+    aliceToken := resp["token"].(string)
+    req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
+    req.Header.Set("Authorization", "Bearer "+aliceToken)
+    w = httptest.NewRecorder()
+    s.withShellSession(s.handleShellManifestList)(w, req)
+    var aliceView []shell.ManifestView
+    _ = json.Unmarshal(w.Body.Bytes(), &aliceView)
+    if len(aliceView) != 1 || aliceView[0].ID != "fusion-mlx" {
+        t.Fatalf("alice manifest list = %+v, want only fusion-mlx", aliceView)
+    }
+
+    // Admin: still sees both.
+    _, resp = loginShell(t, s, "admin", "s3cret")
+    adminToken := resp["token"].(string)
+    req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
+    req.Header.Set("Authorization", "Bearer "+adminToken)
+    w = httptest.NewRecorder()
+    s.withShellSession(s.handleShellManifestList)(w, req)
+    var adminView []shell.ManifestView
+    _ = json.Unmarshal(w.Body.Bytes(), &adminView)
+    if len(adminView) != 2 {
+        t.Fatalf("admin manifest list = %+v, want all 2", adminView)
     }
 }
 
