@@ -3,6 +3,7 @@ package shell
 import (
     "bufio"
     "context"
+    "encoding/json"
     "net"
     "net/http"
     "net/http/httptest"
@@ -244,6 +245,33 @@ func TestRegistry_UpsertRejectsBadUpstream(t *testing.T) {
     m.Upstream = "ftp://127.0.0.1:1"
     if err := r.Upsert(m); err == nil {
         t.Fatal("non-http upstream accepted")
+    }
+}
+
+// TestRegistry_RegistrationBodyDecodesAPIKey (#232 regression): api_key must
+// DECODE from a registration body (json:"-" blocked decode, live-found) while
+// list output stays clean.
+func TestRegistry_RegistrationBodyDecodesAPIKey(t *testing.T) {
+    var m config.ShellManifest
+    body := `{"id":"fusion-x","title":"X","path":"/x","entry":"/shell/fusion-x/",` +
+        `"devices":["desktop"],"category":"dev","upstream":"http://127.0.0.1:9100","api_key":"k123"}`
+    if err := json.Unmarshal([]byte(body), &m); err != nil {
+        t.Fatalf("decode: %v", err)
+    }
+    if m.APIKey != "k123" || m.Upstream != "http://127.0.0.1:9100" {
+        t.Fatalf("decoded = %+v", m)
+    }
+    r := NewRegistry(nil, nil, 30*time.Second)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if _, key, ok := r.UpstreamFor("fusion-x"); !ok || key != "k123" {
+        t.Fatalf("UpstreamFor = %q %v", key, ok)
+    }
+    // List JSON must not carry the secret.
+    raw, _ := json.Marshal(r.List())
+    if strings.Contains(string(raw), "k123") {
+        t.Fatalf("list JSON leaked api_key: %s", raw)
     }
 }
 
