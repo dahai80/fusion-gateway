@@ -112,11 +112,9 @@ See `config.example.yaml` for full reference. Key settings:
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
 | `hot_reload.enabled` | true | Enable config file hot reload |
 | `hot_reload.breaker_drain_timeout` | 10s | Wait time for in-flight drain before applying config |
-| `hot_reload.breaker_warmup_success` | 3 | Success count to close breaker after warmup |
 | `admin.enabled` | true | Enable admin dashboard and API |
 | `admin.log_max_len` | 10000 | Max request log entries (ring buffer) |
 | `admin.jwt_secret` | "" | JWT signing secret for admin auth |
-| `cost.pricing_file` | "" | Custom pricing YAML with hot reload |
 | `observability.otel_enabled` | false | Enable OpenTelemetry tracing |
 | `observability.otel_endpoint` | localhost:4317 | OTel collector endpoint |
 | `observability.otel_protocol` | grpc | OTel export protocol: grpc or http |
@@ -660,7 +658,6 @@ Built-in cost tracking with per-model pricing:
 - `/v1/cost` endpoint for aggregated summaries (by key, backend, model)
 - Per-key cost breakdown with `?key=<name>` filter
 - JSON export via `Tracker.ExportJSON()`
-- **Custom pricing file**: YAML-based model pricing overrides with hot reload (`cost.pricing_file`)
 - **Budget blocking**: Per-key monthly spend limits (`budget_limit`) enforced before request execution
 
 ## Stream Options

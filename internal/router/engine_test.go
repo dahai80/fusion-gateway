@@ -611,7 +611,6 @@ func TestDrainAndApply(t *testing.T) {
     newCfg := defaultTestSnapshot()
     newCfg.Version = 2
     newCfg.Config.HotReload.BreakerDrainTimeout = 1 * time.Second
-    newCfg.Config.HotReload.BreakerWarmupSuccess = 2
 
     e.DrainAndApply(newCfg)
 

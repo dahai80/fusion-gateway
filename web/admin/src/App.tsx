@@ -12,7 +12,6 @@ import AuthConfig from "./pages/config/AuthConfig";
 import RateLimitConfig from "./pages/config/RateLimitConfig";
 import RetryConfig from "./pages/config/RetryConfig";
 import CacheConfig from "./pages/config/CacheConfig";
-import CostConfig from "./pages/config/CostConfig";
 import CORSConfig from "./pages/config/CORSConfig";
 import HardwareConfig from "./pages/config/HardwareConfig";
 import NegotiationConfig from "./pages/config/NegotiationConfig";
@@ -72,7 +71,6 @@ export default function App() {
                         <Route path="config/rate-limit" element={<RateLimitConfig />} />
                         <Route path="config/retry" element={<RetryConfig />} />
                         <Route path="config/cache" element={<CacheConfig />} />
-                        <Route path="config/cost" element={<CostConfig />} />
                         <Route path="config/cost-markup" element={<CostMarkupConfig />} />
                         <Route path="config/pii" element={<PIIConfig />} />
                         <Route path="config/prompt-injection" element={<PromptInjectionConfig />} />

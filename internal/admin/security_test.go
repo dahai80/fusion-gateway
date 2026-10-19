@@ -118,7 +118,6 @@ func TestConfigPUTRejectedForViewerRole(t *testing.T) {
         {"/admin/api/config/server", map[string]interface{}{"port": 9999}},
         {"/admin/api/config/cache", map[string]interface{}{"enabled": false}},
         {"/admin/api/config/auth", map[string]interface{}{"enabled": false}},
-        {"/admin/api/config/cost", map[string]interface{}{"enabled": false}},
     }
 
     for _, ep := range endpoints {

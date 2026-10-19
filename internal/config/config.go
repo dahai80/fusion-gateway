@@ -87,8 +87,7 @@ type AuthKeyConfig struct {
     ExpiresAt        string            `mapstructure:"expires_at"`
     BudgetLimit      float64           `mapstructure:"budget_limit"`
     DailyBudgetLimit float64           `mapstructure:"daily_budget_limit"`
-    Metadata         map[string]string `mapstructure:"metadata"`
-    // TeamID is the tenant this key belongs to, resolved from the store's
+        // TeamID is the tenant this key belongs to, resolved from the store's
     // key->team binding (Store.GetTeamByKey) at auth time. Issue #150 Gap1:
     // gateway-derived tenant identity, NOT a client-supplied header. Empty
     // when the key has no team binding (master key, legacy keys).
@@ -413,12 +412,6 @@ type RedisConfig struct {
     PoolSize int    `mapstructure:"pool_size"`
 }
 
-type CostConfig struct {
-    Enabled              bool    `mapstructure:"enabled"`
-    PricingFile          string  `mapstructure:"pricing_file"`
-    BudgetAlertThreshold float64 `mapstructure:"budget_alert_threshold"`
-}
-
 type PIIConfig struct {
     Enabled  bool           `mapstructure:"enabled"`
     Action   string         `mapstructure:"action"`
@@ -581,9 +574,7 @@ type HotReloadConfig struct {
     Enabled              bool          `mapstructure:"enabled"`
     WatchPath            string        `mapstructure:"watch_path"`
     Debounce             time.Duration `mapstructure:"debounce"`
-    Versioning           bool          `mapstructure:"versioning"`
     BreakerDrainTimeout  time.Duration `mapstructure:"breaker_drain_timeout"`
-    BreakerWarmupSuccess int           `mapstructure:"breaker_warmup_success"`
 }
 
 type ValidationConfig struct {
@@ -888,7 +879,6 @@ type Config struct {
     Cluster       ClusterConfig            `mapstructure:"cluster"`
     Realtime      RealtimeConfig           `mapstructure:"realtime"`
     Cache         CacheConfig              `mapstructure:"cache"`
-    Cost          CostConfig               `mapstructure:"cost"`
     PII           PIIConfig                `mapstructure:"pii"`
     CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
     Admin         *AdminConfig             `mapstructure:"admin"`
@@ -1162,6 +1152,7 @@ func Load(path string) (*ConfigSnapshot, error) {
     if err := v.ReadInConfig(); err != nil {
         return nil, fmt.Errorf("read config: %w", err)
     }
+    warnUnknownKeys(v.AllSettings())
 
     // Seed with DefaultConfig so fields a YAML omits land on sane defaults, not
     // zero values that validate() then rejects (e.g. circuit_breaker thresholds
@@ -1257,6 +1248,7 @@ func Reload(path string) (*ConfigSnapshot, error) {
         slog.Error("reload: failed to read config", "error", err)
         return nil, fmt.Errorf("read config: %w", err)
     }
+    warnUnknownKeys(v.AllSettings())
 
     // Seed with DefaultConfig (same as Load) so omitted YAML keys keep sane
     // defaults, not zero values that validate() rejects. EI8 made validate()

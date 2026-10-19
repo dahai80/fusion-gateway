@@ -57,7 +57,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/config/retry", h.requireAdminRole(h.handleRetryConfig))
     mux.HandleFunc("/admin/api/config/negotiation", h.requireAdminRole(h.handleNegotiationConfig))
     mux.HandleFunc("/admin/api/config/cache", h.requireAdminRole(h.handleCacheConfig))
-    mux.HandleFunc("/admin/api/config/cost", h.requireAdminRole(h.handleCostConfig))
     mux.HandleFunc("/admin/api/config/cost-markup", h.requireAdminRole(h.handleCostMarkupConfig))
     mux.HandleFunc("/admin/api/config/pii", h.requireAdminRole(h.handlePIIConfig))
     mux.HandleFunc("/admin/api/config/cloud-routing", h.requireAdminRole(h.handleCloudRoutingConfig))
@@ -317,7 +316,6 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             "daily_date":       key.DailyDate,
             "allowed_backends": key.AllowedBackends,
             "model_modules":    key.ModelModules,
-            "metadata":         key.Metadata,
             "created_at":       key.CreatedAt.Format(time.RFC3339),
             "updated_at":       key.UpdatedAt.Format(time.RFC3339),
         })

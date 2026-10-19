@@ -349,55 +349,6 @@ func (h *Handler) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
 
 // ─── Cost Config ──────────────────────────────────────────────
 
-type costConfigResponse struct {
-    Enabled              bool    `json:"enabled"`
-    PricingFile          string  `json:"pricing_file"`
-    BudgetAlertThreshold float64 `json:"budget_alert_threshold"`
-}
-
-type costConfigUpdate struct {
-    Enabled              *bool    `json:"enabled,omitempty"`
-    PricingFile          *string  `json:"pricing_file,omitempty"`
-    BudgetAlertThreshold *float64 `json:"budget_alert_threshold,omitempty"`
-}
-
-func (h *Handler) handleCostConfig(w http.ResponseWriter, r *http.Request) {
-    switch r.Method {
-    case http.MethodGet:
-        c := config.GetSnapshot().Config.Cost
-        writeJSON(w, http.StatusOK, costConfigResponse{
-            Enabled: c.Enabled, PricingFile: c.PricingFile,
-            BudgetAlertThreshold: c.BudgetAlertThreshold,
-        })
-    case http.MethodPut:
-        var req costConfigUpdate
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            writeError(w, http.StatusBadRequest, "invalid request body")
-            return
-        }
-        doc, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
-            sec := getOrCreateSection(doc, "cost")
-            applyBool(sec, "enabled", req.Enabled)
-            applyString(sec, "pricing_file", req.PricingFile)
-            if req.BudgetAlertThreshold != nil {
-                sec["budget_alert_threshold"] = *req.BudgetAlertThreshold
-            }
-            return nil
-        }); if err != nil {
-            writeYAMLError(w, err)
-            return
-        }
-        slog.Info("cost config updated via admin API")
-        sec := getOrCreateSection(doc, "cost")
-        writeJSON(w, http.StatusOK, costConfigResponse{
-            Enabled: getBool(sec, "enabled"), PricingFile: getString(sec, "pricing_file"),
-            BudgetAlertThreshold: getFloat64(sec, "budget_alert_threshold"),
-        })
-    default:
-        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-    }
-}
-
 // ─── CostMarkup Config ────────────────────────────────────────
 
 type costMarkupConfigResponse struct {
@@ -934,18 +885,14 @@ type hotReloadConfigResponse struct {
     Enabled              bool   `json:"enabled"`
     WatchPath            string `json:"watch_path"`
     Debounce             string `json:"debounce"`
-    Versioning           bool   `json:"versioning"`
     BreakerDrainTimeout  string `json:"breaker_drain_timeout"`
-    BreakerWarmupSuccess int    `json:"breaker_warmup_success"`
 }
 
 type hotReloadConfigUpdate struct {
     Enabled              *bool   `json:"enabled,omitempty"`
     WatchPath            *string `json:"watch_path,omitempty"`
     Debounce             *string `json:"debounce,omitempty"`
-    Versioning           *bool   `json:"versioning,omitempty"`
     BreakerDrainTimeout  *string `json:"breaker_drain_timeout,omitempty"`
-    BreakerWarmupSuccess *int    `json:"breaker_warmup_success,omitempty"`
 }
 
 func (h *Handler) handleHotReloadConfig(w http.ResponseWriter, r *http.Request) {
@@ -954,8 +901,7 @@ func (h *Handler) handleHotReloadConfig(w http.ResponseWriter, r *http.Request) 
         hr := config.GetSnapshot().Config.HotReload
         writeJSON(w, http.StatusOK, hotReloadConfigResponse{
             Enabled: hr.Enabled, WatchPath: hr.WatchPath, Debounce: hr.Debounce.String(),
-            Versioning: hr.Versioning, BreakerDrainTimeout: hr.BreakerDrainTimeout.String(),
-            BreakerWarmupSuccess: hr.BreakerWarmupSuccess,
+            BreakerDrainTimeout: hr.BreakerDrainTimeout.String(),
         })
     case http.MethodPut:
         var req hotReloadConfigUpdate
@@ -970,11 +916,9 @@ func (h *Handler) handleHotReloadConfig(w http.ResponseWriter, r *http.Request) 
             if req.Debounce != nil {
                 sec["debounce"] = *req.Debounce
             }
-            applyBool(sec, "versioning", req.Versioning)
             if req.BreakerDrainTimeout != nil {
                 sec["breaker_drain_timeout"] = *req.BreakerDrainTimeout
             }
-            applyInt(sec, "breaker_warmup_success", req.BreakerWarmupSuccess)
             return nil
         }); if err != nil {
             writeYAMLError(w, err)
@@ -984,8 +928,7 @@ func (h *Handler) handleHotReloadConfig(w http.ResponseWriter, r *http.Request) 
         sec := getOrCreateSection(doc, "hot_reload")
         writeJSON(w, http.StatusOK, hotReloadConfigResponse{
             Enabled: getBool(sec, "enabled"), WatchPath: getString(sec, "watch_path"), Debounce: getString(sec, "debounce"),
-            Versioning: getBool(sec, "versioning"), BreakerDrainTimeout: getString(sec, "breaker_drain_timeout"),
-            BreakerWarmupSuccess: getInt(sec, "breaker_warmup_success"),
+            BreakerDrainTimeout: getString(sec, "breaker_drain_timeout"),
         })
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1696,7 +1639,6 @@ type authKeyResponse struct {
     ExpiresAt        string            `json:"expires_at"`
     BudgetLimit      float64           `json:"budget_limit"`
     DailyBudgetLimit float64           `json:"daily_budget_limit"`
-    Metadata         map[string]string `json:"metadata"`
 }
 
 type authConfigResponse struct {
@@ -1726,7 +1668,6 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                 ModelModules: k.ModelModules,
                 ExpiresAt: k.ExpiresAt, BudgetLimit: k.BudgetLimit,
                 DailyBudgetLimit: k.DailyBudgetLimit,
-                Metadata: k.Metadata,
             })
         }
         writeJSON(w, http.StatusOK, authConfigResponse{
@@ -1796,8 +1737,7 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                         ModelModules: interfaceToStringSlice(m["model_modules"]),
                         ExpiresAt: getString(m, "expires_at"), BudgetLimit: getFloat64(m, "budget_limit"),
                         DailyBudgetLimit: getFloat64(m, "daily_budget_limit"),
-                        Metadata: interfaceToStringMap(m["metadata"]),
-                    })
+                                            })
                 }
             }
         }
@@ -1832,10 +1772,6 @@ func (h *Handler) handleFullConfig(w http.ResponseWriter, r *http.Request) {
             "enabled": cfg.Cache.Enabled, "max_entries": cfg.Cache.MaxEntries,
             "ttl": cfg.Cache.TTL.String(), "max_memory_mb": cfg.Cache.MaxMemoryMB,
             "backend": cfg.Cache.Backend,
-        },
-        "cost": map[string]interface{}{
-            "enabled": cfg.Cost.Enabled, "pricing_file": cfg.Cost.PricingFile,
-            "budget_alert_threshold": cfg.Cost.BudgetAlertThreshold,
         },
         "cluster": map[string]interface{}{
             "enabled": cfg.Cluster.Enabled, "mode": string(cfg.Cluster.Mode),
