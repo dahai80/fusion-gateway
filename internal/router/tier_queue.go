@@ -128,15 +128,24 @@ func clampGuarantee(g, cap int) int {
 // ErrTierQueueTimeout. ctx cancel is honored: a canceled ctx returns ctx.Err()
 // without acquiring a slot.
 func (q *TierQueue) Acquire(ctx context.Context, tier Tier) (func(), error) {
-    // Fast path: a free slot with no waiters takes it immediately. This keeps
-    // the uncontended path lock-free and identical to slotQueue.
-    select {
-    case q.sem <- struct{}{}:
-        slog.Debug("tier queue acquired (fast path)",
-            "tier", tier, "occupied", len(q.sem))
-        return q.release, nil
-    default:
+    // Fast path: a free slot with no waiters takes it immediately. B9 (audit):
+    // the old unconditional channel send let a new request — even a light one —
+    // grab a slot that had just been freed while heavy waiters were queued,
+    // bypassing tier priority entirely. Taking the slot under q.mu with an
+    // empty-waiters check hands freed slots to dispatch (head-of-line by tier)
+    // whenever anyone is waiting. The uncontended path keeps the same shape.
+    q.mu.Lock()
+    if len(q.waiters) == 0 {
+        select {
+        case q.sem <- struct{}{}:
+            q.mu.Unlock()
+            slog.Debug("tier queue acquired (fast path)",
+                "tier", tier, "occupied", len(q.sem))
+            return q.release, nil
+        default:
+        }
     }
+    q.mu.Unlock()
 
     waiter := &tierWaiter{
         tier:  tier,
@@ -145,6 +154,11 @@ func (q *TierQueue) Acquire(ctx context.Context, tier Tier) (func(), error) {
     }
     waitCtx, cancel := context.WithCancel(ctx)
     waiter.cancel = cancel
+    // A9 (audit): cancel the child ctx on every return path — previously only
+    // removeWaiterIfNotCommitted fired it, so success branches (slot granted)
+    // left the child context attached to the parent until the parent itself
+    // was canceled. cancel() is idempotent and harmless after commit.
+    defer cancel()
 
     q.mu.Lock()
     q.insertWaiter(waiter)

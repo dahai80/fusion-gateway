@@ -25,7 +25,7 @@ func TestRBACAuth_Disabled(t *testing.T) {
 }
 
 func TestRBACAuth_ViewerBlockedOnMutation(t *testing.T) {
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("viewer should not reach handler on POST")
     }))
@@ -38,7 +38,7 @@ func TestRBACAuth_ViewerBlockedOnMutation(t *testing.T) {
 }
 
 func TestRBACAuth_ViewerAllowedOnGet(t *testing.T) {
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         called = true
@@ -70,7 +70,7 @@ func TestRBACAuth_MasterKeyGetsInferenceNotAdmin(t *testing.T) {
     // /v1/chat/completions is an inference call, not an admin mutation), so the
     // handler is still called — but the role on the Principal must be
     // RoleInference, never RoleAdmin. This is the plane-separation invariant.
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     var gotRole Role
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if p := PrincipalFromContext(r.Context()); p != nil {
@@ -124,7 +124,7 @@ func TestCanWrite(t *testing.T) {
 
 func TestRBACAuth_OIDCRoleClaim(t *testing.T) {
     slog.Info("test RBACAuth_OIDCRoleClaim")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
@@ -148,7 +148,7 @@ func TestRBACAuth_OIDCRoleClaim(t *testing.T) {
 
 func TestRBACAuth_OIDCGroupsAdmin(t *testing.T) {
     slog.Info("test RBACAuth_OIDCGroupsAdmin")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
@@ -171,7 +171,7 @@ func TestRBACAuth_OIDCGroupsAdmin(t *testing.T) {
 
 func TestRBACAuth_OIDCGroupsAdmins(t *testing.T) {
     slog.Info("test RBACAuth_OIDCGroupsAdmins")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
@@ -194,7 +194,7 @@ func TestRBACAuth_OIDCGroupsAdmins(t *testing.T) {
 
 func TestRBACAuth_OIDCGroupsEditor(t *testing.T) {
     slog.Info("test RBACAuth_OIDCGroupsEditor")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
@@ -217,7 +217,7 @@ func TestRBACAuth_OIDCGroupsEditor(t *testing.T) {
 
 func TestRBACAuth_OIDCGroupsEditors(t *testing.T) {
     slog.Info("test RBACAuth_OIDCGroupsEditors")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     called := false
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
@@ -240,7 +240,7 @@ func TestRBACAuth_OIDCGroupsEditors(t *testing.T) {
 
 func TestRBACAuth_OIDCInvalidRole(t *testing.T) {
     slog.Info("test RBACAuth_OIDCInvalidRole")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("viewer with invalid OIDC role should be blocked on POST")
     }))
@@ -314,7 +314,7 @@ func TestRBACAuth_EditorCanMutate(t *testing.T) {
 
 func TestRBACAuth_ViewerBlockedOnPut(t *testing.T) {
     slog.Info("test RBACAuth_ViewerBlockedOnPut")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("viewer should not reach handler on PUT")
     }))
@@ -328,7 +328,7 @@ func TestRBACAuth_ViewerBlockedOnPut(t *testing.T) {
 
 func TestRBACAuth_ViewerBlockedOnDelete(t *testing.T) {
     slog.Info("test RBACAuth_ViewerBlockedOnDelete")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("viewer should not reach handler on DELETE")
     }))
@@ -342,7 +342,7 @@ func TestRBACAuth_ViewerBlockedOnDelete(t *testing.T) {
 
 func TestRBACAuth_ViewerBlockedOnPatch(t *testing.T) {
     slog.Info("test RBACAuth_ViewerBlockedOnPatch")
-    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer", TrustOIDCClaims: true}
     handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("viewer should not reach handler on PATCH")
     }))
@@ -392,5 +392,30 @@ func TestRBACAuth_OIDCGroupDoesNotOverrideAdmin(t *testing.T) {
     handler.ServeHTTP(httptest.NewRecorder(), req)
     if !called {
         t.Fatal("editor group should not downgrade admin from OIDC role claim")
+    }
+}
+
+func TestRBACAuth_OIDCClaimsIgnoredByDefault(t *testing.T) {
+    slog.Info("test RBACAuth_OIDCClaimsIgnoredByDefault (B20: claim mapping opt-in)")
+    cfg := &config.RBACConfig{Enabled: true, DefaultRole: "viewer"}
+    handler := RBACAuth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        p := PrincipalFromContext(r.Context())
+        if p.Role == RoleAdmin {
+            t.Error("OIDC role claim must not escalate without rbac.trust_oidc_claims (B20)")
+        }
+        if p.Role != RoleViewer {
+            t.Errorf("role: got %s, want viewer (default_role)", p.Role)
+        }
+        w.WriteHeader(http.StatusOK)
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    ctx, _ := EnsurePrincipal(req.Context())
+    ctx = ContextWithPrincipal(ctx, &Principal{
+        OIDCClaims: jwt.MapClaims{"role": "admin"},
+    })
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req.WithContext(ctx))
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
     }
 }

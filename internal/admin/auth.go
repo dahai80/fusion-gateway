@@ -31,6 +31,10 @@ type AdminAuth struct {
 type loginAttempt struct {
     count        int
     lockedUntil  time.Time
+    // B15 (audit): last failure time. Entries for usernames never seen again
+    // are pure garbage once their lockout expires; lastSeen drives the sweep
+    // that bounds the map against unbounded random-username growth.
+    lastSeen     time.Time
 }
 
 const (
@@ -150,11 +154,33 @@ func (a *AdminAuth) recordLoginFailure(username string) {
         a.loginAttempts[username] = att
     }
     att.count++
+    now := time.Now()
+    att.lastSeen = now
     if att.count >= maxLoginAttempts {
-        att.lockedUntil = time.Now().Add(loginLockoutDur)
+        att.lockedUntil = now.Add(loginLockoutDur)
         slog.Warn("admin login locked out after repeated failures",
             "username", username, "attempts", att.count, "locked_for", loginLockoutDur)
     }
+    a.pruneLoginAttemptsLocked(now)
+}
+
+// maxLoginAttemptsMap caps the loginAttempts map. A random-username attack
+// inserts one entry per distinct name with no upper bound otherwise (B15) —
+// past this size, expired-lockout entries older than the lockout window are
+// swept under the same lock.
+const maxLoginAttemptsMap = 2048
+
+func (a *AdminAuth) pruneLoginAttemptsLocked(now time.Time) {
+    if len(a.loginAttempts) < maxLoginAttemptsMap {
+        return
+    }
+    cutoff := now.Add(-loginLockoutDur)
+    for u, att := range a.loginAttempts {
+        if att.lastSeen.Before(cutoff) && now.After(att.lockedUntil) {
+            delete(a.loginAttempts, u)
+        }
+    }
+    slog.Debug("admin login attempts map pruned", "size", len(a.loginAttempts))
 }
 
 // recordLoginSuccess clears the attempt history for username (R6).

@@ -315,18 +315,43 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     // inFlightMu.RLock once so the loop does not re-acquire per poll.
     e.inFlightMu.RLock()
     inFlightFn := e.localInFlight
+    oldLocalQueue := e.localQueue
+    oldTierQueue := e.tierQueue
     e.inFlightMu.RUnlock()
+    // B8 (audit): drain previously watched only the in-flight count — with
+    // in-flight==0 but queued waiters on localQueue/tierQueue, the queues were
+    // swapped out from under waiting requests, which then only escaped via
+    // their own timeout. Also fixes C3: one inFlightFn() call per iteration
+    // instead of two (the old log could report a different value than the
+    // condition checked).
+    queueWaiters := func() int {
+        total := 0
+        if oldLocalQueue != nil {
+            total += oldLocalQueue.Waiters()
+        }
+        if oldTierQueue != nil {
+            for _, n := range oldTierQueue.Waiters() {
+                total += n
+            }
+        }
+        return total
+    }
     deadline := time.Now().Add(drainTimeout)
     for time.Now().Before(deadline) {
-        if inFlightFn() == 0 {
-            slog.Info("drain complete: no in-flight requests")
+        inFlight := inFlightFn()
+        waiters := queueWaiters()
+        if inFlight == 0 && waiters == 0 {
+            slog.Info("drain complete: no in-flight requests or queued waiters")
             break
         }
-        slog.Info("draining: waiting for in-flight requests", "in_flight", inFlightFn())
+        slog.Info("draining: waiting for in-flight requests", "in_flight", inFlight, "queue_waiters", waiters)
         time.Sleep(200 * time.Millisecond)
     }
-    if inFlightFn() > 0 {
-        slog.Warn("drain timeout: in-flight requests remain", "in_flight", inFlightFn())
+    remainingInFlight := inFlightFn()
+    remainingWaiters := queueWaiters()
+    if remainingInFlight > 0 || remainingWaiters > 0 {
+        slog.Warn("drain timeout: in-flight requests or queued waiters remain",
+            "in_flight", remainingInFlight, "queue_waiters", remainingWaiters)
     }
 
     // Phase 2: Apply — split across two SEPARATE lock windows (E8: never hold
@@ -389,17 +414,19 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     e.breakerMu.Unlock()
     slog.Info("config applied: circuit breakers rebuilt", "version", cfg.Version)
 
-    // Phase 3: Warmup - set local breaker to half_open for gradual recovery
-    warmupSuccess := cfg.Config.HotReload.BreakerWarmupSuccess
-    if warmupSuccess <= 0 {
-        warmupSuccess = 3
-    }
+    // Phase 3: Warmup (B7 audit) — only HALF-OPEN the local breaker when the
+    // inherited snapshot was OPEN (a tripped breaker gets a fast-path probe
+    // after reload). Resetting unconditionally whitewashed a healthy CLOSED
+    // breaker mid-failure-accumulation on every hot reload: state forced to
+    // half_open and failureCount zeroed, erasing exactly the evidence that was
+    // about to trip it. InheritSnapshot skips StateClosed, so a healthy local
+    // stays closed here.
     e.breakerMu.RLock()
-    if b, ok := e.breakers["local"]; ok {
+    if b, ok := e.breakers["local"]; ok && b.Snapshot().State == StateOpen {
         b.ResetToHalfOpen()
+        slog.Info("warmup started: open local breaker set to half_open for probe")
     }
     e.breakerMu.RUnlock()
-    slog.Info("warmup started: local breaker set to half_open", "warmup_success_target", warmupSuccess)
 }
 
 func (e *Engine) SetLocalReady(ready bool) {
@@ -411,6 +438,11 @@ func (e *Engine) SetLocalReady(ready bool) {
 func (e *Engine) SetLocalInFlight(fn func() int64) {
     e.inFlightMu.Lock()
     defer e.inFlightMu.Unlock()
+    if fn == nil {
+        // A7 (audit): wiring nil would put a nil func in routeSnapshot and
+        // panic at the next Decide; fall back to a no-op instead.
+        fn = func() int64 { return 0 }
+    }
     e.localInFlight = fn
 }
 
@@ -478,6 +510,11 @@ func (e *Engine) QueueTimeout() time.Duration {
 func (e *Engine) SetLocalModels(fn func() map[string]bool) {
     e.inFlightMu.Lock()
     defer e.inFlightMu.Unlock()
+    if fn == nil {
+        // A7 (audit): nil wiring panics routeSnapshot consumers (P0.2/P5/P6
+        // read snap.localModels() unconditionally); store a no-op instead.
+        fn = func() map[string]bool { return nil }
+    }
     e.localModels = fn
 }
 
@@ -529,30 +566,42 @@ func (e *Engine) RecordAffinity(spaceID, providerName string) {
 }
 
 func (e *Engine) RecordSuccess(backend string) {
-    // L1 fix: RLock to find breaker, then call RecordSuccess outside RLock.
-    // E8: breakers live under breakerMu now.
+    // B4 (audit): complete the Record under breakerMu.RLock. The old
+    // find-then-Record window let DrainAndApply swap the breaker map between
+    // the two steps, landing the record on the discarded breaker — the state
+    // transition (and the R8/observer notifications) were silently lost.
+    // CircuitBreaker has its own lock, so nesting breaker.mu inside
+    // breakerMu.RLock is safe (same order the decideLocked reads already use).
+    var state CircuitBreakerState
+    found := false
     e.breakerMu.RLock()
-    b, ok := e.breakers[backend]
-    e.breakerMu.RUnlock()
-    if ok {
+    if b, ok := e.breakers[backend]; ok {
         b.RecordSuccess()
+        state = b.State()
+        found = true
+    }
+    e.breakerMu.RUnlock()
+    if found {
         // Publish resulting state to Prometheus (#96): half_open->closed is a
         // real transition the /metrics gauge must reflect.
-        observability.UpdateCircuitBreakerState(backend, int(b.State()))
+        observability.UpdateCircuitBreakerState(backend, int(state))
     }
 }
 
 func (e *Engine) RecordFailure(backend string) {
-    // L1 fix: RLock to find breaker, then call RecordFailure outside RLock.
-    // E8: breakers live under breakerMu now.
+    // B4 (audit): Record under breakerMu.RLock (see RecordSuccess).
+    var state CircuitBreakerState
+    found := false
     e.breakerMu.RLock()
-    b, ok := e.breakers[backend]
-    e.breakerMu.RUnlock()
-    if ok {
+    if b, ok := e.breakers[backend]; ok {
         b.RecordFailure()
+        state = b.State()
+        found = true
+    }
+    e.breakerMu.RUnlock()
+    if found {
         // Publish resulting state to Prometheus (#96): closed->open on failure
         // threshold must reflect on the gauge, not stay 0.
-        state := b.State()
         observability.UpdateCircuitBreakerState(backend, int(state))
         if state == StateOpen {
             // RecordFailure opened the breaker — count the implicit trip so the
@@ -601,12 +650,15 @@ func (e *Engine) RecordNodeSuccess(nodeID string) {
     cbCfg := e.cfg.Config.Routing.CircuitBreaker
     cluster := e.cluster
     e.inFlightMu.RUnlock()
+    // B4 (audit): lazy-create + prevState read + Record under ONE breakerMu
+    // hold — the old unlock-between-steps window let DrainAndApply swap the
+    // nodeBreakers map, losing the record and the R8 recovery notification.
     e.breakerMu.Lock()
     b := e.nodeBreakerLocked(nodeID, cbCfg)
-    e.breakerMu.Unlock()
     prevState := b.State()
     b.RecordSuccess()
     state := b.State()
+    e.breakerMu.Unlock()
     observability.UpdateCircuitBreakerState("node:"+nodeID, int(state))
     // R8: when the breaker recovers to closed (half_open→closed, or open→closed
     // on a successful half-open probe), push the recovery into Discovery so the
@@ -631,11 +683,13 @@ func (e *Engine) RecordNodeFailure(nodeID string) {
     cbCfg := e.cfg.Config.Routing.CircuitBreaker
     cluster := e.cluster
     e.inFlightMu.RUnlock()
+    // B4 (audit): lazy-create + Record under ONE breakerMu hold (see
+    // RecordNodeSuccess).
     e.breakerMu.Lock()
     b := e.nodeBreakerLocked(nodeID, cbCfg)
-    e.breakerMu.Unlock()
     b.RecordFailure()
     state := b.State()
+    e.breakerMu.Unlock()
     observability.UpdateCircuitBreakerState("node:"+nodeID, int(state))
     if state == StateOpen {
         slog.Warn("per-node circuit breaker opened", "node_id", nodeID)
@@ -699,13 +753,15 @@ func (e *Engine) NodeBreakerState(nodeID string) CircuitBreakerState {
 }
 
 func (e *Engine) Trip(backend, reason string) {
-    // L1 fix: RLock to find breaker, then call Trip outside RLock. E8: breakers
-    // live under breakerMu now.
+    // B4 (audit): Trip under breakerMu.RLock (see RecordSuccess).
+    found := false
     e.breakerMu.RLock()
-    b, ok := e.breakers[backend]
-    e.breakerMu.RUnlock()
-    if ok {
+    if b, ok := e.breakers[backend]; ok {
         b.Trip(reason)
+        found = true
+    }
+    e.breakerMu.RUnlock()
+    if found {
         slog.Warn("circuit breaker tripped", "backend", backend, "reason", reason)
         observability.RecordCircuitBreakerTrip(backend, reason)
         observability.UpdateCircuitBreakerState(backend, int(StateOpen))
@@ -819,8 +875,8 @@ func (e *Engine) tryLocalClusterHALocked(cfg *config.ConfigSnapshot, model strin
     if snap.cluster.HealthyNodesByPlatform(tag) == 0 {
         return nil
     }
-    if e.breakers["cluster"].State() == StateOpen {
-        slog.Debug("ha_routing: cluster breaker open, skipping mac-platform HA dispatch")
+    if !e.breakers["cluster"].Admit() {
+        slog.Debug("ha_routing: cluster breaker open or half-open probe busy, skipping mac-platform HA dispatch")
         return nil
     }
     strategy := cfg.Config.Cluster.LoadBalancer
@@ -921,8 +977,11 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return decision
     }
 
-    // P0: Circuit breaker check — local
-    if e.breakers["local"].State() == StateOpen {
+    // P0: Circuit breaker check — local. B6 (audit): Admit() enforces the
+    // half-open single-probe rule at the authoritative admission gate — a
+    // recovering local backend sees at most one probe at a time instead of
+    // the full flood State() used to let through. Divert reason unchanged.
+    if !e.breakers["local"].Admit() {
         if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
             return decision
         }
@@ -1194,14 +1253,17 @@ func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnaps
         // fall through
     }
 
-    // Rerank: typically cloud-only unless local model available
+    // Rerank: typically cloud-only unless the REQUESTED model is locally
+    // available. B10 (audit): the inner loop variable shadowed the model
+    // param — ANY rerank model in the local set routed local regardless of
+    // the requested model (wrong model served), and the breaker check ran
+    // per-iteration. Now the requested model must itself be a rerank model,
+    // present in the local set, with the local breaker checked once.
     localModels := snap.localModels()
     if snap.localReady && localModels != nil {
-        for model := range localModels {
-            if isRerankModel(model) {
-                if e.breakers["local"].State() != StateOpen {
-                    return &RouteDecision{Backend: LocalBackend, Reason: "rerank_local_available"}
-                }
+        if isRerankModel(model) {
+            if _, ok := localModels[model]; ok && e.breakers["local"].State() != StateOpen {
+                return &RouteDecision{Backend: LocalBackend, Reason: "rerank_local_available"}
             }
         }
     }
@@ -1226,8 +1288,8 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string, snap
         return nil
     }
 
-    if e.breakers["cluster"].State() == StateOpen {
-        slog.Debug("cluster breaker open, skipping cluster fallback")
+    if !e.breakers["cluster"].Admit() {
+        slog.Debug("cluster breaker open or half-open probe busy, skipping cluster fallback")
         return nil
     }
 
@@ -1273,7 +1335,7 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string, snap
 // local-fallback path appends a _local_fallback suffix for tracing.
 // Called inside decideLocked under breakerMu.RLock — uses the lock-free breaker read.
 func (e *Engine) cloudOrLocalLocked(req *RouteRequest, cloudDecision *RouteDecision) *RouteDecision {
-    if e.breakers["cloud"].State() != StateOpen {
+    if e.breakers["cloud"].Admit() {
         return cloudDecision
     }
     slog.Warn("cloud breaker open, falling back to local",
@@ -1301,8 +1363,8 @@ func (e *Engine) tryClusterByPlatformLocked(cfg *config.ConfigSnapshot, platform
     if snap.cluster == nil || !cfg.Config.Cluster.Enabled || platform == "" {
         return nil
     }
-    if e.breakers["cluster"].State() == StateOpen {
-        slog.Debug("cluster breaker open, skipping platform cluster dispatch", "platform", platform)
+    if !e.breakers["cluster"].Admit() {
+        slog.Debug("cluster breaker open or half-open probe busy, skipping platform cluster dispatch", "platform", platform)
         return nil
     }
     if snap.cluster.HealthyNodesByPlatform(platform) == 0 {

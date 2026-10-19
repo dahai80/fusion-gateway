@@ -123,6 +123,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `observability.otel_service_name` | fusion-gateway | Service name in OTel traces |
 | `rbac.enabled` | false | Enable RBAC role-based access control |
 | `rbac.default_role` | viewer | Default role when no OIDC claims: admin, editor, viewer |
+| `rbac.trust_oidc_claims` | false | Opt-in: map OIDC role/groups claims onto the RBAC role. Off by default so claim pollution cannot grant admin |
 | `team.enabled` | false | Enable team/org management |
 | `team.default_team` | default | Default team for unassigned keys |
 | `semantic_cache.enabled` | false | Enable semantic cache (similarity-based hit) |
@@ -760,12 +761,13 @@ Role-based access control with three roles: **admin** (full access), **editor** 
 rbac:
     enabled: true
     default_role: "viewer"    # fallback when no OIDC claims
+    trust_oidc_claims: false  # opt-in: OIDC role/groups claims map to RBAC roles
 team:
     enabled: true
     default_team: "default"   # team assigned when no OIDC team claim
 ```
 
-- OIDC claims `role`, `groups`, `team` automatically mapped to RBAC roles
+- OIDC claims `role`, `groups`, `team` mapped to RBAC roles **only when `rbac.trust_oidc_claims` is true** (default `false`: a self-serve or compromised identity provider cannot escalate a user to admin by emitting a crafted claim)
 - Master API key always gets admin role
 - Team cost aggregation via `/admin/teams` — quota tracking per team
 - Key-to-team binding: `BindKeyToTeam(apiKey, teamID)` in TeamsStore

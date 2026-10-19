@@ -117,6 +117,18 @@ func (r *TaskRegistry) Register(taskID, ownerKey string, cancel context.CancelFu
 func (r *TaskRegistry) Cancel(taskID, requester string, isMaster bool) (canceled, denied bool) {
     r.mu.Lock()
     entry, ok := r.tasks[taskID]
+    // B18 (audit): owner check BEFORE delete. The old order (delete, unlock,
+    // validate, re-insert on denial) opened a window where a concurrent
+    // Cancel/Release saw "task not found" for a still-running task, and the
+    // re-insert raced Register/Cancel/Release. Validating under the same lock
+    // hold removes both.
+    if ok && !isMaster && entry.ownerKey != "" && entry.ownerKey != requester {
+        owner := entry.ownerKey
+        r.mu.Unlock()
+        slog.Warn("task registry: cancel denied, owner mismatch",
+            "task_id", taskID, "owner", owner, "requester", requester)
+        return false, true
+    }
     if ok {
         delete(r.tasks, taskID)
     }
@@ -125,24 +137,7 @@ func (r *TaskRegistry) Cancel(taskID, requester string, isMaster bool) (canceled
         slog.Info("task registry: cancel for unknown task id", "task_id", taskID)
         return false, false
     }
-    if !isMaster && entry.ownerKey != "" && entry.ownerKey != requester {
-        slog.Warn("task registry: cancel denied, owner mismatch",
-            "task_id", taskID, "owner", entry.ownerKey, "requester", requester)
-        // Re-insert: the task is still in-flight, only the cancel was refused.
-        // Reacquire the lock so the write is serialized against concurrent
-        // Register/Cancel/Release; without it the unlocked delete above + this
-        // write race (caught by -race in TestTaskRegistry_Concurrent).
-        r.mu.Lock()
-        r.tasks[taskID] = entry
-        active := len(r.tasks)
-        r.mu.Unlock()
-        slog.Debug("task registry: denied cancel kept entry in-flight", "task_id", taskID, "active", active)
-        return false, true
-    }
     entry.cancel()
-    // Note: len(r.tasks) is NOT read here — the delete above dropped this
-    // entry under the lock, and a concurrent Cancel could be mid-map-write.
-    // Log without the active count to avoid an unlocked map read (-race).
     slog.Info("task registry: canceled in-flight task", "task_id", taskID, "owner", entry.ownerKey, "requester", requester)
     return true, false
 }

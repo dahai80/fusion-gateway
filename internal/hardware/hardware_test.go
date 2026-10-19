@@ -1707,3 +1707,25 @@ func TestCollectGopsutil_NormalRatio(t *testing.T) {
         t.Errorf("SwapUsed: got %d, want 536870912", m.SwapUsed)
     }
 }
+
+func TestParsePrometheusMetrics_MultiSeriesSum(t *testing.T) {
+    t.Log("testing parsePrometheusMetrics sums multiple series (C9 audit)")
+    input := `fusion_mlx_model_memory_bytes{model="a"} 100
+fusion_mlx_model_memory_bytes{model="b"} 200
+fusion_mlx_inference_queue_depth{worker="0"} 3
+fusion_mlx_inference_queue_depth{worker="1"} 4
+fusion_mlx_models_loaded 2
+fusion_mlx_models_loaded_extra_total 99
+`
+    var m HardwareMetrics
+    parsePrometheusMetrics(input, &m)
+    if m.MLXActiveMemory != 300 {
+        t.Errorf("MLXActiveMemory: got %d, want 300 (sum of both series)", m.MLXActiveMemory)
+    }
+    if m.MLXInferenceQueueDepth != 7 {
+        t.Errorf("MLXInferenceQueueDepth: got %d, want 7 (sum of both series)", m.MLXInferenceQueueDepth)
+    }
+    if m.MLXModelsLoaded != 2 {
+        t.Errorf("MLXModelsLoaded: got %d, want 2 (similar-name series must not bleed in)", m.MLXModelsLoaded)
+    }
+}

@@ -9,7 +9,74 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed (audit sweep 2026-10-19)
+
+- **Stream replay cross-principal isolation (A1)**: buffered stream entries
+  record the owning principal at open; `/v1/stream/{sid}/events` replays only
+  for the same principal (403 on mismatch) and a mismatched Last-Event-ID
+  cursor sid is rejected (400) instead of silently replaying from the start.
+- **Admin key API no longer leaks or drops the key hash (A2)**: GET returns a
+  field projection without `key_hash`; PUT merges onto the stored entry so
+  re-saving a key no longer wipes the hash (which broke auth for that key).
+- **Identity model peek keeps the full body (A3)**: the 1 MiB LimitReader
+  truncation is gone; on read error the partial body is restored instead of
+  dropped.
+- **Per-key TPM limits actually enforced (A4)**: the rate limiter is wired to
+  a token estimator (body peek + tokenizer count, only for keys with tpm > 0)
+  and a TPM reject rolls back the RPM slot it consumed.
+- **Volcengine credentials (A5/B16)**: stream cancel watcher added; a
+  configured `api_key` now wins over AK/SK (the old code overwrote the
+  Bearer header with a non-standard HMAC); `url.Parse` errors surface.
+- **Signed-provider stream relays are cancel-aware (A6/B17)**: blocking sends
+  honor ctx; upstream error bodies are capped (1 MiB read / truncated log).
+- **Nil wiring + nil-config panics (A7/A8)**: router nil callbacks and a nil
+  hardware collector config refuse to start loudly instead of panicking.
+- **TierQueue Acquire cancels its child ctx on every return path (A9)**.
+- **Key/quota store races (B1)**: KeyStore getters return copies; quota
+  display-state updates go through a locked `UpdateUsage`.
+- **Hot-reload snapshot races (B2)**: 5 direct `s.cfg.Config` reads
+  (stream deadline, proxy body cap, managed settings, webhook receiver,
+  stream resume) now go through `s.snapshot()` under cfgMu.
+- **Rate limiter lastAccess race (B3)**: moved inside the key-state lock.
+- **RBAC short-circuits shell-session principals (B11)**: web-shell admins
+  are no longer downgraded to viewer (403 on every write).
+- **Circuit breaker TOCTOU (B4)**: Record*/Trip complete under breakerMu so
+  DrainAndApply cannot land records on a discarded breaker.
+- **Vertex token refresh single-flighted (B5)**: refresh runs under the
+  provider lock with a re-check (SA loading inlined to avoid re-lock).
+- **Half-open single-probe (B6)**: `Admit()` admits exactly one probe at a
+  time at the P0 local / cloud / cluster gates; failures while open refresh
+  `lastFailureTime`.
+- **Hot-reload no longer whitewashes breakers (B7)**: half-open reset only
+  when the inherited local snapshot was open; dead warmupSuccess removed.
+- **Drain waits for queued waiters (B8)**: slotQueue/tierQueue waiters count
+  toward the drain loop (in-flight==0 alone no longer swaps queues out from
+  under waiting requests).
+- **Tier queue fast path respects waiters (B9)**: freed slots dispatch by
+  tier priority instead of being grabbed by new arrivals.
+- **Rerank routing model check (B10)**: the loop variable no longer shadows
+  the requested model; local rerank requires the requested model present.
+- **Admin PUT writers (B13)**: backend/routing PUT use atomic writes +
+  explicit reload; backend PUT no longer writes a masked `****` api_key over
+  the real credential; `failure_threshold: 0` is now the documented
+  "disabled" opt-out (validate accepts 0, breaker runtime never trips at 0).
+- **Admin users PUT merge (B14)**: masked entries keep existing users instead
+  of producing an empty users map (admin lockout after restart).
+- **Login attempt map bounded (B15)**: expired entries are swept past 2048.
+- **Task registry cancel order (B18)**: owner check happens before the map
+  delete (no delete-then-reinsert window).
+- **Shutdown cancels fallback pump roots (B19)**.
+- **OIDC hardening (B20)**: the `admin_token` cookie is no longer an OIDC
+  token source (header only); OIDC claim-to-role mapping is opt-in via
+  `rbac.trust_oidc_claims` (default off).
+- **MLX metrics parsing (C9)**: exact metric-name matching, series summed
+  (multi-series no longer last-wins).
+- **OpenRouter swallowed errors (C13)**: marshal/request-build errors surface
+  instead of panicking on a nil request.
+- **Cloud in-flight stream forwarder (C17)**: ctx-aware send so a gone
+  consumer cannot leak the goroutine + gauge.
+- **Webhook ack JSON escaping (C22)**: event names are marshaled, not
+  concatenated into the JSON body.
 
 ## [0.9.20] - 2026-09-29
 

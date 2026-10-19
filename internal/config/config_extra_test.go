@@ -506,11 +506,18 @@ func TestEI8_MaxMLXMemoryRatio_Negative(t *testing.T) {
     }
 }
 
-func TestEI8_CircuitBreaker_FailureThresholdZero(t *testing.T) {
+func TestCircuitBreaker_FailureThresholdZeroDisabled(t *testing.T) {
+    // B13 follow-up: 0 is the documented DISABLED opt-out the admin routing
+    // PUT writes (engine reads >0 as enabled) — valid config, negative is not.
     cfg := DefaultConfig()
     cfg.Routing.CircuitBreaker.FailureThreshold = 0
-    if err := validate(&cfg); err == nil {
-        t.Fatal("EI8: expected error for zero circuit_breaker.failure_threshold")
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("zero circuit_breaker.failure_threshold must validate as disabled: %v", err)
+    }
+    neg := DefaultConfig()
+    neg.Routing.CircuitBreaker.FailureThreshold = -1
+    if err := validate(&neg); err == nil {
+        t.Fatal("negative circuit_breaker.failure_threshold must fail validation")
     }
 }
 

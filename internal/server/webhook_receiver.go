@@ -49,7 +49,7 @@ func (s *Server) handleModelHubWebhook(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    cfg := s.cfg.Config.Routing.Webhooks.ModelHub
+    cfg := s.snapshot().Config.Routing.Webhooks.ModelHub
     if !cfg.Enabled {
         slog.Warn("model-hub webhook received but receiver disabled", "path", r.URL.Path, "remote", r.RemoteAddr)
         http.Error(w, `{"error":{"message":"webhook receiver disabled","type":"disabled"}}`, http.StatusServiceUnavailable)
@@ -93,7 +93,15 @@ func (s *Server) handleModelHubWebhook(w http.ResponseWriter, r *http.Request) {
     }
 
     w.WriteHeader(http.StatusOK)
-    w.Write([]byte(`{"status":"accepted","event":"` + env.Event + `"}`))
+    // C22 (audit): env.Event was concatenated raw into the JSON response — a
+    // crafted event name containing `"}{...` injected arbitrary JSON. Marshal
+    // it so quotes/escapes are encoded properly.
+    respBody, merr := json.Marshal(map[string]string{"status": "accepted", "event": env.Event})
+    if merr != nil {
+        slog.Error("model-hub webhook: failed to marshal ack body", "error", merr)
+        respBody = []byte(`{"status":"accepted"}`)
+    }
+    w.Write(respBody)
 }
 
 // verifyWebhookSignature re-computes HMAC-SHA256 over the raw body with the

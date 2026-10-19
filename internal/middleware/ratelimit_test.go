@@ -197,7 +197,7 @@ func TestRateLimit_TPMExceeded(t *testing.T) {
     rl := NewRateLimiter()
     p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "tpm-limited", RPM: 100, TPM: 100}}
     rl.AllowTPM("tpm-limited", 100, 100)
-    tokFn := func(ctx context.Context) int { return 50 }
+    tokFn := func(_ *http.Request) int { return 50 }
     handler := RateLimit(cfg, rl, tokFn)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("should not reach next handler")
     }))
@@ -337,7 +337,7 @@ func TestRateLimit_TokenCountZero(t *testing.T) {
     cfg := &config.RateLimitConfig{Enabled: true}
     rl := NewRateLimiter()
     p := &Principal{KeyConfig: &config.AuthKeyConfig{Name: "toktest", RPM: 100, TPM: 100}}
-    tokFn := func(ctx context.Context) int { return 0 }
+    tokFn := func(_ *http.Request) int { return 0 }
     var called bool
     handler := RateLimit(cfg, rl, tokFn)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         called = true
@@ -356,7 +356,7 @@ func TestRateLimit_TokenCountZero(t *testing.T) {
 func TestRateLimitBridgedAdminPrincipalSkipsKeyLimit(t *testing.T) {
     cfg := &config.RateLimitConfig{Enabled: true, KeyEnforcement: true}
     rl := NewRateLimiter()
-    h := RateLimit(cfg, rl, func(ctx context.Context) int { return 0 })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    h := RateLimit(cfg, rl, func(_ *http.Request) int { return 0 })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
     }))
     for _, method := range []string{"admin-jwt", "shell-session"} {

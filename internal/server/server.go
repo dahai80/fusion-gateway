@@ -1,6 +1,7 @@
 package server
 
 import (
+    "bytes"
     "context"
     "fmt"
     "io"
@@ -150,6 +151,13 @@ type Server struct {
     // upstream reads while in-flight responses still flush.
     shutdownCtx    context.Context
     shutdownCancel context.CancelFunc
+    // B19 (audit): cancellable fallback root for liveCtx when shutdownCtx was
+    // never wired (Server built as a struct literal instead of New). The old
+    // plain context.Background() fallback made Shutdown unable to cancel those
+    // pumps. Created once via liveFallbackOnce; canceled in Shutdown.
+    liveFallbackOnce   sync.Once
+    liveFallbackCtx    context.Context
+    liveFallbackCancel context.CancelFunc
     // R4 (audit): build-time version/commit, stamped by main.go via SetVersion
     // and surfaced on /v1/status. Defaults until SetVersion is called.
     version string
@@ -380,7 +388,7 @@ func (s *Server) recordOutcome(backend router.Backend, nodeID string, success bo
 // caller MUST defer the returned cancel so the deadline ctx releases when the
 // handler returns, even on panic.
 func (s *Server) streamDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-    d := s.cfg.Config.Routing.Stream.MaxRequestDuration
+    d := s.snapshot().Config.Routing.Stream.MaxRequestDuration
     if d <= 0 {
         return ctx, func() {}
     }
@@ -1039,6 +1047,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
     if s.shutdownCancel != nil {
         s.shutdownCancel()
     }
+    // B19: ensure the fallback root exists, then cancel it. Routing through
+    // Once makes the read of liveFallbackCancel race-free against a request
+    // goroutine lazily creating it.
+    s.liveFallbackOnce.Do(func() {
+        s.liveFallbackCtx, s.liveFallbackCancel = context.WithCancel(context.Background())
+    })
+    if s.liveFallbackCancel != nil {
+        s.liveFallbackCancel()
+    }
     var err error
     if s.httpServer != nil {
         err = s.httpServer.Shutdown(ctx)
@@ -1219,7 +1236,7 @@ func (s *Server) buildMiddlewareChain() {
         middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
         middleware.BudgetBlock(s.store),
-        middleware.RateLimit(&s.cfg.Config.Routing.RateLimit, s.rateLimiter, nil),
+        middleware.RateLimit(&s.cfg.Config.Routing.RateLimit, s.rateLimiter, s.estimateRequestTokens),
     }
 
     s.middlewareChainMu.Lock()
@@ -1283,6 +1300,35 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     slog.Info("middleware chain rebuilt on config reload")
 }
 
+// estimateRequestTokens approximates the prompt token count for the TPM rate
+// limiter (audit A4: the middleware was wired with a nil estimator, so
+// per-key TPM limits never fired). The body is fully buffered and restored —
+// the same peek+restore pattern as the identity model peek — and counted by
+// the tokenizer engine's whitespace heuristic. Called only for keys with
+// tpm > 0 (gated in the middleware), so normal traffic pays nothing.
+func (s *Server) estimateRequestTokens(r *http.Request) int {
+    if r.Body == nil || s.tokEngine == nil {
+        return 0
+    }
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        // Restore what was read so the downstream error path still sees a
+        // readable body.
+        r.Body = io.NopCloser(bytes.NewReader(body))
+        slog.Debug("rate limit: token estimation read failed", "error", err)
+        return 0
+    }
+    r.Body = io.NopCloser(bytes.NewReader(body))
+    if len(body) == 0 {
+        return 0
+    }
+    n, err := s.tokEngine.CountTokens(r.Context(), string(body))
+    if err != nil {
+        return 0
+    }
+    return n
+}
+
 // snapshot returns the current config snapshot under cfgMu.RLock. Background
 // goroutines (reapers) use this instead of a bare s.cfg read so the reload
 // pointer swap cannot race them.
@@ -1340,8 +1386,9 @@ const maxProxyBodySize int64 = 256 << 20
 // the body (defense in depth — the const alone was never enforced before E5
 // because the proxy paths never wrapped r.Body).
 func (s *Server) proxyBodyCap() int64 {
-    if s.cfg != nil && s.cfg.Config.Server.ProxyMaxBodySize > 0 {
-        return s.cfg.Config.Server.ProxyMaxBodySize
+    snap := s.snapshot()
+    if snap != nil && snap.Config.Server.ProxyMaxBodySize > 0 {
+        return snap.Config.Server.ProxyMaxBodySize
     }
     return maxProxyBodySize
 }

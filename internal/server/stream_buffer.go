@@ -23,6 +23,10 @@ type streamEventFrame struct {
 type streamBufferEntry struct {
     mu        sync.Mutex
     sid       string
+    // owner is the authenticated principal subject recorded at Open() (audit
+    // A1): the replay endpoint refuses any requester whose principal does not
+    // match, so a leaked/guessed sid cannot replay another key's stream.
+    owner     string
     frames    []streamEventFrame
     bytes     int
     maxEvents int
@@ -80,16 +84,17 @@ func NewStreamBufferStore(maxEvents, maxBytes, maxEntries int, ttl time.Duration
     }
 }
 
-// Open registers a new stream buffer for sid and returns it. If sid already
-// exists (reused X-Request-ID), the existing entry is reset to empty so a
-// fresh generation does not mix with stale frames. Returns nil only if sid is
-// empty.
-func (s *StreamBufferStore) Open(sid string) *streamBufferEntry {
+// Open registers a new stream buffer for sid owned by owner (the authenticated
+// principal subject; audit A1). If sid already exists (reused X-Request-ID),
+// the existing entry is reset to empty so a fresh generation does not mix with
+// stale frames. Returns nil only if sid is empty.
+func (s *StreamBufferStore) Open(sid, owner string) *streamBufferEntry {
     if sid == "" {
         return nil
     }
     e := &streamBufferEntry{
         sid:       sid,
+        owner:     owner,
         maxEvents: s.maxEvents,
         maxBytes:  s.maxBytes,
         createdAt: time.Now(),
@@ -134,6 +139,16 @@ func (s *StreamBufferStore) Get(sid string) *streamBufferEntry {
     e := s.buffers[sid]
     s.mu.RUnlock()
     return e
+}
+
+// Owner returns the principal subject recorded at Open ("" when nil).
+func (e *streamBufferEntry) Owner() string {
+    if e == nil {
+        return ""
+    }
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    return e.owner
 }
 
 // Release evicts a buffer immediately (stream goroutine done, no replay wanted

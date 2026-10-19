@@ -42,6 +42,10 @@ func (e *MessagesHTTPError) Error() string {
 
 // extractUpstreamError reads a non-2xx response body and request-id header
 // into a *MessagesHTTPError. Callers must still close resp.Body.
+//
+// B17 (audit): the read is capped at 1 MiB and the error string truncated —
+// the old unbounded 10 MiB read let a hostile upstream pin 10 MiB per request and
+// put the whole body into logs. Read errors are logged, not swallowed.
 func extractUpstreamError(resp *http.Response) *MessagesHTTPError {
 	reqID := resp.Header.Get("x-request-id")
 	if reqID == "" {
@@ -49,23 +53,37 @@ func extractUpstreamError(resp *http.Response) *MessagesHTTPError {
 	}
 	body := ""
 	if resp.Body != nil {
-		buf := make([]byte, 0, 4096)
-		tmp := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(tmp)
-			if n > 0 {
-				buf = append(buf, tmp[:n]...)
-				if len(buf) > 10<<20 {
-					break
-				}
-			}
-			if err != nil {
+		buf, err := readBodyCap(resp.Body, 1<<20)
+		if err != nil {
+			slog.Warn("signed provider: upstream error body read failed", "status", resp.StatusCode, "error", err)
+		}
+		body = TruncateForError(buf)
+	}
+	return &MessagesHTTPError{StatusCode: resp.StatusCode, RequestID: reqID, Body: body}
+}
+
+// readBodyCap reads up to cap bytes from r; err reports a read failure
+// (io.EOF is success). Returns the bytes read so far on error.
+func readBodyCap(r io.Reader, capBytes int) ([]byte, error) {
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	var readErr error
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if len(buf) >= capBytes {
 				break
 			}
 		}
-		body = string(buf)
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			break
+		}
 	}
-	return &MessagesHTTPError{StatusCode: resp.StatusCode, RequestID: reqID, Body: body}
+	return buf, readErr
 }
 
 // parseAnthropicEventStreamRaw parses a native Anthropic SSE stream (used by
@@ -73,7 +91,13 @@ func extractUpstreamError(resp *http.Response) *MessagesHTTPError {
 // AnthropicStreamEvent values. Mirrors parseAnthropicStreamEvents
 // but is a package-level func so the cloud-signed providers can share it.
 // 1 MiB/line cap matches the SSE hardening convention.
-func parseAnthropicEventStreamRaw(body io.Reader, ch chan<- AnthropicStreamEvent) {
+//
+// A6 (audit): sends block on a full channel until ctx is done — the old
+// non-blocking default:return silently truncated the stream (no error, no
+// finish frame) the moment the consumer fell behind, and a full-buffer drop
+// could discard the message_delta/stop terminal so the client never saw the
+// stream end.
+func parseAnthropicEventStreamRaw(ctx context.Context, body io.Reader, ch chan<- AnthropicStreamEvent) {
 	buf := make([]byte, 4096)
 	var lineBuf []byte
 	const maxLineSize = 1 << 20
@@ -84,7 +108,7 @@ func parseAnthropicEventStreamRaw(body io.Reader, ch chan<- AnthropicStreamEvent
 			if len(lineBuf) > maxLineSize {
 				// B6/RR12: returning (not lineBuf=nil) closes the channel — the
 				// client observes truncation rather than the parser silently
-				// discarding buffered bytes and resyncing mid-JSON. The old
+				// discarding buffered bytes and regaining sync mid-JSON. The old
 				// lineBuf=nil kept reading from an arbitrary byte offset,
 				// producing half-JSON "data:" lines forever with no resync
 				// marker (SSE has no length framing) — the stream never
@@ -115,10 +139,11 @@ func parseAnthropicEventStreamRaw(body io.Reader, ch chan<- AnthropicStreamEvent
 				slog.Warn("anthropic event stream unmarshal error", "error", err)
 				continue
 			}
+			// A6: blocking send — wait for the consumer or ctx cancel.
 			select {
 			case ch <- event:
-			default:
-				slog.Warn("anthropic event stream backpressure")
+			case <-ctx.Done():
+				slog.Debug("anthropic event stream canceled under backpressure", "error", ctx.Err())
 				return
 			}
 		}
@@ -135,7 +160,12 @@ func parseAnthropicEventStreamRaw(body io.Reader, ch chan<- AnthropicStreamEvent
 // StreamMessages) into OpenAI-shaped StreamChunk values so the providers'
 // StreamChat satisfies the OpenAI /v1/chat/completions streaming path. Mirrors
 // the conversion in AnthropicProvider.parseAnthropicSSE.
-func anthropicEventsToChunks(evCh <-chan AnthropicStreamEvent, ch chan<- StreamChunk, model string) {
+//
+// A6 (audit): all sends block until the consumer takes the chunk or ctx is
+// done. The old non-blocking default: branches silently dropped chunks —
+// worst on the message_delta case where the finish_reason/usage terminal
+// vanished and the client stream never ended.
+func anthropicEventsToChunks(ctx context.Context, evCh <-chan AnthropicStreamEvent, ch chan<- StreamChunk, model string) {
 	var outputTokens int
 	var msgID string
 	for event := range evCh {
@@ -161,9 +191,7 @@ func anthropicEventsToChunks(evCh <-chan AnthropicStreamEvent, ch chan<- StreamC
 						Delta: map[string]string{"role": "assistant", "content": delta.Text},
 					}},
 				}
-				select {
-				case ch <- chunk:
-				default:
+				if !sendChunk(ctx, ch, chunk) {
 					return
 				}
 			}
@@ -194,13 +222,26 @@ func anthropicEventsToChunks(evCh <-chan AnthropicStreamEvent, ch chan<- StreamC
 					TotalTokens:      outputTokens,
 				},
 			}
-			select {
-			case ch <- chunk:
-			default:
+			if !sendChunk(ctx, ch, chunk) {
+				return
 			}
 		case "message_stop":
 			return
 		}
+	}
+}
+
+// sendChunk blocks until the chunk is delivered or the ctx is canceled.
+// Returns false when the relay must stop (ctx done). A6: replaces the
+// non-blocking default: sends that silently truncated signed-provider streams
+// under backpressure.
+func sendChunk(ctx context.Context, ch chan<- StreamChunk, chunk StreamChunk) bool {
+	select {
+	case ch <- chunk:
+		return true
+	case <-ctx.Done():
+		slog.Debug("signed provider stream relay canceled under backpressure", "error", ctx.Err())
+		return false
 	}
 }
 

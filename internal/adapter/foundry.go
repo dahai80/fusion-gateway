@@ -160,7 +160,7 @@ func (p *FoundryProvider) StreamMessages(ctx context.Context, req *AnthropicRequ
 			case <-stopBodyWatch:
 			}
 		})
-		parseAnthropicEventStreamRaw(resp.Body, ch)
+		parseAnthropicEventStreamRaw(ctx, resp.Body, ch)
 	})
 	return ch, nil
 }
@@ -185,7 +185,7 @@ func (p *FoundryProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
 	ch := make(chan StreamChunk, 64)
 	safego.Go("foundry_stream_relay", func() {
 		defer close(ch)
-		anthropicEventsToChunks(evCh, ch, req.Model)
+		anthropicEventsToChunks(ctx, evCh, ch, req.Model)
 	})
 	return ch, nil
 }

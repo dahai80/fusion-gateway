@@ -24,12 +24,22 @@ func NewKeyStore() *KeyStore {
 
 func (s *KeyStore) SetOnMutate(fn func()) { s.onMutate = fn }
 
+// copyEntry returns a shallow copy so callers (admin JSON serialization,
+// auth middleware) never hold the internal pointer while QuotaStore mutates
+// usage fields under its own lock (audit B1 data race). Slices/maps inside
+// the copy stay shared — they are replaced wholesale on Update, never
+// mutated in place.
+func copyEntry(k *store.APIKeyEntry) *store.APIKeyEntry {
+    cp := *k
+    return &cp
+}
+
 func (s *KeyStore) List() ([]*store.APIKeyEntry, error) {
     s.mu.RLock()
     defer s.mu.RUnlock()
     result := make([]*store.APIKeyEntry, 0, len(s.keys))
     for _, k := range s.keys {
-        result = append(result, k)
+        result = append(result, copyEntry(k))
     }
     return result, nil
 }
@@ -41,7 +51,7 @@ func (s *KeyStore) Get(name string) (*store.APIKeyEntry, error) {
     if !ok {
         return nil, fmt.Errorf("key not found: %s", name)
     }
-    return k, nil
+    return copyEntry(k), nil
 }
 
 func (s *KeyStore) GetByHash(hash string) (*store.APIKeyEntry, error) {
@@ -55,7 +65,7 @@ func (s *KeyStore) GetByHash(hash string) (*store.APIKeyEntry, error) {
     if !ok {
         return nil, fmt.Errorf("key not found by hash")
     }
-    return k, nil
+    return copyEntry(k), nil
 }
 
 func (s *KeyStore) Create(key *store.APIKeyEntry) error {
@@ -121,6 +131,22 @@ func (s *KeyStore) Delete(name string) error {
         s.onMutate()
     }
     return nil
+}
+
+// UpdateUsage writes the quota-display fields of the internal entry under
+// keys.mu (audit B1): QuotaStore mutates them on the hot path while admin
+// handlers and auth middleware read the entry — without this lock the
+// accesses race. Callers may hold q.mu (order q.mu → keys.mu is the only
+// nesting used).
+func (s *KeyStore) UpdateUsage(name string, quotaUsed, quotaRemaining, dailyUsed float64, dailyDate string) {
+    s.mu.Lock()
+    if k, ok := s.keys[name]; ok {
+        k.QuotaUsed = quotaUsed
+        k.QuotaRemaining = quotaRemaining
+        k.DailyUsed = dailyUsed
+        k.DailyDate = dailyDate
+    }
+    s.mu.Unlock()
 }
 
 func (s *KeyStore) LoadFromConfig(keys map[string]*store.APIKeyEntry) {

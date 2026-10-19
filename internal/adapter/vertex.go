@@ -130,88 +130,105 @@ func (p *VertexProvider) loadServiceAccount() ([]byte, error) {
 // within 5 minutes of expiry. The token is obtained via a self-signed RS256
 // JWT (jwt/v5, already a repo dependency) exchanged at the SA token_uri.
 func (p *VertexProvider) accessToken(ctx context.Context) (string, error) {
-	p.mu.Lock()
-	if p.cachedToken != "" && time.Now().Add(5*time.Minute).Before(p.tokenExpiry) {
-		tok := p.cachedToken
-		p.mu.Unlock()
-		return tok, nil
-	}
-	p.mu.Unlock()
+    // B5 (audit): the old check-then-refresh released p.mu before refreshing,
+    // so N concurrent requests landing on expiry each did a JWT sign + token
+    // exchange. Refresh under the lock with a re-check: the first goroutine
+    // refreshes, the rest find the fresh token on the second check. Worst-case
+    // hold is the 30s tokenClient timeout, once per token lifetime (~1h).
+    p.mu.Lock()
+    defer p.mu.Unlock()
+    if p.cachedToken != "" && time.Now().Add(5*time.Minute).Before(p.tokenExpiry) {
+        return p.cachedToken, nil
+    }
 
-	saBytes, err := p.loadServiceAccount()
-	if err != nil {
-		return "", err
-	}
-	var sa gcpServiceAccount
-	if err := json.Unmarshal(saBytes, &sa); err != nil {
-		return "", fmt.Errorf("parse service account json: %w", err)
-	}
-	if sa.ClientEmail == "" || sa.PrivateKey == "" {
-		return "", fmt.Errorf("service account json missing client_email/private_key")
-	}
-	tokenURI := sa.TokenURI
-	if tokenURI == "" {
-		tokenURI = "https://oauth2.googleapis.com/token"
-	}
+    // Load the SA inline (not via loadServiceAccount — it takes p.mu, and we
+    // already hold it; sync.Mutex is not reentrant). Safe to mutate p.saJSON
+    // under the same lock.
+    var saBytes []byte
+    if len(p.saJSON) > 0 {
+        saBytes = p.saJSON
+    } else if inline := os.Getenv("VERTEX_SERVICE_ACCOUNT_JSON"); inline != "" {
+        p.saJSON = []byte(inline)
+        saBytes = p.saJSON
+    } else if path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); path != "" {
+        data, err := os.ReadFile(path)
+        if err != nil {
+            return "", fmt.Errorf("read service account file: %w", err)
+        }
+        p.saJSON = data
+        saBytes = data
+    } else {
+        return "", fmt.Errorf("missing VERTEX_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS env")
+    }
+    var sa gcpServiceAccount
+    if err := json.Unmarshal(saBytes, &sa); err != nil {
+        return "", fmt.Errorf("parse service account json: %w", err)
+    }
+    if sa.ClientEmail == "" || sa.PrivateKey == "" {
+        return "", fmt.Errorf("service account json missing client_email/private_key")
+    }
+    tokenURI := sa.TokenURI
+    if tokenURI == "" {
+        tokenURI = "https://oauth2.googleapis.com/token"
+    }
 
-	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(sa.PrivateKey))
-	if err != nil {
-		return "", fmt.Errorf("parse sa private key: %w", err)
-	}
-	now := time.Now()
-	claims := jwt.RegisteredClaims{
-		Issuer:    sa.ClientEmail,
-		Subject:   sa.ClientEmail,
-		Audience:  []string{tokenURI},
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(1 * time.Hour)),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	token.Header["kid"] = sa.PrivateKeyID
-	signed, err := token.SignedString(key)
-	if err != nil {
-		return "", fmt.Errorf("sign sa jwt: %w", err)
-	}
+    key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(sa.PrivateKey))
+    if err != nil {
+        return "", fmt.Errorf("parse sa private key: %w", err)
+    }
+    now := time.Now()
+    claims := jwt.RegisteredClaims{
+        Issuer:    sa.ClientEmail,
+        Subject:   sa.ClientEmail,
+        Audience:  []string{tokenURI},
+        IssuedAt:  jwt.NewNumericDate(now),
+        ExpiresAt: jwt.NewNumericDate(now.Add(1 * time.Hour)),
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+    token.Header["kid"] = sa.PrivateKeyID
+    signed, err := token.SignedString(key)
+    if err != nil {
+        return "", fmt.Errorf("sign sa jwt: %w", err)
+    }
 
-	form := "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + signed
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURI, strings.NewReader(form))
-	if err != nil {
-		return "", fmt.Errorf("create token request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := p.tokenClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("token exchange failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b := ReadErrorBody(resp)
-		return "", fmt.Errorf("token exchange status %d: %s", resp.StatusCode, string(b))
-	}
-	var tokResp struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&tokResp); err != nil {
-		return "", fmt.Errorf("decode token response: %w", err)
-	}
-	if tokResp.AccessToken == "" {
-		return "", fmt.Errorf("empty access_token in token response")
-	}
-	expiry := time.Now()
-	if tokResp.ExpiresIn > 0 {
-		expiry = expiry.Add(time.Duration(tokResp.ExpiresIn) * time.Second)
-	} else {
-		expiry = expiry.Add(55 * time.Minute)
-	}
+    form := "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + signed
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURI, strings.NewReader(form))
+    if err != nil {
+        return "", fmt.Errorf("create token request: %w", err)
+    }
+    httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    resp, err := p.tokenClient.Do(httpReq)
+    if err != nil {
+        return "", fmt.Errorf("token exchange failed: %w", err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        b := ReadErrorBody(resp)
+        return "", fmt.Errorf("token exchange status %d: %s", resp.StatusCode, string(b))
+    }
+    var tokResp struct {
+        AccessToken string `json:"access_token"`
+        ExpiresIn   int    `json:"expires_in"`
+    }
+    if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&tokResp); err != nil {
+        return "", fmt.Errorf("decode token response: %w", err)
+    }
+    if tokResp.AccessToken == "" {
+        return "", fmt.Errorf("empty access_token in token response")
+    }
+    expiry := time.Now()
+    if tokResp.ExpiresIn > 0 {
+        expiry = expiry.Add(time.Duration(tokResp.ExpiresIn) * time.Second)
+    } else {
+        expiry = expiry.Add(55 * time.Minute)
+    }
 
-	p.mu.Lock()
-	p.cachedToken = tokResp.AccessToken
-	p.tokenExpiry = expiry
-	p.mu.Unlock()
-	slog.Info("vertex oauth2 token acquired", "expires_in", tokResp.ExpiresIn)
-	return tokResp.AccessToken, nil
+    p.cachedToken = tokResp.AccessToken
+    p.tokenExpiry = expiry
+    slog.Info("vertex oauth2 token acquired", "expires_in", tokResp.ExpiresIn)
+    return tokResp.AccessToken, nil
 }
+
 
 func (p *VertexProvider) rawPredictURL(model string) string {
 	return fmt.Sprintf("%s/v1/projects/%s/locations/%s/publishers/anthropic/models/%s:rawPredict",
@@ -273,7 +290,7 @@ func (p *VertexProvider) StreamMessages(ctx context.Context, req *AnthropicReque
 			case <-stopBodyWatch:
 			}
 		})
-		parseAnthropicEventStreamRaw(resp.Body, ch)
+		parseAnthropicEventStreamRaw(ctx, resp.Body, ch)
 	})
 	return ch, nil
 }
@@ -318,7 +335,7 @@ func (p *VertexProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-ch
 	ch := make(chan StreamChunk, 64)
 	safego.Go("vertex_stream_relay", func() {
 		defer close(ch)
-		anthropicEventsToChunks(evCh, ch, req.Model)
+		anthropicEventsToChunks(ctx, evCh, ch, req.Model)
 	})
 	return ch, nil
 }

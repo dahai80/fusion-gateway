@@ -65,37 +65,35 @@ func collectMLXMetrics(m *HardwareMetrics) error {
 
 func parsePrometheusMetrics(data string, m *HardwareMetrics) {
     lines := strings.Split(data, "\n")
+    // C9 (audit): the old HasPrefix match was last-wins per line group — with
+    // multiple series (per-model memory, per-worker queue depth) the final
+    // line clobbered the earlier ones, and a longer metric name sharing the
+    // prefix was misattributed. Now: exact metric-name boundary (next char is
+    // '{' or whitespace) and SUM across series for these additive gauges.
     for _, line := range lines {
-        if strings.HasPrefix(line, "#") || line == "" {
+        if line == "" || strings.HasPrefix(line, "#") {
             continue
         }
-
-        // Parse fusion_mlx_model_memory_bytes
-        if strings.HasPrefix(line, "fusion_mlx_model_memory_bytes") {
-            if val, err := extractMetricValue(line); err == nil {
-                m.MLXActiveMemory = val
-            }
+        idx := strings.IndexAny(line, "{ ")
+        if idx <= 0 {
+            continue
         }
-
-        // Parse fusion_mlx_models_loaded
-        if strings.HasPrefix(line, "fusion_mlx_models_loaded") {
-            if val, err := extractMetricValue(line); err == nil {
-                m.MLXModelsLoaded = int(val)
-            }
+        name := line[:idx]
+        // extractMetricValue takes the full line (it reads the last
+        // whitespace-separated token, which is the value).
+        val, err := extractMetricValue(line)
+        if err != nil {
+            continue
         }
-
-        // Parse fusion_mlx_requests_total
-        if strings.HasPrefix(line, "fusion_mlx_requests_total") {
-            if val, err := extractMetricValue(line); err == nil {
-                m.MLXRequestsTotal = val
-            }
-        }
-
-        // Parse inference queue depth
-        if strings.HasPrefix(line, "fusion_mlx_inference_queue_depth") {
-            if val, err := extractMetricValue(line); err == nil {
-                m.MLXInferenceQueueDepth = int(val)
-            }
+        switch name {
+        case "fusion_mlx_model_memory_bytes":
+            m.MLXActiveMemory += val
+        case "fusion_mlx_models_loaded":
+            m.MLXModelsLoaded += int(val)
+        case "fusion_mlx_requests_total":
+            m.MLXRequestsTotal += val
+        case "fusion_mlx_inference_queue_depth":
+            m.MLXInferenceQueueDepth += int(val)
         }
     }
 
@@ -103,10 +101,8 @@ func parsePrometheusMetrics(data string, m *HardwareMetrics) {
         "active_memory", m.MLXActiveMemory,
         "models_loaded", m.MLXModelsLoaded,
         "requests_total", m.MLXRequestsTotal,
-        "queue_depth", m.MLXInferenceQueueDepth,
-    )
+        "queue_depth", m.MLXInferenceQueueDepth)
 }
-
 func extractMetricValue(line string) (uint64, error) {
     parts := strings.Fields(line)
     if len(parts) < 2 {

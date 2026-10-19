@@ -71,7 +71,7 @@ func TestParseAnthropicEventStreamRaw(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	ch := make(chan AnthropicStreamEvent, 16)
-	parseAnthropicEventStreamRaw(resp.Body, ch)
+	parseAnthropicEventStreamRaw(context.Background(), resp.Body, ch)
 	close(ch)
 	var types []string
 	for ev := range ch {
@@ -92,7 +92,7 @@ func TestAnthropicEventsToChunks(t *testing.T) {
 	evCh <- AnthropicStreamEvent{Type: "message_delta", StopReason: "end_turn", Usage: &AnthropicUsage{OutputTokens: 1}}
 	close(evCh)
 	ch := make(chan StreamChunk, 8)
-	anthropicEventsToChunks(evCh, ch, "claude-x")
+	anthropicEventsToChunks(context.Background(), evCh, ch, "claude-x")
 	close(ch)
 	var n int
 	var sawFinish bool
@@ -364,7 +364,7 @@ func TestRR12_ParseAnthropicEventStreamRaw_OversizeLineClosesStream(t *testing.T
 	ch := make(chan AnthropicStreamEvent, 16)
 	done := make(chan struct{})
 	go func() {
-		parseAnthropicEventStreamRaw(body, ch)
+		parseAnthropicEventStreamRaw(context.Background(), body, ch)
 		close(done)
 	}()
 
@@ -418,7 +418,7 @@ func TestRR12_OversizeLine_HalfJSONNotEmitted(t *testing.T) {
 	body := bytesReader(append(append([]byte("data: "), oversize...), []byte("\n\ndata: {\"type\":\"message_stop\"}\n\n")...))
 
 	ch := make(chan AnthropicStreamEvent, 16)
-	parseAnthropicEventStreamRaw(body, ch)
+	parseAnthropicEventStreamRaw(context.Background(), body, ch)
 	close(ch)
 	var count int
 	for range ch {
