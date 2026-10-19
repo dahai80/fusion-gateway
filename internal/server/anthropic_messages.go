@@ -266,6 +266,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
             tenant = kc.Name
         }
+        // #234: echo the request id on the fallback path too (native path
+        // surfaces it via writeMessagesError on errors only).
+        if rid := middleware.RequestIDFromContext(r.Context()); rid != "" {
+            w.Header().Set("X-Request-ID", rid)
+        }
         if antReq.Stream {
             // R10 (audit): global concurrent-stream cap (429 when full).
             ok, releaseSlot := s.acquireStreamSlot()
@@ -282,9 +287,18 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
             // R9 (audit): per-request duration ceiling (default 600s).
             streamCtx, cancelDeadline := s.streamDeadline(ctx)
             defer cancelDeadline()
-            s.handleStreamChat(streamCtx, w, provider, chatReq, decision, budget, start)
+            // #234: the openai-compatible backend streams OpenAI chunks —
+            // interpose the SSE bridge so the client receives Anthropic
+            // message_* events (message_start on the first upstream chunk).
+            bridge := newAnthropicSSEBridge(w)
+            s.handleStreamChat(streamCtx, bridge, provider, chatReq, decision, budget, start)
+            bridge.Finalize()
         } else {
-            s.handleNonStreamChat(ctx, w, provider, chatReq, decision, budget, start, tenant)
+            // #234: capture the OpenAI ChatCompletion body and convert it to
+            // an Anthropic Message before it reaches the client.
+            capture := newNonStreamBridgeWriter()
+            s.handleNonStreamChat(ctx, capture, provider, chatReq, decision, budget, start, tenant)
+            capture.finalize(w)
         }
     }
 }

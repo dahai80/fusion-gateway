@@ -590,6 +590,7 @@ chat completions 完整支持 OpenAI `stream_options`:
 
 - **原生路径**:路由到 Anthropic 后端的请求以原生格式转发 (无转换开销)
 - **自动转换路径**:路由到非 Anthropic 后端的请求自动转换:AnthropicRequest → ChatRequest → ChatResponse → AnthropicResponse
+- **OpenAI 兼容后端回程桥接** (#234) — 路由目标不是 `MessagesProvider` (如 fusion-mlx) 时,Anthropic→OpenAI 请求转换后由 OpenAI 格式的 chat handler 生成响应;桥接层 (`internal/server/anthropic_openai_bridge.go`) 转换回程,客户端始终收到协议合法的 Anthropic 载荷:非流式 ChatCompletion JSON → Message (content blocks、`tool_calls` → `tool_use`、`stop_reason` 映射 length→max_tokens / tool_calls→tool_use、usage prompt/completion→input/output),OpenAI chunk SSE → Anthropic 事件 SSE (`message_start` 随首个上游 chunk 立即发出、block 生命周期、`message_delta`+`message_stop` 终止对 — 流未以 `[DONE]` 结束也合成终止),错误体 (`{"detail":...}`、OpenAI `{"error":{...}}`、流前失败) → `{"type":"error","error":{...}}` 信封。回程路径回显 `X-Request-ID`。
 - **双向转换**:system 消息提取、工具格式翻译 (OpenAI functions ↔ Anthropic tools)、content block 映射
 - **内容形式**:`content` 接受纯字符串或 content block 数组 (遵循 Anthropic API 规范;字符串归一化为 `[{type:"text",text:s}]`)
 - **流式**:原生 Anthropic SSE 事件 (`message_start`、`content_block_delta`、`message_delta`、`message_stop`)
