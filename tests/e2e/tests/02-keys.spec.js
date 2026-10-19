@@ -59,6 +59,10 @@ test.describe('key management', () => {
         // --- DELETE via UI (the previously-broken button) ---
         await page.reload();
         await page.waitForLoadState('networkidle');
+        // Keys table paginates at 20/page; a long-lived store can hold >20 keys
+        // so the fresh key may land on page 2. Switch page size to 100 first.
+        await page.locator('.ant-pagination .ant-select').click();
+        await page.getByRole('option', { name: '100 / page' }).click();
         const row = page.locator('.ant-table-row', { hasText: TMP + '-auth' }).first();
         await expect(row).toBeVisible({ timeout: 10_000 });
         await row.getByRole('button', { name: /delete|删除|remove/i }).click();

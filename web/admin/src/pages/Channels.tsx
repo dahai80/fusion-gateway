@@ -202,7 +202,7 @@ export default function Channels() {
                 columns={columns}
                 dataSource={channels}
                 loading={loading}
-                pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `Total ${t}` }}
+                pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (t) => `Total ${t}` }}
             />
             <Modal
                 title={editId ? "Edit Channel" : "Add Channel"}

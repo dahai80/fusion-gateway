@@ -165,7 +165,7 @@ export default function Keys() {
                 columns={columns}
                 dataSource={keys}
                 loading={loading}
-                pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `Total ${t}` }}
+                pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (t) => `Total ${t}` }}
             />
             <Modal
                 title={editId ? "Edit Key" : "Create Key"}

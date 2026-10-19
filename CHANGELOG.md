@@ -9,6 +9,17 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (admin UI, 2026-10-19)
+
+- **Keys/Channels tables: page-size changer was a no-op.** Passing a static
+  `pageSize: 20` inside the antd `pagination` prop makes it a *controlled*
+  value (partial-merge pins it), so the `showSizeChanger` combobox silently
+  did nothing for users. Switched to `defaultPageSize: 20` (uncontrolled) on
+  both pages. Surfaced by the e2e keys suite: soft-deleted (F8) keys
+  accumulate in the list by design, so a long-lived store pushes fresh keys
+  past page 1 and the test's row-visibility check needs the 100/page switch
+  (added to `02-keys.spec.js`).
+
 ### Fixed (regression-report follow-ups, 2026-10-19)
 
 - **B16 closed: volcengine provider is Bearer-only.** The AK/SK HMAC branch
