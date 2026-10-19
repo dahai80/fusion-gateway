@@ -9,6 +9,16 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (regression-report follow-ups, 2026-10-19)
+
+- **B16 closed: volcengine provider is Bearer-only.** The AK/SK HMAC branch
+  was unreachable (the constructor never populated the accessKey/secretKey
+  fields from any config key) and its string-to-sign (method+path+timestamp)
+  matched no real Volcengine scheme — a strict server would always 401. The
+  dead branch is removed; Ark /api/v3 authenticates with Bearer api_key, and
+  a missing api_key logs an explicit error (C1 already refuses enabled
+  backends without one).
+
 ### Removed (config simplification, audit 1019)
 
 - **Dead config fields deleted (full stack: struct + admin API + dashboard UI)**:

@@ -22,24 +22,11 @@ func TestVolcengineSignRequest_APIKey(t *testing.T) {
     }
 }
 
-func TestVolcengineSignRequest_HMAC(t *testing.T) {
-    slog.Info("test VolcengineSignRequest_HMAC")
-    p := NewVolcengineProvider("test", config.BackendConfig{
-        BaseURL: "http://localhost:8080",
-    })
-    p.accessKey = "test-access-key"
-    p.secretKey = "test-secret-key"
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
-    p.signRequest(req)
-    if req.Header.Get("X-Date") == "" {
-        t.Error("expected X-Date header")
-    }
-    auth := req.Header.Get("Authorization")
-    if auth == "" {
-        t.Error("expected Authorization header")
-    }
-}
-
+// B16 follow-up (regression report 1019): the AK/SK HMAC branch was
+// unreachable (constructor never populated the fields) and its signature
+// scheme matched no real Volcengine API. The provider is Bearer-only now;
+// a missing api_key leaves the request unauthenticated (config validation
+// refuses enabled backends without one).
 func TestVolcengineSignRequest_NoKeys(t *testing.T) {
     slog.Info("test VolcengineSignRequest_NoKeys")
     p := NewVolcengineProvider("test", config.BackendConfig{
@@ -49,5 +36,8 @@ func TestVolcengineSignRequest_NoKeys(t *testing.T) {
     p.signRequest(req)
     if req.Header.Get("Authorization") != "" {
         t.Error("expected no Authorization header without keys")
+    }
+    if req.Header.Get("X-Date") != "" {
+        t.Error("expected no X-Date header (HMAC path removed)")
     }
 }

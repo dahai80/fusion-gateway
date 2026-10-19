@@ -425,13 +425,11 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
 func TestVolcengine_SignRequestWithAPIKey(t *testing.T) {
     slog.Info("test Volcengine_SignRequestWithAPIKey")
     p := NewVolcengineProvider("test", config.BackendConfig{BaseURL: "http://localhost:8080", APIKey: "test-key"})
-    p.accessKey = "test-access"
-    p.secretKey = "test-secret"
     req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
     p.signRequest(req)
     auth := req.Header.Get("Authorization")
-    if !strings.HasPrefix(auth, "Bearer ") {
-        t.Errorf("expected Bearer api_key to win when both credential kinds are configured (B16 audit), got %s", auth)
+    if auth != "Bearer test-key" {
+        t.Errorf("expected exact Bearer api_key, got %s", auth)
     }
 }
 
@@ -852,17 +850,15 @@ func TestAnthropic_ListModelsHardcoded(t *testing.T) {
     }
 }
 
-// TestVolcengine_SignRequestWithAKSKOnly: with ONLY access+secret keys (no
-// api_key), the HMAC signature path is used.
-func TestVolcengine_SignRequestWithAKSKOnly(t *testing.T) {
-    slog.Info("test Volcengine_SignRequestWithAKSKOnly")
+// TestVolcengine_SignRequestNoAuthLeavesHeaderEmpty: with no api_key the
+// request carries no Authorization header (Bearer-only provider; C1 config
+// validation refuses enabled backends without an api_key).
+func TestVolcengine_SignRequestNoAuthLeavesHeaderEmpty(t *testing.T) {
+    slog.Info("test Volcengine_SignRequestNoAuthLeavesHeaderEmpty")
     p := NewVolcengineProvider("test", config.BackendConfig{BaseURL: "http://localhost:8030"})
-    p.accessKey = "test-access"
-    p.secretKey = "test-secret"
     req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
     p.signRequest(req)
-    auth := req.Header.Get("Authorization")
-    if !strings.HasPrefix(auth, "HMAC-SHA256") {
-        t.Errorf("expected HMAC signature for AK/SK-only config, got %s", auth)
+    if auth := req.Header.Get("Authorization"); auth != "" {
+        t.Errorf("expected empty Authorization without api_key, got %s", auth)
     }
 }

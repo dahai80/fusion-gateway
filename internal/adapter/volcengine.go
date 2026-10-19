@@ -3,15 +3,11 @@ package adapter
 import (
     "bytes"
     "context"
-    "crypto/hmac"
-    "crypto/sha256"
-    "encoding/hex"
     "encoding/json"
     "fmt"
 
     "log/slog"
     "net/http"
-    "net/url"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -22,8 +18,6 @@ type VolcengineProvider struct {
     name             string
     baseURL           string
     apiKey            string
-    accessKey         string
-    secretKey         string
     httpClient        *http.Client
     streamHTTPClient  *http.Client
 }
@@ -158,34 +152,18 @@ func (p *VolcengineProvider) ListModels(ctx context.Context) ([]ModelInfo, error
     return listResp.Data, nil
 }
 
-// signRequest authenticates the outbound request. The two credential kinds
-// are mutually exclusive (B16, audit): when both are configured the previous
-// code set Bearer and then overwrote Authorization with an HMAC header, so
-// neither path was valid. apiKey wins (the ARC service accepts Bearer); the
-// AK/SK branch is kept for deployments that configure only those. The HMAC
-// string-to-sign covers method + path + timestamp; a full V4 signature (host/
-// query/body) is tracked upstream — with the overwrite bug removed the Bearer
-// path at least authenticates deterministically.
+// signRequest authenticates the outbound request with Bearer api_key. The
+// AK/SK HMAC branch was removed (B16 follow-up, regression report 1019): the
+// constructor never populated accessKey/secretKey from any config field, so
+// the branch was unreachable, and its string-to-sign (method+path+timestamp)
+// matched no real Volcengine scheme — a strict server would always 401. Ark
+// /api/v3 authenticates with Bearer api_key only; a missing api_key is a
+// config error (C1 placeholder validation already refuses enabled backends
+// without one).
 func (p *VolcengineProvider) signRequest(req *http.Request) {
-    if p.apiKey != "" {
-        if p.accessKey != "" && p.secretKey != "" {
-            slog.Warn("volcengine: both api_key and ak/sk configured, using Bearer api_key", "backend", p.name)
-        }
-        req.Header.Set("Authorization", "Bearer "+p.apiKey)
+    if p.apiKey == "" {
+        slog.Error("volcengine: no api_key configured, request will be unauthenticated", "backend", p.name)
         return
     }
-    if p.accessKey != "" && p.secretKey != "" {
-        u, err := url.Parse(p.baseURL + req.URL.Path)
-        if err != nil {
-            slog.Error("volcengine: unparseable base URL, skipping AK/SK signature", "backend", p.name, "error", err)
-            return
-        }
-        ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-        stringToSign := req.Method + "\n" + u.Path + "\n" + ts
-        mac := hmac.New(sha256.New, []byte(p.secretKey))
-        mac.Write([]byte(stringToSign))
-        signature := hex.EncodeToString(mac.Sum(nil))
-        req.Header.Set("X-Date", ts)
-        req.Header.Set("Authorization", fmt.Sprintf("HMAC-SHA256 Credential=%s, Signature=%s", p.accessKey, signature))
-    }
+    req.Header.Set("Authorization", "Bearer "+p.apiKey)
 }
