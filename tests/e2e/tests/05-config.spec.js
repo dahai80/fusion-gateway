@@ -21,7 +21,8 @@ const SECTIONS = [
     ['retry', { max_retries: 7, retryable_status_codes: [429, 500, 502, 503] }],
     ['negotiation', { disable_fusion_mlx_routing: true, route_header: 'X-Fusion-Route' }],
     ['cache', { enabled: false, max_entries: 50 }],
-    ['cost', { enabled: false }],
+    // cost section removed in the 1019 config sweep (dead fields, tracker
+    // hardcoded) — /admin/api/config/cost no longer exists, so no round-trip.
     ['cost-markup', { enabled: false, global_markup: 0.1 }],
     ['pii', { enabled: false, action: 'block' }],
     ['cloud-routing', { strategy: 'weighted' }],

@@ -349,15 +349,28 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusNotFound, err.Error())
             return
         }
+        // e2e regression fix: the A2 projection on PUT must use the same
+        // field names as GET (quota_limit etc.) — the interim hand-built map
+        // used "quota"/"used_quota" and broke clients reading quota_limit.
         writeJSON(w, http.StatusOK, map[string]interface{}{
-            "name":       key.Name,
-            "key_prefix": key.KeyPrefix,
-            "status":     key.Status,
-            "models":     key.AllowedModels,
-            "modules":    key.ModelModules,
-            "quota":      key.QuotaLimit,
-            "used_quota": key.QuotaUsed,
-            "created_at": key.CreatedAt.Format(time.RFC3339),
+            "name":               key.Name,
+            "key_prefix":         key.KeyPrefix,
+            "status":             key.Status,
+            "quota_limit":        key.QuotaLimit,
+            "quota_used":         key.QuotaUsed,
+            "quota_remaining":    key.QuotaRemaining,
+            "allowed_models":     key.AllowedModels,
+            "rpm":                key.RPM,
+            "tpm":                key.TPM,
+            "expires_at":         key.ExpiresAt,
+            "budget_limit":       key.BudgetLimit,
+            "daily_budget_limit": key.DailyBudgetLimit,
+            "daily_used":         key.DailyUsed,
+            "daily_date":         key.DailyDate,
+            "allowed_backends":   key.AllowedBackends,
+            "model_modules":      key.ModelModules,
+            "created_at":         key.CreatedAt.Format(time.RFC3339),
+            "updated_at":         key.UpdatedAt.Format(time.RFC3339),
         })
 
     case http.MethodDelete:
