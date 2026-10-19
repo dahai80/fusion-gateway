@@ -9,6 +9,21 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (e2e, 2026-10-19) — #241
+
+- **03-channels "create channel with inputs, then DELETE" flake root-caused
+  and fixed.** Two latent defects: (1) the type Select was driven by
+  `keyboard.type('openai')` but the Select is not search-enabled, so typing
+  did nothing and Enter always picked the first option ("Fusion-MLX (Local)")
+  — the test never asserted the selected type, so it silently created the
+  wrong channel type; (2) fixed `waitForTimeout` sleeps + 20/page pagination
+  made row-visibility asserts depend on residue and timing. Now: open
+  dropdown clicked case-insensitively, selection asserted, create/delete
+  confirmed via API polling, 100/page before row checks, and an afterAll
+  sweep hard-deletes every `e2e-ch*` channel (channel DELETE is a hard
+  delete; a failed test skips its own cleanup and its residue poisons the
+  next run). Suite runs 48/48 twice consecutively; spec runs 3.6× faster.
+
 ### Fixed (admin UI, 2026-10-19)
 
 - **Keys/Channels tables: page-size changer was a no-op.** Passing a static
