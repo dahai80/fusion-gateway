@@ -59,9 +59,15 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     // it keep reading a torn-down fusion-mlx. context.Background() here would
     // ignore Shutdown — slots leak until the 5-min idle watchdog or a read
     // error, contending the next process on a fast restart.
-    liveCtx := context.Background()
-    if s.shutdownCtx != nil {
-        liveCtx = s.shutdownCtx
+    liveCtx := s.shutdownCtx
+    if liveCtx == nil {
+        // B19 (audit): the fallback must stay cancellable — a plain
+        // context.Background() root survived Shutdown, keeping pumps reading
+        // a torn-down fusion-mlx. Once-created cancellable root instead.
+        s.liveFallbackOnce.Do(func() {
+            s.liveFallbackCtx, s.liveFallbackCancel = context.WithCancel(context.Background())
+        })
+        liveCtx = s.liveFallbackCtx
     }
     if rid := middleware.RequestIDFromContext(ctx); rid != "" {
         liveCtx = middleware.InjectRequestID(liveCtx, rid)
@@ -84,7 +90,13 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     liveCtx, liveCancel := context.WithCancel(liveCtx)
     defer liveCancel()
 
-    buf := s.streamBuffers.Open(sid)
+    // A1 (audit): record the authenticated principal as the buffer owner so
+    // the replay endpoint can enforce same-principal replay.
+    owner := ""
+    if p := middleware.PrincipalFromContext(ctx); p != nil {
+        owner = p.Subject()
+    }
+    buf := s.streamBuffers.Open(sid, owner)
     ch, err := provider.StreamChat(liveCtx, req)
     if err != nil {
         // RR4 slot-full diversion mirrors the plain path.
@@ -130,7 +142,7 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
     w.Header().Set("X-Fusion-Stream-Resume-URL", "/v1/stream/"+sid+"/events")
     flusher, canFlush := w.(http.Flusher)
 
-    streamCfg := s.cfg.Config.Routing.Stream
+    streamCfg := s.snapshot().Config.Routing.Stream
     streamStart := time.Now()
     var firstChunkAt time.Time
     var lastChunkAt time.Time
@@ -410,6 +422,21 @@ func (s *Server) handleStreamResume(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // A1 (audit): only the principal that opened the stream may replay it. A
+    // mismatch returns 403 (not 404) so the owner can tell eviction apart from
+    // a permission problem; existence is not disclosed since Get() already
+    // 404s unknown sids to everyone.
+    requester := ""
+    if p := middleware.PrincipalFromContext(ctx); p != nil {
+        requester = p.Subject()
+    }
+    if owner := buf.Owner(); owner == "" || requester == "" || owner != requester {
+        slog.Warn("stream resume: principal mismatch, refusing replay",
+            "sid", sid, "owner", owner, "requester", requester)
+        http.Error(w, `{"error":{"type":"permission_error","message":"stream belongs to another principal"}}`, http.StatusForbidden)
+        return
+    }
+
     // Cursor: Last-Event-ID header takes precedence; ?last_event_id= fallback;
     // empty = replay from the start.
     cursor := r.Header.Get("Last-Event-ID")
@@ -418,8 +445,14 @@ func (s *Server) handleStreamResume(w http.ResponseWriter, r *http.Request) {
     }
     afterSeq := 0
     if cursor != "" {
-        if seq, ok := parseStreamCursor(cursor); ok {
+        if seq, cursorSID, ok := parseStreamCursor(cursor); ok && cursorSID == sid {
             afterSeq = seq
+        } else if ok {
+            // Cursor cites a different stream — replaying from start would
+            // interleave foreign frames; refuse instead of guessing.
+            slog.Warn("stream resume: cursor sid mismatch", "sid", sid, "cursor", cursor)
+            http.Error(w, `{"error":{"type":"invalid_request_error","message":"Last-Event-ID cites a different stream"}}`, http.StatusBadRequest)
+            return
         } else {
             slog.Warn("stream resume: unparseable Last-Event-ID, replaying from start", "sid", sid, "cursor", cursor)
         }
@@ -480,16 +513,18 @@ func (s *Server) handleStreamResume(w http.ResponseWriter, r *http.Request) {
     slog.Info("stream resume: ended", "sid", sid, "last_seq", afterSeq, "client_gone", clientGone, "ctx_err", ctx.Err())
 }
 
-// parseStreamCursor parses "<sid>:<seq>" and returns the seq. Returns ok=false
-// if the format is wrong (caller replays from start).
-func parseStreamCursor(cursor string) (int, bool) {
+// parseStreamCursor parses "<sid>:<seq>" and returns the seq and the sid the
+// cursor cites. Returns ok=false if the format is wrong (caller replays from
+// start); ok=true with a sid that does not match the path sid is refused by
+// the caller (audit A1).
+func parseStreamCursor(cursor string) (int, string, bool) {
     idx := strings.LastIndex(cursor, ":")
     if idx < 0 {
-        return 0, false
+        return 0, "", false
     }
     seq, err := strconv.Atoi(cursor[idx+1:])
     if err != nil || seq < 0 {
-        return 0, false
+        return 0, "", false
     }
-    return seq, true
+    return seq, cursor[:idx], true
 }

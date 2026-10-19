@@ -122,7 +122,7 @@ func TestResumableStream_EmitsIDLines(t *testing.T) {
 // after the cursor seq. Guard: monotonic seq + filter both required.
 func TestStreamBuffer_AppendFramesAfterCursor(t *testing.T) {
     store := NewStreamBufferStore(256, 1<<20, 0, 10*time.Minute)
-    buf := store.Open("sid-cursor")
+    buf := store.Open("sid-cursor", "owner-1")
     if buf == nil {
         t.Fatal("Open returned nil")
     }
@@ -235,7 +235,7 @@ func TestResumableStream_CloudPathUnaffected(t *testing.T) {
 func TestStreamResume_ReplayAfterCursor(t *testing.T) {
     s := newResumableTestServer(t)
     sid := "req-replay-test"
-    buf := s.streamBuffers.Open(sid)
+    buf := s.streamBuffers.Open(sid, "owner-1")
     for i := 0; i < 5; i++ {
         buf.Append([]byte(fmt.Sprintf(`{"i":%d}`, i)))
     }
@@ -243,6 +243,7 @@ func TestStreamResume_ReplayAfterCursor(t *testing.T) {
 
     // Cursor "req-replay-test:2" → replay frames 3,4,5 only.
     req := httptest.NewRequest(http.MethodGet, "/v1/messages/"+sid+"/events", nil)
+    req = withResumePrincipal(req, "owner-1")
     req.Header.Set("Last-Event-ID", sid+":2")
     rec := httptest.NewRecorder()
     s.handleStreamResume(rec, req)
@@ -278,13 +279,14 @@ func TestStreamResume_404WhenDisabled(t *testing.T) {
 func TestStreamResume_NeutralRoute(t *testing.T) {
     s := newResumableTestServer(t)
     sid := "req-neutral-route"
-    buf := s.streamBuffers.Open(sid)
+    buf := s.streamBuffers.Open(sid, "owner-1")
     for i := 0; i < 4; i++ {
         buf.Append([]byte(fmt.Sprintf(`{"i":%d}`, i)))
     }
     buf.MarkFinalized()
 
     req := httptest.NewRequest(http.MethodGet, "/v1/stream/"+sid+"/events", nil)
+    req = withResumePrincipal(req, "owner-1")
     req.Header.Set("Last-Event-ID", sid+":2")
     rec := httptest.NewRecorder()
     s.handleStreamResume(rec, req)
@@ -320,5 +322,55 @@ func TestResumableStream_EmitsResumeURLHeader(t *testing.T) {
     want := "/v1/stream/" + sid + "/events"
     if got := rec.Header().Get("X-Fusion-Stream-Resume-URL"); got != want {
         t.Fatalf("X-Fusion-Stream-Resume-URL = %q, want %q", got, want)
+    }
+}
+
+// withResumePrincipal injects an authenticated principal (key owner) into the
+// request ctx — the replay endpoint requires it since audit A1.
+func withResumePrincipal(req *http.Request, name string) *http.Request {
+    p := &middleware.Principal{KeyConfig: &config.AuthKeyConfig{Name: name}}
+    return req.WithContext(middleware.ContextWithPrincipal(req.Context(), p))
+}
+
+// TestStreamResume_OwnerMismatch403 (audit A1): a different principal than the
+// one that opened the stream must be refused the replay.
+// Guard: remove the owner check and the foreign replay returns 200 + frames.
+func TestStreamResume_OwnerMismatch403(t *testing.T) {
+    s := newResumableTestServer(t)
+    sid := "req-acl-test"
+    buf := s.streamBuffers.Open(sid, "owner-1")
+    buf.Append([]byte(`{"secret":"prompt-tail"}`))
+    buf.MarkFinalized()
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/stream/"+sid+"/events", nil)
+    req = withResumePrincipal(req, "owner-2")
+    rec := httptest.NewRecorder()
+    s.handleStreamResume(rec, req)
+
+    if rec.Code != http.StatusForbidden {
+        t.Fatalf("code = %d, want 403", rec.Code)
+    }
+    if strings.Contains(rec.Body.String(), "prompt-tail") {
+        t.Fatalf("foreign principal saw stream content: %s", rec.Body.String())
+    }
+}
+
+// TestStreamResume_CursorSidMismatch400 (audit A1): a Last-Event-ID citing a
+// different sid must be refused, not silently replayed from the start.
+func TestStreamResume_CursorSidMismatch400(t *testing.T) {
+    s := newResumableTestServer(t)
+    sid := "req-cursor-foreign"
+    buf := s.streamBuffers.Open(sid, "owner-1")
+    buf.Append([]byte(`{"i":1}`))
+    buf.MarkFinalized()
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/stream/"+sid+"/events", nil)
+    req = withResumePrincipal(req, "owner-1")
+    req.Header.Set("Last-Event-ID", "other-sid:2")
+    rec := httptest.NewRecorder()
+    s.handleStreamResume(rec, req)
+
+    if rec.Code != http.StatusBadRequest {
+        t.Fatalf("code = %d, want 400", rec.Code)
     }
 }

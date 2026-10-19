@@ -94,6 +94,7 @@ cp config.example.yaml config.yaml
 | `observability.otel_service_name` | fusion-gateway | OTel 链路中的服务名 |
 | `rbac.enabled` | false | 启用 RBAC 基于角色的访问控制 |
 | `rbac.default_role` | viewer | 无 OIDC claims 时的默认角色:admin、editor、viewer |
+| `rbac.trust_oidc_claims` | false | 可选:将 OIDC role/groups claims 映射到 RBAC 角色。默认关闭,防止 claim 污染获得 admin |
 | `team.enabled` | false | 启用团队/组织管理 |
 | `team.default_team` | default | 未分配 key 的默认团队 |
 | `semantic_cache.enabled` | false | 启用语义缓存 (基于相似度命中) |
@@ -644,12 +645,13 @@ observability:
 rbac:
     enabled: true
     default_role: "viewer"    # 无 OIDC claims 时的回退角色
+trust_oidc_claims: false  # 可选:OIDC role/groups claims 映射到 RBAC 角色
 team:
     enabled: true
     default_team: "default"   # 无 OIDC team claim 时分配的团队
 ```
 
-- OIDC claims `role`、`groups`、`team` 自动映射到 RBAC 角色
+- OIDC claims `role`、`groups`、`team` 仅在 `rbac.trust_oidc_claims: true` 时映射到 RBAC 角色（默认 `false`:自注册或被入侵的 IdP 无法通过伪造 claim 提权到 admin）
 - master API key 始终获得 admin 角色
 - 通过 `/admin/teams` 团队成本聚合 — 按团队跟踪配额
 - key 与团队绑定:TeamsStore 中的 `BindKeyToTeam(apiKey, teamID)`

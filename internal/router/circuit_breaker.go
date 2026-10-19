@@ -37,6 +37,13 @@ type CircuitBreaker struct {
     successCount     int
     lastFailureTime  time.Time
     tripReason       string
+    // B6 (audit): half-open single-probe gate. Without it, every request saw
+    // StateHalfOpen after the open timeout and flooded the recovering backend,
+    // with successCount shared across concurrent probes. One probe in flight
+    // at a time; a reservation that never sees Record* (its request diverted
+    // before dispatch) self-heals after probeWindow.
+    probeInFlight bool
+    probeDeadline time.Time
 }
 
 func NewCircuitBreaker(cfg config.CircuitBreakerConfig) *CircuitBreaker {
@@ -72,12 +79,57 @@ func (cb *CircuitBreaker) State() CircuitBreakerState {
     return currentState
 }
 
+// probeWindow bounds how long a half-open probe reservation stays valid when
+// its request never reaches RecordSuccess/RecordFailure (decide diverted it to
+// another backend). Reuses the open-state timeout — already config-driven and
+// on the same order as a request's reasonable lifetime.
+func (cb *CircuitBreaker) probeWindow() time.Duration {
+    if cb.cfg.Timeout <= 0 {
+        return 30 * time.Second
+    }
+    return cb.cfg.Timeout
+}
+
+// Admit reports whether ONE more request may hit the protected backend, and
+// for half-open enforces the single-probe rule: the first caller reserves the
+// probe slot, every later caller is denied until the probe's RecordSuccess/
+// RecordFailure clears it or the reservation window expires. Closed admits
+// unconditionally. Open denies (transitioning to half-open on timeout, same
+// rule as State()). Admission sites: engine P0 local, cloud, cluster gates.
+func (cb *CircuitBreaker) Admit() bool {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    switch cb.state {
+    case StateClosed:
+        return true
+    case StateOpen:
+        if time.Since(cb.lastFailureTime) > cb.cfg.Timeout {
+            cb.state = StateHalfOpen
+            cb.successCount = 0
+            slog.Info("circuit breaker transitioned to half_open",
+                "timeout", cb.cfg.Timeout,
+                "reason", cb.tripReason,
+            )
+        }
+        return false
+    default: // StateHalfOpen
+        now := time.Now()
+        if cb.probeInFlight && now.Before(cb.probeDeadline) {
+            return false
+        }
+        cb.probeInFlight = true
+        cb.probeDeadline = now.Add(cb.probeWindow())
+        return true
+    }
+}
+
 func (cb *CircuitBreaker) RecordSuccess() {
     cb.mu.Lock()
     defer cb.mu.Unlock()
 
     switch cb.state {
     case StateHalfOpen:
+        cb.probeInFlight = false
         cb.successCount++
         if cb.successCount >= cb.cfg.SuccessThreshold {
             cb.state = StateClosed
@@ -96,6 +148,13 @@ func (cb *CircuitBreaker) RecordFailure() {
 
     switch cb.state {
     case StateClosed:
+        // failure_threshold 0 disables tripping entirely (the documented
+        // opt-out the admin routing PUT writes; B13 follow-up). Guard here so
+        // a disabled breaker does not trip on the very first failure
+        // (failureCount++ >= 0 would always hold).
+        if cb.cfg.FailureThreshold <= 0 {
+            return
+        }
         cb.failureCount++
         if cb.failureCount >= cb.cfg.FailureThreshold {
             cb.state = StateOpen
@@ -106,9 +165,15 @@ func (cb *CircuitBreaker) RecordFailure() {
             )
         }
     case StateHalfOpen:
+        cb.probeInFlight = false
         cb.state = StateOpen
         cb.lastFailureTime = time.Now()
         slog.Warn("circuit breaker reopened from half_open")
+    case StateOpen:
+        // B6 (audit): failures observed while open (racing requests that were
+        // already admitted) must refresh lastFailureTime — the old code left
+        // the pre-trip timestamp, distorting the remaining-open-time math.
+        cb.lastFailureTime = time.Now()
     }
 }
 
@@ -132,6 +197,8 @@ func (cb *CircuitBreaker) ResetToHalfOpen() {
     cb.state = StateHalfOpen
     cb.successCount = 0
     cb.failureCount = 0
+    cb.probeInFlight = false
+    cb.probeDeadline = time.Time{}
     slog.Info("circuit breaker reset to half_open for warmup")
 }
 

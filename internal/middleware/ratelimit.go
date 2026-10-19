@@ -56,12 +56,36 @@ func NewRateLimiter() *RateLimiter {
 func (rl *RateLimiter) getOrCreate(key string) *keyState {
     if v, ok := rl.counters.Load(key); ok {
         ks := v.(*keyState)
+        // B3 (audit): lastAccess is read by cleanupIdle under ks.mu — the
+        // write must hold the same lock or the race detector fires.
+        ks.mu.Lock()
         ks.lastAccess = time.Now()
+        ks.mu.Unlock()
         return ks
     }
     ks := &keyState{lastAccess: time.Now()}
     actual, _ := rl.counters.LoadOrStore(key, ks)
     return actual.(*keyState)
+}
+
+// RollbackRPM returns the most recent RPM slot taken by AllowRPM (audit B12:
+// a key rejected by TPM must not also burn an RPM slot — the TPM check runs
+// after AllowRPM has already appended a timestamp). No-op when the key has no
+// state or the window is empty.
+func (rl *RateLimiter) RollbackRPM(key string, rpm int) {
+    if rpm <= 0 {
+        return
+    }
+    v, ok := rl.counters.Load(key + ":rpm")
+    if !ok {
+        return
+    }
+    ks := v.(*keyState)
+    ks.mu.Lock()
+    if n := len(ks.sw.timestamps); n > 0 {
+        ks.sw.timestamps = ks.sw.timestamps[:n-1]
+    }
+    ks.mu.Unlock()
 }
 
 func (rl *RateLimiter) AllowRPM(key string, rpm int) bool {
@@ -175,7 +199,12 @@ func (rl *RateLimiter) cleanupIdle(ctx context.Context) {
     }
 }
 
-func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx context.Context) int) func(http.Handler) http.Handler {
+// RateLimit enforces per-key RPM and TPM windows. tokFn estimates the
+// request's token count for the TPM window (audit A4: wiring nil disabled TPM
+// enforcement entirely); it is only invoked for keys that actually configure
+// tpm > 0, so non-TPM traffic pays no estimation cost. On a TPM rejection the
+// RPM slot taken above is rolled back (audit B12).
+func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(r *http.Request) int) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             if !cfg.Enabled {
@@ -249,11 +278,14 @@ func RateLimit(cfg *config.RateLimitConfig, limiter *RateLimiter, tokFn func(ctx
             }
 
             tokenCount := 0
-            if tokFn != nil {
-                tokenCount = tokFn(r.Context())
+            if tokFn != nil && keyCfg.TPM > 0 {
+                tokenCount = tokFn(r)
             }
             if tokenCount > 0 && !limiter.AllowTPM(keyName, keyCfg.TPM, tokenCount) {
                 slog.Warn("rate limit: TPM exceeded", "key", keyName, "tpm", keyCfg.TPM, "tokens", tokenCount)
+                // B12 (audit): do not let a TPM rejection also consume an RPM
+                // slot — rollback the timestamp AllowRPM just appended.
+                limiter.RollbackRPM(keyName, keyCfg.RPM)
                 w.Header().Set("Retry-After", "1")
                 w.Header().Set("X-RateLimit-Remaining", "0")
                 http.Error(w, `{"error":{"message":"Rate limit exceeded (TPM)","type":"rate_limit_error"}}`, http.StatusTooManyRequests)

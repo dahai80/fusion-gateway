@@ -705,6 +705,11 @@ type OIDCConfig struct {
 type RBACConfig struct {
     Enabled bool   `mapstructure:"enabled"`
     DefaultRole string `mapstructure:"default_role"`
+    // B20 (audit): when false (default), OIDC role/groups claims are NOT
+    // mapped into the RBAC role — a self-serve or compromised IdP cannot
+    // escalate a user to admin by emitting a crafted claim. Set true only
+    // when the OIDC issuer is trusted to control role assignment.
+    TrustOIDCClaims bool `mapstructure:"trust_oidc_claims"`
 }
 
 type TeamConfig struct {
@@ -1477,8 +1482,13 @@ func validate(cfg *Config) error {
     if cfg.Routing.LocalPriority.MaxMLXMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxMLXMemoryRatio > 1 {
         return fmt.Errorf("max_mlx_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxMLXMemoryRatio)
     }
-    if cfg.Routing.CircuitBreaker.FailureThreshold <= 0 {
-        return fmt.Errorf("circuit_breaker.failure_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.FailureThreshold)
+    // B13 follow-up: the admin routing PUT writes failure_threshold: 0 to
+    // DISABLE the breaker (and the engine reads >0 as enabled), so 0 is the
+    // documented opt-out — reject only negatives. The old <=0 check made every
+    // admin "disable" PUT pass validation silently (reload was never called
+    // from that path) but blow up on the next reload.
+    if cfg.Routing.CircuitBreaker.FailureThreshold < 0 {
+        return fmt.Errorf("circuit_breaker.failure_threshold must be non-negative (0 disables), got: %d", cfg.Routing.CircuitBreaker.FailureThreshold)
     }
     if cfg.Routing.CircuitBreaker.SuccessThreshold <= 0 {
         return fmt.Errorf("circuit_breaker.success_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.SuccessThreshold)

@@ -82,20 +82,27 @@ func (q *QuotaStore) SeedUsage(usage, dailyUsage map[string]float64, dailyDate m
         q.dailyDate[k] = v
     }
     q.mu.Unlock()
-    // sync key entries for display consistency (best-effort; missing keys skip)
+    // sync key entries for display consistency (best-effort; missing keys
+    // skip). B1 (audit): writes go through KeyStore.UpdateUsage so the entry
+    // fields are touched under keys.mu, not on a pointer the store hands out.
     for name, used := range usage {
-        if k, err := q.keys.Get(name); err == nil {
-            k.QuotaUsed = used
-            if k.QuotaLimit > 0 {
-                k.QuotaRemaining = k.QuotaLimit - used
-            }
-            if du, ok := dailyUsage[name]; ok {
-                k.DailyUsed = du
-            }
-            if dd, ok := dailyDate[name]; ok {
-                k.DailyDate = dd
-            }
+        k, err := q.keys.Get(name)
+        if err != nil {
+            continue
         }
+        remaining := k.QuotaRemaining
+        if k.QuotaLimit > 0 {
+            remaining = k.QuotaLimit - used
+        }
+        du, ok := dailyUsage[name]
+        if !ok {
+            du = k.DailyUsed
+        }
+        dd, ok := dailyDate[name]
+        if !ok {
+            dd = k.DailyDate
+        }
+        q.keys.UpdateUsage(name, used, remaining, du, dd)
     }
 }
 
@@ -189,12 +196,17 @@ func (q *QuotaStore) Deduct(keyName string, amount float64) error {
         q.scheduleKeyPersist()
         return nil
     }
+    quotaUsed := q.usage[keyName]
+    quotaRemaining := k.QuotaRemaining
     if k.QuotaLimit > 0 {
-        k.QuotaUsed = q.usage[keyName]
-        k.QuotaRemaining = k.QuotaLimit - k.QuotaUsed
+        quotaUsed = q.usage[keyName]
+        quotaRemaining = k.QuotaLimit - quotaUsed
     }
-    k.DailyUsed = q.dailyUsage[keyName]
-    k.DailyDate = q.dailyDate[keyName]
+    dailyUsed := q.dailyUsage[keyName]
+    dailyDate := q.dailyDate[keyName]
+    // B1 (audit): entry fields written under keys.mu via the accessor, not on
+    // a raw pointer shared with admin serialization / auth reads.
+    q.keys.UpdateUsage(keyName, quotaUsed, quotaRemaining, dailyUsed, dailyDate)
     q.mu.Unlock()
     // A2: debounced persist of the authoritative quota maps (outside the lock
     // to avoid holding q.mu across the timer bookkeeping).

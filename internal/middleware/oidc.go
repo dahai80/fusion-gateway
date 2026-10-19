@@ -119,12 +119,15 @@ func (a *OIDCAuthenticator) Middleware(authCfg *config.AuthConfig) func(http.Han
 
             _ = authCfg // API-key auth is handled by a separate middleware; OIDC validates only OIDC tokens.
 
+            // B20 (audit): the admin_token cookie is the admin module's own
+            // JWT, not an OIDC token. Accepting it here let a GET request
+            // carry credentials via CSRF/link-preview and fed a foreign JWT
+            // into the OIDC validator — two auth domains collapsed. OIDC
+            // tokens come from the Authorization header only.
             var tokenStr string
             auth := r.Header.Get("Authorization")
             if strings.HasPrefix(auth, "Bearer ") {
                 tokenStr = strings.TrimPrefix(auth, "Bearer ")
-            } else if cookie, err := r.Cookie("admin_token"); err == nil && cookie.Value != "" {
-                tokenStr = cookie.Value
             } else {
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return

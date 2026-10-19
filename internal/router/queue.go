@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "log/slog"
+    "sync/atomic"
     "time"
 )
 
@@ -21,6 +22,10 @@ var ErrQueueTimeout = errors.New("queue timeout: local slot did not free up in t
 // queue: the gateway does not own agent semantic labels (#102 ADR-001).
 type slotQueue struct {
     sem chan struct{}
+    // B8 (audit): count of Acquire calls blocked waiting for a slot. The
+    // hot-reload drain previously could not see these — in-flight==0 with
+    // waiters still queued swapped the queue out from under them.
+    waiters atomic.Int64
 }
 
 // newSlotQueue builds a slotQueue with capacity maxConcurrent. A
@@ -50,6 +55,11 @@ func (q *slotQueue) Acquire(ctx context.Context, timeout time.Duration) (func(),
             return nil, ErrQueueTimeout
         }
     }
+
+    // B8: only the blocking wait counts as a waiter — the fast paths above
+    // either succeeded or failed without queueing.
+    q.waiters.Add(1)
+    defer q.waiters.Add(-1)
 
     timer := time.NewTimer(timeout)
     defer timer.Stop()
@@ -83,4 +93,10 @@ func (q *slotQueue) release() {
 // Occupied returns the current number of held slots (for metrics/logging).
 func (q *slotQueue) Occupied() int {
     return len(q.sem)
+}
+
+// Waiters returns the number of Acquire calls blocked waiting for a slot
+// (B8: visibility for the hot-reload drain loop).
+func (q *slotQueue) Waiters() int {
+    return int(q.waiters.Load())
 }

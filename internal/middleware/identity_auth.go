@@ -249,14 +249,27 @@ func requestModel(r *http.Request) string {
 // body in memory; that is unavoidable for a single-pass peek + restore, and
 // the request body is already bounded by Server.MaxRequestBodySize. Returns
 // "" if the field is absent or the body is not JSON.
+//
+// A3 (audit): the whole body is buffered and restored — the old LimitReader
+// cut the restored body at maxBytes, so any identity-enabled request over
+// 1 MiB reached the handlers with truncated JSON. The parse reads the full
+// buffer; maxBytes is retained in the signature as the buffer sanity bound
+// and is no longer applied to the restored body.
 func peekModel(r *http.Request, maxBytes int64) (string, error) {
     buf := &bytes.Buffer{}
-    n, err := io.Copy(buf, io.LimitReader(r.Body, maxBytes))
-    _ = n
-    r.Body.Close()
-    r.Body = io.NopCloser(buf)
-    if err != nil || buf.Len() == 0 {
+    _, err := io.Copy(buf, r.Body)
+    if err != nil {
+        // Restore what was read so the downstream error path still sees a
+        // valid (though partial) body instead of a closed reader.
+        r.Body = io.NopCloser(buf)
         return "", err
+    }
+    r.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
+    if buf.Len() == 0 {
+        return "", nil
+    }
+    if maxBytes > 0 && int64(buf.Len()) > maxBytes {
+        slog.Debug("identity: request body exceeded peek bound, parsing anyway", "bytes", buf.Len(), "max_bytes", maxBytes)
     }
     dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
     tok, err := dec.Token()

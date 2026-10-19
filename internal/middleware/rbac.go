@@ -50,7 +50,12 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
             // role from OIDC claims / default role for the API-key path; for an
             // already-bridged admin identity it must NOT overwrite the role
             // (which would drop RoleAdmin back to RoleViewer → admin route 403).
-            if p.AuthMethod == "admin-jwt" {
+            if p.AuthMethod == "admin-jwt" || p.AuthMethod == "shell-session" {
+                // B11 (audit): shell-session principals (web-shell admin) were
+                // not short-circuited like admin-jwt — when rbac.enabled, an
+                // admin user of the shell module got downgraded to viewer and
+                // every shell write op 403'd. Both are management-plane
+                // identities whose role was decided by their own gate.
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
@@ -65,8 +70,12 @@ func RBACAuth(cfg *config.RBACConfig, teamCfg *config.TeamConfig) func(http.Hand
                 role = RoleViewer
             }
 
+            // B20 (audit): claim-to-role mapping is opt-in. OIDC role/groups
+            // claims used to map straight to RoleAdmin — claim pollution
+            // (self-serve IdP, compromised issuer) equaled privilege
+            // escalation. Default off: the configured default_role applies.
             claims := GetOIDCClaims(r.Context())
-            if claims != nil {
+            if cfg.TrustOIDCClaims && claims != nil {
                 if roleClaim, ok := claims["role"].(string); ok {
                     r := Role(strings.ToLower(roleClaim))
                     if r == RoleAdmin || r == RoleEditor || r == RoleViewer {

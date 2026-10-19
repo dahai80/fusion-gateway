@@ -628,8 +628,8 @@ func TestOIDCMiddleware_BearerToken(t *testing.T) {
     }
 }
 
-func TestOIDCMiddleware_CookieToken(t *testing.T) {
-    slog.Info("test OIDCMiddleware_CookieToken")
+func TestOIDCMiddleware_CookieToken_Rejected(t *testing.T) {
+    slog.Info("test OIDCMiddleware_CookieToken_Rejected (B20: admin_token cookie is not an OIDC token source)")
     srv, privKey, kid := newOIDCTestServer(t)
     defer srv.Close()
 
@@ -660,10 +660,13 @@ func TestOIDCMiddleware_CookieToken(t *testing.T) {
     rec := httptest.NewRecorder()
     handler.ServeHTTP(rec, req)
     if rec.Code != http.StatusOK {
-        t.Fatalf("expected 200, got %d", rec.Code)
+        t.Fatalf("expected 200 (passthrough), got %d", rec.Code)
     }
-    if gotPrincipal == nil || gotPrincipal.AuthMethod != "oidc" {
-        t.Error("expected oidc auth method on principal via cookie")
+    // B20 (audit): the admin_token cookie must NOT authenticate the OIDC
+    // path — only the Authorization header does. The request passes through
+    // unauthenticated instead.
+    if gotPrincipal != nil && gotPrincipal.AuthMethod == "oidc" {
+        t.Error("oidc auth via admin_token cookie must be rejected (B20)")
     }
 }
 

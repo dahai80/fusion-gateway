@@ -296,7 +296,31 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusNotFound, err.Error())
             return
         }
-        writeJSON(w, http.StatusOK, key)
+        // A2 (audit): never serialize the SHA-256 key hash to the admin
+        // client — an offline brute-force of a low-entropy hand-written key
+        // would let the attacker forge the credential. Project an explicit
+        // response shape instead of the raw store entry.
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+            "name":             key.Name,
+            "key_prefix":       key.KeyPrefix,
+            "status":           key.Status,
+            "quota_limit":      key.QuotaLimit,
+            "quota_used":       key.QuotaUsed,
+            "quota_remaining":  key.QuotaRemaining,
+            "allowed_models":   key.AllowedModels,
+            "rpm":              key.RPM,
+            "tpm":              key.TPM,
+            "expires_at":       key.ExpiresAt,
+            "budget_limit":     key.BudgetLimit,
+            "daily_budget_limit": key.DailyBudgetLimit,
+            "daily_used":       key.DailyUsed,
+            "daily_date":       key.DailyDate,
+            "allowed_backends": key.AllowedBackends,
+            "model_modules":    key.ModelModules,
+            "metadata":         key.Metadata,
+            "created_at":       key.CreatedAt.Format(time.RFC3339),
+            "updated_at":       key.UpdatedAt.Format(time.RFC3339),
+        })
 
     case http.MethodPut:
         var req createKeyRequest
@@ -304,22 +328,39 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
             writeError(w, http.StatusBadRequest, "invalid JSON")
             return
         }
-        key := store.APIKeyEntry{
-            Name:             name,
-            Status:           normalizeStatus(req.Status),
-            AllowedModels:    req.Models,
-            ModelModules:     req.Modules,
-            QuotaLimit:       req.Quota,
-            RPM:              req.RPM,
-            TPM:              req.TPM,
-            BudgetLimit:      req.Budget,
-            DailyBudgetLimit: req.DailyBudget,
+        // A2 (audit) companion fix: Update replaces the whole entry, so a PUT
+        // built from the request alone used to DROP KeyHash/KeyPrefix/
+        // CreatedAt — the byHash index entry was deleted and the key stopped
+        // authenticating after the first edit. Load the existing entry and
+        // merge: only the request-carried fields change.
+        old, err := h.store.GetKey(name)
+        if err != nil {
+            writeError(w, http.StatusNotFound, err.Error())
+            return
         }
+        key := *old
+        key.Status = normalizeStatus(req.Status)
+        key.AllowedModels = req.Models
+        key.ModelModules = req.Modules
+        key.QuotaLimit = req.Quota
+        key.RPM = req.RPM
+        key.TPM = req.TPM
+        key.BudgetLimit = req.Budget
+        key.DailyBudgetLimit = req.DailyBudget
         if err := h.store.UpdateKey(&key); err != nil {
             writeError(w, http.StatusNotFound, err.Error())
             return
         }
-        writeJSON(w, http.StatusOK, key)
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+            "name":       key.Name,
+            "key_prefix": key.KeyPrefix,
+            "status":     key.Status,
+            "models":     key.AllowedModels,
+            "modules":    key.ModelModules,
+            "quota":      key.QuotaLimit,
+            "used_quota": key.QuotaUsed,
+            "created_at": key.CreatedAt.Format(time.RFC3339),
+        })
 
     case http.MethodDelete:
         // F8: soft-delete — revoke the key (Status=disabled) instead of
@@ -1163,16 +1204,20 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
         }
     }
 
-    out, err := yaml.Marshal(doc)
-    if err != nil {
-        slog.Error("failed to marshal config yaml", "error", err)
-        writeError(w, http.StatusInternalServerError, "failed to marshal config")
+    // B13 (audit): atomic write (writeYAMLDoc) instead of raw os.WriteFile,
+    // plus an explicit config.Reload — same EI1 semantics as updateYAMLSection.
+    // The raw write could race a concurrent Reload into a truncated read, and
+    // without the reload the live snapshot stayed stale until an unrelated PUT.
+    if err := writeYAMLDoc(h.configPath, doc); err != nil {
+        slog.Error("failed to write config file", "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to write config file")
         return
     }
 
-    if err := os.WriteFile(h.configPath, out, 0600); err != nil {
-        slog.Error("failed to write config file", "path", h.configPath, "error", err)
-        writeError(w, http.StatusInternalServerError, "failed to write config file")
+    if _, err := config.Reload(h.configPath); err != nil {
+        slog.Error("config file written but reload failed — live snapshot is STALE",
+            "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "config written but reload failed, live config stale")
         return
     }
 
@@ -1301,9 +1346,10 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
         if req.BaseURL != nil {
             backend["base_url"] = *req.BaseURL
         }
-        if req.APIKey != nil {
-            backend["api_key"] = *req.APIKey
-        }
+        // B13 (audit): the frontend echoes the masked api_key ("****xxxx")
+        // from GET back on PUT — writing it verbatim destroyed the real
+        // upstream credential. applyMaskedString skips empty/masked values.
+        applyMaskedString(backend, "api_key", req.APIKey)
         if req.Enabled != nil {
             backend["enabled"] = *req.Enabled
         }
@@ -1311,16 +1357,17 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             backend["timeout"] = *req.Timeout
         }
 
-        out, err := yaml.Marshal(doc)
-        if err != nil {
-            slog.Error("failed to marshal config yaml", "error", err)
-            writeError(w, http.StatusInternalServerError, "failed to marshal config")
+        // B13 (audit): atomic write + explicit reload, same as routing PUT.
+        if err := writeYAMLDoc(h.configPath, doc); err != nil {
+            slog.Error("failed to write config file", "path", h.configPath, "error", err)
+            writeError(w, http.StatusInternalServerError, "failed to write config file")
             return
         }
 
-        if err := os.WriteFile(h.configPath, out, 0600); err != nil {
-            slog.Error("failed to write config file", "path", h.configPath, "error", err)
-            writeError(w, http.StatusInternalServerError, "failed to write config file")
+        if _, err := config.Reload(h.configPath); err != nil {
+            slog.Error("config file written but reload failed — live snapshot is STALE",
+                "path", h.configPath, "error", err)
+            writeError(w, http.StatusInternalServerError, "config written but reload failed, live config stale")
             return
         }
 

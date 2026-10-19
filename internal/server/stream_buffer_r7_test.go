@@ -11,20 +11,20 @@ import (
 // insert) and the count stays at cap+1.
 func TestR7_StreamBuffer_CapEvictsOldest(t *testing.T) {
     store := NewStreamBufferStore(256, 1<<20, 3, 10*time.Minute)
-    if store.Open("sid-a") == nil {
+    if store.Open("sid-a", "owner-a") == nil {
         t.Fatal("Open sid-a nil")
     }
     time.Sleep(2 * time.Millisecond)
-    if store.Open("sid-b") == nil {
+    if store.Open("sid-b", "owner-b") == nil {
         t.Fatal("Open sid-b nil")
     }
     time.Sleep(2 * time.Millisecond)
-    if store.Open("sid-c") == nil {
+    if store.Open("sid-c", "owner-c") == nil {
         t.Fatal("Open sid-c nil")
     }
     time.Sleep(2 * time.Millisecond)
     // map at cap (3). Opening sid-d must evict sid-a (oldest createdAt).
-    d := store.Open("sid-d")
+    d := store.Open("sid-d", "owner-d")
     if d == nil {
         t.Fatal("Open sid-d nil")
     }
@@ -57,7 +57,7 @@ func TestR7_StreamBuffer_CapZeroUnlimited(t *testing.T) {
     store := NewStreamBufferStore(256, 1<<20, 0, 10*time.Minute)
     for i := 0; i < 50; i++ {
         sid := "sid-" + string(rune('a'+i%26)) + string(rune('0'+i/26))
-        if store.Open(sid) == nil {
+        if store.Open(sid, "owner") == nil {
             t.Fatalf("Open %s nil", sid)
         }
     }
@@ -75,16 +75,16 @@ func TestR7_StreamBuffer_CapZeroUnlimited(t *testing.T) {
 // the `!exists` guard (evict even on reuse) and sid-b vanishes.
 func TestR7_StreamBuffer_ReuseSidAtCapDoesNotEvict(t *testing.T) {
     store := NewStreamBufferStore(256, 1<<20, 2, 10*time.Minute)
-    if store.Open("sid-b") == nil {
+    if store.Open("sid-b", "owner-b") == nil {
         t.Fatal("Open sid-b nil")
     }
     time.Sleep(2 * time.Millisecond)
-    if store.Open("sid-a") == nil {
+    if store.Open("sid-a", "owner-a") == nil {
         t.Fatal("Open sid-a nil")
     }
     // map at cap (2). sid-b is oldest. Reopening sid-a must reset it, not
     // evict sid-b.
-    if store.Open("sid-a") == nil {
+    if store.Open("sid-a", "owner-a") == nil {
         t.Fatal("reopen sid-a nil")
     }
     store.mu.RLock()

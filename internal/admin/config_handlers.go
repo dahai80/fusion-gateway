@@ -1218,7 +1218,21 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
                         return fmt.Errorf("password for user %q must be at least 8 characters", k)
                     }
                 }
+                // B14 (audit): merge on top of the existing map instead of
+                // whole-replacing. A frontend echoing the masked users map
+                // previously produced an empty users map (every entry
+                // skipped), ReloadUsers skipped len==0, and the admin module
+                // locked itself out after the next restart (login 503).
+                // Masked/empty now always means "keep existing" per name,
+                // matching the F9 field semantics.
                 users := make(map[string]interface{})
+                if existing, ok := sec["users"].(map[string]interface{}); ok {
+                    for k, v := range existing {
+                        if hv, ok := v.(string); ok {
+                            users[k] = hv
+                        }
+                    }
+                }
                 for k, v := range *req.Users {
                     if v == "" || isMaskedValue(v) {
                         continue

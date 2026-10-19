@@ -2,6 +2,7 @@ package adapter
 
 import (
     "context"
+    "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
@@ -63,7 +64,7 @@ func (c *cloudTrackingProvider) StreamChat(ctx context.Context, req *ChatRequest
         observability.DecrCloudInFlight()
         return nil, err
     }
-    return wrapCloudInFlightStream(ch), nil
+    return wrapCloudInFlightStream(ctx, ch), nil
 }
 
 // wrapCloudInFlightStream wraps the provider's chunk channel so the in-flight
@@ -71,13 +72,22 @@ func (c *cloudTrackingProvider) StreamChat(ctx context.Context, req *ChatRequest
 // no extra racing drain consumer (#168). The previous design spawned a
 // per-request "cloud_inflight_drain" goroutine that raced the real consumer
 // for chunks and could block forever if the channel was never closed.
-func wrapCloudInFlightStream(ch <-chan StreamChunk) <-chan StreamChunk {
+func wrapCloudInFlightStream(ctx context.Context, ch <-chan StreamChunk) <-chan StreamChunk {
     out := make(chan StreamChunk, cap(ch))
     safego.Go("cloud_inflight_wrap", func() {
         defer close(out)
         defer observability.DecrCloudInFlight()
         for chunk := range ch {
-            out <- chunk
+            // C17 (audit): the bare send blocked forever when the consumer
+            // exited without canceling ctx — the forwarder goroutine and the
+            // in-flight gauge leaked. The ctx arm unwinds both (same pattern
+            // as local_slot.go).
+            select {
+            case out <- chunk:
+            case <-ctx.Done():
+                slog.Debug("cloud in-flight stream forwarder stopped, consumer gone", "error", ctx.Err())
+                return
+            }
         }
     })
     return out

@@ -85,7 +85,7 @@ func (s *Server) handleManagedSettings(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"managed-settings signing not configured","type":"disabled"}}`, http.StatusServiceUnavailable)
         return
     }
-    payload := []byte(s.cfg.Config.ManagedSettings.Payload)
+    payload := []byte(s.snapshot().Config.ManagedSettings.Payload)
     if len(payload) == 0 {
         payload = []byte("null")
     }

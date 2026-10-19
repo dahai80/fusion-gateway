@@ -38,7 +38,12 @@ func NewOpenRouterProvider(name string, backendCfg config.BackendConfig) *OpenRo
 func (p *OpenRouterProvider) Name() string { return p.name }
 
 func (p *OpenRouterProvider) HealthCheck(ctx context.Context) error {
-    req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    // C13 (audit): the ignored NewRequestWithContext error left req nil on a
+    // malformed baseURL — setHeaders then panicked. Surface it.
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    if err != nil {
+        return fmt.Errorf("openrouter health check request: %w", err)
+    }
     p.setHeaders(req)
     resp, err := p.httpClient.Do(req)
     if err != nil { return fmt.Errorf("openrouter health check failed: %w", err) }
@@ -48,8 +53,16 @@ func (p *OpenRouterProvider) HealthCheck(ctx context.Context) error {
 }
 
 func (p *OpenRouterProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-    body, _ := json.Marshal(req)
-    httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    // C13 (audit): stop swallowing marshal/request-build errors (nil request
+    // panicked in setHeaders on a malformed baseURL).
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal openrouter chat request: %w", err)
+    }
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("openrouter chat request: %w", err)
+    }
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
@@ -66,8 +79,15 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
 }
 
 func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
-    body, _ := json.Marshal(req)
-    httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    // C13 (audit): stop swallowing marshal/request-build errors (see Chat).
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal openrouter stream request: %w", err)
+    }
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("openrouter stream request: %w", err)
+    }
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
@@ -105,8 +125,15 @@ func (p *OpenRouterProvider) StreamChat(ctx context.Context, req *ChatRequest) (
 }
 
 func (p *OpenRouterProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
-    body, _ := json.Marshal(req)
-    httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
+    // C13 (audit): stop swallowing marshal/request-build errors (see Chat).
+    body, err := json.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal openrouter embedding request: %w", err)
+    }
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
+    if err != nil {
+        return nil, fmt.Errorf("openrouter embedding request: %w", err)
+    }
     httpReq.Header.Set("Content-Type", "application/json")
     p.setHeaders(httpReq)
     InjectFusionHeaders(ctx, httpReq)
@@ -127,7 +154,11 @@ func (p *OpenRouterProvider) Rerank(ctx context.Context, req *RerankRequest) (*R
 }
 
 func (p *OpenRouterProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
-    req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    // C13 (audit): stop swallowing the request-build error (see HealthCheck).
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    if err != nil {
+        return nil, fmt.Errorf("openrouter list models request: %w", err)
+    }
     p.setHeaders(req)
     resp, err := p.httpClient.Do(req)
     if err != nil { return nil, fmt.Errorf("openrouter list models failed: %w", err) }

@@ -313,7 +313,7 @@ func (p *BedrockProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-c
 	ch := make(chan StreamChunk, 64)
 	safego.Go("bedrock_stream_relay", func() {
 		defer close(ch)
-		anthropicEventsToChunks(evCh, ch, req.Model)
+		anthropicEventsToChunks(ctx, evCh, ch, req.Model)
 	})
 	return ch, nil
 }

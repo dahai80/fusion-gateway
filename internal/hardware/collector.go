@@ -44,6 +44,14 @@ func NewCollector(cfg *config.HardwareConfig) *Collector {
 }
 
 func (c *Collector) Start(ctx context.Context) {
+    if c.cfg == nil {
+        // A8 (audit): NewCollector permits cfg==nil (only the mlx-metrics
+        // wiring above is cfg-guarded) but Start/collectLoop dereference
+        // c.cfg.Enabled — a nil cfg started the worker and panicked on the
+        // first tick. Refuse to start and log loudly instead.
+        slog.Error("hardware collector started with nil config, refusing to start")
+        return
+    }
     if !c.cfg.Enabled {
         slog.Info("hardware collector disabled")
         return

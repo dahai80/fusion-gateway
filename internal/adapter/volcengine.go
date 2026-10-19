@@ -9,12 +9,13 @@ import (
     "encoding/json"
     "fmt"
 
-	"github.com/fusion-gateway/fusion-gateway/internal/safego"
+    "log/slog"
     "net/http"
     "net/url"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type VolcengineProvider struct {
@@ -98,6 +99,23 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
     safego.Go("volcengine_stream", func() {
         defer close(ch)
         defer resp.Body.Close()
+
+        // A5 (audit): RR8 ctx-watcher — closes resp.Body on client cancel so
+        // the blocked body.Read inside parseSSEStream unblocks instead of
+        // pinning the goroutine + connection until the watchdog. Same pattern
+        // as base_openai.go (the volcengine shim predates EI7 and was the one
+        // stream path left without the watcher).
+        stopBodyWatch := make(chan struct{})
+        defer close(stopBodyWatch)
+        safego.Go("volcengine_stream_cancel_watch", func() {
+            select {
+            case <-ctx.Done():
+                slog.Debug("volcengine stream canceled by client, closing body", "error", ctx.Err())
+                resp.Body.Close()
+            case <-stopBodyWatch:
+            }
+        })
+
         parseSSEStream(ctx, resp.Body, ch)
     })
     return ch, nil
@@ -140,12 +158,28 @@ func (p *VolcengineProvider) ListModels(ctx context.Context) ([]ModelInfo, error
     return listResp.Data, nil
 }
 
+// signRequest authenticates the outbound request. The two credential kinds
+// are mutually exclusive (B16, audit): when both are configured the previous
+// code set Bearer and then overwrote Authorization with an HMAC header, so
+// neither path was valid. apiKey wins (the ARC service accepts Bearer); the
+// AK/SK branch is kept for deployments that configure only those. The HMAC
+// string-to-sign covers method + path + timestamp; a full V4 signature (host/
+// query/body) is tracked upstream — with the overwrite bug removed the Bearer
+// path at least authenticates deterministically.
 func (p *VolcengineProvider) signRequest(req *http.Request) {
     if p.apiKey != "" {
+        if p.accessKey != "" && p.secretKey != "" {
+            slog.Warn("volcengine: both api_key and ak/sk configured, using Bearer api_key", "backend", p.name)
+        }
         req.Header.Set("Authorization", "Bearer "+p.apiKey)
+        return
     }
     if p.accessKey != "" && p.secretKey != "" {
-        u, _ := url.Parse(p.baseURL + req.URL.Path)
+        u, err := url.Parse(p.baseURL + req.URL.Path)
+        if err != nil {
+            slog.Error("volcengine: unparseable base URL, skipping AK/SK signature", "backend", p.name, "error", err)
+            return
+        }
         ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
         stringToSign := req.Method + "\n" + u.Path + "\n" + ts
         mac := hmac.New(sha256.New, []byte(p.secretKey))
