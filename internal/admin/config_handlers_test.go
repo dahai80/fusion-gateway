@@ -79,10 +79,6 @@ cache:
     password: "redis-secret-pass"
     db: 0
     pool_size: 10
-cost:
-  enabled: true
-  pricing_file: "pricing.yaml"
-  budget_alert_threshold: 0.8
 cost_markup:
   enabled: false
   global_markup: 0.0
@@ -152,9 +148,7 @@ hot_reload:
   enabled: true
   watch_path: ""
   debounce: "1s"
-  versioning: true
   breaker_drain_timeout: "5s"
-  breaker_warmup_success: 3
 cluster:
   enabled: false
   mode: "standalone"
@@ -613,45 +607,6 @@ func TestHandleCacheConfig(t *testing.T) {
     })
 }
 
-// ─── Cost Config Tests ──────────────────────────────────────────
-
-func TestHandleCostConfig(t *testing.T) {
-    auth, ms, _ := setupConfigTest(t)
-
-    t.Run("get", func(t *testing.T) {
-        h := newTestHandler(t, ms, auth, "")
-        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/config/cost", nil)
-        rec := httptest.NewRecorder()
-        h.handleCostConfig(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-        }
-        body := decodeResponse(t, rec)
-        if body["enabled"] != true {
-            t.Errorf("expected enabled true, got %v", body["enabled"])
-        }
-        if body["pricing_file"] != "pricing.yaml" {
-            t.Errorf("expected pricing_file pricing.yaml, got %v", body["pricing_file"])
-        }
-    })
-
-    t.Run("update", func(t *testing.T) {
-        _, _, configPath := setupConfigTestWithFile(t)
-        h := newTestHandler(t, ms, auth, configPath)
-        body := map[string]interface{}{"enabled": false, "budget_alert_threshold": 0.9}
-        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/cost", body)
-        rec := httptest.NewRecorder()
-        h.handleCostConfig(rec, req)
-        if rec.Code != http.StatusOK {
-            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-        }
-        sec := readYAMLSection(t, configPath, "cost")
-        if sec["enabled"] != false {
-            t.Errorf("expected enabled false, got %v", sec["enabled"])
-        }
-    })
-}
-
 // ─── CostMarkup Config Tests ────────────────────────────────────
 
 func TestHandleCostMarkupConfig(t *testing.T) {
@@ -971,9 +926,6 @@ func TestHandleHotReloadConfig(t *testing.T) {
         body := decodeResponse(t, rec)
         if body["enabled"] != true {
             t.Errorf("expected enabled true, got %v", body["enabled"])
-        }
-        if body["versioning"] != true {
-            t.Errorf("expected versioning true, got %v", body["versioning"])
         }
     })
 
@@ -1844,7 +1796,6 @@ func TestConfigHandlersInvalidJSON(t *testing.T) {
         {"retry", (*Handler).handleRetryConfig},
         {"negotiation", (*Handler).handleNegotiationConfig},
         {"cache", (*Handler).handleCacheConfig},
-        {"cost", (*Handler).handleCostConfig},
         {"cost_markup", (*Handler).handleCostMarkupConfig},
         {"pii", (*Handler).handlePIIConfig},
         {"cloud_routing", (*Handler).handleCloudRoutingConfig},
@@ -1892,7 +1843,6 @@ func TestConfigHandlersMethodNotAllowed(t *testing.T) {
         {"retry", (*Handler).handleRetryConfig},
         {"negotiation", (*Handler).handleNegotiationConfig},
         {"cache", (*Handler).handleCacheConfig},
-        {"cost", (*Handler).handleCostConfig},
         {"cost_markup", (*Handler).handleCostMarkupConfig},
         {"pii", (*Handler).handlePIIConfig},
         {"cloud_routing", (*Handler).handleCloudRoutingConfig},
@@ -1939,7 +1889,6 @@ func TestConfigHandlersPUTNoConfigPath(t *testing.T) {
         {"retry", (*Handler).handleRetryConfig, map[string]interface{}{"max_retries": 5}},
         {"negotiation", (*Handler).handleNegotiationConfig, map[string]interface{}{"route_header": "X-Test"}},
         {"cache", (*Handler).handleCacheConfig, map[string]interface{}{"enabled": false}},
-        {"cost", (*Handler).handleCostConfig, map[string]interface{}{"enabled": false}},
         {"cost_markup", (*Handler).handleCostMarkupConfig, map[string]interface{}{"enabled": true}},
         {"pii", (*Handler).handlePIIConfig, map[string]interface{}{"enabled": false}},
         {"cloud_routing", (*Handler).handleCloudRoutingConfig, map[string]interface{}{"strategy": "random"}},

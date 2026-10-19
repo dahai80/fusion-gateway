@@ -53,7 +53,6 @@ const menuItems = [
             { key: "/admin/config/rate-limit", icon: <ThunderboltOutlined />, label: "Rate Limit" },
             { key: "/admin/config/retry", icon: <ReloadOutlined />, label: "Retry" },
             { key: "/admin/config/cache", icon: <DatabaseOutlined />, label: "Cache" },
-            { key: "/admin/config/cost", icon: <DollarOutlined />, label: "Cost" },
             { key: "/admin/config/cost-markup", icon: <DollarOutlined />, label: "Cost Markup" },
             { key: "/admin/config/pii", icon: <SafetyCertificateOutlined />, label: "PII" },
             { key: "/admin/config/prompt-injection", icon: <WarningOutlined />, label: "Prompt Injection" },

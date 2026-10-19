@@ -83,11 +83,9 @@ cp config.example.yaml config.yaml
 | `hardware.mlx_metrics.enabled` | true | 采集 fusion-mlx /metrics |
 | `hot_reload.enabled` | true | 启用配置文件热重载 |
 | `hot_reload.breaker_drain_timeout` | 10s | 应用配置前等待在途请求排空的时间 |
-| `hot_reload.breaker_warmup_success` | 3 | warmup 后关闭熔断器所需的成功次数 |
 | `admin.enabled` | true | 启用管理后台与 API |
 | `admin.log_max_len` | 10000 | 请求日志最大条数 (环形缓冲) |
 | `admin.jwt_secret` | "" | 管理后台鉴权的 JWT 签名密钥（推荐用环境变量 `FG_ADMIN_JWT_SECRET` 注入，避免明文写入 config.yaml，#175） |
-| `cost.pricing_file` | "" | 自定义定价 YAML,支持热重载 |
 | `observability.otel_enabled` | false | 启用 OpenTelemetry 链路追踪 |
 | `observability.otel_endpoint` | localhost:4317 | OTel collector 端点 |
 | `observability.otel_protocol` | grpc | OTel 导出协议:grpc 或 http |
@@ -575,7 +573,6 @@ Key 来自**两个来源**,鉴权层均认可:
 - `/v1/cost` 端点提供聚合汇总 (按 key、后端、模型)
 - 按 key 成本拆分,支持 `?key=<name>` 过滤
 - 通过 `Tracker.ExportJSON()` 导出 JSON
-- **自定义定价文件**:基于 YAML 的模型定价覆盖,支持热重载 (`cost.pricing_file`)
 - **预算阻断**:按 key 的月度消费上限 (`budget_limit`) 在请求执行前强制
 
 ## Stream Options

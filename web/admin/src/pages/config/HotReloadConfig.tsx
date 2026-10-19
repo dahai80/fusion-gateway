@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Form, Switch, Input, InputNumber, Row, Col } from "antd";
+import { Form, Switch, Input, Row, Col } from "antd";
 import client from "../../api/client";
 import ConfigPageLayout, { useConfigNotifier } from "../../components/ConfigPageLayout";
 
@@ -7,9 +7,7 @@ interface HotReloadConfig {
     enabled: boolean;
     watch_path: string;
     debounce: string;
-    versioning: boolean;
     breaker_drain_timeout: string;
-    breaker_warmup_success: number;
 }
 
 export default function HotReloadConfig() {
@@ -59,9 +57,6 @@ export default function HotReloadConfig() {
                         </Form.Item>
                     </Col>
                     <Col span={4}>
-                        <Form.Item name="versioning" label="Versioning" valuePropName="checked">
-                            <Switch />
-                        </Form.Item>
                     </Col>
                 </Row>
                 <Row gutter={16}>
@@ -71,9 +66,6 @@ export default function HotReloadConfig() {
                         </Form.Item>
                     </Col>
                     <Col span={8}>
-                        <Form.Item name="breaker_warmup_success" label="Breaker Warmup Success">
-                            <InputNumber min={0} style={{ width: "100%" }} />
-                        </Form.Item>
                     </Col>
                 </Row>
             </Form>

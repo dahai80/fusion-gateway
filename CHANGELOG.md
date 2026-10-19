@@ -9,6 +9,34 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Removed (config simplification, audit 1019)
+
+- **Dead config fields deleted (full stack: struct + admin API + dashboard UI)**:
+  `cost.enabled` / `cost.pricing_file` / `cost.budget_alert_threshold` (the
+  tracker always used the hardcoded in-memory recorder; the admin Cost page
+  wrote settings nothing read), `hot_reload.versioning` +
+  `hot_reload.breaker_warmup_success` (never consumed by the engine),
+  `AuthKeyConfig.metadata` (stored but never read). `hot_reload.breaker_drain_timeout`
+  is kept (consumed by DrainAndApply). Verified-alive keys the audit flagged
+  are NOT deleted: `routing.local_priority.swap_page_rate_threshold`
+  (engine P2 check) and per-key `daily_budget_limit` (budget middleware).
+- **Unknown-key config validator**: `config.Load`/`Reload` now walk the yaml
+  tree against the mapstructure schema and log a WARN per unknown key (viper
+  silently ignored them — root cause of the "changed a key, nothing happened"
+  class). Dynamic map subtrees (backends.*, web_shell.modules.*) stay opaque:
+  their keys are user-defined and often contain dots, which viper treats as
+  nesting separators in AllSettings() (recursing would flag artifacts like
+  `backends.kimi-k2.7-code` that exist only in the flattened view).
+- **config.example.yaml**: legacy `route:` section rewritten to the real
+  `routing:` schema (local_priority subtree, circuit_breaker without the
+  removed boolean keys); `hardware.interval/enable_iokit/enable_mlx_metrics/mlx_metrics_url`
+  replaced by the real nested keys (`collect_interval`, `iokit.enabled`,
+  `mlx_metrics.{enabled,url}`); `tokenizer.type` → `tokenizer.provider`;
+  `observability.namespace` and the dead `cost:` section dropped;
+  `context_window_fallback` example commented out with a note that map keys
+  must not contain dots (viper "." = nesting separator — a pre-existing
+  limitation, not new).
+
 ### Fixed (audit sweep 2026-10-19)
 
 - **Stream replay cross-principal isolation (A1)**: buffered stream entries
