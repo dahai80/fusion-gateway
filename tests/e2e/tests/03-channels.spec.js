@@ -7,7 +7,47 @@ async function openChannels(page, token) {
     await openAsAdmin(page, token, '/admin/channels');
 }
 
+// Issue #241: a failed test skips its own cleanup, and residue channels from
+// a failed run push fresh rows past the table's first page (20/page), making
+// the next full-suite run's row-visibility asserts flaky. Sweep every
+// e2e-ch* channel after the suite (covers e2e-chedit-*/e2e-chid-*); channel
+// DELETE is a hard delete, unlike keys (F8 soft-delete).
+const CH_PREFIX = 'e2e-ch';
+
+async function pollUntil(fn, ms = 5000, step = 250) {
+    const start = Date.now();
+    for (;;) {
+        const v = await fn();
+        if (v) return v;
+        if (Date.now() - start > ms) return null;
+        await new Promise((r) => setTimeout(r, step));
+    }
+}
+
 test.describe('channel management', () => {
+    test.afterAll(async ({ request }) => {
+        const creds = {
+            username: process.env.FG_ADMIN_USER || 'admin',
+            password: process.env.FG_ADMIN_PASS || 'change-me-secure-password',
+        };
+        const loginRes = await request.post(`${BASE}/admin/api/login`, { data: creds }).catch(() => null);
+        if (!loginRes || !loginRes.ok()) return;
+        const { token } = await loginRes.json();
+        const res = await request.get(`${BASE}/admin/api/channels`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok()) return;
+        const arr = await res.json();
+        for (const c of arr) {
+            if (String(c.name).startsWith(CH_PREFIX)) {
+                await request.fetch(`${BASE}/admin/api/channels/${c.name}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${token}` },
+                }).catch(() => {});
+            }
+        }
+    });
+
     test('lists channels via the table', async ({ page }) => {
         const { token } = await login(page);
         await openChannels(page, token);
@@ -21,37 +61,48 @@ test.describe('channel management', () => {
 
         await openChannels(page, token);
         await page.getByRole('button', { name: /add|create|new|新增|添加/i }).first().click();
-        await page.waitForTimeout(800);
+        // Deterministic modal wait — fixed sleeps were the flake source (#241).
+        await expect(page.locator('#name')).toBeVisible({ timeout: 10_000 });
         await page.locator('#name').fill(name);
         // type is an antd Select; click the selector and pick an option
         await page.locator('#type').click();
-        await page.waitForTimeout(400);
-        await page.keyboard.type('openai');
-        await page.keyboard.press('Enter');
+        // Scope to the OPEN dropdown (antd keeps hidden dropdowns in the DOM)
+        // and match case-insensitively — option labels are like "OpenAI".
+        await page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option', { hasText: /openai/i }).first().click();
+        // Selected value renders in the sibling .ant-select-selection-item,
+        // not the readonly input itself.
+        await expect(page.locator('.ant-select:has(#type) .ant-select-selection-item')).toHaveText(/openai/i);
         await page.locator('#base_url').fill('https://api.example.com/v1');
         await page.locator('#priority').fill('1');
         await page.locator('#weight').fill('5');
         await page.getByRole('button', { name: /save|ok|确定|提交|create|add/i }).last().click();
-        await page.waitForTimeout(1200);
-
-        const res = await api('GET', '/channels');
-        const arr = await res.json();
-        const found = arr.find((c) => c.name === name);
+        // Confirm create via API polling, not a fixed sleep.
+        const found = await pollUntil(async () => {
+            const res = await api('GET', '/channels');
+            const arr = await res.json();
+            return arr.find((c) => c.name === name) || null;
+        });
         expect(found, `channel ${name} not in list after create`).toBeTruthy();
 
         // DELETE via UI
         await page.reload();
         await page.waitForLoadState('networkidle');
+        // Table paginates at 20/page; residue can push the fresh row past
+        // page 1 (see #241). Switch to 100/page before asserting visibility.
+        await page.locator('.ant-pagination .ant-select').click();
+        await page.getByRole('option', { name: '100 / page' }).click();
         const row = page.locator('.ant-table-row', { hasText: name }).first();
         await expect(row).toBeVisible({ timeout: 10_000 });
         await row.getByRole('button', { name: /delete|删除|remove/i }).click();
         const confirm = page.getByRole('button', { name: /^ok|确定|确认|yes$/i }).last();
         if (await confirm.isVisible().catch(() => false)) await confirm.click();
-        await page.waitForTimeout(1200);
-
-        const after = await api('GET', '/channels');
-        const afterArr = await after.json();
-        expect(afterArr.find((c) => c.name === name), 'channel should be gone after delete').toBeFalsy();
+        // Confirm delete via API polling.
+        const gone = await pollUntil(async () => {
+            const res = await api('GET', '/channels');
+            const arr = await res.json();
+            return arr.find((c) => c.name === name) ? null : true;
+        });
+        expect(gone, 'channel should be gone after delete').toBeTruthy();
     });
 
     test('rejects create with empty name', async ({ page }) => {
