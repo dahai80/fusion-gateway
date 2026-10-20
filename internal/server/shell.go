@@ -13,6 +13,7 @@ import (
 
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "golang.org/x/crypto/bcrypt"
 )
@@ -212,8 +213,8 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
     mux.HandleFunc("GET /api/v1/shell/me", s.withShellSession(s.handleShellMe))
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
-    mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.handleShellManifestUpsert))
-    mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.handleShellManifestHeartbeat))
+    mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestUpsert)))
+    mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestHeartbeat)))
     mux.HandleFunc("GET /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserList)))
     mux.HandleFunc("POST /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserCreate)))
     mux.HandleFunc("PATCH /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserUpdate)))
@@ -500,9 +501,43 @@ func (s *Server) handleShellManifestList(w http.ResponseWriter, r *http.Request)
     _ = json.NewEncoder(w).Encode(filtered)
 }
 
+// withShellManifestAuth (#243): manifest writes are an admin-plane
+// operation — require the master key or the designated web_shell.admin_key
+// (env FUSION_GATEWAY_ADMIN_KEY, the credential downstream modules
+// document). Plain client keys are rejected: letting any consumer key
+// register or heartbeat manifests was a privilege inversion, and the
+// fg-admin-key value modules historically passed is a backend stub the
+// auth chain never accepted anyway (the "dead-on-arrival" registration).
+// Runs INSIDE withMiddleware so the principal is already resolved.
+func (s *Server) withShellManifestAuth(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        adminKey := ""
+        if s.cfg != nil {
+            adminKey = s.cfg.Config.Shell.AdminKey
+        }
+        p := middleware.PrincipalFromContext(r.Context())
+        allowed := p != nil && p.IsMaster
+        if !allowed && adminKey != "" && p != nil && p.KeyConfig != nil {
+            allowed = subtle.ConstantTimeCompare([]byte(p.KeyConfig.Key), []byte(adminKey)) == 1
+        }
+        if !allowed {
+            keyName := "anonymous"
+            if p != nil && p.KeyConfig != nil && p.KeyConfig.Name != "" {
+                keyName = p.KeyConfig.Name
+            }
+            slog.Warn("shell manifest write denied: requires master key or web_shell.admin_key",
+                "path", r.URL.Path, "key", keyName)
+            shell.WriteEnvelope(w, http.StatusForbidden, "manifest_forbidden",
+                "manifest registration requires the master key or web_shell.admin_key", "", false)
+            return
+        }
+        next(w, r)
+    }
+}
+
 // handleShellManifestUpsert: POST /api/v1/shell/manifests — module
-// self-registration (idempotent by id, PRD §5.2). fg-key auth; entry origin
-// whitelist enforced (A7: reject 403 at registration).
+// self-registration (idempotent by id, PRD §5.2). fg-key auth + admin-plane
+// gate (#243); entry origin whitelist enforced (A7: reject 403 at registration).
 func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Request) {
     body := http.MaxBytesReader(w, r.Body, maxShellBody)
     var m config.ShellManifest
