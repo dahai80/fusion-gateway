@@ -122,6 +122,9 @@ func (s *Server) autoRegisterAdminModule() {
             "id", manifest.ID, "entry", manifest.Entry, "error", err)
         return
     }
+    // The built-in admin module is gateway-owned: mark it so API deletion
+    // (#253) rejects it like a static config entry.
+    s.shellRegistry.MarkBuiltin(manifest.ID)
     slog.Info("shell admin module auto-registered",
         "id", manifest.ID, "entry", manifest.Entry, "health", manifest.Health)
 }

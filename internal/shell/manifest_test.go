@@ -463,3 +463,25 @@ func TestRegistry_Remove(t *testing.T) {
         t.Fatalf("removed manifest resurrected on load: %+v", views)
     }
 }
+
+func TestRegistry_RemoveBuiltinRejected(t *testing.T) {
+    r := NewRegistry(nil, nil, time.Second)
+    m := validManifest("fusion-admin")
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert builtin: %v", err)
+    }
+    r.MarkBuiltin("fusion-admin")
+    // Builtins are gateway-owned: rejected like static entries even though
+    // the registration itself is dynamic.
+    if err := r.Remove("fusion-admin"); !errors.Is(err, ErrManifestStatic) {
+        t.Fatalf("remove builtin = %v, want ErrManifestStatic", err)
+    }
+    // Unmarking is not possible via the API surface — a different id still
+    // removes fine on the same registry.
+    if err := r.Upsert(validManifest("fusion-temp")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if err := r.Remove("fusion-temp"); err != nil {
+        t.Fatalf("remove non-builtin: %v", err)
+    }
+}

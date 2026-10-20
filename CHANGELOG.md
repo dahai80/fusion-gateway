@@ -23,6 +23,10 @@ on tag push; this file is the maintained, human-curated counterpart.
   removable; the static entry survives (offline).
 - Route sits behind the same `withShellManifestAuth` gate as upsert/heartbeat
   (master key or `web_shell.admin_key`, #243).
+- Built-in manifests are gateway-owned: the auto-registered `fusion-admin`
+  (#216) is marked via `Registry.MarkBuiltin` and `Remove` rejects it 409
+  `manifest_static` like config static entries — found during live smoke,
+  where a DELETE briefly removed the admin module for the process lifetime.
 
 ### Added (manifest ext fields, 2026-10-20) — #250
 
