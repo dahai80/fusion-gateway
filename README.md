@@ -235,6 +235,7 @@ web_shell:
     fusion-mlx:
       upstream: http://127.0.0.1:11434
       api_key: "<upstream credential injected as Authorization: Bearer>"
+  spa_dir: ""                        # optional (#247): host the shell SPA dist at the gateway root
 ```
 
 - **Manifest registry** — modules self-register via `POST /api/v1/shell/manifests` (idempotent upsert by id; admin-plane auth — master key or the designated `web_shell.admin_key`, plain client keys are rejected); heartbeat keepalive; expired heartbeats mark the module `unreachable` (menu greyed, never deleted); static fallback keeps the menu non-empty. Dynamic registrations persist to `store.data_dir/shell_manifests.json` (atomic write, 0600, #230) and reload on boot — restarts no longer drop registered modules; loaded heartbeat timestamps are kept as-is, so a stale entry comes back `unreachable` and the offline marking still applies. Store entries that no longer validate against the current manifest rules / entry allowlist are skipped with a warning.
@@ -248,6 +249,7 @@ web_shell:
 - **Per-module RBAC in the proxy** (#221, F-2/S-8) — `/shell/<module>/` re-validates the session's module permissions (`*` expands) before proxying; unauthorized modules get 403 `module_forbidden` without an upstream dial. Menu hiding is only the first layer.
 - **Upstream credential injection** (#222, F-3) — each `web_shell.modules.<id>` accepts `api_key`; the proxy strips the caller's `Authorization` and `Cookie` headers and injects `Authorization: Bearer <api_key>` upstream. The shell session token never leaves the gateway.
 - **Dynamic proxy routing** (#232) — a manifest registration may carry `upstream` (+ `api_key`) so a self-registering module is proxied at `/shell/<id>/` without a config edit + restart; static `web_shell.modules` still wins as override. `upstream` must be an absolute http(s) URL; the entry-origin allowlist and credential-injection semantics apply identically. The manifest list API never surfaces `api_key` (zeroed server-side). WebSocket upgrades pass through the proxy bidirectionally (verified by a raw-handshake test) alongside SSE.
+- **Same-origin SPA hosting** (#247) — `web_shell.spa_dir` points at the built shell SPA dist (fusion-web-shell `apps/shell` build output); the gateway then serves it at its root with an `index.html` fallback for deep links. Every API namespace keeps precedence (`/v1/*`, `/shell/`, `/admin/`, `/api/v1/shell/*`, `/health*`, ... — ServeMux longest-pattern wins), so one port/one process hosts the shell, its modules, and the API; cookie SSO works same-origin (#220). Served unauthenticated (the SPA's first screen is the shell login) with directory listings suppressed and `index.html` sent `no-store` while `assets/*` is immutable-cached. Empty (default) registers nothing — the dev posture (vite dev server `:11430` proxying to `:11432`) stays for development; a misconfigured dir logs a WARN and the gateway keeps its previous 404 behavior.
 
 ### Admin console as a shell remote module (#216)
 

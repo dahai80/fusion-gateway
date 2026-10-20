@@ -206,6 +206,7 @@ web_shell:
     fusion-mlx:
       upstream: http://127.0.0.1:11434
       api_key: "<上游凭证,以 Authorization: Bearer 注入>"
+  spa_dir: ""                        # 可选(#247):网关根路径托管 shell SPA dist
 ```
 
 - **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。动态注册持久化到 `store.data_dir/shell_manifests.json`(原子写,0600,#230),启动时回载 — 重启不再丢失已注册模块;回载保留原心跳时间戳,过期条目重启后仍为 `unreachable`,离线标记继续生效。不再满足当前 manifest 规则 / entry 白名单的存量条目跳过并 WARN。
@@ -219,6 +220,7 @@ web_shell:
 - **代理层模块级 RBAC**(#221,F-2/S-8)— `/shell/<module>/` 转发前再次校验会话的模块权限(`*` 通配);未授权模块直接 403 `module_forbidden`,不触达上游。菜单隐藏只是第一层。
 - **上游凭证注入**(#222,F-3)— `web_shell.modules.<id>` 支持 `api_key`;代理剥离调用方的 `Authorization` 与 `Cookie` 头,向上游注入 `Authorization: Bearer <api_key>`。shell 会话 token 永不出网关。
 - **动态代理路由**(#232)— manifest 注册可携带 `upstream`(及 `api_key`),自注册模块无需改配置+重启即可经 `/shell/<id>/` 代理;静态 `web_shell.modules` 仍优先生效(override)。`upstream` 必须为绝对 http(s) URL;entry 来源白名单与凭证注入语义完全一致。manifest 列表 API 永不外泄 `api_key`(服务端置零)。WebSocket 升级经代理双向透传(原始握手测试验证),与 SSE 并存。
+- **同源 SPA 托管**(#247)— `web_shell.spa_dir` 指向构建好的 shell SPA dist(fusion-web-shell `apps/shell` 构建产物),网关即在其根路径托管该 SPA,未命中路径回退 `index.html`(深链刷新不丢页面)。所有 API 命名空间优先(ServeMux 最长模式匹配:`/v1/*`、`/shell/`、`/admin/`、`/api/v1/shell/*`、`/health*` ...),单端口单进程同时承载 shell、模块代理与 API;cookie SSO 同源即通(#220)。SPA 无需鉴权即可加载(首屏即 shell 登录页),目录列表被抑制,`index.html` 发 `no-store`、`assets/*` 长缓存 immutable。留空(默认)不注册任何路由 — 开发态(vite dev server `:11430` 代理 `:11432`)照常;目录配置错误仅 WARN,网关保持原有 404 行为。
 
 ### 管理控制台作为 shell 远程模块(#216)
 

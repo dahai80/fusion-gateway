@@ -898,6 +898,15 @@ func (s *Server) Start() error {
         slog.Warn("pprof endpoints enabled — access requires master_key")
     }
 
+    // #247: host the union-web shell SPA same-origin at the gateway root when
+    // web_shell.spa_dir is configured. The "/" catch-all sits below every API
+    // namespace via ServeMux longest-pattern precedence (/v1/*, /shell/,
+    // /admin/, /api/v1/shell/*, /health ... all keep winning); unmatched
+    // paths fall back to the SPA's index.html (deep links). Empty spa_dir
+    // (default) registers nothing — the dev posture (:11430 vite proxy) and
+    // today's 404-on-unmatched behavior stay unchanged.
+    s.registerShellSPA(mux)
+
     addr := fmt.Sprintf("%s:%d", s.cfg.Config.Server.Host, s.cfg.Config.Server.Port)
 
     s.httpServer = &http.Server{
