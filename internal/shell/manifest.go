@@ -380,5 +380,72 @@ func validateManifest(m config.ShellManifest) error {
     default:
         return fmt.Errorf("manifest %q: category %q must be platform|domain|infra|dev", m.ID, m.Category)
     }
+    return validateManifestExt(m)
+}
+
+// maxShellExtEntries bounds each schema v1 ext array (#250) so a module
+// cannot inflate the manifest list payload; the shell host caps at the
+// same value on load.
+const maxShellExtEntries = 32
+
+// validateManifestExt gates the schema v1 ext fields (#250): endpoints must
+// be gateway-absolute /... (the shell dials them same-origin), page routes
+// are module-relative paths, and notification kinds use the host's
+// vocabulary. Shape errors are rejected at registration, not silently
+// dropped at shell load.
+func validateManifestExt(m config.ShellManifest) error {
+    if len(m.SearchProviders) > maxShellExtEntries {
+        return fmt.Errorf("manifest %q: search_providers exceeds %d entries", m.ID, maxShellExtEntries)
+    }
+    for _, p := range m.SearchProviders {
+        if p.ID == "" || p.Label == "" {
+            return fmt.Errorf("manifest %q: search provider requires id and label", m.ID)
+        }
+        if err := validateGatewayAbsolutePath(p.Endpoint); err != nil {
+            return fmt.Errorf("manifest %q: search provider %q endpoint: %w", m.ID, p.ID, err)
+        }
+    }
+    if len(m.Pages) > maxShellExtEntries {
+        return fmt.Errorf("manifest %q: pages exceeds %d entries", m.ID, maxShellExtEntries)
+    }
+    for _, p := range m.Pages {
+        if p.Title == "" {
+            return fmt.Errorf("manifest %q: page requires title", m.ID)
+        }
+        if err := validateGatewayAbsolutePath(p.Route); err != nil {
+            return fmt.Errorf("manifest %q: page route %q: %w", m.ID, p.Route, err)
+        }
+        if strings.Contains(p.Route, "#") {
+            return fmt.Errorf("manifest %q: page route %q must not contain '#'", m.ID, p.Route)
+        }
+    }
+    if len(m.Notifications) > maxShellExtEntries {
+        return fmt.Errorf("manifest %q: notifications exceeds %d entries", m.ID, maxShellExtEntries)
+    }
+    for _, n := range m.Notifications {
+        if n.ID == "" || n.Label == "" {
+            return fmt.Errorf("manifest %q: notification requires id and label", m.ID)
+        }
+        switch n.Kind {
+        case "approvals", "runs", "engine":
+        default:
+            return fmt.Errorf("manifest %q: notification kind %q must be approvals|runs|engine", m.ID, n.Kind)
+        }
+        if err := validateGatewayAbsolutePath(n.Endpoint); err != nil {
+            return fmt.Errorf("manifest %q: notification %q endpoint: %w", m.ID, n.ID, err)
+        }
+    }
+    return nil
+}
+
+// validateGatewayAbsolutePath enforces the gateway-absolute path vocabulary
+// shared with manifest entries: starts with "/", no traversal.
+func validateGatewayAbsolutePath(p string) error {
+    if !strings.HasPrefix(p, "/") {
+        return fmt.Errorf("%q must be a gateway-absolute /... path", p)
+    }
+    if strings.Contains(p, "..") {
+        return fmt.Errorf("%q must not contain path traversal", p)
+    }
     return nil
 }
