@@ -907,6 +907,14 @@ type Config struct {
 // browser/identity opt-in gates).
 type ShellConfig struct {
     Enabled bool `mapstructure:"enabled"`
+    // AdminKey designates the module-registration credential (#243): manifest
+    // upsert/heartbeat require the master_key OR this key. Matches the
+    // FUSION_GATEWAY_ADMIN_KEY env documented by downstream modules
+    // (fusion-cowork shell_registry). Must be one of auth.api_keys (static)
+    // — a WARN is logged at validate time otherwise. Plain client keys are
+    // rejected: letting any consumer key register manifests was a privilege
+    // inversion.
+    AdminKey string `mapstructure:"admin_key"`
     Session ShellSessionConfig `mapstructure:"session"`
     // Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
     // have not registered still render in the shell menu (greyed offline) so
@@ -1134,6 +1142,10 @@ func bindSecretEnv(v *viper.Viper) {
     // the ecosystem convention (fusion-model-hub docker-compose already uses
     // it).
     v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
+    // web_shell.admin_key (#243) — the module self-registration credential
+    // documented by fusion-cowork as FUSION_GATEWAY_ADMIN_KEY. Env precedence
+    // keeps the admin-plane secret out of config.yaml.
+    v.BindEnv("web_shell.admin_key", "FUSION_GATEWAY_ADMIN_KEY")
     // managed_settings.private_key (#151) — Ed25519 seed (base64 32 bytes) the
     // gateway signs managed-settings payloads with. A Kubernetes Secret via
     // secretKeyRef injects FG_MANAGED_SETTINGS_PRIVATE_KEY; env precedence keeps
@@ -1738,6 +1750,22 @@ func validate(cfg *Config) error {
         }
         if cfg.Shell.Session.TTL <= 0 {
             return fmt.Errorf("web_shell.session.ttl must be positive when shell enabled, got %s", cfg.Shell.Session.TTL)
+        }
+        // #243: a misconfigured AdminKey would 401 module self-registration
+        // after the auth chain with no explanation — surface it at load time.
+        // Store-issued keys (created via the admin UI, hashed at rest) cannot
+        // be matched here; those are still accepted by the handler gate.
+        if cfg.Shell.AdminKey != "" && cfg.Shell.AdminKey != cfg.Auth.MasterKey {
+            adminKeyKnown := false
+            for i := range cfg.Auth.APIKeys {
+                if cfg.Auth.APIKeys[i].Key == cfg.Shell.AdminKey {
+                    adminKeyKnown = true
+                }
+            }
+            if !adminKeyKnown {
+                slog.Warn("web_shell.admin_key matches neither master_key nor any static auth.api_keys entry — module self-registration will 401 unless it is a store-issued key",
+                    "key_prefix", cfg.Shell.AdminKey[:min(3, len(cfg.Shell.AdminKey))]+"***")
+            }
         }
         if cfg.Shell.HeartbeatTimeout <= 0 {
             return fmt.Errorf("web_shell.heartbeat_timeout must be positive when shell enabled, got %s", cfg.Shell.HeartbeatTimeout)

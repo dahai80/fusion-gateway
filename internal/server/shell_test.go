@@ -1,6 +1,7 @@
 package server
 
 import (
+    "bytes"
     "encoding/json"
     "net/http"
     "net/http/httptest"
@@ -9,6 +10,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
 )
 
@@ -389,5 +391,46 @@ func TestShellSession_CookieIssuedAndAcceptedOnShellProxy(t *testing.T) {
     s.withShellSession(s.withShellModuleAccess(s.shellProxy.ServeHTTP))(w4, req4)
     if w4.Code != http.StatusUnauthorized {
         t.Fatalf("post-logout cookie code = %d, want 401", w4.Code)
+    }
+}
+
+// #243: manifest writes are admin-plane — the master key or the designated
+// web_shell.admin_key passes the gate; a plain client key is rejected 403
+// (privilege inversion fixed) and an absent principal is rejected too.
+func TestShellManifestAuthGate(t *testing.T) {
+    s := newShellTestServer(t, false)
+    const adminKey = "ak-shell-admin-0123456789abcdef"
+    s.cfg.Config.Shell.AdminKey = adminKey
+
+    manifest := map[string]any{
+        "id": "fusion-mlx", "title": "MLX", "path": "/mlx",
+        "entry": "http://127.0.0.1:11432/shell/fusion-mlx/",
+        "devices": []string{"desktop"}, "category": "platform",
+    }
+    body, _ := json.Marshal(manifest)
+    call := func(p *middleware.Principal) *httptest.ResponseRecorder {
+        req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+        if p != nil {
+            req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), p))
+        }
+        w := httptest.NewRecorder()
+        s.withShellManifestAuth(s.handleShellManifestUpsert)(w, req)
+        return w
+    }
+
+    if w := call(nil); w.Code != http.StatusForbidden {
+        t.Fatalf("anonymous gate code = %d, want 403", w.Code)
+    }
+    client := &middleware.Principal{KeyConfig: &config.AuthKeyConfig{Key: "ak-client", Name: "consumer"}}
+    if w := call(client); w.Code != http.StatusForbidden {
+        t.Fatalf("client-key gate code = %d, want 403", w.Code)
+    }
+    admin := &middleware.Principal{KeyConfig: &config.AuthKeyConfig{Key: adminKey, Name: "shell-admin"}}
+    if w := call(admin); w.Code != http.StatusOK {
+        t.Fatalf("admin-key gate code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    master := &middleware.Principal{IsMaster: true, KeyConfig: &config.AuthKeyConfig{Key: "mk", Name: "master"}}
+    if w := call(master); w.Code != http.StatusOK {
+        t.Fatalf("master gate code = %d body=%s, want 200", w.Code, w.Body.String())
     }
 }

@@ -9,6 +9,20 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (security/contract, 2026-10-20) — #243
+
+- **Shell manifest registration is now admin-plane.** `POST /api/v1/shell/manifests`
+  and its heartbeat previously accepted ANY authenticated client key (privilege
+  inversion), while the key downstream modules actually documented —
+  `FUSION_GATEWAY_ADMIN_KEY=fg-admin-key` — was a fusion-mlx backend stub the
+  auth chain never accepted, so module self-registration was dead-on-arrival.
+  Now: writes require the **master key** or the designated **`web_shell.admin_key`**
+  (env `FUSION_GATEWAY_ADMIN_KEY`, viper-bound; must be a static `auth.api_keys`
+  entry — a mismatch logs a WARN at load). Plain client keys are rejected 403.
+  Breaking change for hypothetical client-key registrants — none existed in
+  practice (the documented path never worked). Gate tests added; README +
+  config.example.yaml updated.
+
 ### Fixed (e2e, 2026-10-19) — #241
 
 - **03-channels "create channel with inputs, then DELETE" flake root-caused

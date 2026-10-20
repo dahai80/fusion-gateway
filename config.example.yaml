@@ -485,3 +485,16 @@ browser:
     #     - id: "mbp-node-2"
     #       socket_path: "/tmp/fusion-browser-2.sock"
     #       token: "paste-the-node2-authToken-here"
+
+# Union-web shell (module menu + iframe proxy). Most keys live under
+# web_shell.session / web_shell.modules — see README "Union-web shell".
+web_shell:
+    enabled: false
+    # Module self-registration credential (#243): POST /api/v1/shell/manifests
+    # and its heartbeat accept the master_key OR this key. Env override:
+    # FUSION_GATEWAY_ADMIN_KEY (the name downstream modules document). Must
+    # be one of auth.api_keys (static entries) — a mismatch logs a WARN at
+    # load; plain client keys are rejected (privilege inversion fixed).
+    admin_key: ""                         # e.g. the "shell-admin" auth key
+    entry_origin_allowlist:
+        - "http://127.0.0.1:11432"
