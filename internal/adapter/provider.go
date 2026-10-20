@@ -338,6 +338,44 @@ type ModelInfo struct {
     // models so downstream consumers can distinguish "listed" from "servable"
     // (#59). Omitted for cloud models where the concept does not apply.
     Loaded bool `json:"loaded,omitempty"`
+    // Modality is the engine-level model kind surfaced by fusion-mlx
+    // /v1/models ("text" | "image" | "video" | "audio" | "draft") so
+    // downstream chat-model filters can exclude non-chat entries (#245).
+    // Empty for cloud catalogs that do not declare one.
+    Modality string `json:"modality,omitempty"`
+    // Capabilities mirrors fusion-mlx per-model capability flags; nil when
+    // the backend does not declare them.
+    Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+    // EngineType is the normalized cross-project alias derived from
+    // Modality+Capabilities (adapter.NormalizedEngineType) honoring the
+    // fusion-cowork chat-model filter contract (#245). Omitted when no
+    // engine metadata is declared.
+    EngineType string `json:"engine_type,omitempty"`
+}
+
+type ModelCapabilities struct {
+    TextGeneration   bool `json:"text_generation"`
+    ToolCalling      bool `json:"tool_calling"`
+    StructuredOutput bool `json:"structured_output"`
+    Vision           bool `json:"vision"`
+    Embedding        bool `json:"embedding"`
+}
+
+// NormalizedEngineType derives the cross-project `engine_type` alias from the
+// engine-declared metadata (#245). fusion-cowork's chat-model filter keys on
+// engine_type with a non-chat set {image_gen, video_gen, image, video, tts,
+// stt, audio, embedding, rerank}; emitting the raw modality would leave
+// embedding models (bge-m3: modality=text, capabilities.embedding=true)
+// misclassified as chat. Priority: embedding capability > non-text modality
+// > text. "" means "no engine metadata declared" (most cloud catalogs) and is
+// omitted from the wire — consumers then default to chat, which is correct
+// for cloud catalogs. Note "draft" (speculative-decoding draft models) is NOT
+// in cowork's non-chat set — tracked upstream on the cowork side.
+func NormalizedEngineType(m ModelInfo) string {
+    if m.Capabilities != nil && m.Capabilities.Embedding {
+        return "embedding"
+    }
+    return m.Modality
 }
 
 type ImageRequest struct {

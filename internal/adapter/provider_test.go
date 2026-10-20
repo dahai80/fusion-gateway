@@ -159,3 +159,27 @@ func TestInjectFusionHeaders_LeaseSignals(t *testing.T) {
         }
     })
 }
+
+// #245: NormalizedEngineType must map embedding-capable models (bge-m3:
+// modality=text, capabilities.embedding=true) to engine_type=embedding, not
+// "text" — cowork's non-chat set has no per-capability escape hatch.
+func TestNormalizedEngineType(t *testing.T) {
+    cases := []struct {
+        name string
+        m    ModelInfo
+        want string
+    }{
+        {"image", ModelInfo{Modality: "image"}, "image"},
+        {"video", ModelInfo{Modality: "video"}, "video"},
+        {"audio", ModelInfo{Modality: "audio"}, "audio"},
+        {"text", ModelInfo{Modality: "text"}, "text"},
+        {"draft", ModelInfo{Modality: "draft"}, "draft"},
+        {"embedding capability wins over text modality", ModelInfo{Modality: "text", Capabilities: &ModelCapabilities{Embedding: true}}, "embedding"},
+        {"no metadata is empty", ModelInfo{}, ""},
+    }
+    for _, tc := range cases {
+        if got := NormalizedEngineType(tc.m); got != tc.want {
+            t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+        }
+    }
+}

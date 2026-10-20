@@ -600,6 +600,42 @@ func TestFusionMLXProvider_ListModels(t *testing.T) {
     }
 }
 
+// #245: fusion-mlx declares per-model modality + capabilities on /v1/models;
+// the gateway must carry them through verbatim so downstream chat-model
+// filters (cowork _is_chat_model) key on real data, not fixtures.
+func TestFusionMLXProvider_ListModels_MetadataPassthrough(t *testing.T) {
+    slog.Info("test TestFusionMLXProvider_ListModels_MetadataPassthrough")
+    raw := `{"data":[
+        {"id":"FLUX.1-dev","object":"model","owned_by":"local","modality":"image","capabilities":{"text_generation":false,"tool_calling":false,"structured_output":false,"vision":false,"embedding":false}},
+        {"id":"bge-m3","object":"model","owned_by":"local","modality":"text","capabilities":{"embedding":true}}
+    ]}`
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/models" {
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte(raw))
+        }
+    }))
+    defer srv.Close()
+
+    p := NewFusionMLXProvider(config.BackendConfig{BaseURL: srv.URL, APIKey: "test-key"}, config.RoutingConfig{})
+    models, err := p.ListModels(context.Background())
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(models) != 2 {
+        t.Fatalf("unexpected models: %v", models)
+    }
+    if models[0].Modality != "image" {
+        t.Fatalf("modality = %q, want image", models[0].Modality)
+    }
+    if models[0].Capabilities == nil || models[0].Capabilities.TextGeneration {
+        t.Fatalf("capabilities = %+v, want text_generation=false", models[0].Capabilities)
+    }
+    if models[1].Modality != "text" || models[1].Capabilities == nil || models[1].Capabilities.Embedding != true {
+        t.Fatalf("second model = %+v", models[1])
+    }
+}
+
 func TestFusionMLXProvider_Cancel(t *testing.T) {
     slog.Info("test FusionMLXProvider_Cancel")
     p := NewFusionMLXProvider(config.BackendConfig{
