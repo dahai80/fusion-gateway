@@ -534,6 +534,17 @@ func TestShellManifest_Delete(t *testing.T) {
         t.Fatalf("delete unknown code = %d body=%s, want 404 manifest_unknown", w.Code, w.Body.String())
     }
 
+    // Built-in auto-registered admin module (#216): gateway-owned, rejected
+    // like a static entry (409) even though the registration is dynamic.
+    req = httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-admin", nil)
+    req.SetPathValue("id", "fusion-admin")
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w = httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestDelete)(w, req)
+    if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"manifest_static"`) {
+        t.Fatalf("delete builtin code = %d body=%s, want 409 manifest_static", w.Code, w.Body.String())
+    }
+
     // Static-only id: 409 (config-owned, not API-removable).
     s.shellRegistry = shell.NewRegistry([]config.ShellManifest{{
         ID: "fusion-static", Title: "Static", Path: "/static",

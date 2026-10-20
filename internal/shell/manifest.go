@@ -67,6 +67,12 @@ type Registry struct {
     // manifest id (health.go poller). A static fallback entry with a fresh
     // probe is surfaced online even though no dynamic registration exists.
     lastHealthy map[string]time.Time
+    // builtins are gateway-owned manifest ids (the auto-registered
+    // fusion-admin, #216). They are dynamic registrations in every other
+    // respect, but NOT API-owned: Remove rejects them like static entries
+    // (#253) — a restart re-registers them, yet the process-lifetime menu
+    // loss is a config-plane change, not an API one.
+    builtins map[string]struct{}
     // path is the persistence file for dynamic registrations ("" = memory
     // only). When set, Upsert persists and Load restores on boot (#230);
     // the loaded lastHeartbeat is kept as-is, so a stale entry comes back
@@ -85,6 +91,7 @@ func NewRegistry(staticFallback []config.ShellManifest, allowlist []string, hear
         heartbeatExpiry: heartbeatExpiry,
         allowlist:       allowlist,
         lastHealthy:     make(map[string]time.Time),
+        builtins:        make(map[string]struct{}),
     }
 }
 
@@ -256,8 +263,20 @@ var (
 // (409) rather than silently returning 200 for an entry that survives.
 // Removing an unknown id is a 404 condition (not idempotent-200): the shell
 // host should distinguish "already gone" from "deleted now".
+// MarkBuiltin records a gateway-owned manifest id (auto-registered at
+// startup). Builtins are protected from API deletion like static entries.
+func (r *Registry) MarkBuiltin(id string) {
+    r.mu.Lock()
+    r.builtins[id] = struct{}{}
+    r.mu.Unlock()
+}
+
 func (r *Registry) Remove(id string) error {
     r.mu.Lock()
+    if _, isBuiltin := r.builtins[id]; isBuiltin {
+        r.mu.Unlock()
+        return ErrManifestStatic
+    }
     _, isDynamic := r.dynamic[id]
     if !isDynamic {
         for _, m := range r.staticFallback {
