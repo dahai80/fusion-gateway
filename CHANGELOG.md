@@ -24,6 +24,21 @@ on tag push; this file is the maintained, human-curated counterpart.
   match the shell host's ManifestDto; config.yaml static entries use
   snake_case. Fields persist via the existing embedded-struct store shape and
   surface in `GET /api/v1/shell/manifests` automatically.
+### Fixed (SPA catch-all, 2026-10-20) — #249
+
+- **The web_shell.spa_dir catch-all no longer answers API-shaped requests
+  with 200 HTML.** Found in the full-GUI sweep: a typo'd module call
+  (`POST /v1/rpc`) got index.html with HTTP 200; the module then failed
+  `JSON.parse('<!doctype...')` and surfaced a misleading toast — the real
+  404 was invisible in the network tab.
+- The index.html fallback is now reserved for browser navigations: GET/HEAD
+  whose Accept header prefers text/html. Every other miss (POST/PUT/DELETE,
+  Accept: application/json or `*/*`) gets a 404 with the standardized JSON
+  error envelope (`{"code":"not_found",...}`) plus an INFO log with
+  method/path/accept.
+- Root document, assets (immutable-cache), and reserved namespaces
+  (`/v1/*`, `/shell/*`, `/admin/*`, `/api/*`, `/gateway/*`) keep their exact
+  previous behavior.
 
 ### Added (shell hosting, 2026-10-20) — #247
 
