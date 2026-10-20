@@ -935,6 +935,13 @@ type ShellConfig struct {
     // Modules maps manifest id -> upstream base URL for the /shell/<id>/
     // proxy. Modules without an entry get the module_not_found envelope.
     Modules map[string]ShellModuleConfig `mapstructure:"modules"`
+    // SpaDir (#247) hosts the union-web shell SPA dist on the gateway itself:
+    // a "/" catch-all serves the directory with an index.html fallback (deep
+    // links) below every API namespace (/v1/*, /shell/, /admin/, /api/v1/*,
+    // /health ...). Empty (default) = no root route — the dev posture
+    // (:11430 vite proxy) keeps working unchanged. Points at the built
+    // apps/shell dist from fusion-web-shell.
+    SpaDir string `mapstructure:"spa_dir"`
 }
 
 type ShellSessionConfig struct {

@@ -498,3 +498,10 @@ web_shell:
     admin_key: ""                         # e.g. the "shell-admin" auth key
     entry_origin_allowlist:
         - "http://127.0.0.1:11432"
+    # #247: host the union-web shell SPA dist at the gateway root ("/", with
+    # index.html fallback for deep links) — one port, one process, same-origin
+    # cookie SSO. Point at the built fusion-web-shell apps/shell dist. Empty
+    # (default) = no root route; dev mode (:11430 vite proxy) stays for dev.
+    # All API namespaces (/v1/*, /shell/, /admin/, /api/v1/shell/*) keep
+    # precedence over the SPA catch-all.
+    spa_dir: ""

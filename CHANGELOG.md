@@ -9,6 +9,24 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (shell hosting, 2026-10-20) — #247
+
+- **The gateway can now host the union-web shell SPA same-origin at its root.**
+  Today's integrated form is a dev posture: the shell host runs its own vite
+  dev server (:11430) proxying /shell + /admin + /api to :11432, so the
+  "one entry" story needs a second process and a dev server in the loop.
+  New `web_shell.spa_dir`: point it at the built fusion-web-shell
+  `apps/shell` dist and the gateway serves it as the root SPA with an
+  `index.html` fallback for deep links — one port, one process, cookie SSO
+  same-origin (#220). Every API namespace keeps precedence via ServeMux
+  longest-pattern matching (`/v1/*`, `/shell/`, `/admin/`,
+  `/api/v1/shell/*`, `/health*`, `/gateway/*`); unmatched paths reach the
+  SPA. Unauthenticated on purpose (the first screen is the shell login, the
+  same posture as the embedded /admin/ SPA); directory listings suppressed;
+  `index.html` is `no-store`, `assets/*` immutable-cached. Empty (default)
+  registers nothing — dev mode stays for development; a dir without
+  `index.html` logs a WARN and the gateway keeps its previous 404 behavior.
+
 ### Fixed (models API, 2026-10-20) — #245
 
 - **/v1/models now surfaces engine metadata: `modality` + `capabilities` per entry.**
