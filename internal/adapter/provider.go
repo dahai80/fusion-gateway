@@ -338,6 +338,22 @@ type ModelInfo struct {
     // models so downstream consumers can distinguish "listed" from "servable"
     // (#59). Omitted for cloud models where the concept does not apply.
     Loaded bool `json:"loaded,omitempty"`
+    // Modality is the engine-level model kind surfaced by fusion-mlx
+    // /v1/models ("text" | "image" | "video" | "audio" | "draft") so
+    // downstream chat-model filters can exclude non-chat entries (#245).
+    // Empty for cloud catalogs that do not declare one.
+    Modality string `json:"modality,omitempty"`
+    // Capabilities mirrors fusion-mlx per-model capability flags; nil when
+    // the backend does not declare them.
+    Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+}
+
+type ModelCapabilities struct {
+    TextGeneration   bool `json:"text_generation"`
+    ToolCalling      bool `json:"tool_calling"`
+    StructuredOutput bool `json:"structured_output"`
+    Vision           bool `json:"vision"`
+    Embedding        bool `json:"embedding"`
 }
 
 type ImageRequest struct {

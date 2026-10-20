@@ -94,6 +94,45 @@ func TestHandleModels_ModeLocalOnlyReturnsLocal(t *testing.T) {
     }
 }
 
+// TestHandleModels_MetadataPassthrough (#245): engine-declared modality +
+// capabilities must survive the /v1/models response so downstream chat-model
+// filters (cowork _is_chat_model) key on real data, not fixtures.
+func TestHandleModels_MetadataPassthrough(t *testing.T) {
+    s := newTestServer()
+    s.pool.Register("local-mlx", &mockProvider{
+        name: "local-mlx",
+        models: []adapter.ModelInfo{
+            {ID: "FLUX.1-dev", OwnedBy: "local", Modality: "image", Capabilities: &adapter.ModelCapabilities{}},
+            {ID: "qwen3", OwnedBy: "local", Modality: "text", Capabilities: &adapter.ModelCapabilities{TextGeneration: true, ToolCalling: true}},
+        },
+    }, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    var resp struct {
+        Data []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+        t.Fatalf("decode response: %v", err)
+    }
+    if len(resp.Data) != 2 {
+        t.Fatalf("expected 2 models, got %+v", resp.Data)
+    }
+    for _, m := range resp.Data {
+        if m.ID == "FLUX.1-dev" && (m.Modality != "image" || m.Capabilities == nil) {
+            t.Fatalf("FLUX.1-dev = %+v, want modality=image + capabilities", m)
+        }
+        if m.ID == "qwen3" && (m.Modality != "text" || m.Capabilities == nil || !m.Capabilities.TextGeneration) {
+            t.Fatalf("qwen3 = %+v, want modality=text + text_generation", m)
+        }
+    }
+}
+
 // TestHandleModels_LocalModelsListedFirst verifies that /v1/models orders
 // local (owned_by="local") models ahead of cloud models, with loaded local
 // models ahead of unloaded local models. Cloud providers are registered first

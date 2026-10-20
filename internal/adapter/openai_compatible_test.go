@@ -275,6 +275,39 @@ func TestOpenAICompatibleProvider_ListModels(t *testing.T) {
     }
 }
 
+// #245: engine-level metadata (modality + capabilities) declared by the
+// upstream must survive the provider's ListModels decode — cowork's chat-
+// model filter keys on these fields; dropping them makes the filter a no-op.
+func TestOpenAICompatibleProvider_ListModels_MetadataPassthrough(t *testing.T) {
+    slog.Info("test OpenAICompatibleProvider_ListModels_MetadataPassthrough")
+    raw := `{"data":[{"id":"FLUX.1-dev","object":"model","owned_by":"local","modality":"image","capabilities":{"text_generation":false,"tool_calling":false,"structured_output":false,"vision":false,"embedding":false}},{"id":"qwen-chat","object":"model","owned_by":"local","modality":"text","capabilities":{"text_generation":true}}]}`
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path == "/v1/models" {
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte(raw))
+        }
+    }))
+    defer srv.Close()
+
+    p := NewOpenAICompatibleProvider("openai", config.BackendConfig{BaseURL: srv.URL, APIKey: "test-key"})
+    models, err := p.ListModels(context.Background())
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(models) != 2 {
+        t.Fatalf("unexpected models: %v", models)
+    }
+    if models[0].Modality != "image" {
+        t.Fatalf("modality = %q, want image", models[0].Modality)
+    }
+    if models[0].Capabilities == nil || models[0].Capabilities.TextGeneration {
+        t.Fatalf("capabilities = %+v, want text_generation=false", models[0].Capabilities)
+    }
+    if models[1].Modality != "text" || models[1].Capabilities == nil || !models[1].Capabilities.TextGeneration {
+        t.Fatalf("second model = %+v", models[1])
+    }
+}
+
 func TestOpenAICompatibleProvider_ListModels_Error(t *testing.T) {
     slog.Info("test OpenAICompatibleProvider_ListModels_Error")
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
