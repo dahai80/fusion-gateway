@@ -153,7 +153,7 @@ func TestShellManifest_UpsertListHeartbeat(t *testing.T) {
     // handler is exercised directly (wrap happens at registration).
     m := map[string]any{
         "id": "fusion-mlx", "title": "MLX", "path": "/mlx",
-        "entry": "http://127.0.0.1:11432/shell/fusion-mlx/",
+        "entry":   "http://127.0.0.1:11432/shell/fusion-mlx/",
         "devices": []string{"desktop"}, "category": "platform",
     }
     body, _ := json.Marshal(m)
@@ -213,7 +213,7 @@ func TestShellManifestList_PermissionFiltered(t *testing.T) {
     // auto-registered fusion-admin); alice has only [fusion-mlx].
     m := map[string]any{
         "id": "fusion-mlx", "title": "MLX", "path": "/mlx",
-        "entry": "http://127.0.0.1:11432/shell/fusion-mlx/",
+        "entry":   "http://127.0.0.1:11432/shell/fusion-mlx/",
         "devices": []string{"desktop"}, "category": "platform",
     }
     body, _ := json.Marshal(m)
@@ -404,7 +404,7 @@ func TestShellManifestAuthGate(t *testing.T) {
 
     manifest := map[string]any{
         "id": "fusion-mlx", "title": "MLX", "path": "/mlx",
-        "entry": "http://127.0.0.1:11432/shell/fusion-mlx/",
+        "entry":   "http://127.0.0.1:11432/shell/fusion-mlx/",
         "devices": []string{"desktop"}, "category": "platform",
     }
     body, _ := json.Marshal(manifest)
@@ -442,7 +442,7 @@ func TestShellManifest_ExtFieldsPassthrough(t *testing.T) {
     s := newShellTestServer(t, false)
     m := map[string]any{
         "id": "fusion-cowork", "title": "Cowork", "path": "/cowork",
-        "entry": "http://127.0.0.1:11432/shell/fusion-cowork/",
+        "entry":   "http://127.0.0.1:11432/shell/fusion-cowork/",
         "devices": []string{"desktop"}, "category": "domain",
         "searchProviders": []map[string]any{
             {"id": "workflows", "label": "工作流", "label_en": "Workflows", "endpoint": "/api/cowork/search"},
@@ -482,7 +482,7 @@ func TestShellManifest_ExtFieldsPassthrough(t *testing.T) {
     // Empty manifests must not leak the keys (omitempty).
     m2 := map[string]any{
         "id": "fusion-doc", "title": "Doc", "path": "/doc",
-        "entry": "http://127.0.0.1:11432/shell/fusion-doc/",
+        "entry":   "http://127.0.0.1:11432/shell/fusion-doc/",
         "devices": []string{"desktop"}, "category": "domain",
     }
     body, _ = json.Marshal(m2)
@@ -498,5 +498,80 @@ func TestShellManifest_ExtFieldsPassthrough(t *testing.T) {
     s.withShellSession(s.handleShellManifestList)(w, req)
     if strings.Contains(w.Body.String(), `"searchProviders":null`) || strings.Contains(w.Body.String(), `"pages":null`) {
         t.Fatalf("omitempty violated: %s", w.Body.String())
+    }
+}
+
+// TestShellManifest_Delete (#253): DELETE /api/v1/shell/manifests/{id} drops
+// a dynamic registration behind the same admin-plane gate as upsert.
+func TestShellManifest_Delete(t *testing.T) {
+    s := newShellTestServer(t, false)
+    const adminKey = "ak-shell-admin-0123456789abcdef"
+    s.cfg.Config.Shell.AdminKey = adminKey
+    admin := &middleware.Principal{KeyConfig: &config.AuthKeyConfig{Key: adminKey, Name: "shell-admin"}}
+
+    register := func(id string) {
+        body, _ := json.Marshal(map[string]any{
+            "id": id, "title": "T " + id, "path": "/" + id,
+            "entry":   "http://127.0.0.1:11432/shell/" + id + "/",
+            "devices": []string{"desktop"}, "category": "domain",
+        })
+        req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+        req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+        w := httptest.NewRecorder()
+        s.withShellManifestAuth(s.handleShellManifestUpsert)(w, req)
+        if w.Code != http.StatusOK {
+            t.Fatalf("register %s code = %d body=%s", id, w.Code, w.Body.String())
+        }
+    }
+
+    // Unknown id: 404.
+    req := httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-ghost", nil)
+    req.SetPathValue("id", "fusion-ghost")
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestDelete)(w, req)
+    if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), `"code":"manifest_unknown"`) {
+        t.Fatalf("delete unknown code = %d body=%s, want 404 manifest_unknown", w.Code, w.Body.String())
+    }
+
+    // Static-only id: 409 (config-owned, not API-removable).
+    s.shellRegistry = shell.NewRegistry([]config.ShellManifest{{
+        ID: "fusion-static", Title: "Static", Path: "/static",
+        Entry:   "http://127.0.0.1:11432/shell/fusion-static/",
+        Devices: []string{"desktop"}, Category: "platform",
+    }}, s.cfg.Config.Shell.EntryOriginAllowlist, time.Second)
+    req = httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-static", nil)
+    req.SetPathValue("id", "fusion-static")
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w = httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestDelete)(w, req)
+    if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"manifest_static"`) {
+        t.Fatalf("delete static code = %d body=%s, want 409 manifest_static", w.Code, w.Body.String())
+    }
+
+    // Dynamic registration: 200, then heartbeat on the gone id 404s.
+    register("fusion-temp")
+    req = httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-temp", nil)
+    req.SetPathValue("id", "fusion-temp")
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w = httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestDelete)(w, req)
+    if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"code":"ok"`) {
+        t.Fatalf("delete dynamic code = %d body=%s, want 200 ok", w.Code, w.Body.String())
+    }
+    req = httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests/fusion-temp/heartbeat", nil)
+    req.SetPathValue("id", "fusion-temp")
+    w = httptest.NewRecorder()
+    s.handleShellManifestHeartbeat(w, req)
+    if w.Code != http.StatusNotFound {
+        t.Fatalf("heartbeat after delete code = %d, want 404", w.Code)
+    }
+
+    // Auth gate: anonymous DELETE is rejected 403 before reaching the handler.
+    req = httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-temp", nil)
+    w = httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestDelete)(w, req)
+    if w.Code != http.StatusForbidden {
+        t.Fatalf("anonymous delete code = %d, want 403", w.Code)
     }
 }

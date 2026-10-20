@@ -9,6 +9,21 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (manifest deregistration, 2026-10-20) — #253
+
+- **`DELETE /api/v1/shell/manifests/{id}`** — manifest deregistration, found
+  missing during shell#24/#250 acceptance (cleanup required hand-editing
+  `shell_manifests.json` + a restart).
+- `Registry.Remove(id)` drops the dynamic registration and persists the store
+  file (same post-lock save pattern as Upsert). Unknown ids are a 404
+  `manifest_unknown` (not idempotent-200: the shell host distinguishes
+  "already gone" from "deleted now"); config.yaml static entries are
+  rejected 409 `manifest_static` — they keep rendering offline from config,
+  so a 200 would be a lie. A dynamic registration shadowing a static id is
+  removable; the static entry survives (offline).
+- Route sits behind the same `withShellManifestAuth` gate as upsert/heartbeat
+  (master key or `web_shell.admin_key`, #243).
+
 ### Added (manifest ext fields, 2026-10-20) — #250
 
 - **Schema v1 manifest ext fields pass through to the shell host.** `ShellManifest`

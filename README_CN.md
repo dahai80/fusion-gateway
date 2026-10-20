@@ -171,6 +171,7 @@ cp config.example.yaml config.yaml
 | `/api/v1/shell/me` | GET | Union Web Shell:返回调用方 claims(用户、角色、模块权限) |
 | `/api/v1/shell/manifests` | GET/POST | Union Web Shell:带存活状态的 manifest 列表 / 模块幂等注册(fg-key 鉴权,entry 来源白名单校验) |
 | `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union Web Shell:模块心跳保活(心跳超时标记 unreachable,不删除) |
+| `/api/v1/shell/manifests/{id}` | DELETE | Union Web Shell:manifest 注销(#253)— 与注册相同的 admin-plane 鉴权;动态注册删除并持久化存储文件;未知 id 404 `manifest_unknown`,config 静态条目 409 `manifest_static` |
 | `/shell/{module_id}/` | ANY | Union Web Shell:模块代理 — 转发到模块 upstream,失败返回标准化错误信封 `{code, message, module_id, retryable}`(后端宕机不裸 502) |
 | `/api/v1/shell/users` | GET/POST | Union Web Shell RBAC:账号列表 / 创建账号(需 admin 角色;密码仅存 bcrypt 哈希) |
 | `/api/v1/shell/users/{id}` | PATCH/DELETE | Union Web Shell RBAC:修改 display_name/disabled/permissions/roles / 删除账号(保护最后一个可用管理员) |
@@ -209,7 +210,7 @@ web_shell:
   spa_dir: ""                        # 可选(#247):网关根路径托管 shell SPA dist
 ```
 
-- **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。动态注册持久化到 `store.data_dir/shell_manifests.json`(原子写,0600,#230),启动时回载 — 重启不再丢失已注册模块;回载保留原心跳时间戳,过期条目重启后仍为 `unreachable`,离线标记继续生效。不再满足当前 manifest 规则 / entry 白名单的存量条目跳过并 WARN。
+- **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。动态注册持久化到 `store.data_dir/shell_manifests.json`(原子写,0600,#230),启动时回载 — 重启不再丢失已注册模块;回载保留原心跳时间戳,过期条目重启后仍为 `unreachable`,离线标记继续生效。不再满足当前 manifest 规则 / entry 白名单的存量条目跳过并 WARN。注销(#253):`DELETE /api/v1/shell/manifests/{id}`(同 admin-plane 鉴权)删除动态注册并持久化存储;未知 id 404,config 静态条目拒绝 409 `manifest_static`(不属于 API 管辖)。
 - **Manifest 列表按权限过滤**(#229)— `GET /api/v1/shell/manifests` 仅返回会话已授权的 manifest 子集(`*` 见全部;空权限看不到任何条目,fail-closed),受限会话无法枚举无权访问的模块 id/标题/健康 URL。宿主菜单无需再客户端过滤。
 - **Schema v1 扩展字段**(#250)— manifest(静态兜底或动态注册)可携带 `searchProviders` / `pages` / `notifications`(shell#24):shell 宿主的 ⌘K 跨模块搜索、子页面深链、通知中心轮询源。endpoint/页面 route 必须为网关绝对路径 `/...`(拒绝穿越、拒绝 `#`),通知 kind 限定 `approvals|runs|engine`,每个数组上限 32 条;非法形状在注册时 403 拒绝,而非在 shell 加载时静默丢弃。列表 API 原样透传已校验字段(不含任何密钥)。JSON 线上键为驼峰(`searchProviders`、`pages`、`notifications`,与 shell 宿主 DTO 一致);config.yaml 静态条目用蛇形(`search_providers`、`pages`、`notifications`)。
 - **会话签发** — `POST /api/v1/shell/session` 校验本地账号表(优先 bcrypt)或首启引导管理员;token 为 HMAC 签名,与管理员 JWT、API key 处于独立密钥空间;`tenant_id` claim 预留(单租户固定 `local`)。

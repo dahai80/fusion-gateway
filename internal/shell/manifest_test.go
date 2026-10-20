@@ -2,6 +2,7 @@ package shell
 
 import (
     "encoding/json"
+    "errors"
     "fmt"
     "net/http"
     "net/http/httptest"
@@ -414,5 +415,51 @@ func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
     }
     if v.Notifications[0].Kind != "runs" {
         t.Fatalf("notification kind lost: %+v", v.Notifications[0])
+    }
+}
+
+func TestRegistry_Remove(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    r := NewRegistry(nil, nil, time.Second)
+    r.SetPersistence(path)
+    if err := r.Upsert(validManifest("fusion-temp")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+
+    // Unknown id: ErrManifestNotFound (404 condition, not idempotent-200).
+    if err := r.Remove("fusion-ghost"); !errors.Is(err, ErrManifestNotFound) {
+        t.Fatalf("remove unknown = %v, want ErrManifestNotFound", err)
+    }
+    // Static-only id: ErrManifestStatic (config-owned, API delete rejected).
+    r2 := NewRegistry([]config.ShellManifest{validManifest("fusion-static")}, nil, time.Second)
+    if err := r2.Remove("fusion-static"); !errors.Is(err, ErrManifestStatic) {
+        t.Fatalf("remove static = %v, want ErrManifestStatic", err)
+    }
+    // Dynamic id that ALSO exists as static fallback: the dynamic
+    // registration is API-owned and removable; the static entry survives.
+    r3 := NewRegistry([]config.ShellManifest{validManifest("fusion-temp")}, nil, time.Second)
+    if err := r3.Upsert(validManifest("fusion-temp")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if err := r3.Remove("fusion-temp"); err != nil {
+        t.Fatalf("remove dynamic-over-static: %v", err)
+    }
+    views := r3.List()
+    if len(views) != 1 || views[0].Registered {
+        t.Fatalf("want static-only offline view, got %+v", views)
+    }
+
+    // Removed entry persists: a fresh registry loads without it.
+    if err := r.Remove("fusion-temp"); err != nil {
+        t.Fatalf("remove: %v", err)
+    }
+    r4 := NewRegistry(nil, nil, time.Second)
+    r4.SetPersistence(path)
+    if err := r4.Load(); err != nil {
+        t.Fatalf("load: %v", err)
+    }
+    if views := r4.List(); len(views) != 0 {
+        t.Fatalf("removed manifest resurrected on load: %+v", views)
     }
 }

@@ -2,6 +2,7 @@ package shell
 
 import (
     "encoding/json"
+    "errors"
     "fmt"
     "log/slog"
     "net/url"
@@ -30,9 +31,9 @@ const (
 // fields plus the derived liveness status.
 type ManifestView struct {
     config.ShellManifest
-    Status         Status    `json:"status"`
-    LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
-    Registered     bool      `json:"registered"`
+    Status        Status    `json:"status"`
+    LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
+    Registered    bool      `json:"registered"`
     // Unreachable is the host-menu flag (PRD §5.2 greyed-not-removed): any
     // status below online — stale heartbeat (unreachable) or never
     // registered (offline static fallback).
@@ -237,6 +238,45 @@ func (r *Registry) Heartbeat(id string) error {
         return fmt.Errorf("manifest %q not registered", id)
     }
     e.lastHeartbeat = time.Now()
+    return nil
+}
+
+// Sentinel errors surfaced by Remove, mapped to HTTP statuses by the delete
+// handler (#253): unknown id → 404, config-owned static manifest → 409.
+var (
+    ErrManifestNotFound = errors.New("shell manifest not registered")
+    ErrManifestStatic   = errors.New("static manifest is config-owned and cannot be deleted via the API")
+)
+
+// Remove drops a dynamic registration and persists the store file (#253) —
+// the API-level counterpart of Upsert, so test registrations can be cleaned
+// up without editing shell_manifests.json by hand. Static fallback entries
+// (cfg.Shell.Manifests) are NOT API-owned: they would keep rendering offline
+// from config even after a dynamic delete, so removing them is rejected
+// (409) rather than silently returning 200 for an entry that survives.
+// Removing an unknown id is a 404 condition (not idempotent-200): the shell
+// host should distinguish "already gone" from "deleted now".
+func (r *Registry) Remove(id string) error {
+    r.mu.Lock()
+    _, isDynamic := r.dynamic[id]
+    if !isDynamic {
+        for _, m := range r.staticFallback {
+            if m.ID == id {
+                r.mu.Unlock()
+                return ErrManifestStatic
+            }
+        }
+        r.mu.Unlock()
+        return ErrManifestNotFound
+    }
+    delete(r.dynamic, id)
+    r.mu.Unlock()
+    // Persist after releasing the lock (same pattern as Upsert): a failed
+    // write must not fail the delete — log loudly, the next mutation retries.
+    if err := r.save(); err != nil {
+        slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
+    }
+    slog.Info("shell manifest removed", "id", id)
     return nil
 }
 
