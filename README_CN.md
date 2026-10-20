@@ -211,6 +211,7 @@ web_shell:
 
 - **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。动态注册持久化到 `store.data_dir/shell_manifests.json`(原子写,0600,#230),启动时回载 — 重启不再丢失已注册模块;回载保留原心跳时间戳,过期条目重启后仍为 `unreachable`,离线标记继续生效。不再满足当前 manifest 规则 / entry 白名单的存量条目跳过并 WARN。
 - **Manifest 列表按权限过滤**(#229)— `GET /api/v1/shell/manifests` 仅返回会话已授权的 manifest 子集(`*` 见全部;空权限看不到任何条目,fail-closed),受限会话无法枚举无权访问的模块 id/标题/健康 URL。宿主菜单无需再客户端过滤。
+- **Schema v1 扩展字段**(#250)— manifest(静态兜底或动态注册)可携带 `searchProviders` / `pages` / `notifications`(shell#24):shell 宿主的 ⌘K 跨模块搜索、子页面深链、通知中心轮询源。endpoint/页面 route 必须为网关绝对路径 `/...`(拒绝穿越、拒绝 `#`),通知 kind 限定 `approvals|runs|engine`,每个数组上限 32 条;非法形状在注册时 403 拒绝,而非在 shell 加载时静默丢弃。列表 API 原样透传已校验字段(不含任何密钥)。JSON 线上键为驼峰(`searchProviders`、`pages`、`notifications`,与 shell 宿主 DTO 一致);config.yaml 静态条目用蛇形(`search_providers`、`pages`、`notifications`)。
 - **会话签发** — `POST /api/v1/shell/session` 校验本地账号表(优先 bcrypt)或首启引导管理员;token 为 HMAC 签名,与管理员 JWT、API key 处于独立密钥空间;`tenant_id` claim 预留(单租户固定 `local`)。
 - **RBAC 账号存储** — 持久账号存储(`store.data_dir/shell_users.json`,仅 bcrypt),支撑 `/api/v1/shell/users` CRUD + 密码重置(需 admin 角色,保护最后一个可用管理员)与 `POST /api/v1/password`(自助改密,清除 `must_change_password`)。config 用户仅作种子数据:存储文件一旦存在即为唯一事实源。
 - **错误信封** — `/shell/{module}/` 代理失败一律返回 `{code, message, module_id, retryable}`(503 `backend_unavailable` / 404 `module_not_found`),宿主据此弹非阻塞 Toast 而非无限 Loading(A5)。

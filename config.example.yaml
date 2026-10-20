@@ -505,3 +505,29 @@ web_shell:
     # All API namespaces (/v1/*, /shell/, /admin/, /api/v1/shell/*) keep
     # precedence over the SPA catch-all.
     spa_dir: ""
+    # Static fallback manifests may carry the schema v1 ext fields (#250):
+    # search_providers (⌘K cross-module search), pages (sub-page deep links),
+    # notifications (notification poll sources, kind: approvals|runs|engine).
+    # Endpoints must be gateway-absolute /... paths; each field caps at 32
+    # entries. Dynamic registrations carry the same fields (JSON wire keys:
+    # searchProviders/pages/notifications).
+    manifests: []
+    #  - id: fusion-cowork
+    #    title: Cowork
+    #    path: /cowork
+    #    entry: http://127.0.0.1:11432/shell/fusion-cowork/
+    #    devices: [desktop]
+    #    category: domain
+    #    search_providers:
+    #      - id: workflows
+    #        label: 工作流
+    #        label_en: Workflows
+    #        endpoint: /api/cowork/search
+    #    pages:
+    #      - route: /runs
+    #        title: 运行
+    #    notifications:
+    #      - id: approvals
+    #        label: 审批
+    #        endpoint: /api/cowork/notifications
+    #        kind: approvals

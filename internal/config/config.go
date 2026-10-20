@@ -5,16 +5,16 @@ import (
     "encoding/base64"
     "encoding/json"
     "fmt"
-	"os"
-	"path/filepath"
-	"strings"
+    "os"
+    "path/filepath"
+    "strings"
     "net/url"
     "sync"
     "sync/atomic"
     "time"
 
     "github.com/fsnotify/fsnotify"
-	"github.com/spf13/viper"
+    "github.com/spf13/viper"
     "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
@@ -990,6 +990,44 @@ type ShellManifest struct {
     // returned copies and omitempty drops the empty field (the shell host
     // must not receive secrets).
     APIKey string `json:"api_key,omitempty" mapstructure:"api_key"`
+    // Schema v1 ext fields (#250, shell#24): optional module-provided
+    // extensions consumed by the shell host (⌘K cross-module search,
+    // sub-page deep links, notification poll sources). The JSON wire keys
+    // are camelCase to match the shell-side ManifestDto
+    // (dto.searchProviders/pages/notifications); inner keys and the
+    // config.yaml mapstructure keys stay snake_case. The shell host
+    // re-sanitizes on load (shape-check, dedupe, cap) — the gateway
+    // validates shape and bounds at registration, then passes through.
+    SearchProviders []ShellSearchProvider     `json:"searchProviders,omitempty" mapstructure:"search_providers"`
+    Pages           []ShellPage               `json:"pages,omitempty" mapstructure:"pages"`
+    Notifications   []ShellNotificationSource `json:"notifications,omitempty" mapstructure:"notifications"`
+}
+
+// ShellSearchProvider is one ⌘K cross-module search source (shell#24): the
+// shell host calls GET <endpoint>?q=<query> and expects {items:[{title, route?}]}.
+type ShellSearchProvider struct {
+    ID       string `json:"id" mapstructure:"id"`
+    Label    string `json:"label" mapstructure:"label"`
+    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
+}
+
+// ShellPage is a sub-page deep link (shell#24): the shell links to
+// ${entry}#${route}; route is the module-relative /path.
+type ShellPage struct {
+    Route   string `json:"route" mapstructure:"route"`
+    Title   string `json:"title" mapstructure:"title"`
+    TitleEn string `json:"title_en,omitempty" mapstructure:"title_en"`
+}
+
+// ShellNotificationSource is one notification-center poll source (shell#24);
+// kind selects the host's rendering pipeline: approvals|runs|engine.
+type ShellNotificationSource struct {
+    ID       string `json:"id" mapstructure:"id"`
+    Label    string `json:"label" mapstructure:"label"`
+    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
+    Kind     string `json:"kind" mapstructure:"kind"`
 }
 
 type ShellModuleConfig struct {

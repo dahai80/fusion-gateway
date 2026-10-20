@@ -434,3 +434,69 @@ func TestShellManifestAuthGate(t *testing.T) {
         t.Fatalf("master gate code = %d body=%s, want 200", w.Code, w.Body.String())
     }
 }
+
+// TestShellManifest_ExtFieldsPassthrough (#250): schema v1 ext fields decode
+// from the camelCase wire keys, survive the registry, and surface in the
+// manifest list output the shell host consumes.
+func TestShellManifest_ExtFieldsPassthrough(t *testing.T) {
+    s := newShellTestServer(t, false)
+    m := map[string]any{
+        "id": "fusion-cowork", "title": "Cowork", "path": "/cowork",
+        "entry": "http://127.0.0.1:11432/shell/fusion-cowork/",
+        "devices": []string{"desktop"}, "category": "domain",
+        "searchProviders": []map[string]any{
+            {"id": "workflows", "label": "工作流", "label_en": "Workflows", "endpoint": "/api/cowork/search"},
+        },
+        "pages": []map[string]any{
+            {"route": "/runs", "title": "运行", "title_en": "Runs"},
+        },
+        "notifications": []map[string]any{
+            {"id": "approvals", "label": "审批", "label_en": "Approvals", "endpoint": "/api/cowork/notifications", "kind": "approvals"},
+        },
+    }
+    body, _ := json.Marshal(m)
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", strings.NewReader(string(body)))
+    w := httptest.NewRecorder()
+    s.handleShellManifestUpsert(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("upsert code = %d body=%s", w.Code, w.Body.String())
+    }
+
+    _, loginResp := loginShell(t, s, "admin", "s3cret")
+    adminToken := loginResp["token"].(string)
+    req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
+    req.Header.Set("Authorization", "Bearer "+adminToken)
+    w = httptest.NewRecorder()
+    s.withShellSession(s.handleShellManifestList)(w, req)
+    raw := w.Body.String()
+    for _, want := range []string{
+        `"searchProviders":[{"id":"workflows","label":"工作流","label_en":"Workflows","endpoint":"/api/cowork/search"}]`,
+        `"pages":[{"route":"/runs","title":"运行","title_en":"Runs"}]`,
+        `"notifications":[{"id":"approvals","label":"审批","label_en":"Approvals","endpoint":"/api/cowork/notifications","kind":"approvals"}]`,
+    } {
+        if !strings.Contains(raw, want) {
+            t.Fatalf("manifest list missing ext field %s; got %s", want, raw)
+        }
+    }
+
+    // Empty manifests must not leak the keys (omitempty).
+    m2 := map[string]any{
+        "id": "fusion-doc", "title": "Doc", "path": "/doc",
+        "entry": "http://127.0.0.1:11432/shell/fusion-doc/",
+        "devices": []string{"desktop"}, "category": "domain",
+    }
+    body, _ = json.Marshal(m2)
+    req = httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", strings.NewReader(string(body)))
+    w = httptest.NewRecorder()
+    s.handleShellManifestUpsert(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("upsert-2 code = %d body=%s", w.Code, w.Body.String())
+    }
+    req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/manifests", nil)
+    req.Header.Set("Authorization", "Bearer "+adminToken)
+    w = httptest.NewRecorder()
+    s.withShellSession(s.handleShellManifestList)(w, req)
+    if strings.Contains(w.Body.String(), `"searchProviders":null`) || strings.Contains(w.Body.String(), `"pages":null`) {
+        t.Fatalf("omitempty violated: %s", w.Body.String())
+    }
+}

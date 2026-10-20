@@ -2,6 +2,7 @@ package shell
 
 import (
     "encoding/json"
+    "fmt"
     "net/http"
     "net/http/httptest"
     "os"
@@ -298,5 +299,120 @@ func TestRegistry_NoPersistence_MemoryOnly(t *testing.T) {
     }
     if r.path != "" {
         t.Fatal("path must stay empty without SetPersistence")
+    }
+}
+
+func TestRegistry_ExtFieldValidation(t *testing.T) {
+    r := NewRegistry(nil, nil, time.Second)
+    cases := []struct {
+        name string
+        m    config.ShellManifest
+    }{
+        {"search endpoint not gateway-absolute", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.SearchProviders = []config.ShellSearchProvider{{ID: "s", Label: "S", Endpoint: "http://evil/x"}}
+            return m
+        }()},
+        {"search provider missing label", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.SearchProviders = []config.ShellSearchProvider{{ID: "s", Endpoint: "/api/s"}}
+            return m
+        }()},
+        {"search endpoint traversal", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.SearchProviders = []config.ShellSearchProvider{{ID: "s", Label: "S", Endpoint: "/api/../secret"}}
+            return m
+        }()},
+        {"page route missing title", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Pages = []config.ShellPage{{Route: "/runs"}}
+            return m
+        }()},
+        {"page route contains fragment", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Pages = []config.ShellPage{{Route: "/runs#top", Title: "Runs"}}
+            return m
+        }()},
+        {"page route not absolute", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Pages = []config.ShellPage{{Route: "runs", Title: "Runs"}}
+            return m
+        }()},
+        {"notification bad kind", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Notifications = []config.ShellNotificationSource{{ID: "n", Label: "N", Endpoint: "/api/n", Kind: "junk"}}
+            return m
+        }()},
+        {"notification missing id", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Notifications = []config.ShellNotificationSource{{Label: "N", Endpoint: "/api/n", Kind: "runs"}}
+            return m
+        }()},
+        {"too many search providers", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            for i := 0; i < 33; i++ {
+                m.SearchProviders = append(m.SearchProviders, config.ShellSearchProvider{ID: fmt.Sprintf("s%d", i), Label: "S", Endpoint: "/api/s"})
+            }
+            return m
+        }()},
+    }
+    for _, tc := range cases {
+        if err := r.Upsert(tc.m); err == nil {
+            t.Errorf("%s: want error, got nil", tc.name)
+        }
+    }
+
+    // A valid full set passes and surfaces from List.
+    ok := validManifest("fusion-x")
+    ok.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", LabelEn: "Workflows", Endpoint: "/api/cowork/search"}}
+    ok.Pages = []config.ShellPage{{Route: "/runs", Title: "运行", TitleEn: "Runs"}}
+    ok.Notifications = []config.ShellNotificationSource{{ID: "approvals", Label: "审批", Endpoint: "/api/cowork/notifications", Kind: "approvals"}}
+    if err := r.Upsert(ok); err != nil {
+        t.Fatalf("valid ext upsert: %v", err)
+    }
+    views := r.List()
+    if len(views) != 1 {
+        t.Fatalf("want 1 view, got %d", len(views))
+    }
+    v := views[0]
+    if len(v.SearchProviders) != 1 || v.SearchProviders[0].Endpoint != "/api/cowork/search" {
+        t.Fatalf("search providers lost: %+v", v.SearchProviders)
+    }
+    if len(v.Pages) != 1 || v.Pages[0].Route != "/runs" {
+        t.Fatalf("pages lost: %+v", v.Pages)
+    }
+    if len(v.Notifications) != 1 || v.Notifications[0].Kind != "approvals" {
+        t.Fatalf("notifications lost: %+v", v.Notifications)
+    }
+}
+
+func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    r := NewRegistry(nil, nil, time.Second)
+    r.SetPersistence(path)
+    m := validManifest("fusion-cowork")
+    m.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", Endpoint: "/api/cowork/search"}}
+    m.Pages = []config.ShellPage{{Route: "/runs", Title: "运行"}}
+    m.Notifications = []config.ShellNotificationSource{{ID: "runs", Label: "运行", Endpoint: "/api/cowork/notifications", Kind: "runs"}}
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+
+    r2 := NewRegistry(nil, nil, time.Second)
+    r2.SetPersistence(path)
+    if err := r2.Load(); err != nil {
+        t.Fatalf("load: %v", err)
+    }
+    views := r2.List()
+    if len(views) != 1 {
+        t.Fatalf("want 1 view, got %d", len(views))
+    }
+    v := views[0]
+    if len(v.SearchProviders) != 1 || len(v.Pages) != 1 || len(v.Notifications) != 1 {
+        t.Fatalf("ext fields not persisted: %+v", v)
+    }
+    if v.Notifications[0].Kind != "runs" {
+        t.Fatalf("notification kind lost: %+v", v.Notifications[0])
     }
 }
