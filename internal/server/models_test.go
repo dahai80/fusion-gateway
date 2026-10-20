@@ -104,6 +104,7 @@ func TestHandleModels_MetadataPassthrough(t *testing.T) {
         models: []adapter.ModelInfo{
             {ID: "FLUX.1-dev", OwnedBy: "local", Modality: "image", Capabilities: &adapter.ModelCapabilities{}},
             {ID: "qwen3", OwnedBy: "local", Modality: "text", Capabilities: &adapter.ModelCapabilities{TextGeneration: true, ToolCalling: true}},
+            {ID: "bge-m3", OwnedBy: "local", Modality: "text", Capabilities: &adapter.ModelCapabilities{Embedding: true}},
         },
     }, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
 
@@ -120,15 +121,18 @@ func TestHandleModels_MetadataPassthrough(t *testing.T) {
     if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
         t.Fatalf("decode response: %v", err)
     }
-    if len(resp.Data) != 2 {
-        t.Fatalf("expected 2 models, got %+v", resp.Data)
+    if len(resp.Data) != 3 {
+        t.Fatalf("expected 3 models, got %+v", resp.Data)
     }
     for _, m := range resp.Data {
-        if m.ID == "FLUX.1-dev" && (m.Modality != "image" || m.Capabilities == nil) {
-            t.Fatalf("FLUX.1-dev = %+v, want modality=image + capabilities", m)
+        if m.ID == "FLUX.1-dev" && (m.Modality != "image" || m.EngineType != "image") {
+            t.Fatalf("FLUX.1-dev = %+v, want modality=image + engine_type=image", m)
         }
-        if m.ID == "qwen3" && (m.Modality != "text" || m.Capabilities == nil || !m.Capabilities.TextGeneration) {
-            t.Fatalf("qwen3 = %+v, want modality=text + text_generation", m)
+        if m.ID == "qwen3" && (m.Modality != "text" || m.EngineType != "text" || !m.Capabilities.TextGeneration) {
+            t.Fatalf("qwen3 = %+v, want modality=text + engine_type=text", m)
+        }
+        if m.ID == "bge-m3" && m.EngineType != "embedding" {
+            t.Fatalf("bge-m3 = %+v, want engine_type=embedding (capability overrides text modality)", m)
         }
     }
 }

@@ -59,6 +59,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     }
     for i := range models {
         models[i].Loaded = loadedSet[models[i].ID]
+        // #245: derive the cross-project engine_type alias so downstream
+        // chat-model filters (cowork _is_chat_model) classify on real
+        // engine metadata instead of degrading to "everything is chat".
+        models[i].EngineType = adapter.NormalizedEngineType(models[i])
     }
 
     // Order models so local (owned_by="local") models precede cloud models,
