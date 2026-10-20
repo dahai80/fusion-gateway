@@ -9,6 +9,22 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (manifest ext fields, 2026-10-20) — #250
+
+- **Schema v1 manifest ext fields pass through to the shell host.** `ShellManifest`
+  gains three optional fields (shell#24): `searchProviders` (⌘K cross-module
+  search), `pages` (sub-page deep links), and `notifications` (notification
+  poll sources). Previously a fixed struct dropped them at registration, so
+  the shell-side implementation was inert end-to-end.
+- Validation at registration (and store load): endpoints/page routes must be
+  gateway-absolute `/...` paths (no traversal, no `#`); notification kinds are
+  restricted to `approvals|runs|engine`; each ext array caps at 32 entries to
+  bound the list payload. No secrets are carried in ext fields.
+- JSON wire keys are camelCase (`searchProviders`/`pages`/`notifications`) to
+  match the shell host's ManifestDto; config.yaml static entries use
+  snake_case. Fields persist via the existing embedded-struct store shape and
+  surface in `GET /api/v1/shell/manifests` automatically.
+
 ### Added (shell hosting, 2026-10-20) — #247
 
 - **The gateway can now host the union-web shell SPA same-origin at its root.**
