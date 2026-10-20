@@ -5,6 +5,7 @@ import (
     "crypto/subtle"
     "encoding/hex"
     "encoding/json"
+    "errors"
     "fmt"
     "log/slog"
     "net/http"
@@ -215,6 +216,7 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestUpsert)))
     mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestHeartbeat)))
+    mux.HandleFunc("DELETE /api/v1/shell/manifests/{id}", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestDelete)))
     mux.HandleFunc("GET /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserList)))
     mux.HandleFunc("POST /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserCreate)))
     mux.HandleFunc("PATCH /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserUpdate)))
@@ -562,4 +564,25 @@ func (s *Server) handleShellManifestHeartbeat(w http.ResponseWriter, r *http.Req
         return
     }
     shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted", id, false)
+}
+
+// handleShellManifestDelete: DELETE /api/v1/shell/manifests/{id} (#253) —
+// manifest deregistration behind the same admin-plane gate as upsert. Only
+// dynamic registrations are API-owned: an unknown id is 404
+// manifest_unknown, a config.yaml static entry is 409 manifest_static (it
+// would keep rendering offline from config — a 200 would be a lie).
+func (s *Server) handleShellManifestDelete(w http.ResponseWriter, r *http.Request) {
+    id := r.PathValue("id")
+    if err := s.shellRegistry.Remove(id); err != nil {
+        slog.Warn("shell manifest delete rejected", "id", id, "error", err)
+        switch {
+        case errors.Is(err, shell.ErrManifestStatic):
+            shell.WriteEnvelope(w, http.StatusConflict, "manifest_static",
+                "static manifest is config-owned (web_shell.manifests); remove it from config.yaml instead", id, false)
+        default:
+            shell.WriteEnvelope(w, http.StatusNotFound, "manifest_unknown", err.Error(), id, false)
+        }
+        return
+    }
+    shell.WriteEnvelope(w, http.StatusOK, "ok", "manifest removed", id, false)
 }
