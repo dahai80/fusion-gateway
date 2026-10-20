@@ -9,6 +9,17 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (models API, 2026-10-20) — #245
+
+- **/v1/models now surfaces engine metadata: `modality` + `capabilities` per entry.**
+  fusion-mlx declares per-model engine metadata (modality: text/image/video/audio/draft;
+  capabilities: text_generation/tool_calling/structured_output/vision/embedding) but the
+  gateway ModelInfo re-encode dropped both — cowork's chat-model filter (`_is_chat_model`,
+  cowork #126) was a no-op against live data and every entry, incl. FLUX.1-dev (image),
+  Wan2.2-TI2V-5B (video), bge-m3 (embedding), was selectable as a "chat" model. Both
+  ListModels decoders now carry the fields through verbatim; cloud catalogs without
+  them stay byte-identical (omitempty).
+
 ### Fixed (security/contract, 2026-10-20) — #243
 
 - **Shell manifest registration is now admin-plane.** `POST /api/v1/shell/manifests`
