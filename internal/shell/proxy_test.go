@@ -381,7 +381,7 @@ func TestProxy_ExtPathUpstreamOverride(t *testing.T) {
 
     p := NewProxy(func(string) (string, string) { return staticSrv.URL, "fk-static" })
     p.SetExtResolver(func(moduleID, path string) (string, string, bool) {
-        if path == "/api/search/models" || strings.HasPrefix(path, "/api/notifications") {
+        if path == "/shell/fusion-mlx/api/search/models" || strings.HasPrefix(path, "/shell/fusion-mlx/api/notifications") {
             return extSrv.URL, "fk-bridge", true
         }
         return "", "", false
@@ -431,7 +431,7 @@ func TestProxy_TransportCachePerUpstream(t *testing.T) {
 
     p := NewProxy(func(string) (string, string) { return staticSrv.URL, "" })
     p.SetExtResolver(func(_, path string) (string, string, bool) {
-        if path == "/api/x" {
+        if path == "/shell/m/api/x" {
             return extSrv.URL, "", true
         }
         return "", "", false

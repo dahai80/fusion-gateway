@@ -502,14 +502,22 @@ func TestRegistry_ExtRouteFor(t *testing.T) {
         path string
         want bool
     }{
-        {"/api/search/models", true},          // exact search endpoint
-        {"/api/search/models?q=x", false},     // query is not part of path
-        {"/api/search/models/sub", true},      // segment-boundary prefix
-        {"/api/notifications", true},          // exact notification endpoint
-        {"/api/notificationss", false},        // NOT a prefix at segment boundary
-        {"/api/other", false},                 // undeclared path
-        {"", false},                           // empty
-        {"/runs", false},                      // pages are SPA deep links, never routed
+        // Module-relative declaration style.
+        {"/api/search/models", true},        // exact search endpoint
+        {"/api/search/models?q=x", false},   // query is not part of path
+        {"/api/search/models/sub", true},    // segment-boundary prefix
+        {"/api/notifications", true},        // exact notification endpoint
+        {"/api/notificationss", false},      // NOT a prefix at segment boundary
+        // Gateway-absolute declaration style (what fusion-mlx registers).
+        {"/shell/fusion-mlx/api/search/models", true},
+        {"/shell/fusion-mlx/api/notifications", true},
+        {"/shell/fusion-mlx/api/search/models/sub", true},
+        // Cross-module path must NOT match (never route another module's
+        // namespace to this module's upstream).
+        {"/shell/fusion-doc/api/search/models", false},
+        {"/shell/fusion-mlx/other", false}, // undeclared path
+        {"", false},                        // empty
+        {"/runs", false},                   // pages are SPA deep links, never routed
     }
     for _, tc := range cases {
         up, key, ok := r.ExtRouteFor("fusion-mlx", tc.path)
