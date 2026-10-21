@@ -485,3 +485,54 @@ func TestRegistry_RemoveBuiltinRejected(t *testing.T) {
         t.Fatalf("remove non-builtin: %v", err)
     }
 }
+
+func TestRegistry_ExtRouteFor(t *testing.T) {
+    r := NewRegistry(nil, nil, time.Second)
+    m := validManifest("fusion-mlx")
+    m.Upstream = "http://127.0.0.1:11471"
+    m.APIKey = "fk-bridge"
+    m.SearchProviders = []config.ShellSearchProvider{{ID: "models", Label: "模型", Endpoint: "/api/search/models"}}
+    m.Notifications = []config.ShellNotificationSource{{ID: "eng", Label: "事件", Endpoint: "/api/notifications", Kind: "engine"}}
+    m.Pages = []config.ShellPage{{Route: "/runs", Title: "运行"}}
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+
+    cases := []struct {
+        path string
+        want bool
+    }{
+        {"/api/search/models", true},          // exact search endpoint
+        {"/api/search/models?q=x", false},     // query is not part of path
+        {"/api/search/models/sub", true},      // segment-boundary prefix
+        {"/api/notifications", true},          // exact notification endpoint
+        {"/api/notificationss", false},        // NOT a prefix at segment boundary
+        {"/api/other", false},                 // undeclared path
+        {"", false},                           // empty
+        {"/runs", false},                      // pages are SPA deep links, never routed
+    }
+    for _, tc := range cases {
+        up, key, ok := r.ExtRouteFor("fusion-mlx", tc.path)
+        if ok != tc.want {
+            t.Errorf("ExtRouteFor(%q) ok = %v, want %v", tc.path, ok, tc.want)
+            continue
+        }
+        if ok && (up != "http://127.0.0.1:11471" || key != "fk-bridge") {
+            t.Errorf("ExtRouteFor(%q) = %q/%q", tc.path, up, key)
+        }
+    }
+
+    // No upstream on the manifest: no ext routing (static serves).
+    m2 := validManifest("fusion-doc")
+    m2.SearchProviders = []config.ShellSearchProvider{{ID: "s", Label: "S", Endpoint: "/api/search"}}
+    if err := r.Upsert(m2); err != nil {
+        t.Fatalf("upsert m2: %v", err)
+    }
+    if _, _, ok := r.ExtRouteFor("fusion-doc", "/api/search"); ok {
+        t.Error("manifest without upstream must not route ext paths")
+    }
+    // Unknown module: no.
+    if _, _, ok := r.ExtRouteFor("fusion-ghost", "/api/search/models"); ok {
+        t.Error("unknown module must not route ext paths")
+    }
+}
