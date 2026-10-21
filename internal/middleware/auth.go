@@ -65,6 +65,8 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
                     Name: "master",
                 }
                 StampAPIKeyName(ctx, "master")
+                // #262 K2: master carries the "master" principal downstream.
+                ctx = adapter.WithPrincipal(ctx, "master")
                 next.ServeHTTP(w, r.WithContext(ctx))
                 return
             }
@@ -78,7 +80,11 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             }
 
             if matchedKey == nil && st != nil {
-                if kc, ok := lookupKeyByHash(st, key); ok {
+                grace := cfg.KeyRotationGrace
+                if grace <= 0 {
+                    grace = 24 * time.Hour
+                }
+                if kc, ok := lookupKeyByHash(st, key, grace); ok {
                     matchedKey = kc
                 }
             }
@@ -133,13 +139,16 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             // Attach the tenant to the ctx so adapter.InjectFusionHeaders
             // stamps X-Fusion-Tenant on every outbound upstream request.
             ctx = adapter.WithTenant(ctx, matchedKey.TeamID)
+            // #262 K2: attach the resolved key name so InjectFusionHeaders
+            // stamps X-Fusion-Principal (caller identity attribution).
+            ctx = adapter.WithPrincipal(ctx, matchedKey.Name)
             slog.Debug("api key authenticated", "key", matchedKey.Name, "modules", matchedKey.ModelModules, "team", matchedKey.TeamID)
             next.ServeHTTP(w, r.WithContext(ctx))
         })
     }
 }
 
-func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool) {
+func lookupKeyByHash(st keyLookupStore, key string, keyRotationGrace time.Duration) (*config.AuthKeyConfig, bool) {
     sum := sha256.Sum256([]byte(key))
     hash := hex.EncodeToString(sum[:])
     entry, err := st.GetKeyByHash(hash)
@@ -162,12 +171,24 @@ func lookupKeyByHash(st keyLookupStore, key string) (*config.AuthKeyConfig, bool
         slog.Warn("api key disabled", "key", entry.Name, "status", entry.Status)
         return nil, false
     }
+    // #262 K2: dual-active rotation grace. The hash index carries both the
+    // current and the pre-rotation hash; a presented key matching the
+    // pre-rotation hash is accepted only inside the grace window.
+    if hash != entry.KeyHash && hash == entry.KeyPrevHash {
+        grace := keyRotationGrace
+        if entry.KeyRotatedAt == nil || time.Since(*entry.KeyRotatedAt) > grace {
+            slog.Warn("rotated api key presented outside the grace window", "key", entry.Name)
+            return nil, false
+        }
+        slog.Info("pre-rotation api key accepted inside grace window", "key", entry.Name)
+    }
     kc := &config.AuthKeyConfig{
         Key:             key,
         Name:            entry.Name,
         AllowedBackends: entry.AllowedBackends,
         AllowedModels:   entry.AllowedModels,
         ModelModules:    entry.ModelModules,
+        Scopes:          entry.Scopes,
         RPM:             entry.RPM,
         TPM:             entry.TPM,
         BudgetLimit:     entry.BudgetLimit,

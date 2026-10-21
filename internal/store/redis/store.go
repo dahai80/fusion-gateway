@@ -314,6 +314,12 @@ func (r *RedisStore) CreateKey(key *store.APIKeyEntry) error {
             slog.Warn("failed to index key hash", "key", key.Name, "error", err)
         }
     }
+    // #262 K2: index the pre-rotation hash too (dual-active grace window).
+    if key.KeyPrevHash != "" && key.KeyPrevHash != key.KeyHash {
+        if err := r.client.Set(ctx, apiKeyHashPrefix+key.KeyPrevHash, key.Name, 0).Err(); err != nil {
+            slog.Warn("failed to index prev key hash", "key", key.Name, "error", err)
+        }
+    }
     // AH1 (audit P1): seed the usage counter from the blob's QuotaUsed only if
     // the counter is absent (SetNX never overwrites) — the counter is the
     // source of truth once any deduction ran; never overwrite it with a stale

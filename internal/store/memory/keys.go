@@ -85,6 +85,11 @@ func (s *KeyStore) Create(key *store.APIKeyEntry) error {
     if key.KeyHash != "" {
         s.byHash[key.KeyHash] = key.Name
     }
+    // #262 K2: index the pre-rotation hash too so a rotated-but-still-graced
+    // key resolves to its entry; the auth layer enforces the grace window.
+    if key.KeyPrevHash != "" && key.KeyPrevHash != key.KeyHash {
+        s.byHash[key.KeyPrevHash] = key.Name
+    }
     s.mu.Unlock()
     if s.onMutate != nil {
         s.onMutate()
@@ -102,11 +107,18 @@ func (s *KeyStore) Update(key *store.APIKeyEntry) error {
     if old.KeyHash != "" && old.KeyHash != key.KeyHash {
         delete(s.byHash, old.KeyHash)
     }
+    if old.KeyPrevHash != "" && old.KeyPrevHash != key.KeyPrevHash {
+        delete(s.byHash, old.KeyPrevHash)
+    }
     key.UpdatedAt = time.Now()
     key.QuotaRemaining = key.QuotaLimit - key.QuotaUsed
     s.keys[key.Name] = key
     if key.KeyHash != "" {
         s.byHash[key.KeyHash] = key.Name
+    }
+    // #262 K2: keep the pre-rotation hash indexed (dual-active grace window).
+    if key.KeyPrevHash != "" && key.KeyPrevHash != key.KeyHash {
+        s.byHash[key.KeyPrevHash] = key.Name
     }
     s.mu.Unlock()
     if s.onMutate != nil {

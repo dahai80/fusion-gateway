@@ -9,6 +9,24 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (user API keys, 2026-10-22) — #262
+
+- **Gateway-issued `fk-` user API keys with scope enforcement on `/v1/*`.**
+  Master-gated CRUD at `/api/v1/keys`: create (`{name, scopes, tenant?, ...}`,
+  plaintext returned exactly once, SHA-256-only storage, tail-4 display),
+  rotate (dual-active grace via `auth.key_rotation_grace`, default 24h —
+  `key_prev_hash` + `key_rotated_at` keep the old key valid inside the
+  window), revoke (soft — status `revoked`, row retained for audit, auth
+  rejects immediately). New `middleware.ScopeEnforce` maps `/v1/*` inference
+  paths to modules (chat/rag/design/agent) and returns
+  `403 permission_error` when a scoped key lacks the module grant —
+  `["chat", "rag:embed", "cowork:runs:create", "*"]` matrix; empty scopes
+  (legacy keys) pass unchanged. Optional `tenant` binds the key to a team so
+  the request path derives `X-Fusion-Tenant` from the credential. Every
+  authenticated `/v1/*` request now propagates the caller identity
+  downstream as `X-Fusion-Principal` (set by the auth middleware, never a
+  client passthrough).
+
 ### Added (gateway-issued module service keys, 2026-10-22) — #261
 
 - **`fm-` service keys reverse the module credential direction.** A

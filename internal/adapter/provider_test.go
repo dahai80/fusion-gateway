@@ -117,6 +117,35 @@ func TestInjectFusionHeaders_TenantStamped(t *testing.T) {
     })
 }
 
+// TestInjectFusionHeaders_PrincipalStamped (#262 K2): a ctx carrying the
+// resolved API-key name (adapter.WithPrincipal, set by the auth middleware)
+// must produce an X-Fusion-Principal header on the outbound request. Gateway-
+// authoritative only — never a client passthrough header.
+func TestInjectFusionHeaders_PrincipalStamped(t *testing.T) {
+    t.Run("principal_present", func(t *testing.T) {
+        ctx := WithPrincipal(context.Background(), "ext-runner")
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(ctx, req)
+        if got := req.Header.Get("X-Fusion-Principal"); got != "ext-runner" {
+            t.Fatalf("X-Fusion-Principal: got %q, want ext-runner", got)
+        }
+    })
+
+    t.Run("principal_absent_omits_header", func(t *testing.T) {
+        req, _ := http.NewRequest("POST", "http://upstream/v1/chat/completions", nil)
+        InjectFusionHeaders(context.Background(), req)
+        if got := req.Header.Get("X-Fusion-Principal"); got != "" {
+            t.Fatalf("X-Fusion-Principal: got %q, want empty (anonymous)", got)
+        }
+    })
+
+    t.Run("empty_principal_noop", func(t *testing.T) {
+        if WithPrincipal(context.Background(), "") != context.Background() {
+            t.Fatal("WithPrincipal empty must be a no-op (no ctx value)")
+        }
+    })
+}
+
 // #157 items 2+3: identity lease scheduling signals forwarded as outbound
 // headers so fusion-mlx can apply VRAM priority + KV cache-tag isolation.
 func TestInjectFusionHeaders_LeaseSignals(t *testing.T) {
