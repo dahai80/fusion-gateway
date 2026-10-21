@@ -823,6 +823,28 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     return decision
 }
 
+// modelAllowedByCloudList reports whether model is permitted to route to a
+// cloud backend under routing.cloud_models (issue #265). Empty list = no
+// restriction (historical hybrid behavior). Patterns follow the auth
+// allowed_models convention: exact match, "*", or trailing "*" prefix match,
+// case-insensitive.
+func modelAllowedByCloudList(model string, patterns []string) bool {
+    if len(patterns) == 0 {
+        return true
+    }
+    modelLower := strings.ToLower(model)
+    for _, pattern := range patterns {
+        pLower := strings.ToLower(strings.TrimSpace(pattern))
+        if pLower == "*" || pLower == modelLower {
+            return true
+        }
+        if strings.HasSuffix(pLower, "*") && strings.HasPrefix(modelLower, pLower[:len(pLower)-1]) {
+            return true
+        }
+    }
+    return false
+}
+
 // localExclusiveDecision returns a force-local RouteDecision when req.Model is
 // local-exclusive (in the local model set, not in routing.fallback.model_mapping),
 // or nil when the model is cloud-routable / not in the local set. Hoisted to P0.2
@@ -986,6 +1008,24 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             return decision
         }
         return &RouteDecision{Backend: CloudBackend, Reason: "circuit_breaker_open"}
+    }
+
+    // P0.15: Cloud-model allowlist (issue #265). When routing.cloud_models is
+    // non-empty, only models matching a listed pattern may route to a cloud
+    // backend; everything else — local-set models, unknown names, empty model
+    // (default-model backfill stays local) — is pinned to local fusion-mlx so
+    // no heuristic below (P1/P1.5/P2/P2.5 memory, P4 token budget, P4.5
+    // ratio, P6 availability) can hand a cloud-only-model name to an endpoint
+    // that cannot serve it. Empty list = no restriction, historical behavior.
+    // Like P0.2, the P0 breaker-open check stays upstream: a tripped local
+    // backend is a DOWN local, and cloud remains the least-bad fallback even
+    // for an allowlist miss.
+    if !modelAllowedByCloudList(req.Model, cfg.Config.Routing.CloudModels) {
+        slog.Info("cloud_models allowlist miss, forcing local",
+            "model", req.Model,
+            "config_version", cfg.Version,
+        )
+        return &RouteDecision{Backend: LocalBackend, Reason: "cloud_models_allowlist_miss"}
     }
 
     // P0.2: Local-exclusive model guard (issue #83, hoisted above P0.5/P1-P2.5
@@ -1266,6 +1306,17 @@ func (e *Engine) decideRerankLocked(ctx context.Context, cfg *config.ConfigSnaps
                 return &RouteDecision{Backend: LocalBackend, Reason: "rerank_local_available"}
             }
         }
+    }
+
+    // Cloud-model allowlist (issue #265): rerank falls through to
+    // cluster/cloud below by default — a non-listed model stays local
+    // instead of being handed to a cloud rerank endpoint.
+    if !modelAllowedByCloudList(model, cfg.Config.Routing.CloudModels) {
+        slog.Info("cloud_models allowlist miss, forcing rerank local",
+            "model", model,
+            "config_version", cfg.Version,
+        )
+        return &RouteDecision{Backend: LocalBackend, Reason: "cloud_models_allowlist_miss:rerank"}
     }
 
     if decision := e.tryClusterLocked(cfg, model, snap); decision != nil {

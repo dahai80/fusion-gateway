@@ -211,6 +211,17 @@ type AgentTaskConfig struct {
 type RoutingConfig struct {
     Mode                      string               `mapstructure:"mode"`
     DefaultModel              string               `mapstructure:"default_model"`
+    // CloudModels is the cloud-routable model allowlist (issue #265). Empty
+    // (default) = no restriction, historical hybrid behavior. When non-empty,
+    // only models matching an entry may route to a cloud backend; everything
+    // else (local set, unknown names, empty model) is pinned to local
+    // fusion-mlx at P0.15 so no overload/token/ratio heuristic can divert it
+    // to a cloud endpoint that cannot serve the name. Entries use the auth
+    // allowed_models pattern convention: exact match, "*", or trailing "*"
+    // prefix (case-insensitive). NOTE: fallback.model_mapping is applied by
+    // the handler AFTER Decide, so entries must be client-facing names
+    // (e.g. "claude-*"), not the mapped cloud model id.
+    CloudModels               []string             `mapstructure:"cloud_models"`
     TokenThreshold            int                  `mapstructure:"token_threshold"`
     ModelContextLimit         map[string]int       `mapstructure:"model_context_limit"`
     OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`

@@ -9,6 +9,21 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (cloud-model allowlist, 2026-10-22) — #265
+
+- **`routing.cloud_models` allowlist pins everything else to local
+  fusion-mlx.** When non-empty, only models matching a listed pattern may
+  route to a cloud backend; local-set models, unknown model names, and the
+  empty model (default-model backfill) are forced local at P0.15 — no
+  overload/token/ratio heuristic can hand a local-only name to a cloud
+  endpoint. Patterns follow the auth `allowed_models` convention (exact,
+  `*`, trailing-`*` prefix, case-insensitive). Empty list (default) keeps
+  the historical hybrid behavior, so existing deployments are unaffected.
+  The same guard applies to the rerank decision path. Exposed on
+  `GET/PUT /admin/api/config/routing` as `cloud_models`. Note
+  `fallback.model_mapping` is applied after routing, so the list must carry
+  client-facing aliases (`claude-*`), not the mapped model id.
+
 ### Changed (glm-5 default cloud backend, 2026-10-21)
 
 - **`glm-5` is now the gateway's cloud default.** New `backends.glm-5`
