@@ -92,6 +92,9 @@ type AuthKeyConfig struct {
     // gateway-derived tenant identity, NOT a client-supplied header. Empty
     // when the key has no team binding (master key, legacy keys).
     TeamID           string            `mapstructure:"team_id"`
+    // Scopes (#262 K2): module×action grants for /v1/* enforcement. Populated
+    // from the store entry at auth time; config-file keys rarely carry it.
+    Scopes           []string          `mapstructure:"scopes"`
 }
 
 type AuthConfig struct {
@@ -99,6 +102,9 @@ type AuthConfig struct {
     APIKeys     []AuthKeyConfig `mapstructure:"api_keys"`
     Passthrough bool            `mapstructure:"passthrough"`
     MasterKey   string          `mapstructure:"master_key"`
+    // KeyRotationGrace (#262 K2): after a key rotation, the previous key
+    // stays valid until this window elapses (dual-active grace). Default 24h.
+    KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
 }
 
 type RateLimitConfig struct {

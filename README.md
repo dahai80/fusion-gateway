@@ -634,6 +634,24 @@ store:
 - **Redis backend**: not applicable (Redis provides its own persistence); `data_dir` is ignored when `backend: redis`.
 - Static `auth.api_keys` are unaffected — they are read directly from the config snapshot, never from the Store.
 
+### User API Keys (`/api/v1/keys`, #262)
+
+Gateway-issued `fk-` credentials for external callers — self-service scope grants enforced on `/v1/*`. The CRUD surface is master-key gated (Bearer = `master_key`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/keys` | GET | List keys — tail-4 prefix display, scopes, quota counters. No hashes, no plaintext |
+| `/api/v1/keys` | POST | Create: `{name, scopes, tenant?, quota_limit?, rpm?, tpm?, allowed_models?}`. Returns `raw_key` exactly once |
+| `/api/v1/keys/{name}/rotate` | POST | Rotate: new `raw_key` once; the old key stays valid for the grace window |
+| `/api/v1/keys/{name}` | DELETE | Revoke (soft): status flips to `revoked`, auth rejects immediately, the row stays for audit |
+
+- **Key format**: `fk-<48 hex chars>` (24 random bytes). Storage keeps the SHA-256 hash only (`key_hash`); the plaintext appears exactly once in the create/rotate response. Key lists show the tail 4 chars (`fk-…ab12`).
+- **Scopes** (required at create): a module×action matrix, e.g. `["chat", "rag:embed", "cowork:runs:create", "*"]`. `middleware.ScopeEnforce` maps `/v1/chat|completions|messages` → `chat`, embeddings/rerank → `rag`, images → `design`, connector → `agent`, and rejects with `403 permission_error` when the key holds scopes but none grants the module. Empty scopes (legacy/admin keys) pass unchanged.
+- **Rotation grace**: `auth.key_rotation_grace` (default `24h`). Rotating records `key_prev_hash` + `key_rotated_at`; both old and new keys authenticate during the window (dual-active), after which the old key 401s. Same semantics as the K1 `fm-` module service keys.
+- **Tenant binding**: optional `tenant` at create binds the key to a team (`BindKeyToTeam`); the request path derives `X-Fusion-Tenant` from that binding and never trusts a client-supplied header.
+- **Identity propagation**: every authenticated `/v1/*` request carries `X-Fusion-Principal: <key name>` downstream, so upstream modules can attribute callers without re-authenticating.
+- **Revocation is soft**: keys are never hard-deleted (audit + preserve-keys policy); a `revoked` status fails auth immediately.
+
 ### MasterKey
 
 The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.

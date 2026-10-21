@@ -549,6 +549,24 @@ Key 来自**两个来源**,鉴权层均认可:
 - **静态 (config.yaml)**:`auth.api_keys` 条目,按 key 字符串精确匹配。
 - **后台管理 (dashboard)**:通过 `POST /admin/api/keys` 创建。创建时一次性返回完整 `sk-<raw>` key;网关仅存储 8 字符前缀 + SHA-256 哈希 (`key_hash`)。鉴权时对提交的 key 哈希后在 Store 中查找,因此后台生成的 key 与静态 key 鉴权方式完全一致 (配额、白名单、预算全部生效)。非 `active` 状态的 key 被拒绝。
 
+### 用户 API Key(`/api/v1/keys`,#262)
+
+面向外部调用方的网关签发 `fk-` 凭据——自助式 scope 授权,在 `/v1/*` 上强制执行。CRUD 接口仅 master key 可访问(Bearer = `master_key`):
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/keys` | GET | 列出 key——尾 4 位前缀展示、scope、配额计数。不返回哈希与明文 |
+| `/api/v1/keys` | POST | 创建:`{name, scopes, tenant?, quota_limit?, rpm?, tpm?, allowed_models?}`。`raw_key` 仅返回一次 |
+| `/api/v1/keys/{name}/rotate` | POST | 轮换:一次性返回新 `raw_key`;旧 key 在宽限期内仍有效 |
+| `/api/v1/keys/{name}` | DELETE | 吊销(软删除):status 置为 `revoked`,鉴权立即拒绝,记录保留供审计 |
+
+- **Key 格式**:`fk-<48 位 hex>`(24 随机字节)。存储仅保留 SHA-256 哈希(`key_hash`);明文只在创建/轮换响应中出现一次。列表仅展示尾 4 位(`fk-…ab12`)。
+- **Scope**(创建时必填):模块×动作矩阵,如 `["chat", "rag:embed", "cowork:runs:create", "*"]`。`middleware.ScopeEnforce` 将 `/v1/chat|completions|messages` 映射为 `chat`,embeddings/rerank 为 `rag`,images 为 `design`,connector 为 `agent`;key 持有 scope 但均未授权该模块时返回 `403 permission_error`。空 scope(legacy/admin key)行为不变、直接放行。
+- **轮换宽限期**:`auth.key_rotation_grace`(默认 `24h`)。轮换记录 `key_prev_hash` + `key_rotated_at`;宽限期内新旧 key 同时可用(双活),期满后旧 key 401。与 K1 `fm-` 模块服务 key 语义一致。
+- **租户绑定**:创建时可选 `tenant`,将 key 绑定到 team(`BindKeyToTeam`);请求路径从该绑定派生 `X-Fusion-Tenant`,绝不信任客户端伪造头。
+- **身份透传**:每个鉴权通过的 `/v1/*` 请求向下游携带 `X-Fusion-Principal: <key name>`,上游模块无需重新鉴权即可归因调用方。
+- **吊销为软删除**:key 永不物理删除(审计 + 保留策略);`revoked` 状态即刻鉴权失败。
+
 ### MasterKey
 
 `master_key` 绕过所有限流和模型白名单。仅供内部服务使用。

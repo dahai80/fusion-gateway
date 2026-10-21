@@ -800,6 +800,11 @@ func (s *Server) Start() error {
         s.registerShellRoutes(mux)
     }
 
+    // #262 K2: user API key CRUD — master-gated credential issuance surface.
+    // Always registered (the control plane is not feature-flagged); auth is
+    // the master key itself via withMasterKey inside registerUserKeyRoutes.
+    s.registerUserKeyRoutes(mux)
+
     // Connector plugin framework routes
     mux.HandleFunc("/gateway/v1/connector/list", s.withMiddleware(s.handleConnectorList))
     mux.HandleFunc("/gateway/v1/connector/test", s.withMiddleware(s.handleConnectorTest))
@@ -1243,6 +1248,11 @@ func (s *Server) buildMiddlewareChain() {
         middleware.IdentityAuth(s.identityClient, &s.cfg.Config.Identity),
         s.oidcAuth.Middleware(&s.cfg.Config.Auth),
         middleware.RBACAuth(&s.cfg.Config.RBAC, &s.cfg.Config.Team),
+        // #262 K2: scope enforcement for user-issued keys — runs after key
+        // resolution so p.KeyConfig.Scopes is populated; no-op for master,
+        // admin-JWT, legacy config keys (empty scopes), and non-inference
+        // paths (inferenceModule == "").
+        middleware.ScopeEnforce(),
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
         middleware.BudgetBlock(s.store),
         middleware.RateLimit(&s.cfg.Config.Routing.RateLimit, s.rateLimiter, s.estimateRequestTokens),

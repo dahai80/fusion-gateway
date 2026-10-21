@@ -57,6 +57,15 @@ type APIKeyEntry struct {
     DailyDate       string            `json:"daily_date"`
     AllowedBackends []string          `json:"allowed_backends"`
     ModelModules    []string          `json:"model_modules"`
+    // Scopes (#262 K2) is the module×action grant matrix for /v1/*
+    // enforcement ("chat", "rag", "chat:generate", "*"). Empty = no scope
+    // restriction (legacy/admin keys keep their historical behavior).
+    Scopes []string `json:"scopes,omitempty"`
+    // KeyPrevHash/KeyRotatedAt (#262 K2) carry the pre-rotation key hash and
+    // the rotation timestamp: the previous key stays valid for the rotation
+    // grace window (auth.key_rotation_grace, dual-active semantics).
+    KeyPrevHash string     `json:"key_prev_hash,omitempty"`
+    KeyRotatedAt *time.Time `json:"key_rotated_at,omitempty"`
     Metadata        map[string]string `json:"metadata"`
     CreatedAt       time.Time         `json:"created_at"`
     UpdatedAt       time.Time         `json:"updated_at"`

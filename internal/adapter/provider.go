@@ -58,6 +58,14 @@ func InjectFusionHeaders(ctx context.Context, req *http.Request) {
         slog.Debug("injected gateway-authoritative tenant onto upstream",
             "tenant", tenant, "path", req.URL.Path)
     }
+    // #262 K2: propagate the gateway-authenticated caller identity downstream
+    // as X-Fusion-Principal (the resolved API-key name) so upstream modules
+    // can attribute requests without re-authenticating them. Gateway-set
+    // only, never client passthrough. Empty (anonymous/admin-JWT paths)
+    // omits the header.
+    if principal, _ := ctx.Value(principalCtxKey{}).(string); principal != "" {
+        req.Header.Set("X-Fusion-Principal", principal)
+    }
     // #157 items 2+3: forward identity lease scheduling signals so fusion-mlx
     // can apply VRAM priority + KV cache-tag isolation on its side. The
     // gateway is non-invasive (no allocator/cache here); these headers are the
@@ -100,6 +108,21 @@ func WithTenant(ctx context.Context, tenantID string) context.Context {
         return ctx
     }
     return context.WithValue(ctx, tenantCtxKey{}, tenantID)
+}
+
+// principalCtxKey carries the resolved API-key name through the request ctx.
+// Set by the auth middleware after key resolution; read by InjectFusionHeaders
+// to stamp X-Fusion-Principal (#262 K2).
+type principalCtxKey struct{}
+
+// WithPrincipal attaches the gateway-authenticated caller identity (API-key
+// name) to ctx so outbound adapter forwards carry X-Fusion-Principal. Empty
+// name is a no-op.
+func WithPrincipal(ctx context.Context, name string) context.Context {
+    if name == "" {
+        return ctx
+    }
+    return context.WithValue(ctx, principalCtxKey{}, name)
 }
 
 // TenantFromContext returns the gateway-derived tenant id, or "".
