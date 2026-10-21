@@ -73,6 +73,11 @@ func (s *Server) setupShell() {
         }
         return "", ""
     })
+    // #256: ext endpoints a self-registered manifest declares
+    // (searchProviders/notifications) route to that registration's own
+    // upstream when static config pins the module elsewhere (engine vs web
+    // bridge). Static upstream keeps serving everything else (#232).
+    s.shellProxy.SetExtResolver(s.shellRegistry.ExtRouteFor)
     s.setupShellUsers(&cfg)
     s.autoRegisterAdminModule()
     slog.Info("shell subsystem initialized",

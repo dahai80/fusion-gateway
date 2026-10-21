@@ -21,18 +21,32 @@ import (
 // rebuilding the proxy.
 type upstreamFn func(moduleID string) (string, string)
 
+// extUpstreamFn resolves a per-path upstream override (#256): for a request
+// path (proxy-relative, leading "/") matching an endpoint the module
+// declared in its manifest ext fields (searchProviders/notifications),
+// return the dynamic registration's own upstream + credential. ok=false
+// keeps the static upstream.
+type extUpstreamFn func(moduleID, path string) (string, string, bool)
+
 // Proxy forwards /shell/<module_id>/... requests to the module's upstream
 // and degrades failures into the standardized error envelope (PRD §7.2):
 // backend down is a 503 envelope with retryable=true, NEVER a bare 502 or a
 // hung connection. The body cap (E5 lesson) bounds proxied request bodies.
 type Proxy struct {
-    resolveUpstream upstreamFn
-    transports      sync.Map // module id -> *http.Client (built once per module)
-    bodyCap         int64
+    resolveUpstream    upstreamFn
+    resolveExtUpstream extUpstreamFn
+    transports         sync.Map // "<moduleID>|<upstream>" -> *http.Client (built once per pair)
+    bodyCap            int64
 }
 
 func NewProxy(resolveUpstream upstreamFn) *Proxy {
     return &Proxy{resolveUpstream: resolveUpstream, bodyCap: 256 << 20}
+}
+
+// SetExtResolver wires the per-path upstream override (#256). Optional —
+// without it the proxy behaves exactly as before (one upstream per module).
+func (p *Proxy) SetExtResolver(fn extUpstreamFn) {
+    p.resolveExtUpstream = fn
 }
 
 // moduleClient builds (once) the HTTP client for one module upstream. Goes
@@ -40,8 +54,11 @@ func NewProxy(resolveUpstream upstreamFn) *Proxy {
 // + ResponseHeaderTimeout + dial timeout — never a bare &http.Client{}.
 // Module upstreams are loopback in the union-web topology, so the local
 // predicate applies and the header timeout stretches to 300s (mirrors #208).
+// The cache key includes the upstream: a module can dial TWO upstreams in
+// one lifetime now that ext paths may override the static one (#256).
 func (p *Proxy) moduleClient(moduleID, upstream string) (*http.Client, error) {
-    if c, ok := p.transports.Load(moduleID); ok {
+    cacheKey := moduleID + "|" + upstream
+    if c, ok := p.transports.Load(cacheKey); ok {
         return c.(*http.Client), nil
     }
     u, err := url.Parse(upstream)
@@ -50,7 +67,7 @@ func (p *Proxy) moduleClient(moduleID, upstream string) (*http.Client, error) {
     }
     bc := config.BackendConfig{Type: "openai-compatible", BaseURL: upstream}
     client := &http.Client{Transport: httpx.TransportForBackend(bc)}
-    actual, loaded := p.transports.LoadOrStore(moduleID, client)
+    actual, loaded := p.transports.LoadOrStore(cacheKey, client)
     if loaded {
         // Another goroutine won the race; ours is discarded (same config).
         transport, ok := client.Transport.(interface{ CloseIdleConnections() })
@@ -79,6 +96,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         WriteEnvelope(w, http.StatusNotFound, "module_not_found",
             fmt.Sprintf("module %q has no proxy upstream configured", moduleID), moduleID, false)
         return
+    }
+
+    // #256: an ext endpoint declared in the module's manifest
+    // (searchProviders/notifications) routes to the dynamic registration's
+    // own upstream when the static config pins a different one — the engine
+    // keeps serving the SPA + core API while the bridge/module process
+    // serves its ext endpoints. Static otherwise wins (#232 semantics).
+    if p.resolveExtUpstream != nil {
+        if ou, okey, ok := p.resolveExtUpstream(moduleID, "/"+rest); ok && ou != "" && ou != upstream {
+            slog.Debug("shell proxy ext-path upstream override",
+                "module", moduleID, "path", "/"+rest, "upstream", ou)
+            upstream, apiKey = ou, okey
+        }
     }
 
     client, err := p.moduleClient(moduleID, upstream)

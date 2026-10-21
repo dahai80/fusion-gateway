@@ -9,6 +9,26 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (shell ext-path routing, 2026-10-21) — #256
+
+- **Manifest-declared ext endpoints route to the self-registered upstream,
+  not the static-pinned one.** Acceptance verify of fusion-mlx#1281/#1285
+  hit a conflict: `web_shell.modules.fusion-mlx.upstream` pinned the engine
+  (:11434) while the self-registered manifest declared the web bridge
+  (:11471) — the bridge-only ext endpoints (`/api/search/models`,
+  `/api/notifications`) 404'd through the gateway, breaking ⌘K search and
+  the notification bell for mlx.
+- New per-path override in the /shell/ proxy (#256, issue option 2 — keeps
+  #232 static-wins semantics for everything else): when the request path
+  matches an endpoint the manifest declares in `searchProviders`/
+  `notifications` (exact or segment-boundary prefix), the proxy dials the
+  dynamic registration's own upstream and injects that upstream's
+  credential. Pages are never matched (SPA deep links, not API paths).
+- Proxy transport cache is now keyed `<module>|<upstream>` — one module can
+  dial two upstreams in one lifetime without reusing the wrong client.
+- Without a dynamic registration (or with upstreams equal) behavior is
+  byte-identical to before.
+
 ### Added (manifest deregistration, 2026-10-20) — #253
 
 - **`DELETE /api/v1/shell/manifests/{id}`** — manifest deregistration, found

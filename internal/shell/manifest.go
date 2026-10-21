@@ -355,6 +355,53 @@ func (r *Registry) UpstreamFor(id string) (string, string, bool) {
     return e.manifest.Upstream, e.manifest.APIKey, true
 }
 
+// ExtRouteFor reports the dynamic registration's own upstream + credential
+// for one proxy-relative request path (#256). The static config may pin a
+// module to a different upstream than the one the module self-registered
+// (engine vs web bridge) — the endpoints the module declares in its ext
+// fields (searchProviders/notifications endpoints, #250) live only on the
+// self-registered upstream, so the proxy routes those paths there while
+// everything else keeps the static upstream. Pages are deliberately NOT
+// matched: they are SPA deep links (${entry}#${route}), not API paths.
+// ok=false keeps the static upstream.
+func (r *Registry) ExtRouteFor(id, path string) (string, string, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    e, ok := r.dynamic[id]
+    if !ok || e.manifest.Upstream == "" || !manifestHasExtEndpoint(&e.manifest, path) {
+        return "", "", false
+    }
+    return e.manifest.Upstream, e.manifest.APIKey, true
+}
+
+// manifestHasExtEndpoint reports whether path (leading "/", proxy-relative)
+// matches a declared ext endpoint: exact, or a segment-boundary prefix (a
+// search API may serve sub-resources under its endpoint root). Endpoints
+// are validated gateway-absolute ("/..." , no traversal) at registration.
+func manifestHasExtEndpoint(m *config.ShellManifest, path string) bool {
+    if path == "" {
+        return false
+    }
+    for _, p := range m.SearchProviders {
+        if extEndpointMatches(p.Endpoint, path) {
+            return true
+        }
+    }
+    for _, n := range m.Notifications {
+        if extEndpointMatches(n.Endpoint, path) {
+            return true
+        }
+    }
+    return false
+}
+
+func extEndpointMatches(endpoint, path string) bool {
+    if endpoint == "" {
+        return false
+    }
+    return path == endpoint || strings.HasPrefix(path, endpoint+"/")
+}
+
 // RecordHealth stores a health-probe observation for one manifest id. A
 // failed probe clears the observation so a dead module goes offline on the
 // next list render (A5 recovery path: probe succeeds again -> online).

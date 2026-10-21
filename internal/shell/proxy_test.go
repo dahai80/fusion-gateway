@@ -353,3 +353,102 @@ func TestProxy_WebSocketUpgradePassthrough(t *testing.T) {
         t.Fatalf("ws payload = %q err=%v", string(reply[:n]), err)
     }
 }
+
+// TestProxy_ExtPathUpstreamOverride (#256): manifest-declared ext endpoints
+// dial the dynamic upstream while everything else keeps the static one.
+func TestProxy_ExtPathUpstreamOverride(t *testing.T) {
+    var staticPaths, extPaths atomic.Value
+    staticPaths.Store([]string{})
+    extPaths.Store([]string{})
+    record := func(dst *atomic.Value, path string) {
+        cur := dst.Load().([]string)
+        dst.Store(append(cur, path))
+    }
+    staticSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        record(&staticPaths, r.URL.Path)
+        _, _ = w.Write([]byte("static"))
+    }))
+    defer staticSrv.Close()
+    extSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        record(&extPaths, r.URL.Path)
+        if r.Header.Get("Authorization") != "Bearer fk-bridge" {
+            w.WriteHeader(http.StatusUnauthorized)
+            return
+        }
+        _, _ = w.Write([]byte("ext"))
+    }))
+    defer extSrv.Close()
+
+    p := NewProxy(func(string) (string, string) { return staticSrv.URL, "fk-static" })
+    p.SetExtResolver(func(moduleID, path string) (string, string, bool) {
+        if path == "/api/search/models" || strings.HasPrefix(path, "/api/notifications") {
+            return extSrv.URL, "fk-bridge", true
+        }
+        return "", "", false
+    })
+
+    // Ext path → dynamic upstream + dynamic credential.
+    w := httptest.NewRecorder()
+    p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/api/search/models?q=glm", nil))
+    if w.Code != http.StatusOK || w.Body.String() != "ext" {
+        t.Fatalf("ext path code=%d body=%q, want ext upstream", w.Code, w.Body.String())
+    }
+    // Undeclared path → static upstream + static credential.
+    w = httptest.NewRecorder()
+    p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/index.html", nil))
+    if w.Code != http.StatusOK || w.Body.String() != "static" {
+        t.Fatalf("normal path code=%d body=%q, want static upstream", w.Code, w.Body.String())
+    }
+    // Notification sub-path matches at the segment boundary.
+    w = httptest.NewRecorder()
+    p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/api/notifications/engine", nil))
+    if w.Code != http.StatusOK || w.Body.String() != "ext" {
+        t.Fatalf("notification sub-path code=%d body=%q, want ext upstream", w.Code, w.Body.String())
+    }
+
+    if got := len(extPaths.Load().([]string)); got != 2 {
+        t.Fatalf("ext upstream hits = %d, want 2", got)
+    }
+    if got := len(staticPaths.Load().([]string)); got != 1 {
+        t.Fatalf("static upstream hits = %d, want 1", got)
+    }
+    if got := staticPaths.Load().([]string); got[0] != "/index.html" {
+        t.Fatalf("static path = %q, want /index.html", got[0])
+    }
+}
+
+// TestProxy_TransportCachePerUpstream: one module dialing two upstreams
+// must not reuse the first upstream's client for the second (#256).
+func TestProxy_TransportCachePerUpstream(t *testing.T) {
+    staticSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        _, _ = w.Write([]byte("static"))
+    }))
+    defer staticSrv.Close()
+    extSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        _, _ = w.Write([]byte("ext"))
+    }))
+    defer extSrv.Close()
+
+    p := NewProxy(func(string) (string, string) { return staticSrv.URL, "" })
+    p.SetExtResolver(func(_, path string) (string, string, bool) {
+        if path == "/api/x" {
+            return extSrv.URL, "", true
+        }
+        return "", "", false
+    })
+
+    // Interleave: normal first (caches static client), then ext (must build
+    // a client for the ext upstream, not reuse the static one).
+    for i := 0; i < 2; i++ {
+        w := httptest.NewRecorder()
+        p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/m/index.html", nil))
+        if w.Body.String() != "static" {
+            t.Fatalf("iter %d: normal path = %q", i, w.Body.String())
+        }
+        w = httptest.NewRecorder()
+        p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/m/api/x", nil))
+        if w.Body.String() != "ext" {
+            t.Fatalf("iter %d: ext path = %q (stale transport?)", i, w.Body.String())
+        }
+    }
+}
