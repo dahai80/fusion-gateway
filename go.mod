@@ -2,7 +2,7 @@ module github.com/fusion-gateway/fusion-gateway
 
 go 1.26.3
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
