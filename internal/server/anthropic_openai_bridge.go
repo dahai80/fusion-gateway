@@ -334,6 +334,15 @@ func (b *anthropicSSEBridge) handleFrame(frame string) {
         b.forward(frame)
         return
     }
+    // #259: JSON that parses but carries no OpenAI-chunk semantics (ID, choices,
+    // usage, error) is not a chunk either — e.g. the native ping event the
+    // keepalive branch emits for Anthropic downstreams. Without this the bridge
+    // swallowed its own pings: unmarshal succeeded, nothing emitted, nothing
+    // forwarded. Forward verbatim.
+    if cc.ID == "" && len(cc.Choices) == 0 && cc.Usage == nil && cc.Error == nil {
+        b.forward(frame)
+        return
+    }
     if cc.Error != nil {
         b.emitError(cc.Error)
         return
@@ -343,19 +352,32 @@ func (b *anthropicSSEBridge) handleFrame(frame string) {
         b.inTok = cc.Usage.PromptTokens
         b.outTok = cc.Usage.CompletionTokens
     }
+    emitted := false
     for _, ch := range cc.Choices {
         if text, ok := ch.Delta.Content.(string); ok && text != "" {
             b.emitTextDelta(text)
+            emitted = true
         }
         for _, tc := range ch.Delta.ToolCalls {
             b.emitToolDelta(tc)
+            emitted = true
         }
         if ch.FinishReason != nil && *ch.FinishReason != "" {
             b.stopReason = anthropicStopReasonFromOpenAI(*ch.FinishReason)
             b.closeOpenBlocks()
+            emitted = true
         }
     }
-    // The synthetic usage chunk (include_usage) carries empty choices.
+    // #259: fusion-mlx (PR #1295) emits prefill heartbeats as legal
+    // empty-delta chunks. The bridge swallowed them, so a 100-200s prefill
+    // produced zero Anthropic events after message_start and Claude Code's
+    // ~60s TTFB timer cancelled the stream. Forward such a chunk as a native
+    // ping event (the aggregate loop's contract). The synthetic usage chunk
+    // (include_usage) carries zero choices — it is data, not a heartbeat,
+    // and must not ping.
+    if !emitted && len(cc.Choices) > 0 {
+        b.forward("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+    }
 }
 
 // ensureMessageStart emits message_start exactly once, immediately on the

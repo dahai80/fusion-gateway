@@ -183,6 +183,35 @@ func TestSSEBridge_ToolStream(t *testing.T) {
     }
 }
 
+// TestSSEBridge_HeartbeatPing (#259): fusion-mlx prefill heartbeats arrive as
+// legal empty-delta OpenAI chunks. The bridge must surface them as native
+// ping events (CC's TTFB timer resets on events, not on comments), while the
+// synthetic usage chunk (zero choices) stays silent.
+func TestSSEBridge_HeartbeatPing(t *testing.T) {
+    inner := httptest.NewRecorder()
+    b := newAnthropicSSEBridge(inner)
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{}}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{}}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n"))
+    b.Write([]byte("data: [DONE]\n\n"))
+
+    var seq []string
+    for _, f := range bridgeFrames(t, inner.Body.String()) {
+        seq = append(seq, f[0])
+    }
+    want := []string{
+        "message_start",
+        "ping", "ping",
+        "content_block_start", "content_block_delta",
+        "content_block_stop", "message_delta", "message_stop",
+    }
+    if strings.Join(seq, ",") != strings.Join(want, ",") {
+        t.Fatalf("event seq = %v, want %v", seq, want)
+    }
+}
+
 // TestSSEBridge_FinalizeSynth: a stream cut without [DONE] (watchdog/abort)
 // still produces a protocol-valid terminal, and Finalize is idempotent.
 func TestSSEBridge_FinalizeSynth(t *testing.T) {

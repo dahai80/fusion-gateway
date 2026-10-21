@@ -132,6 +132,49 @@ func TestR6_ResumableStream_NoDataRace(t *testing.T) {
     }
 }
 
+// TestStreamChat_BridgeKeepaliveNativePing (#259): handleStreamChat's
+// keepalive branch emits an Anthropic-native ping event when the downstream
+// writer is the OpenAI→Anthropic SSE bridge (CC's TTFB timer resets on real
+// events only), while OpenAI-wire writers keep the `: keepalive` comment.
+func TestStreamChat_BridgeKeepaliveNativePing(t *testing.T) {
+    // Plain (non-resumable) server: the resumable path owns its own keepalive
+    // and is default-off in production for this surface.
+    s := newTestServer()
+    cleanup := resumableStreamConfig(s, 10*time.Millisecond, 30*time.Second)
+    defer cleanup()
+    provider := &delayedStreamProvider{
+        name:    "fusion-mlx",
+        chunks:  chunksFor(1),
+        delay:   200 * time.Millisecond,
+        started: make(chan struct{}),
+        closed:  make(chan struct{}),
+    }
+    s.pool.Register("fusion-mlx", provider, configBackend("fusion-mlx"))
+
+    ctx := middleware.InjectRequestID(context.Background(), "req-259-ping")
+    decision := &router.RouteDecision{Backend: router.LocalBackend, Reason: "test"}
+    budget := tokenizer.TokenBudget{InputTokens: 5, TotalBudget: 20}
+    req := &adapter.ChatRequest{Model: "qwen-7b", Messages: []adapter.ChatMessage{{Role: "user", Content: "hi"}}, Stream: true}
+
+    inner := httptest.NewRecorder()
+    bridge := newAnthropicSSEBridge(inner)
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamChat(ctx, bridge, provider, req, decision, budget, time.Now())
+        close(done)
+    }()
+    <-provider.started
+    select {
+    case <-done:
+    case <-time.After(15 * time.Second):
+        t.Fatal("handleStreamChat did not return within 15s")
+    }
+    raw := inner.Body.String()
+    if !strings.Contains(raw, "event: ping") || !strings.Contains(raw, "\"type\":\"ping\"") {
+        t.Fatalf("bridge keepalive missing native ping event. body:\n%s", raw)
+    }
+}
+
 // TestR6_ResumableStream_KeepaliveEmitted: a slow-but-live upstream (long delay
 // between chunks, longer than the keepalive tick) must emit `: keepalive` lines
 // so an intermediate proxy does not time the client out. Prior code defined

@@ -717,8 +717,19 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                     wdCancel()
                     done = true
                 } else if !watchdogTripped {
-                    // SSE comment keepalive — client ignores, bytes keep flowing.
-                    if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+                    // SSE comment keepalive keeps bytes flowing (#69/#81), but
+                    // #259: an Anthropic downstream (the OpenAI→Anthropic SSE
+                    // bridge) and Claude Code parse only real SSE events — the
+                    // TTFB timer never resets on comments, so CC cancels the
+                    // stream mid-prefill. Emit an Anthropic-native ping event
+                    // for that surface — same contract as the aggregate loop
+                    // (anthropic_messages.go). OpenAI-wire clients keep the
+                    // comment (they ignore both).
+                    keepalive := ": keepalive\n\n"
+                    if _, isBridge := w.(*anthropicSSEBridge); isBridge {
+                        keepalive = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+                    }
+                    if _, err := fmt.Fprint(w, keepalive); err != nil {
                         slog.Warn("stream chat keepalive write failed", "provider", provider.Name(), "error", err)
                         endReason = "write_failed"
                         done = true
