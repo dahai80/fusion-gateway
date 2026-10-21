@@ -215,6 +215,143 @@ func TestDecide_LocalExclusiveModel_RatioNotCloudDiverted(t *testing.T) {
     }
 }
 
+// issue #265: routing.cloud_models allowlist — a model NOT matching any
+// entry is pinned local even when P4.5 ratio would divert it cloud.
+func TestDecide_CloudModelsAllowlist_UnknownModelRatioForcedLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CloudModels = []string{"glm-5", "claude-*"}
+    cfg.Config.Routing.OutputInputRatioThreshold = 0.6
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 132, PredictOutputTokens: 2048, TotalBudget: 2180}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "gpt-4o", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for allowlist-miss model under high ratio, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "cloud_models_allowlist_miss" {
+        t.Errorf("expected cloud_models_allowlist_miss, got %s", dec.Reason)
+    }
+}
+
+// issue #265: allowlisted model still routes cloud via P6 when not in the
+// local set, and the claude-* prefix pattern matches client-facing aliases
+// (model_mapping is applied by the handler AFTER Decide).
+func TestDecide_CloudModelsAllowlist_ListedModelStillCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CloudModels = []string{"glm-5", "claude-*"}
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 12}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    for _, model := range []string{"glm-5", "claude-sonnet-4-6"} {
+        dec := e.Decide(ctx, &RouteRequest{Model: model, Stream: false})
+        if dec.Backend != CloudBackend {
+            t.Errorf("expected cloud for allowlisted model %s, got %s: %s", model, dec.Backend, dec.Reason)
+        }
+    }
+}
+
+// issue #265: empty list = no restriction, historical behavior preserved.
+func TestDecide_CloudModelsAllowlist_EmptyListKeepsP6CloudDivert(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 12}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    dec := e.Decide(ctx, &RouteRequest{Model: "gpt-4o", Stream: false})
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud for unknown model with empty allowlist, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// issue #265: local-set model under allowlist still routes local (P0.15
+// fires before P0.2; reason is the allowlist miss).
+func TestDecide_CloudModelsAllowlist_LocalModelStaysLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CloudModels = []string{"glm-5"}
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"Qwen3.5-9B-4bit": true}
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 12}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    dec := e.Decide(ctx, &RouteRequest{Model: "Qwen3.5-9B-4bit", Stream: false})
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for local-set model under allowlist, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
+// issue #265: pattern matcher semantics — exact, "*", trailing prefix.
+func TestModelAllowedByCloudList(t *testing.T) {
+    if !modelAllowedByCloudList("", nil) {
+        t.Error("empty patterns must allow everything")
+    }
+    if !modelAllowedByCloudList("glm-5", []string{"glm-5"}) {
+        t.Error("exact match must allow")
+    }
+    if modelAllowedByCloudList("gpt-4o", []string{"glm-5"}) {
+        t.Error("non-listed model must be denied")
+    }
+    if !modelAllowedByCloudList("claude-sonnet-4-6", []string{"claude-*"}) {
+        t.Error("trailing * must prefix-match")
+    }
+    if !modelAllowedByCloudList("anything", []string{"*"}) {
+        t.Error("bare * must allow all")
+    }
+    if !modelAllowedByCloudList("GLM-5", []string{"glm-5"}) {
+        t.Error("match must be case-insensitive")
+    }
+}
+
+// issue #265: rerank allowlist miss stays local instead of cloud default.
+func TestDecide_CloudModelsAllowlist_RerankMissForcedLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.CloudModels = []string{"glm-5"}
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{}
+    })
+    ctx := config.WithSnapshot(context.Background(), cfg)
+
+    dec := e.Decide(ctx, &RouteRequest{Model: "bge-reranker-v2-m3", Type: RequestTypeRerank})
+    if dec.Backend != LocalBackend {
+        t.Errorf("expected local for allowlist-miss rerank model, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "cloud_models_allowlist_miss:rerank" {
+        t.Errorf("expected cloud_models_allowlist_miss:rerank, got %s", dec.Reason)
+    }
+}
+
 // issue #83: same guard must hold against P4 token-budget cloud-divert.
 func TestDecide_LocalExclusiveModel_TokenBudgetNotCloudDiverted(t *testing.T) {
     cfg := defaultTestSnapshot()

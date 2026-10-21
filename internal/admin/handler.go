@@ -991,6 +991,7 @@ type tokenTierRuleResponse struct {
 type routingConfigResponse struct {
     Mode                      string                   `json:"mode"`
     DefaultModel              string                   `json:"default_model"`
+    CloudModels               []string                 `json:"cloud_models"`
     TokenThreshold            int                      `json:"token_threshold"`
     OutputInputRatioThreshold float64                  `json:"output_input_ratio_threshold"`
     RatioTiersEnabled         bool                     `json:"ratio_tiers_enabled"`
@@ -1010,6 +1011,7 @@ type routingConfigResponse struct {
 type routingConfigUpdate struct {
     Mode                      *string                   `json:"mode,omitempty"`
     DefaultModel              *string                   `json:"default_model,omitempty"`
+    CloudModels               *[]string                 `json:"cloud_models,omitempty"`
     TokenThreshold            *int                      `json:"token_threshold,omitempty"`
     OutputInputRatioThreshold *float64                  `json:"output_input_ratio_threshold,omitempty"`
     RatioTiersEnabled         *bool                     `json:"ratio_tiers_enabled,omitempty"`
@@ -1051,6 +1053,7 @@ func (h *Handler) handleGetRoutingConfig(w http.ResponseWriter, r *http.Request)
     resp := routingConfigResponse{
         Mode:                      cfg.Routing.Mode,
         DefaultModel:              cfg.Routing.DefaultModel,
+        CloudModels:               cfg.Routing.CloudModels,
         TokenThreshold:            cfg.Routing.TokenThreshold,
         OutputInputRatioThreshold: cfg.Routing.OutputInputRatioThreshold,
         RatioTiersEnabled:         cfg.Routing.RatioTiers.Enabled,
@@ -1118,6 +1121,9 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
     }
     if req.DefaultModel != nil {
         routing["default_model"] = *req.DefaultModel
+    }
+    if req.CloudModels != nil {
+        routing["cloud_models"] = *req.CloudModels
     }
     if req.OutputInputRatioThreshold != nil {
         routing["output_input_ratio_threshold"] = *req.OutputInputRatioThreshold
