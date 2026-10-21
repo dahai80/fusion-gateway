@@ -940,6 +940,11 @@ type ShellConfig struct {
     // HeartbeatTimeout: a dynamic manifest whose last heartbeat is older than
     // this is marked unreachable (menu greyed, NOT deleted). Default 30s.
     HeartbeatTimeout time.Duration `mapstructure:"heartbeat_timeout"`
+    // KeyRotationGrace (#261 K1): after a service-key rotation, the previous
+    // key stays valid for heartbeats until the module's next heartbeat
+    // carries the new key (early retirement) or this window elapses —
+    // whichever comes first (dual-active grace). Default 24h.
+    KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
     // HealthPollInterval is the module health poll cadence on the manifest
     // health URL. Default 30s.
     HealthPollInterval time.Duration `mapstructure:"health_poll_interval"`
@@ -2319,6 +2324,7 @@ func DefaultConfig() Config {
             Enabled:            false,
             HeartbeatTimeout:   30 * time.Second,
             HealthPollInterval: 30 * time.Second,
+            KeyRotationGrace:   24 * time.Hour,
             Session: ShellSessionConfig{
                 TTL: 12 * time.Hour,
             },

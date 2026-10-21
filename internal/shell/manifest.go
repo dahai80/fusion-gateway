@@ -44,6 +44,18 @@ type entry struct {
     manifest      config.ShellManifest
     lastHeartbeat time.Time
     dynamic       bool
+    // K1 (#261) gateway-issued service key state. The key ID and SHA-256
+    // hashes live on the entry — never on the manifest — so no manifest
+    // JSON (registration response included) can carry them. The plaintext
+    // credential rides manifest.APIKey: that is the existing proxy
+    // injection path, the existing List() zeroing target, and the existing
+    // persistence channel, so a gateway-issued key inherits all three
+    // invariants without a parallel secret store.
+    serviceKeyID        string
+    serviceKeyHash      string // sha256 hex of the current fm- key; "" = none issued
+    serviceKeyPrevHash  string // sha256 hex of the pre-rotation key (dual-active grace)
+    serviceKeyRotatedAt time.Time
+    serviceKeyRevoked   bool
 }
 
 // persistedManifest is the on-disk shape of a dynamic registration
@@ -51,7 +63,12 @@ type entry struct {
 // persist — static fallback entries live in config.yaml by definition.
 type persistedManifest struct {
     config.ShellManifest
-    LastHeartbeat time.Time `json:"last_heartbeat"`
+    LastHeartbeat        time.Time `json:"last_heartbeat"`
+    ServiceKeyID         string    `json:"service_key_id,omitempty"`
+    ServiceKeyHash       string    `json:"service_key_hash,omitempty"`
+    ServiceKeyPrevHash   string    `json:"service_key_prev_hash,omitempty"`
+    ServiceKeyRotatedAt  time.Time `json:"service_key_rotated_at,omitempty"`
+    ServiceKeyRevoked    bool      `json:"service_key_revoked,omitempty"`
 }
 
 // Registry holds dynamic registrations plus the static fallback list.
@@ -113,12 +130,25 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
     }
 
     r.mu.Lock()
-    _, exists := r.dynamic[m.ID]
-    r.dynamic[m.ID] = &entry{
+    prev, exists := r.dynamic[m.ID]
+    e := &entry{
         manifest:      m,
         lastHeartbeat: time.Now(),
         dynamic:       true,
     }
+    if exists && m.APIKey == "" {
+        // #261 K1: re-registration without api_key keeps the gateway-issued
+        // service key (and its rotation/revocation state) — a module
+        // heartbeating with its fm- key must not be locked out by its own
+        // idempotent re-registration. A body that carries api_key reverts
+        // to the module-supplied credential path and drops the issued key.
+        e.serviceKeyID = prev.serviceKeyID
+        e.serviceKeyHash = prev.serviceKeyHash
+        e.serviceKeyPrevHash = prev.serviceKeyPrevHash
+        e.serviceKeyRotatedAt = prev.serviceKeyRotatedAt
+        e.serviceKeyRevoked = prev.serviceKeyRevoked
+    }
+    r.dynamic[m.ID] = e
     if exists {
         slog.Info("shell manifest re-registered (idempotent upsert)", "id", m.ID, "entry", m.Entry)
     } else {
@@ -174,9 +204,14 @@ func (r *Registry) Load() error {
             continue
         }
         r.dynamic[m.ID] = &entry{
-            manifest:      m,
-            lastHeartbeat: p.LastHeartbeat,
-            dynamic:       true,
+            manifest:            m,
+            lastHeartbeat:       p.LastHeartbeat,
+            dynamic:             true,
+            serviceKeyID:        p.ServiceKeyID,
+            serviceKeyHash:      p.ServiceKeyHash,
+            serviceKeyPrevHash:  p.ServiceKeyPrevHash,
+            serviceKeyRotatedAt: p.ServiceKeyRotatedAt,
+            serviceKeyRevoked:   p.ServiceKeyRevoked,
         }
     }
     n := len(r.dynamic)
@@ -214,8 +249,13 @@ func (r *Registry) save() error {
     persisted := make([]persistedManifest, 0, len(r.dynamic))
     for _, e := range r.dynamic {
         persisted = append(persisted, persistedManifest{
-            ShellManifest: e.manifest,
-            LastHeartbeat: e.lastHeartbeat,
+            ShellManifest:       e.manifest,
+            LastHeartbeat:       e.lastHeartbeat,
+            ServiceKeyID:        e.serviceKeyID,
+            ServiceKeyHash:      e.serviceKeyHash,
+            ServiceKeyPrevHash:  e.serviceKeyPrevHash,
+            ServiceKeyRotatedAt: e.serviceKeyRotatedAt,
+            ServiceKeyRevoked:   e.serviceKeyRevoked,
         })
     }
     r.mu.RUnlock()

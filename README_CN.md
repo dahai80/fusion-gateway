@@ -170,7 +170,9 @@ cp config.example.yaml config.yaml
 | `/api/v1/shell/session/logout` | POST | Union Web Shell:吊销当前会话 token |
 | `/api/v1/shell/me` | GET | Union Web Shell:返回调用方 claims(用户、角色、模块权限) |
 | `/api/v1/shell/manifests` | GET/POST | Union Web Shell:带存活状态的 manifest 列表 / 模块幂等注册(fg-key 鉴权,entry 来源白名单校验) |
-| `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union Web Shell:模块心跳保活(心跳超时标记 unreachable,不删除) |
+| `/api/v1/shell/manifests/{id}/heartbeat` | POST | Union Web Shell:模块心跳保活(心跳超时标记 unreachable,不删除)。鉴权(#261):模块的网关签发 `fm-` 服务密钥、`web_shell.admin_key` 或 master key |
+| `/api/v1/shell/manifests/{id}/key/rotate` | POST | Union Web Shell(#261 K1,admin-plane):轮换模块服务密钥 — 新明文仅返回一次;旧密钥在 `web_shell.key_rotation_grace`(默认 24h)双活窗口内有效,或直到首个携带新密钥的心跳到达 |
+| `/api/v1/shell/manifests/{id}/key` | DELETE | Union Web Shell(#261 K1,admin-plane):吊销模块服务密钥 — 心跳 403,代理降级为结构化 503 `module_key_revoked`,Shell 主机置灰模块 |
 | `/api/v1/shell/manifests/{id}` | DELETE | Union Web Shell:manifest 注销(#253)— 与注册相同的 admin-plane 鉴权;动态注册删除并持久化存储文件;未知 id 404 `manifest_unknown`,config 静态条目 409 `manifest_static` |
 | `/shell/{module_id}/` | ANY | Union Web Shell:模块代理 — 转发到模块 upstream,失败返回标准化错误信封 `{code, message, module_id, retryable}`(后端宕机不裸 502) |
 | `/api/v1/shell/users` | GET/POST | Union Web Shell RBAC:账号列表 / 创建账号(需 admin 角色;密码仅存 bcrypt 哈希) |
