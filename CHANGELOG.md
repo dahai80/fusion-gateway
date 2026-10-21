@@ -9,6 +9,42 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Changed (glm-5 default cloud backend, 2026-10-21)
+
+- **`glm-5` is now the gateway's cloud default.** New `backends.glm-5`
+  entry (`type: anthropic`, `base_url: https://glm.tathr.com`, `timeout:
+  300s`) matches the channel `~/test/startGlm5-3.sh` points Claude Code at.
+  `routing.fallback.cloud_default` was `fusion-mlx-openai` — a backend name
+  that never existed in `backends`, so every cloud-routed request 503'd.
+- **`routing.mode: local` → `hybrid`.** `mode: local` is a fast-path that
+  bypasses P6, so a request for `glm-5` was forced onto fusion-mlx and got
+  `400 Model 'glm-5' not found`. Under `hybrid`, `glm-5` (absent from the
+  local model set) falls through to P6 `model_not_available_locally` →
+  cloud → `glm-5`. Local-exclusive models still hit P0.2 and stay local.
+- **`routing.fallback.model_mapping` values `glm5.2` → `glm-5`.** No backend
+  served `glm5.2`; Claude Code's `claude-*` aliases mapped to a model name
+  the sole cloud backend rejects.
+- **`cloud_routing.strategy`: `weighted` → `weight`, weights `{glm-5: 100}`.**
+  `weighted` is not a case in `CloudStrategy.Select` (the switch matches
+  `weight`), so it fell to `default: return backends[0]` — and `backends`
+  comes from a map iteration, making the cloud pick a coin flip between
+  `kimi-k2.7-code` and `glm-5`.
+- **`routing.ratio_tiers.enabled: true` → `false`.** Its three rules target
+  `volcengine`/`dashscope`/`qianfan`, all `enabled: false`, so any request
+  with output/input ratio ≤ 0.6 got `CloudTarget` = a provider that does not
+  exist → `resolveCloudProvider` 503. Unreachable under `mode: local`; a
+  guaranteed failure under `hybrid`. P4.5b's single `output_input_ratio_threshold`
+  still diverts high-ratio requests.
+
+Verified live against the running binary: `glm-5` → `channel=glm-5`
+(non-stream, SSE, and `/v1/messages` Anthropic wire), `claude-sonnet-4-6` →
+mapped to `glm-5`, `mlx-community/Qwen3.5-4B-MLX-4bit` → `backend=local`.
+
+Known upstream quirks of the glm-5 endpoint (not gateway defects, confirmed
+by calling it directly): `message_start.usage.input_tokens` is 0,
+`message_delta.stop_reason` is empty on the streaming wire, and stream ids
+are `msg_<uuid>` rather than `chatcmpl-*`.
+
 ### Fixed (shell ext-path routing, 2026-10-21) — #256
 
 - **Manifest-declared ext endpoints route to the self-registered upstream,
