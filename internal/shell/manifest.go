@@ -542,12 +542,28 @@ func validateManifestExt(m config.ShellManifest) error {
             return fmt.Errorf("manifest %q: notification requires id and label", m.ID)
         }
         switch n.Kind {
-        case "approvals", "runs", "engine":
+        case "approvals", "runs", "engine", "tasks":
         default:
-            return fmt.Errorf("manifest %q: notification kind %q must be approvals|runs|engine", m.ID, n.Kind)
+            return fmt.Errorf("manifest %q: notification kind %q must be approvals|runs|engine|tasks", m.ID, n.Kind)
         }
         if err := validateGatewayAbsolutePath(n.Endpoint); err != nil {
             return fmt.Errorf("manifest %q: notification %q endpoint: %w", m.ID, n.ID, err)
+        }
+    }
+    if m.Home != nil {
+        if len(m.Home.Cards) > maxShellExtEntries {
+            return fmt.Errorf("manifest %q: home.cards exceeds %d entries", m.ID, maxShellExtEntries)
+        }
+        for _, c := range m.Home.Cards {
+            if c.ID == "" || c.Title == "" {
+                return fmt.Errorf("manifest %q: home card requires id and title", m.ID)
+            }
+            if err := validateGatewayAbsolutePath(c.Route); err != nil {
+                return fmt.Errorf("manifest %q: home card %q route: %w", m.ID, c.ID, err)
+            }
+            if strings.Contains(c.Route, "#") {
+                return fmt.Errorf("manifest %q: home card %q route must not contain '#'", m.ID, c.ID)
+            }
         }
     }
     return nil

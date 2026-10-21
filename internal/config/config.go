@@ -1001,6 +1001,28 @@ type ShellManifest struct {
     SearchProviders []ShellSearchProvider     `json:"searchProviders,omitempty" mapstructure:"search_providers"`
     Pages           []ShellPage               `json:"pages,omitempty" mapstructure:"pages"`
     Notifications   []ShellNotificationSource `json:"notifications,omitempty" mapstructure:"notifications"`
+    // Home is the optional home-page contribution (#263, shell#32): cards
+    // the module renders on the shell host's Home landing. Absent = no
+    // contribution. Same passthrough contract as the other ext fields.
+    Home *ShellHome `json:"home,omitempty" mapstructure:"home"`
+}
+
+// ShellHome is a module's Home-page contribution (#263, shell#32): cards
+// surfaced on the shell host's Home landing; route is a module-relative
+// /path deep link of the same form as ShellPage.Route.
+type ShellHome struct {
+    Cards []ShellHomeCard `json:"cards,omitempty" mapstructure:"cards"`
+}
+
+// ShellHomeCard is one Home card or suggested chip contributed by a module.
+type ShellHomeCard struct {
+    ID            string `json:"id" mapstructure:"id"`
+    Title         string `json:"title" mapstructure:"title"`
+    TitleEn       string `json:"title_en,omitempty" mapstructure:"title_en"`
+    Description   string `json:"description,omitempty" mapstructure:"description"`
+    DescriptionEn string `json:"description_en,omitempty" mapstructure:"description_en"`
+    Route         string `json:"route" mapstructure:"route"`
+    Chip          bool   `json:"chip,omitempty" mapstructure:"chip"`
 }
 
 // ShellSearchProvider is one ⌘K cross-module search source (shell#24): the
