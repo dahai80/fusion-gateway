@@ -222,6 +222,10 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
     mux.HandleFunc("GET /api/v1/shell/me", s.withShellSession(s.handleShellMe))
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
+    // #267: session-gated chat completions for the shell Home delegation
+    // entry — same LLM router as /v1/chat/completions, but the credential
+    // is the shell session JWT (the shell must not hold a gateway API key).
+    mux.HandleFunc("POST /api/v1/shell/chat/completions", s.withShellSession(s.handleChatCompletions))
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestUpsert)))
     mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestHeartbeat)))
     mux.HandleFunc("DELETE /api/v1/shell/manifests/{id}", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestDelete)))
