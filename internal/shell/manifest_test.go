@@ -349,6 +349,30 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
             m.Notifications = []config.ShellNotificationSource{{Label: "N", Endpoint: "/api/n", Kind: "runs"}}
             return m
         }()},
+        {"home card missing title", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "c", Route: "/runs"}}}
+            return m
+        }()},
+        {"home card route contains fragment", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "c", Title: "C", Route: "/runs#top"}}}
+            return m
+        }()},
+        {"home card route not absolute", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "c", Title: "C", Route: "runs"}}}
+            return m
+        }()},
+        {"too many home cards", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            cards := make([]config.ShellHomeCard, 33)
+            for i := range cards {
+                cards[i] = config.ShellHomeCard{ID: fmt.Sprintf("c%d", i), Title: "C", Route: "/runs"}
+            }
+            m.Home = &config.ShellHome{Cards: cards}
+            return m
+        }()},
         {"too many search providers", func() config.ShellManifest {
             m := validManifest("fusion-x")
             for i := 0; i < 33; i++ {
@@ -367,7 +391,8 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     ok := validManifest("fusion-x")
     ok.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", LabelEn: "Workflows", Endpoint: "/api/cowork/search"}}
     ok.Pages = []config.ShellPage{{Route: "/runs", Title: "运行", TitleEn: "Runs"}}
-    ok.Notifications = []config.ShellNotificationSource{{ID: "approvals", Label: "审批", Endpoint: "/api/cowork/notifications", Kind: "approvals"}}
+    ok.Notifications = []config.ShellNotificationSource{{ID: "approvals", Label: "审批", Endpoint: "/api/cowork/notifications", Kind: "approvals"}, {ID: "tasks", Label: "任务", Endpoint: "/api/cowork/tasks", Kind: "tasks"}}
+    ok.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "monthly-close", Title: "月度对账", TitleEn: "Monthly close", Description: "对账并生成报告", DescriptionEn: "Reconcile and report", Route: "/workflows/monthly-close", Chip: true}}}
     if err := r.Upsert(ok); err != nil {
         t.Fatalf("valid ext upsert: %v", err)
     }
@@ -382,8 +407,11 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     if len(v.Pages) != 1 || v.Pages[0].Route != "/runs" {
         t.Fatalf("pages lost: %+v", v.Pages)
     }
-    if len(v.Notifications) != 1 || v.Notifications[0].Kind != "approvals" {
+    if len(v.Notifications) != 2 || v.Notifications[1].Kind != "tasks" {
         t.Fatalf("notifications lost: %+v", v.Notifications)
+    }
+    if v.Home == nil || len(v.Home.Cards) != 1 || v.Home.Cards[0].Route != "/workflows/monthly-close" || !v.Home.Cards[0].Chip {
+        t.Fatalf("home cards lost: %+v", v.Home)
     }
 }
 
@@ -395,7 +423,8 @@ func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
     m := validManifest("fusion-cowork")
     m.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", Endpoint: "/api/cowork/search"}}
     m.Pages = []config.ShellPage{{Route: "/runs", Title: "运行"}}
-    m.Notifications = []config.ShellNotificationSource{{ID: "runs", Label: "运行", Endpoint: "/api/cowork/notifications", Kind: "runs"}}
+    m.Notifications = []config.ShellNotificationSource{{ID: "runs", Label: "运行", Endpoint: "/api/cowork/notifications", Kind: "runs"}, {ID: "tasks", Label: "任务", Endpoint: "/api/cowork/tasks", Kind: "tasks"}}
+    m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "weekly-readout", Title: "周报 readout", Route: "/workflows/weekly"}}}
     if err := r.Upsert(m); err != nil {
         t.Fatalf("upsert: %v", err)
     }
@@ -410,11 +439,14 @@ func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
         t.Fatalf("want 1 view, got %d", len(views))
     }
     v := views[0]
-    if len(v.SearchProviders) != 1 || len(v.Pages) != 1 || len(v.Notifications) != 1 {
+    if len(v.SearchProviders) != 1 || len(v.Pages) != 1 || len(v.Notifications) != 2 {
         t.Fatalf("ext fields not persisted: %+v", v)
     }
-    if v.Notifications[0].Kind != "runs" {
-        t.Fatalf("notification kind lost: %+v", v.Notifications[0])
+    if v.Notifications[0].Kind != "runs" || v.Notifications[1].Kind != "tasks" {
+        t.Fatalf("notification kind lost: %+v", v.Notifications)
+    }
+    if v.Home == nil || len(v.Home.Cards) != 1 || v.Home.Cards[0].ID != "weekly-readout" {
+        t.Fatalf("home cards not persisted: %+v", v.Home)
     }
 }
 
