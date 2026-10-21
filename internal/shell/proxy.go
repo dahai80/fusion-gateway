@@ -35,12 +35,22 @@ type extUpstreamFn func(moduleID, path string) (string, string, bool)
 type Proxy struct {
     resolveUpstream    upstreamFn
     resolveExtUpstream extUpstreamFn
+    // revokedFn (#261 K1) reports whether a module's gateway-issued service
+    // key was revoked — the proxy then serves the structured 503
+    // module_key_revoked instead of forwarding an unauthenticated request.
+    // nil = no revocation surface (revocation disabled / not wired).
+    revokedFn          func(moduleID string) bool
     transports         sync.Map // "<moduleID>|<upstream>" -> *http.Client (built once per pair)
     bodyCap            int64
 }
 
 func NewProxy(resolveUpstream upstreamFn) *Proxy {
     return &Proxy{resolveUpstream: resolveUpstream, bodyCap: 256 << 20}
+}
+
+// SetRevokedChecker wires the service-key revocation check (#261 K1).
+func (p *Proxy) SetRevokedChecker(fn func(moduleID string) bool) {
+    p.revokedFn = fn
 }
 
 // SetExtResolver wires the per-path upstream override (#256). Optional —
@@ -89,6 +99,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     if !found && rest == "" {
         // /shell/<id> exactly — treat as module root.
         rest = ""
+    }
+
+    // #261 K1: a revoked service key degrades immediately and structurally
+    // (A5): the module can no longer authenticate its callers, so forwarding
+    // would leak an unauthenticated request upstream. Shell host greys the
+    // module via the unreachable mechanism in parallel.
+    if p.revokedFn != nil && p.revokedFn(moduleID) {
+        slog.Warn("shell proxy request rejected: module service key revoked", "module", moduleID, "path", rest)
+        WriteEnvelope(w, http.StatusServiceUnavailable, "module_key_revoked",
+            fmt.Sprintf("module %q service key revoked; contact the gateway admin to re-register", moduleID), moduleID, true)
+        return
     }
 
     upstream, apiKey := p.resolveUpstream(moduleID)

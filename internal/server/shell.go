@@ -11,6 +11,7 @@ import (
     "net/http"
     "path/filepath"
     "strings"
+    "time"
 
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -78,6 +79,9 @@ func (s *Server) setupShell() {
     // upstream when static config pins the module elsewhere (engine vs web
     // bridge). Static upstream keeps serving everything else (#232).
     s.shellProxy.SetExtResolver(s.shellRegistry.ExtRouteFor)
+    // #261 K1: a revoked service key degrades the proxy immediately (503
+    // module_key_revoked) instead of forwarding unauthenticated.
+    s.shellProxy.SetRevokedChecker(s.shellRegistry.IsServiceKeyRevoked)
     s.setupShellUsers(&cfg)
     s.autoRegisterAdminModule()
     slog.Info("shell subsystem initialized",
@@ -227,7 +231,15 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // is the shell session JWT (the shell must not hold a gateway API key).
     mux.HandleFunc("POST /api/v1/shell/chat/completions", s.withShellSession(s.handleChatCompletions))
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestUpsert)))
-    mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestHeartbeat)))
+    // #261 K1: heartbeat authenticates with the module's gateway-issued fm-
+    // service key (hash-compare against the registry), NOT the standard fg-
+    // key chain — an fm- Bearer would be 401'd by APIKeyAuthWithStore before
+    // reaching the handler. Master/admin-key heartbeats keep working for
+    // back-compat, so the wrapper parses the credential itself and the route
+    // stays outside withMiddleware.
+    mux.HandleFunc("POST /api/v1/shell/manifests/{id}/heartbeat", s.withShellHeartbeatAuth(s.handleShellManifestHeartbeat))
+    mux.HandleFunc("POST /api/v1/shell/manifests/{id}/key/rotate", s.withMiddleware(s.withShellManifestAuth(s.handleShellServiceKeyRotate)))
+    mux.HandleFunc("DELETE /api/v1/shell/manifests/{id}/key", s.withMiddleware(s.withShellManifestAuth(s.handleShellServiceKeyRevoke)))
     mux.HandleFunc("DELETE /api/v1/shell/manifests/{id}", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestDelete)))
     mux.HandleFunc("GET /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserList)))
     mux.HandleFunc("POST /api/v1/shell/users", s.withShellSession(requireShellAdmin(s.handleShellUserCreate)))
@@ -552,6 +564,9 @@ func (s *Server) withShellManifestAuth(next http.HandlerFunc) http.HandlerFunc {
 // handleShellManifestUpsert: POST /api/v1/shell/manifests — module
 // self-registration (idempotent by id, PRD §5.2). fg-key auth + admin-plane
 // gate (#243); entry origin whitelist enforced (A7: reject 403 at registration).
+// #261 K1: when the body omits api_key, the gateway issues an fm- service
+// key for the module and returns the plaintext exactly once. A body that
+// carries api_key keeps the historical module-supplied credential path.
 func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Request) {
     body := http.MaxBytesReader(w, r.Body, maxShellBody)
     var m config.ShellManifest
@@ -564,7 +579,146 @@ func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Reques
         shell.WriteEnvelope(w, http.StatusForbidden, "manifest_rejected", err.Error(), m.ID, false)
         return
     }
-    shell.WriteEnvelope(w, http.StatusOK, "ok", "manifest registered", m.ID, false)
+    if m.APIKey != "" {
+        shell.WriteEnvelope(w, http.StatusOK, "ok", "manifest registered", m.ID, false)
+        return
+    }
+    keyID, plaintext, issued, err := s.shellRegistry.EnsureServiceKey(m.ID)
+    if err != nil {
+        slog.Error("shell service key issuance failed after upsert", "id", m.ID, "error", err)
+        shell.WriteEnvelope(w, http.StatusInternalServerError, "service_key_error", err.Error(), m.ID, false)
+        return
+    }
+    if !issued {
+        // Idempotent re-registration: the existing key is retained and the
+        // plaintext is NOT re-revealed (returned exactly once, at issuance).
+        // A module that lost its key asks an admin to rotate.
+        writeShellKeyResponse(w, http.StatusOK, "ok", "manifest registered (service key retained; raw key shown only at issuance)", m.ID, keyID, "")
+        return
+    }
+    writeShellKeyResponse(w, http.StatusOK, "ok", "manifest registered; store the service key now — it is shown exactly once", m.ID, keyID, plaintext)
+}
+
+// writeShellKeyResponse emits the issuance/rotation payload: the standard
+// envelope fields plus the non-secret key_id and the raw_key plaintext that
+// is returned exactly once (#261 K1).
+func writeShellKeyResponse(w http.ResponseWriter, status int, code, message, moduleID, keyID, rawKey string) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(struct {
+        Code     string `json:"code"`
+        Message  string `json:"message"`
+        ModuleID string `json:"module_id,omitempty"`
+        KeyID    string `json:"key_id,omitempty"`
+        RawKey   string `json:"raw_key,omitempty"`
+    }{Code: code, Message: message, ModuleID: moduleID, KeyID: keyID, RawKey: rawKey})
+}
+
+// withShellHeartbeatAuth gates the heartbeat endpoint (#261 K1). Accepted
+// credentials, in order: master key, web_shell.admin_key (both constant-time
+// — back-compat for admin-plane scripts), or the module's gateway-issued
+// fm- service key (SHA-256 hash compare against the registry entry bound to
+// the {id} in the path). Deliberately outside withMiddleware: the standard
+// fg-key chain would 401 an fm- Bearer before this gate could evaluate it.
+func (s *Server) withShellHeartbeatAuth(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := r.PathValue("id")
+        token := shellBearerToken(r)
+        if token == "" {
+            slog.Warn("shell heartbeat denied: missing credential", "id", id)
+            shell.WriteEnvelope(w, http.StatusUnauthorized, "heartbeat_unauthorized", "missing Authorization Bearer credential", id, false)
+            return
+        }
+        if s.shellHeartbeatAdminToken(token) {
+            next(w, r)
+            return
+        }
+        if shell.IsServiceKeyPlaintext(token) {
+            sum := sha256.Sum256([]byte(token))
+            grace := s.cfg.Config.Shell.KeyRotationGrace
+            if grace <= 0 {
+                grace = 24 * time.Hour
+            }
+            if s.shellRegistry.AuthServiceKey(id, hex.EncodeToString(sum[:]), grace) {
+                next(w, r)
+                return
+            }
+        }
+        slog.Warn("shell heartbeat denied: invalid credential", "id", id)
+        shell.WriteEnvelope(w, http.StatusForbidden, "heartbeat_forbidden", "heartbeat requires the module service key, web_shell.admin_key, or the master key", id, false)
+    }
+}
+
+// shellHeartbeatAdminToken reports whether the presented credential is the
+// master key or the web_shell.admin_key (constant-time; either may be unset).
+func (s *Server) shellHeartbeatAdminToken(token string) bool {
+    if s.cfg == nil {
+        return false
+    }
+    if mk := s.cfg.Config.Auth.MasterKey; mk != "" && subtle.ConstantTimeCompare([]byte(token), []byte(mk)) == 1 {
+        return true
+    }
+    if ak := s.cfg.Config.Shell.AdminKey; ak != "" && subtle.ConstantTimeCompare([]byte(token), []byte(ak)) == 1 {
+        return true
+    }
+    return false
+}
+
+// shellBearerToken extracts the Authorization Bearer credential.
+func shellBearerToken(r *http.Request) string {
+    auth := r.Header.Get("Authorization")
+    if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+        return strings.TrimSpace(auth[7:])
+    }
+    return ""
+}
+
+// handleShellServiceKeyRotate: POST /api/v1/shell/manifests/{id}/key/rotate
+// (#261 K1, admin-plane). Issues a replacement fm- key; the previous key
+// stays heartbeat-valid for web_shell.key_rotation_grace (default 24h) or
+// until the first heartbeat carries the new key, whichever comes first.
+// Plaintext returned exactly once.
+func (s *Server) handleShellServiceKeyRotate(w http.ResponseWriter, r *http.Request) {
+    id := r.PathValue("id")
+    grace := s.cfg.Config.Shell.KeyRotationGrace
+    if grace <= 0 {
+        grace = 24 * time.Hour
+    }
+    keyID, plaintext, err := s.shellRegistry.RotateServiceKey(id, grace)
+    if err != nil {
+        s.writeShellServiceKeyError(w, id, err)
+        return
+    }
+    writeShellKeyResponse(w, http.StatusOK, "ok", "service key rotated; store the new key now — it is shown exactly once", id, keyID, plaintext)
+}
+
+// handleShellServiceKeyRevoke: DELETE /api/v1/shell/manifests/{id}/key
+// (#261 K1, admin-plane). Immediately invalidates the module's service key:
+// heartbeats 403, the proxy degrades to the structured 503 module_key_revoked
+// and the shell host greys the module via the unreachable mechanism.
+func (s *Server) handleShellServiceKeyRevoke(w http.ResponseWriter, r *http.Request) {
+    id := r.PathValue("id")
+    if err := s.shellRegistry.RevokeServiceKey(id); err != nil {
+        s.writeShellServiceKeyError(w, id, err)
+        return
+    }
+    shell.WriteEnvelope(w, http.StatusOK, "ok", "service key revoked; module degrades to 503 until re-registered", id, false)
+}
+
+func (s *Server) writeShellServiceKeyError(w http.ResponseWriter, id string, err error) {
+    slog.Warn("shell service key operation rejected", "id", id, "error", err)
+    switch {
+    case errors.Is(err, shell.ErrManifestStatic):
+        shell.WriteEnvelope(w, http.StatusConflict, "manifest_static",
+            "builtin/static manifest is gateway-owned and has no revocable service key", id, false)
+    case errors.Is(err, shell.ErrNoServiceKey):
+        shell.WriteEnvelope(w, http.StatusConflict, "no_service_key",
+            "module registered with a module-supplied api_key (or already revoked); nothing to rotate or revoke", id, false)
+    case errors.Is(err, shell.ErrManifestNotFound):
+        shell.WriteEnvelope(w, http.StatusNotFound, "manifest_unknown", err.Error(), id, false)
+    default:
+        shell.WriteEnvelope(w, http.StatusInternalServerError, "service_key_error", err.Error(), id, false)
+    }
 }
 
 // handleShellManifestHeartbeat: POST /api/v1/shell/manifests/{id}/heartbeat

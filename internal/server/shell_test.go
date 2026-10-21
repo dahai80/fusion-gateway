@@ -588,6 +588,192 @@ func TestShellManifest_Delete(t *testing.T) {
     }
 }
 
+// --- #261 K1: gateway-issued service keys ---
+
+// shellKeyResponse is the issuance/rotation payload (envelope + key fields).
+type shellKeyResponse struct {
+    Code     string `json:"code"`
+    ModuleID string `json:"module_id"`
+    KeyID    string `json:"key_id"`
+    RawKey   string `json:"raw_key"`
+}
+
+// TestShellServiceKey_IssueAtRegistration (#261): a registration body that
+// omits api_key gets an fm- key returned exactly once; the idempotent
+// re-registration retains the key without re-revealing the plaintext.
+func TestShellServiceKey_IssueAtRegistration(t *testing.T) {
+    s := newShellTestServer(t, false)
+    admin := &middleware.Principal{IsMaster: true, KeyConfig: &config.AuthKeyConfig{Key: "mk", Name: "master"}}
+    manifest := map[string]any{
+        "id": "fusion-demo", "title": "Demo", "path": "/demo",
+        "entry": "http://127.0.0.1:11432/shell/fusion-demo/", "upstream": "http://127.0.0.1:19000",
+        "devices": []string{"desktop"}, "category": "platform",
+    }
+    body, _ := json.Marshal(manifest)
+    post := func() *httptest.ResponseRecorder {
+        req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+        req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+        w := httptest.NewRecorder()
+        s.withShellManifestAuth(s.handleShellManifestUpsert)(w, req)
+        return w
+    }
+    w := post()
+    if w.Code != http.StatusOK {
+        t.Fatalf("first registration code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    var kr shellKeyResponse
+    if err := json.Unmarshal(w.Body.Bytes(), &kr); err != nil {
+        t.Fatalf("decode key response: %v body=%s", err, w.Body.String())
+    }
+    if !strings.HasPrefix(kr.RawKey, "fm-fusion-demo-") || kr.KeyID == "" {
+        t.Fatalf("expected issued fm- key, got %+v", kr)
+    }
+    w2 := post()
+    var kr2 shellKeyResponse
+    _ = json.Unmarshal(w2.Body.Bytes(), &kr2)
+    if kr2.RawKey != "" || kr2.KeyID != kr.KeyID {
+        t.Fatalf("re-registration must retain the key without re-reveal, got %+v", kr2)
+    }
+}
+
+// TestShellServiceKey_HeartbeatAuth (#261): heartbeat accepts the module's
+// fm- key (hash compare), the admin key, and the master key; refuses a wrong
+// fm- key, a key bound to another module, and a missing credential.
+func TestShellServiceKey_HeartbeatAuth(t *testing.T) {
+    s := newShellTestServer(t, false)
+    const adminKey = "ak-shell-admin-0123456789abcdef"
+    s.cfg.Config.Shell.AdminKey = adminKey
+    s.cfg.Config.Auth.MasterKey = "mk"
+    admin := &middleware.Principal{IsMaster: true, KeyConfig: &config.AuthKeyConfig{Key: "mk", Name: "master"}}
+    manifest := map[string]any{
+        "id": "fusion-demo", "title": "Demo", "path": "/demo",
+        "entry": "http://127.0.0.1:11432/shell/fusion-demo/", "upstream": "http://127.0.0.1:19000",
+        "devices": []string{"desktop"}, "category": "platform",
+    }
+    body, _ := json.Marshal(manifest)
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("registration code = %d body=%s", w.Code, w.Body.String())
+    }
+    var kr shellKeyResponse
+    _ = json.Unmarshal(w.Body.Bytes(), &kr)
+    if kr.RawKey == "" {
+        t.Fatal("expected issued key")
+    }
+
+    beat := func(token string) int {
+        r := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests/fusion-demo/heartbeat", nil)
+        r.SetPathValue("id", "fusion-demo")
+        if token != "" {
+            r.Header.Set("Authorization", "Bearer "+token)
+        }
+        ww := httptest.NewRecorder()
+        s.withShellHeartbeatAuth(s.handleShellManifestHeartbeat)(ww, r)
+        return ww.Code
+    }
+    if code := beat(kr.RawKey); code != http.StatusOK {
+        t.Fatalf("fm- key heartbeat code = %d, want 200", code)
+    }
+    if code := beat(adminKey); code != http.StatusOK {
+        t.Fatalf("admin key heartbeat code = %d, want 200", code)
+    }
+    if code := beat("mk"); code != http.StatusOK {
+        t.Fatalf("master key heartbeat code = %d, want 200", code)
+    }
+    if code := beat("fm-fusion-demo-00000000000000000000000000000000"); code != http.StatusForbidden {
+        t.Fatalf("wrong fm- key heartbeat code = %d, want 403", code)
+    }
+    if code := beat(""); code != http.StatusUnauthorized {
+        t.Fatalf("missing credential heartbeat code = %d, want 401", code)
+    }
+}
+
+// TestShellServiceKey_RotateAndRevoke (#261): rotation returns a new
+// plaintext once and keeps the old key heartbeat-valid inside the grace
+// window; revocation immediately refuses heartbeats and flips the proxy's
+// revoked flag.
+func TestShellServiceKey_RotateAndRevoke(t *testing.T) {
+    s := newShellTestServer(t, false)
+    admin := &middleware.Principal{IsMaster: true, KeyConfig: &config.AuthKeyConfig{Key: "mk", Name: "master"}}
+    manifest := map[string]any{
+        "id": "fusion-demo", "title": "Demo", "path": "/demo",
+        "entry": "http://127.0.0.1:11432/shell/fusion-demo/", "upstream": "http://127.0.0.1:19000",
+        "devices": []string{"desktop"}, "category": "platform",
+    }
+    body, _ := json.Marshal(manifest)
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    w := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellManifestUpsert)(w, req)
+    var kr shellKeyResponse
+    _ = json.Unmarshal(w.Body.Bytes(), &kr)
+    if kr.RawKey == "" {
+        t.Fatal("expected issued key")
+    }
+
+    // Rotate.
+    rot := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests/fusion-demo/key/rotate", nil)
+    rot.SetPathValue("id", "fusion-demo")
+    rot = rot.WithContext(middleware.ContextWithPrincipal(rot.Context(), admin))
+    wr := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellServiceKeyRotate)(wr, rot)
+    if wr.Code != http.StatusOK {
+        t.Fatalf("rotate code = %d body=%s", wr.Code, wr.Body.String())
+    }
+    var kr2 shellKeyResponse
+    _ = json.Unmarshal(wr.Body.Bytes(), &kr2)
+    if kr2.RawKey == "" || kr2.RawKey == kr.RawKey {
+        t.Fatalf("rotation must return a new plaintext once, got %+v", kr2)
+    }
+
+    beat := func(token string) int {
+        r := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests/fusion-demo/heartbeat", nil)
+        r.SetPathValue("id", "fusion-demo")
+        r.Header.Set("Authorization", "Bearer "+token)
+        ww := httptest.NewRecorder()
+        s.withShellHeartbeatAuth(s.handleShellManifestHeartbeat)(ww, r)
+        return ww.Code
+    }
+    if code := beat(kr.RawKey); code != http.StatusOK {
+        t.Fatalf("old key inside grace window code = %d, want 200", code)
+    }
+    if code := beat(kr2.RawKey); code != http.StatusOK {
+        t.Fatalf("rotated key code = %d, want 200", code)
+    }
+    if s.shellRegistry.IsServiceKeyRevoked("fusion-demo") {
+        t.Fatal("must not be revoked before revocation")
+    }
+
+    // Revoke.
+    rev := httptest.NewRequest(http.MethodDelete, "/api/v1/shell/manifests/fusion-demo/key", nil)
+    rev.SetPathValue("id", "fusion-demo")
+    rev = rev.WithContext(middleware.ContextWithPrincipal(rev.Context(), admin))
+    wv := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellServiceKeyRevoke)(wv, rev)
+    if wv.Code != http.StatusOK {
+        t.Fatalf("revoke code = %d body=%s", wv.Code, wv.Body.String())
+    }
+    if !s.shellRegistry.IsServiceKeyRevoked("fusion-demo") {
+        t.Fatal("revoked flag must be set")
+    }
+    if code := beat(kr2.RawKey); code != http.StatusForbidden {
+        t.Fatalf("revoked key heartbeat code = %d, want 403", code)
+    }
+
+    // Rotate after revoke: no live key -> 409 no_service_key.
+    rot2 := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests/fusion-demo/key/rotate", nil)
+    rot2.SetPathValue("id", "fusion-demo")
+    rot2 = rot2.WithContext(middleware.ContextWithPrincipal(rot2.Context(), admin))
+    wr2 := httptest.NewRecorder()
+    s.withShellManifestAuth(s.handleShellServiceKeyRotate)(wr2, rot2)
+    if wr2.Code != http.StatusConflict {
+        t.Fatalf("rotate after revoke code = %d, want 409", wr2.Code)
+    }
+}
+
 // #267: session-gated chat completions — the shell Home delegation entry
 // calls the LLM router with the shell session JWT, never a gateway API key.
 func TestShellChatCompletions_SessionGated(t *testing.T) {
