@@ -103,10 +103,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     // own upstream when the static config pins a different one — the engine
     // keeps serving the SPA + core API while the bridge/module process
     // serves its ext endpoints. Static otherwise wins (#232 semantics).
+    // The resolver receives the FULL gateway path; modules may declare
+    // endpoints either gateway-absolute (/shell/<id>/api/...) or
+    // module-relative (/api/...) — the registry normalizes both (#256).
     if p.resolveExtUpstream != nil {
-        if ou, okey, ok := p.resolveExtUpstream(moduleID, "/"+rest); ok && ou != "" && ou != upstream {
+        if ou, okey, ok := p.resolveExtUpstream(moduleID, r.URL.Path); ok && ou != "" && ou != upstream {
             slog.Debug("shell proxy ext-path upstream override",
-                "module", moduleID, "path", "/"+rest, "upstream", ou)
+                "module", moduleID, "path", r.URL.Path, "upstream", ou)
             upstream, apiKey = ou, okey
         }
     }

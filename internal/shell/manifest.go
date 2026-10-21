@@ -356,7 +356,7 @@ func (r *Registry) UpstreamFor(id string) (string, string, bool) {
 }
 
 // ExtRouteFor reports the dynamic registration's own upstream + credential
-// for one proxy-relative request path (#256). The static config may pin a
+// for one FULL gateway request path (#256). The static config may pin a
 // module to a different upstream than the one the module self-registered
 // (engine vs web bridge) — the endpoints the module declares in its ext
 // fields (searchProviders/notifications endpoints, #250) live only on the
@@ -368,16 +368,25 @@ func (r *Registry) ExtRouteFor(id, path string) (string, string, bool) {
     r.mu.RLock()
     defer r.mu.RUnlock()
     e, ok := r.dynamic[id]
-    if !ok || e.manifest.Upstream == "" || !manifestHasExtEndpoint(&e.manifest, path) {
+    if !ok || e.manifest.Upstream == "" {
+        return "", "", false
+    }
+    // A declared endpoint may be gateway-absolute (/shell/<id>/api/...) or
+    // module-relative (/api/...): match the full path AND the
+    // proxy-relative form so both registration styles work.
+    rel := "/" + strings.TrimPrefix(strings.TrimPrefix(path, "/shell/"+id+"/"), "/")
+    if !manifestHasExtEndpoint(&e.manifest, path) && !manifestHasExtEndpoint(&e.manifest, rel) {
         return "", "", false
     }
     return e.manifest.Upstream, e.manifest.APIKey, true
 }
 
-// manifestHasExtEndpoint reports whether path (leading "/", proxy-relative)
-// matches a declared ext endpoint: exact, or a segment-boundary prefix (a
-// search API may serve sub-resources under its endpoint root). Endpoints
-// are validated gateway-absolute ("/..." , no traversal) at registration.
+// manifestHasExtEndpoint reports whether path matches a declared ext
+// endpoint: exact, or a segment-boundary prefix (a search API may serve
+// sub-resources under its endpoint root). Endpoints are validated
+// gateway-absolute ("/...", no traversal) at registration; both
+// gateway-absolute (/shell/<id>/api/...) and module-relative (/api/...)
+// declaration styles are handled by ExtRouteFor normalizing the path.
 func manifestHasExtEndpoint(m *config.ShellManifest, path string) bool {
     if path == "" {
         return false
