@@ -9,6 +9,7 @@ import (
     "testing"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
@@ -770,5 +771,57 @@ func TestShellServiceKey_RotateAndRevoke(t *testing.T) {
     s.withShellManifestAuth(s.handleShellServiceKeyRotate)(wr2, rot2)
     if wr2.Code != http.StatusConflict {
         t.Fatalf("rotate after revoke code = %d, want 409", wr2.Code)
+    }
+}
+
+// #267: session-gated chat completions — the shell Home delegation entry
+// calls the LLM router with the shell session JWT, never a gateway API key.
+func TestShellChatCompletions_SessionGated(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        chatResp: &adapter.ChatResponse{
+            ID:      "chatcmpl-1",
+            Object:  "chat.completion",
+            Created: time.Now().Unix(),
+            Model:   "gpt-4",
+            Choices: []adapter.ChatChoice{
+                {Index: 0, Message: map[string]string{"role": "assistant", "content": "Hello!"}, FinishReason: "stop"},
+            },
+        },
+    })
+    s.cfg.Config.Shell.Enabled = true
+    s.cfg.Config.Shell.Session.Secret = "test-shell-secret-at-least-32-chars!"
+    s.cfg.Config.Shell.Session.Users = []config.ShellUser{
+        {Username: "alice", Password: "alicepw", Roles: []string{"user"}},
+    }
+    s.setupShell()
+
+    chatBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"stream":false}`
+    handler := s.withShellSession(s.handleChatCompletions)
+
+    // Anonymous: 401 from the shell session gate.
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/chat/completions", strings.NewReader(chatBody))
+    w := httptest.NewRecorder()
+    handler(w, req)
+    if w.Code != http.StatusUnauthorized {
+        t.Fatalf("anonymous chat code = %d body=%s, want 401", w.Code, w.Body.String())
+    }
+
+    // Session token: routed through the LLM router like /v1/chat/completions.
+    _, resp := loginShell(t, s, "alice", "alicepw")
+    token, _ := resp["token"].(string)
+    if token == "" {
+        t.Fatalf("no token: %v", resp)
+    }
+    req = httptest.NewRequest(http.MethodPost, "/api/v1/shell/chat/completions", strings.NewReader(chatBody))
+    req.Header.Set("Authorization", "Bearer "+token)
+    w = httptest.NewRecorder()
+    handler(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("session chat code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    if !strings.Contains(w.Body.String(), "Hello!") {
+        t.Fatalf("chat response missing content: %s", w.Body.String())
     }
 }
