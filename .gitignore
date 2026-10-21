@@ -36,3 +36,4 @@ logs/
 web/admin/node_modules/
 CLAUDE.md
 .gateway.pid
+gateway.stdout.log
