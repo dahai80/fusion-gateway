@@ -239,6 +239,42 @@ func (h *HealthPoller) pollAll(ctx context.Context) {
             slog.Debug("shell module health probe failed", "module", view.ID, "health", view.Health, "error", err)
         }
     }
+    // #276: drop stale dynamic registrations after the probe pass — a green
+    // probe above refreshed the heartbeat, so anything still unreachable here
+    // is heartbeat-dead; entries whose upstream still accepts connections
+    // stay (greyed), only connection-refusing ones expire.
+    h.expireStale(ctx)
+}
+
+// expireStale drops dynamic registrations whose heartbeat has expired AND
+// whose upstream actively refuses connections (#276): a stale registration
+// pointing at a dead port keeps serving its menu entry to every fresh shell
+// session, and each proxy hit degrades to 503 forever. Removing it makes the
+// next manifest list reflect reality within one heartbeat interval; the
+// module re-registers via its own start.sh when it comes back, so no operator
+// action is needed. Builtins are protected (Remove rejects them), and entries
+// without an upstream cannot be connection-checked — both stay unreachable.
+func (h *HealthPoller) expireStale(ctx context.Context) {
+    for _, view := range h.registry.List() {
+        if !view.Registered || view.Status != StatusUnreachable || view.Upstream == "" {
+            continue
+        }
+        reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+        err := h.probe(reqCtx, view.Upstream)
+        cancel()
+        if err == nil {
+            // Upstream accepts connections — heartbeat-dead but alive on the
+            // wire; keep it greyed, dropping would flap a half-up module.
+            continue
+        }
+        if rmErr := h.registry.Remove(view.ID); rmErr != nil {
+            // Builtins / static entries land here — protected by design.
+            slog.Debug("shell stale manifest kept", "module", view.ID, "error", rmErr)
+            continue
+        }
+        slog.Info("shell stale manifest expired (heartbeat gone, upstream refuses connections)",
+            "module", view.ID, "upstream", view.Upstream, "probe_error", err)
+    }
 }
 
 func (h *HealthPoller) probe(ctx context.Context, healthURL string) error {
