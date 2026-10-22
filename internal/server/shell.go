@@ -83,6 +83,7 @@ func (s *Server) setupShell() {
     // module_key_revoked) instead of forwarding unauthenticated.
     s.shellProxy.SetRevokedChecker(s.shellRegistry.IsServiceKeyRevoked)
     s.setupShellUsers(&cfg)
+    s.setupShellAdminSurfaces(&cfg)
     s.autoRegisterAdminModule()
     slog.Info("shell subsystem initialized",
         "static_manifests", len(cfg.Shell.Manifests),
@@ -255,6 +256,9 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/keys", s.withShellSession(requireShellAdmin(s.handleUserKeyCreate)))
     mux.HandleFunc("POST /api/v1/shell/keys/{name}/rotate", s.withShellSession(requireShellAdmin(s.handleUserKeyRotate)))
     mux.HandleFunc("DELETE /api/v1/shell/keys/{name}", s.withShellSession(requireShellAdmin(s.handleUserKeyRevoke)))
+    // #275: E6 admin surfaces (adapters vault / connectors / config
+    // overrides / audit / roles + menu matrix).
+    s.registerShellAdminRoutes(mux)
     mux.HandleFunc("/shell/", s.withShellSession(s.withShellModuleAccess(s.shellProxy.ServeHTTP)))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
@@ -381,6 +385,10 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
     user, ok := s.resolveShellUser(req.Username)
     if !ok || !checkShellPassword(user, req.Password) {
         slog.Warn("shell session login failed", "username", req.Username, "remote", r.RemoteAddr)
+        if s.shellAudit != nil {
+            _ = s.shellAudit.Record(req.Username, "", shell.AuditClassAuth, http.MethodPost,
+                "/api/v1/shell/session", shell.AuditOutcomeDenied, 0)
+        }
         shell.WriteEnvelope(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password", "", false)
         return
     }
@@ -398,6 +406,14 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         return
     }
     slog.Info("shell session issued", "username", user.username, "roles", user.roles)
+    if s.shellAudit != nil {
+        role := ""
+        if len(user.roles) > 0 {
+            role = user.roles[0]
+        }
+        _ = s.shellAudit.Record(user.username, role, shell.AuditClassAuth, http.MethodPost,
+            "/api/v1/shell/session", shell.AuditOutcomeOk, 0)
+    }
     // #220: also set an HttpOnly SameSite=Strict session cookie so iframe
     // navigation requests (no Authorization header possible) authenticate on
     // /shell/*. Secure flag mirrors the transport (TLS deployment = Secure).

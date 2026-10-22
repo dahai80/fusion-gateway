@@ -201,6 +201,15 @@ type Server struct {
     shellProxy    *shell.Proxy
     shellUsers    *shell.UserStore
     shellPoller   *lifecycle.Worker
+    // #275: E6 admin surfaces — encrypted adapter vault, connector document
+    // store, policy overrides, hash-chain audit, roles + menu matrix. All nil
+    // when shell.enabled=false.
+    shellVault      *shell.AdapterVault
+    shellConnectors *shell.ConnectorStore
+    shellOverrides  *shell.ConfigOverrides
+    shellAudit      *shell.AuditLog
+    shellRoles      *shell.RoleStore
+    shellMenus      *shell.MenuPermissions
     // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
     // shell.session.users are configured; hash lives only in memory.
     shellBootstrap *shellUserRecord

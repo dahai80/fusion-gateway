@@ -9,6 +9,54 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (shell E6 admin surfaces, 2026-10-23) — #275
+
+- **Session-gated E6 admin surfaces: adapters vault / connectors / config
+  overrides / audit / roles + menu matrix** (fusion-web-shell#42, migration
+  E6). Five `/api/v1/shell/*` surfaces follow the #271 keys precedent:
+  - **Adapters vault** — `GET/PUT /api/v1/shell/adapters[/{platform}]` +
+    `POST .../test`: per-platform credentials stored AES-256-GCM encrypted at
+    rest (key derived domain-separated from `auth.master_key`); only the
+    masked projection (`credentials_masked`, last 4 chars) ever leaves the
+    gateway; an empty credentials map on PUT keeps existing secrets
+    (rate-limit-only edits cannot wipe them).
+  - **Connectors** — `GET/PUT /api/v1/shell/connectors[/{id}]` +
+    `POST .../test`: config-first connector documents persisted with
+    server-side validation problems surfaced inline; `credential_ref`
+    resolves from the vault, secrets never inline. Package
+    validation/enable still delegates to fusion-plugins-ecosystem#30.
+  - **Config overrides** — `GET/PUT /api/v1/shell/config/{key}`: open key
+    vocabulary (`{defaults, overrides}` projection); PUT is effective
+    immediately (modules merge over template defaults at runtime).
+  - **Audit** — `GET /api/v1/shell/audit?user=&action_class=` (admin or
+    auditor role): hash-chain audit trail (`read|write|approval|agent_run|
+    config|auth` classes, `ok|denied|error` outcomes); a tampered row or any
+    row after a chain break surfaces `integrity_ok: false`. Login
+    success/failure and every E6 mutation record rows.
+  - **Roles + menu matrix** — `GET/POST /api/v1/shell/roles`,
+    `DELETE /api/v1/shell/roles/{name}`,
+    `GET/PUT /api/v1/shell/menu-permissions`: built-in roles (admin/user/
+    auditor) fixed with derived write classes; custom roles grant write
+    classes from the audit vocabulary (≤64, built-in collision 409); a role
+    still assigned to users is rejected with the reason; menu defaults
+    derive from the live manifest registry, overrides replace them and
+    reference only resolvable roles.
+  - Stores persist under `store.data_dir` (`shell_adapters.json`,
+    `shell_connectors.json`, `shell_config_overrides.json`,
+    `shell_audit.json`, `shell_roles.json`, `shell_menu_permissions.json`);
+    a corrupt store degrades that surface, never wedges the shell.
+
+### Fixed (shell stale manifest expiry, 2026-10-23) — #276
+
+- **Stale dynamic registrations whose upstream refuses connections are now
+  expired.** The shell health poller sweeps heartbeat-expired dynamic
+  registrations after each probe pass: when the upstream actively refuses
+  connections the registration is dropped (and the persisted store updated),
+  so fresh shell sessions stop receiving the dead endpoint within one
+  heartbeat interval. Entries whose upstream still accepts connections stay
+  listed as unreachable (greyed); builtins are protected. A restarted
+  service re-registers via its own start.sh — no operator action needed.
+
 ### Added (shell home projects passthrough, 2026-10-22) — #273
 
 - **`home.projects` poll sources in module manifests (shell #41).** The

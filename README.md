@@ -207,6 +207,20 @@ See `config.example.yaml` for full reference. Key settings:
 | `/api/v1/shell/users` | GET/POST | Union-web shell RBAC: list accounts / create an account (admin role required; password stored bcrypt-hashed) |
 | `/api/v1/shell/users/{id}` | PATCH/DELETE | Union-web shell RBAC: patch display_name/disabled/permissions/roles / delete an account (last enabled admin protected) |
 | `/api/v1/shell/users/{id}/password-reset` | POST | Union-web shell RBAC: mint a random temp password and force `must_change_password` on next login (admin role required) |
+| `/api/v1/shell/keys` | GET/POST | Union-web shell (#271, admin role): session-gated user-key management for the Settings → API Keys page — reuses the K2 handlers under the shell session |
+| `/api/v1/shell/keys/{name}/rotate` | POST | Union-web shell (#271, admin role): rotate one user key |
+| `/api/v1/shell/keys/{name}` | DELETE | Union-web shell (#271, admin role): revoke one user key |
+| `/api/v1/shell/adapters` | GET | E6 admin surface (#275, admin role): adapter vault list — masked credential projection only, plaintext never round-trips |
+| `/api/v1/shell/adapters/{platform}` | PUT | E6 admin surface (#275, admin role): store platform adapter credentials (AES-256-GCM encrypted at rest, keyed off the master key) + rate limit / jitter / enabled |
+| `/api/v1/shell/adapters/{platform}/test` | POST | E6 admin surface (#275, admin role): validate stored credentials decrypt under the current master key |
+| `/api/v1/shell/connectors` | GET | E6 admin surface (#275, admin role): config-first connector documents with server-side validation problems |
+| `/api/v1/shell/connectors/{id}` | PUT | E6 admin surface (#275, admin role): upsert one connector document (`credential_ref` resolves from the adapter vault, never inline secrets) |
+| `/api/v1/shell/connectors/{id}/test` | POST | E6 admin surface (#275, admin role): self-check one connector (valid, enabled, credential resolvable) with duration |
+| `/api/v1/shell/config/{key}` | GET/PUT | E6 admin surface (#275, admin role): policy overrides — `{defaults, overrides}` projection; PUT effective immediately (modules merge over template defaults at runtime) |
+| `/api/v1/shell/audit` | GET | E6 admin surface (#275, admin or auditor role): hash-chain audit trail — `user`/`action_class` filters, `integrity_ok:false` marks chain tampering |
+| `/api/v1/shell/roles` | GET/POST | E6 admin surface (#275, admin role): list built-in + custom roles with write classes and live user counts / create a custom role (built-in collision 409) |
+| `/api/v1/shell/roles/{name}` | DELETE | E6 admin surface (#275, admin role): delete a custom role — built-ins fixed (409), assigned roles rejected with the reason |
+| `/api/v1/shell/menu-permissions` | GET/PUT | E6 admin surface (#275, admin role): role ↔ menu matrix — defaults derive from the manifest registry, overrides replace them; unknown roles rejected |
 | `/api/v1/password` | POST | Union-web shell: change the caller's own password (shell session auth; clears `must_change_password`) |
 
 ## Union Web Shell (#215)
