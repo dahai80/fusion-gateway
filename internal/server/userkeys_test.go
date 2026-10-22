@@ -10,6 +10,7 @@ import (
     "strings"
     "testing"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
@@ -208,5 +209,104 @@ func TestUserKeys_TenantBinding(t *testing.T) {
     entry, err := s.store.GetKey("bound-key")
     if err != nil || entry.Metadata["tenant"] != "team-a" {
         t.Fatalf("tenant metadata missing: %+v err=%v", entry, err)
+    }
+}
+
+// #271: session-gated /api/v1/shell/keys — anonymous 401, non-admin 403,
+// admin session reaches the K2 handlers unchanged.
+func TestShellKeys_SessionGated(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Shell.Enabled = true
+    s.cfg.Config.Shell.Session.Secret = "test-shell-secret-at-least-32-chars!"
+    s.cfg.Config.Shell.Session.Users = []config.ShellUser{
+        {Username: "alice", Password: "alicepw", Roles: []string{"user"}},
+        {Username: "boss", Password: "bosspw", Roles: []string{"admin"}},
+    }
+    s.setupShell()
+    mux := http.NewServeMux()
+    s.registerShellRoutes(mux)
+    s.mux = mux
+
+    shellKeysReq := func(method, path, token string, body any) *httptest.ResponseRecorder {
+        t.Helper()
+        var reader *bytes.Reader
+        if body != nil {
+            raw, err := json.Marshal(body)
+            if err != nil {
+                t.Fatalf("marshal body: %v", err)
+            }
+            reader = bytes.NewReader(raw)
+        } else {
+            reader = bytes.NewReader(nil)
+        }
+        req := httptest.NewRequest(method, path, reader)
+        if token != "" {
+            req.Header.Set("Authorization", "Bearer "+token)
+        }
+        rec := httptest.NewRecorder()
+        s.mux.ServeHTTP(rec, req)
+        return rec
+    }
+
+    // Anonymous: 401 from the shell session gate.
+    rec := shellKeysReq(http.MethodGet, "/api/v1/shell/keys", "", nil)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("anonymous list: %d, want 401", rec.Code)
+    }
+
+    // Non-admin session: 403 from the admin gate.
+    _, alice := loginShell(t, s, "alice", "alicepw")
+    aliceTok, _ := alice["token"].(string)
+    rec = shellKeysReq(http.MethodGet, "/api/v1/shell/keys", aliceTok, nil)
+    if rec.Code != http.StatusForbidden {
+        t.Fatalf("non-admin list: %d body=%s, want 403", rec.Code, rec.Body.String())
+    }
+
+    // Admin session: full create → list → rotate → revoke lifecycle.
+    _, boss := loginShell(t, s, "boss", "bosspw")
+    bossTok, _ := boss["token"].(string)
+    rec = shellKeysReq(http.MethodPost, "/api/v1/shell/keys", bossTok,
+        map[string]any{"name": "shell-made", "scopes": []string{"chat"}})
+    if rec.Code != http.StatusCreated {
+        t.Fatalf("admin create: %d body=%s, want 201", rec.Code, rec.Body.String())
+    }
+    var created userKeyResponse
+    if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+        t.Fatalf("create response: %v", err)
+    }
+    if created.RawKey == "" || !strings.HasPrefix(created.RawKey, "fk-") {
+        t.Fatalf("create did not return one-time plaintext: %+v", created)
+    }
+
+    rec = shellKeysReq(http.MethodGet, "/api/v1/shell/keys", bossTok, nil)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("admin list: %d, want 200", rec.Code)
+    }
+    var listed []userKeyListEntry
+    if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+        t.Fatalf("list decode: %v body=%s", err, rec.Body.String())
+    }
+    if len(listed) != 1 || listed[0].Name != "shell-made" {
+        t.Fatalf("list = %+v, want one shell-made key", listed)
+    }
+    if strings.Contains(rec.Body.String(), created.RawKey) {
+        t.Fatalf("list leaked plaintext: %s", rec.Body.String())
+    }
+
+    rec = shellKeysReq(http.MethodPost, "/api/v1/shell/keys/shell-made/rotate", bossTok, nil)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("admin rotate: %d body=%s, want 200", rec.Code, rec.Body.String())
+    }
+    var rotated userKeyResponse
+    if err := json.Unmarshal(rec.Body.Bytes(), &rotated); err != nil {
+        t.Fatalf("rotate response: %v", err)
+    }
+    if rotated.RawKey == created.RawKey {
+        t.Fatalf("rotate returned the same plaintext")
+    }
+
+    rec = shellKeysReq(http.MethodDelete, "/api/v1/shell/keys/shell-made", bossTok, nil)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("admin revoke: %d body=%s, want 200", rec.Code, rec.Body.String())
     }
 }
