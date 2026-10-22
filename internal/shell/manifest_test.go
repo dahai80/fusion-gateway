@@ -601,3 +601,32 @@ func TestRegistry_ExtRouteFor(t *testing.T) {
         t.Error("unknown module must not route ext paths")
     }
 }
+
+func TestRegistry_UpsertKeepsIssuedKeyPlaintextOnReregistration(t *testing.T) {
+    // #277: a re-registration without api_key must keep the fm- plaintext
+    // (the proxy injection path), not just the hashes — otherwise the
+    // module looks healthy (heartbeat hash still matches) while the proxy
+    // forwards unauthenticated and the plaintext is lost from the store.
+    r := NewRegistry(nil, nil, 30*time.Second)
+    m := validManifest("fusion-trainer")
+    m.Upstream = "http://127.0.0.1:8790"
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    _, plaintext, issued, err := r.EnsureServiceKey("fusion-trainer")
+    if err != nil || !issued || plaintext == "" {
+        t.Fatalf("issue service key: issued=%v err=%v", issued, err)
+    }
+    // Module restart → idempotent re-registration, still no api_key in body.
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("re-upsert: %v", err)
+    }
+    _, key, ok := r.UpstreamFor("fusion-trainer")
+    if !ok || key != plaintext {
+        t.Fatalf("proxy credential lost on re-registration: ok=%v key=%q want %q", ok, key, plaintext)
+    }
+    // Heartbeat must still authenticate with the same fm- key.
+    if !r.AuthServiceKey("fusion-trainer", serviceKeyHashOf(plaintext), time.Hour) {
+        t.Fatal("issued key no longer authenticates after re-registration")
+    }
+}

@@ -142,6 +142,12 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         // heartbeating with its fm- key must not be locked out by its own
         // idempotent re-registration. A body that carries api_key reverts
         // to the module-supplied credential path and drops the issued key.
+        // #277: the plaintext itself must survive too — it rides
+        // manifest.APIKey (the proxy injection path), and dropping it here
+        // wiped the credential in memory AND in the persisted store while
+        // the retained hash kept the heartbeat green: module reachable,
+        // proxy broken, plaintext unrecoverable without an admin rotate.
+        e.manifest.APIKey = prev.manifest.APIKey
         e.serviceKeyID = prev.serviceKeyID
         e.serviceKeyHash = prev.serviceKeyHash
         e.serviceKeyPrevHash = prev.serviceKeyPrevHash
