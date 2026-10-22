@@ -1031,9 +1031,21 @@ type ShellManifest struct {
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards
 // surfaced on the shell host's Home landing; route is a module-relative
-// /path deep link of the same form as ShellPage.Route.
+// /path deep link of the same form as ShellPage.Route. Projects (#273,
+// shell#41) declares the module's spaces/projects poll sources for the
+// Home "Projects/Spaces" section, same contract family as Notifications.
 type ShellHome struct {
-    Cards []ShellHomeCard `json:"cards,omitempty" mapstructure:"cards"`
+    Cards    []ShellHomeCard     `json:"cards,omitempty" mapstructure:"cards"`
+    Projects []ShellHomeProject `json:"projects,omitempty" mapstructure:"projects"`
+}
+
+// ShellHomeProject is one spaces/projects poll source (shell#41): the shell
+// host polls GET <endpoint> and expects {items:[{id, title, route?, ...}]}.
+type ShellHomeProject struct {
+    ID       string `json:"id" mapstructure:"id"`
+    Label    string `json:"label" mapstructure:"label"`
+    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
 }
 
 // ShellHomeCard is one Home card or suggested chip contributed by a module.

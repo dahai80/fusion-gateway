@@ -373,6 +373,25 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
             m.Home = &config.ShellHome{Cards: cards}
             return m
         }()},
+        {"home project missing label", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Home = &config.ShellHome{Projects: []config.ShellHomeProject{{ID: "p", Endpoint: "/api/spaces"}}}
+            return m
+        }()},
+        {"home project endpoint not absolute", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            m.Home = &config.ShellHome{Projects: []config.ShellHomeProject{{ID: "p", Label: "P", Endpoint: "api/spaces"}}}
+            return m
+        }()},
+        {"too many home projects", func() config.ShellManifest {
+            m := validManifest("fusion-x")
+            projects := make([]config.ShellHomeProject, 33)
+            for i := range projects {
+                projects[i] = config.ShellHomeProject{ID: fmt.Sprintf("p%d", i), Label: "P", Endpoint: "/api/spaces"}
+            }
+            m.Home = &config.ShellHome{Projects: projects}
+            return m
+        }()},
         {"too many search providers", func() config.ShellManifest {
             m := validManifest("fusion-x")
             for i := 0; i < 33; i++ {
@@ -392,7 +411,7 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     ok.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", LabelEn: "Workflows", Endpoint: "/api/cowork/search"}}
     ok.Pages = []config.ShellPage{{Route: "/runs", Title: "运行", TitleEn: "Runs"}}
     ok.Notifications = []config.ShellNotificationSource{{ID: "approvals", Label: "审批", Endpoint: "/api/cowork/notifications", Kind: "approvals"}, {ID: "tasks", Label: "任务", Endpoint: "/api/cowork/tasks", Kind: "tasks"}}
-    ok.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "monthly-close", Title: "月度对账", TitleEn: "Monthly close", Description: "对账并生成报告", DescriptionEn: "Reconcile and report", Route: "/workflows/monthly-close", Chip: true}}}
+    ok.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "monthly-close", Title: "月度对账", TitleEn: "Monthly close", Description: "对账并生成报告", DescriptionEn: "Reconcile and report", Route: "/workflows/monthly-close", Chip: true}}, Projects: []config.ShellHomeProject{{ID: "spaces", Label: "空间", LabelEn: "Spaces", Endpoint: "/api/cowork/spaces"}}}
     if err := r.Upsert(ok); err != nil {
         t.Fatalf("valid ext upsert: %v", err)
     }
@@ -413,6 +432,9 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     if v.Home == nil || len(v.Home.Cards) != 1 || v.Home.Cards[0].Route != "/workflows/monthly-close" || !v.Home.Cards[0].Chip {
         t.Fatalf("home cards lost: %+v", v.Home)
     }
+    if len(v.Home.Projects) != 1 || v.Home.Projects[0].Endpoint != "/api/cowork/spaces" || v.Home.Projects[0].LabelEn != "Spaces" {
+        t.Fatalf("home projects lost: %+v", v.Home.Projects)
+    }
 }
 
 func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
@@ -424,7 +446,7 @@ func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
     m.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", Endpoint: "/api/cowork/search"}}
     m.Pages = []config.ShellPage{{Route: "/runs", Title: "运行"}}
     m.Notifications = []config.ShellNotificationSource{{ID: "runs", Label: "运行", Endpoint: "/api/cowork/notifications", Kind: "runs"}, {ID: "tasks", Label: "任务", Endpoint: "/api/cowork/tasks", Kind: "tasks"}}
-    m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "weekly-readout", Title: "周报 readout", Route: "/workflows/weekly"}}}
+    m.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "weekly-readout", Title: "周报 readout", Route: "/workflows/weekly"}}, Projects: []config.ShellHomeProject{{ID: "spaces", Label: "空间", Endpoint: "/api/cowork/spaces"}}}
     if err := r.Upsert(m); err != nil {
         t.Fatalf("upsert: %v", err)
     }
@@ -447,6 +469,9 @@ func TestRegistry_ExtFieldsPersistRoundTrip(t *testing.T) {
     }
     if v.Home == nil || len(v.Home.Cards) != 1 || v.Home.Cards[0].ID != "weekly-readout" {
         t.Fatalf("home cards not persisted: %+v", v.Home)
+    }
+    if len(v.Home.Projects) != 1 || v.Home.Projects[0].ID != "spaces" {
+        t.Fatalf("home projects not persisted: %+v", v.Home.Projects)
     }
 }
 
