@@ -452,3 +452,62 @@ func TestProxy_TransportCachePerUpstream(t *testing.T) {
         }
     }
 }
+
+func TestHealthPoller_ExpiresStaleRefusedRegistration(t *testing.T) {
+    // #276: dynamic registration whose heartbeat expired AND whose upstream
+    // refuses connections must be dropped from the registry — not served as
+    // an unreachable menu entry to every fresh session forever.
+    m := validManifest("fusion-stale")
+    m.Upstream = "http://127.0.0.1:1"
+    r := NewRegistry(nil, nil, 20*time.Millisecond)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    poller := NewHealthPoller(r, 10*time.Millisecond)
+    time.Sleep(60 * time.Millisecond) // heartbeat expires
+    poller.pollAll(context.Background())
+    if views := r.List(); len(views) != 0 {
+        t.Fatalf("want stale refused registration dropped, got %+v", views)
+    }
+}
+
+func TestHealthPoller_KeepsStaleRegistrationWhenUpstreamAlive(t *testing.T) {
+    // Heartbeat-dead but upstream still accepting connections: keep the
+    // entry (greyed unreachable) — only connection-refusing ones expire.
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer upstream.Close()
+    m := validManifest("fusion-halfup")
+    m.Upstream = upstream.URL
+    r := NewRegistry(nil, nil, 20*time.Millisecond)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    poller := NewHealthPoller(r, 10*time.Millisecond)
+    time.Sleep(60 * time.Millisecond)
+    poller.pollAll(context.Background())
+    views := r.List()
+    if len(views) != 1 || views[0].Status != StatusUnreachable {
+        t.Fatalf("want 1 unreachable view (kept, not dropped), got %+v", views)
+    }
+}
+
+func TestHealthPoller_ExpirySkipsBuiltins(t *testing.T) {
+    // Builtins (gateway-owned, e.g. fusion-admin) must survive the stale
+    // sweep: Remove rejects them, and re-registration only happens at boot.
+    m := validManifest("fusion-admin")
+    m.Upstream = "http://127.0.0.1:1"
+    r := NewRegistry(nil, nil, 20*time.Millisecond)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    r.MarkBuiltin(m.ID)
+    poller := NewHealthPoller(r, 10*time.Millisecond)
+    time.Sleep(60 * time.Millisecond)
+    poller.pollAll(context.Background())
+    views := r.List()
+    if len(views) != 1 || views[0].ID != "fusion-admin" {
+        t.Fatalf("want builtin kept despite stale heartbeat + refused upstream, got %+v", views)
+    }
+}
