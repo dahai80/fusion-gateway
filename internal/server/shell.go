@@ -247,6 +247,14 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("DELETE /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserDelete)))
     mux.HandleFunc("POST /api/v1/shell/users/{id}/password-reset", s.withShellSession(requireShellAdmin(s.handleShellUserPasswordReset)))
     mux.HandleFunc("POST /api/v1/password", s.withShellSession(s.handleShellPasswordChange))
+    // #271: session-gated surface for the shell Settings → API Keys page.
+    // The master key can never reach a browser, so admin-role shell users
+    // manage K2 user keys through their session; the handlers are the K2
+    // ones unchanged (dahai80/fusion-web-shell#35).
+    mux.HandleFunc("GET /api/v1/shell/keys", s.withShellSession(requireShellAdmin(s.handleUserKeysList)))
+    mux.HandleFunc("POST /api/v1/shell/keys", s.withShellSession(requireShellAdmin(s.handleUserKeyCreate)))
+    mux.HandleFunc("POST /api/v1/shell/keys/{name}/rotate", s.withShellSession(requireShellAdmin(s.handleUserKeyRotate)))
+    mux.HandleFunc("DELETE /api/v1/shell/keys/{name}", s.withShellSession(requireShellAdmin(s.handleUserKeyRevoke)))
     mux.HandleFunc("/shell/", s.withShellSession(s.withShellModuleAccess(s.shellProxy.ServeHTTP)))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
