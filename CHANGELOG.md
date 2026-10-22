@@ -9,6 +9,16 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (shell home projects passthrough, 2026-10-22) — #273
+
+- **`home.projects` poll sources in module manifests (shell #41).** The
+  manifest `home` block gains an optional `projects` list
+  (`id`/`label`/`label_en`/`endpoint`) so a Home Projects/Spaces section can
+  aggregate per-module workspaces. Entries validate with the same
+  gateway-absolute endpoint rules and 32-entry cap as the other ext fields,
+  pass through camelCase on the wire, and persist in the registry
+  round-trip. Omitting the list leaves existing manifests byte-identical.
+
 ### Added (shell session-gated keys proxy, 2026-10-22) — #271
 
 - **Session-gated `/api/v1/shell/keys` proxy for the Settings page.** The
