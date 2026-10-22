@@ -605,6 +605,17 @@ func validateManifestExt(m config.ShellManifest) error {
                 return fmt.Errorf("manifest %q: home card %q route must not contain '#'", m.ID, c.ID)
             }
         }
+        if len(m.Home.Projects) > maxShellExtEntries {
+            return fmt.Errorf("manifest %q: home.projects exceeds %d entries", m.ID, maxShellExtEntries)
+        }
+        for _, p := range m.Home.Projects {
+            if p.ID == "" || p.Label == "" {
+                return fmt.Errorf("manifest %q: home project requires id and label", m.ID)
+            }
+            if err := validateGatewayAbsolutePath(p.Endpoint); err != nil {
+                return fmt.Errorf("manifest %q: home project %q endpoint: %w", m.ID, p.ID, err)
+            }
+        }
     }
     return nil
 }
