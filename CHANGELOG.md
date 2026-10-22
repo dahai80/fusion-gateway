@@ -9,6 +9,18 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (shell session-gated keys proxy, 2026-10-22) — #271
+
+- **Session-gated `/api/v1/shell/keys` proxy for the Settings page.** The
+  master key can never reach a browser, so the K2 `withMasterKey` gate left
+  the shell Settings → API Keys page with no callable surface. Adds four
+  admin-role session routes (`list`/`create`/`rotate`/`revoke`) under
+  `/api/v1/shell/keys` that reuse the K2 user-key handlers unchanged — the
+  control plane stays master-gated at `/api/v1/keys`, the shell gets its own
+  session-gated path. Non-admin sessions receive `403 permission_error`;
+  rotate/revoke responses are stripped of the non-secret key rows exactly as
+  the master surface does.
+
 ### Added (user API keys, 2026-10-22) — #262
 
 - **Gateway-issued `fk-` user API keys with scope enforcement on `/v1/*`.**
