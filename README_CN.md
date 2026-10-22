@@ -178,6 +178,20 @@ cp config.example.yaml config.yaml
 | `/api/v1/shell/users` | GET/POST | Union Web Shell RBAC:账号列表 / 创建账号(需 admin 角色;密码仅存 bcrypt 哈希) |
 | `/api/v1/shell/users/{id}` | PATCH/DELETE | Union Web Shell RBAC:修改 display_name/disabled/permissions/roles / 删除账号(保护最后一个可用管理员) |
 | `/api/v1/shell/users/{id}/password-reset` | POST | Union Web Shell RBAC:生成随机临时密码并强制 `must_change_password`(需 admin 角色) |
+| `/api/v1/shell/keys` | GET/POST | Union Web Shell(#271,需 admin 角色):会话鉴权的用户 API Key 管理(Settings → API Keys 页),复用 K2 处理器 |
+| `/api/v1/shell/keys/{name}/rotate` | POST | Union Web Shell(#271,需 admin 角色):轮换一个用户 key |
+| `/api/v1/shell/keys/{name}` | DELETE | Union Web Shell(#271,需 admin 角色):吊销一个用户 key |
+| `/api/v1/shell/adapters` | GET | E6 管理面(#275,需 admin 角色):适配器凭据库列表 — 仅返回掩码投影,明文永不回传 |
+| `/api/v1/shell/adapters/{platform}` | PUT | E6 管理面(#275,需 admin 角色):存储平台适配器凭据(AES-256-GCM 静态加密,密钥派生自 master_key)+ 限速/抖动/启用 |
+| `/api/v1/shell/adapters/{platform}/test` | POST | E6 管理面(#275,需 admin 角色):校验存储凭据在当前 master_key 下可解密 |
+| `/api/v1/shell/connectors` | GET | E6 管理面(#275,需 admin 角色):配置式连接器文档列表,附带服务端校验问题 |
+| `/api/v1/shell/connectors/{id}` | PUT | E6 管理面(#275,需 admin 角色):upsert 连器文档(`credential_ref` 从适配器凭据库解析,密钥不内联) |
+| `/api/v1/shell/connectors/{id}/test` | POST | E6 管理面(#275,需 admin 角色):连接器自检(有效、启用、凭据可解析),返回耗时 |
+| `/api/v1/shell/config/{key}` | GET/PUT | E6 管理面(#275,需 admin 角色):策略覆盖 — 返回 `{defaults, overrides}`;PUT 立即生效(模块运行时在模板默认值上合并) |
+| `/api/v1/shell/audit` | GET | E6 管理面(#275,需 admin 或 auditor 角色):哈希链审计轨迹 — 支持 `user`/`action_class` 过滤,`integrity_ok:false` 表示链被篡改 |
+| `/api/v1/shell/roles` | GET/POST | E6 管理面(#275,需 admin 角色):内建 + 自定义角色列表(写类、实时用户数)/ 创建自定义角色(内建冲突 409) |
+| `/api/v1/shell/roles/{name}` | DELETE | E6 管理面(#275,需 admin 角色):删除自定义角色 — 内建固定(409),仍有用户 assigned 时带原因拒绝 |
+| `/api/v1/shell/menu-permissions` | GET/PUT | E6 管理面(#275,需 admin 角色):角色 ↔ 菜单矩阵 — 默认值从 manifest 注册表派生,覆盖值整体替换;未知角色拒绝 |
 | `/api/v1/password` | POST | Union Web Shell:修改调用方自身密码(shell 会话鉴权;清除 `must_change_password`) |
 
 ## Union Web Shell (#215)
