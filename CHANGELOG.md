@@ -9,6 +9,22 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (heartbeat-carried manifest refresh, 2026-10-23) — #284
+
+- **Heartbeat body now converges stale shell manifest ext fields.** Modules
+  re-register the full manifest on startup then only heartbeat, so ext-field
+  drift (fusion-cowork grew 7→11 pages; the shell sidebar kept showing 7)
+  never converged while the module stayed alive, and the persisted store
+  kept replaying the stale manifest across gateway restarts. The heartbeat
+  body is OPTIONAL with a documented semantic: empty (or id-less) body =
+  historical liveness-only ping, not persisted; a body carrying the module's
+  current manifest atomically refreshes the stored entry (same validation
+  gates as registration), persists it, and keeps the issued `fm-` service
+  key intact (#261/#277 — key_id stable, no plaintext re-reveal, upstream
+  credential retained). A refresh that fails validation returns 400
+  `manifest_refresh_rejected` but still counts for liveness — a mis-shaped
+  manifest greys nothing and fails loudly instead of silently.
+
 ### Fixed (log-flood + stale-key observability hardening, 2026-10-23) — #281/#282/#283
 
 - **Shell heartbeat-denial WARN flood throttled (#281).** A module sending a
