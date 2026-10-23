@@ -49,6 +49,10 @@ var (
     // /metrics without log grepping.
     authInvalidKey *prometheus.CounterVec
 
+    // #283: OTel internal errors (mostly failed export batches when no
+    // collector listens). The log line is throttled; this counter is not.
+    otelErrors prometheus.Counter
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -190,6 +194,11 @@ func init() {
         Help: "Invalid API key rejections by key hash prefix (8 hex chars, non-secret)",
     }, []string{"hash_prefix"})
 
+    otelErrors = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "fusion_gateway_otel_errors_total",
+        Help: "OTel internal errors (export failures etc.; log throttled, counter not)",
+    })
+
     // EI6: tokenizer_calibration_deviation removed — it was declared but never
     // had a write path, so /metrics exposed a permanent 0 that looked like a
     // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
@@ -207,6 +216,7 @@ func init() {
         classifierLatency, classifierSLOBreaches,
         shellHeartbeatDenied,
         authInvalidKey,
+        otelErrors,
     )
 }
 
@@ -262,6 +272,13 @@ func RecordShellHeartbeatDenied(moduleID, reason string) {
 // a recurring label value pinpoints a client stuck on a rotated key.
 func RecordAuthInvalidKey(hashPrefix string) {
     authInvalidKey.WithLabelValues(hashPrefix).Inc()
+}
+
+// RecordOtelError counts an OTel internal error (mostly failed export
+// batches when no collector listens, #283). The log line is throttled to
+// 1 per 5m per distinct error; this counter is not throttled.
+func RecordOtelError() {
+    otelErrors.Inc()
 }
 
 func UpdateCircuitBreakerState(backend string, state int) {
