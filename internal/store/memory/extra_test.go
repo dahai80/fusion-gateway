@@ -2,6 +2,7 @@ package memory
 
 import (
     "fmt"
+    "strings"
     "testing"
     "time"
 
@@ -408,6 +409,49 @@ func TestLogStore_Filter_KeyName(t *testing.T) {
     _, total, _ := ls.Query(filter)
     if total != 1 {
         t.Fatalf("expected 1, got %d", total)
+    }
+}
+
+func TestLogStore_Filter_ProjectID(t *testing.T) {
+    ls := NewLogStore(100)
+    _ = ls.Append(&store.RequestLog{ProjectID: "envipermit", Model: "gpt-4"})
+    _ = ls.Append(&store.RequestLog{ProjectID: "other", Model: "claude-3"})
+    _ = ls.Append(&store.RequestLog{Model: "no-project"})
+    filter := store.LogFilter{ProjectID: "envipermit", Page: 1, PageSize: 10}
+    logs, total, _ := ls.Query(filter)
+    if total != 1 {
+        t.Fatalf("expected 1, got %d", total)
+    }
+    if len(logs) > 0 && logs[0].ProjectID != "envipermit" {
+        t.Fatalf("expected envipermit, got %s", logs[0].ProjectID)
+    }
+}
+
+func TestLogStore_ExportCSV_ProjectIDColumn(t *testing.T) {
+    ls := NewLogStore(100)
+    _ = ls.Append(&store.RequestLog{ProjectID: "envipermit", Model: "gpt-4"})
+    data, err := ls.Export(store.LogFilter{Page: 1, PageSize: 10}, "csv")
+    if err != nil {
+        t.Fatalf("export failed: %v", err)
+    }
+    lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+    if len(lines) < 2 {
+        t.Fatalf("expected header + row, got %d lines", len(lines))
+    }
+    headerFields := strings.Split(lines[0], ",")
+    idx := -1
+    for i, f := range headerFields {
+        if f == "project_id" {
+            idx = i
+            break
+        }
+    }
+    if idx < 0 {
+        t.Fatalf("csv header missing project_id: %s", lines[0])
+    }
+    rowFields := strings.Split(lines[1], ",")
+    if idx >= len(rowFields) || rowFields[idx] != "envipermit" {
+        t.Fatalf("expected project_id=envipermit at col %d, got %v", idx, rowFields)
     }
 }
 

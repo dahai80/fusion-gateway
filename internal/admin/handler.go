@@ -820,12 +820,13 @@ func (h *Handler) handleQuota(w http.ResponseWriter, r *http.Request) {
 func parseLogFilter(r *http.Request) store.LogFilter {
     q := r.URL.Query()
     filter := store.LogFilter{
-        KeyName:  q.Get("key_name"),
-        Model:    q.Get("model"),
-        Channel:  q.Get("channel"),
-        Status:   q.Get("status"),
-        Page:     1,
-        PageSize: 50,
+        KeyName:   q.Get("key_name"),
+        Model:     q.Get("model"),
+        Channel:   q.Get("channel"),
+        Status:    q.Get("status"),
+        ProjectID: q.Get("project_id"),
+        Page:      1,
+        PageSize:  50,
     }
 
     if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {

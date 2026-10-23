@@ -92,6 +92,10 @@ type LogFilter struct {
     Model     string     `json:"model,omitempty"`
     Channel   string     `json:"channel,omitempty"`
     Status    string     `json:"status,omitempty"`
+    // ProjectID (#290) filters by the X-Fusion-Project-Id header captured on
+    // the request — the per-project audit export key for downstream
+    // consumers (EnviPermit). Empty = no restriction.
+    ProjectID string     `json:"project_id,omitempty"`
     MinTokens int        `json:"min_tokens,omitempty"`
     MinCost   float64    `json:"min_cost,omitempty"`
     Page      int        `json:"page"`
