@@ -208,6 +208,9 @@ func matchFilter(l *store.RequestLog, f store.LogFilter) bool {
     if f.Channel != "" && l.ChannelName != f.Channel {
         return false
     }
+    if f.ProjectID != "" && l.ProjectID != f.ProjectID {
+        return false
+    }
     if f.Status == "success" && !l.IsSuccess {
         return false
     }
@@ -241,7 +244,7 @@ func exportCSV(logs []*store.RequestLog) ([]byte, error) {
     writer := csv.NewWriter(&byteWriter{buf: &buf})
 
     header := []string{"id", "timestamp", "key_name", "model", "request_type", "channel", "route_reason",
-        "input_tokens", "output_tokens", "total_tokens", "cost", "latency_ms", "status_code", "is_success", "error"}
+        "project_id", "input_tokens", "output_tokens", "total_tokens", "cost", "latency_ms", "status_code", "is_success", "error"}
     _ = writer.Write(header)
 
     for _, l := range logs {
@@ -252,6 +255,8 @@ func exportCSV(logs []*store.RequestLog) ([]byte, error) {
             csvSanitize(l.Model),
             csvSanitize(l.RequestType),
             csvSanitize(l.ChannelName),
+            csvSanitize(l.RouteReason),
+            csvSanitize(l.ProjectID),
             csvSanitize(l.RouteReason),
             fmt.Sprintf("%d", l.InputTokens),
             fmt.Sprintf("%d", l.OutputTokens),

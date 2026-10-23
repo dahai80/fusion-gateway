@@ -56,20 +56,19 @@ cp config.example.yaml config.yaml
 | `server.auto_start.wait_secs` | 120 | 健康检查最长等待秒数 |
 | `auth.enabled` | true | 启用 API key 鉴权 |
 | `auth.master_key` | "" | master key 绕过限流和模型白名单 |
-| `route.token_threshold` | 8000 | token 数阈值:低于走本地,高于走云端 |
-| `route.output_input_ratio_threshold` | 0.6 | 预测输出/input token 比例上限,超过则路由云端 (低于 `output_input_ratio_min_input_tokens` 时跳过) |
-| `route.output_input_ratio_min_input_tokens` | 32 | output/input ratio 判据的最小 input token 数;低于此值跳过 ratio (避免极小请求误判, #48) |
-| `route.mode` | hybrid | 路由模式:`local` (全本地)、`cloud` (全云端)、`hybrid` (按 token/比例/硬件智能路由) |
-| `route.enable_hardware_judge` | true | 启用硬件感知路由 |
-| `route.local_max_memory_ratio` | 0.9 | 系统内存占比上限,超过则强制走云端 |
-| `route.local_max_mlx_memory_ratio` | 0.7 | MLX/GPU 内存占比上限,超过则强制走云端 |
-| `route.circuit_breaker.failure_threshold` | 5 | 连续失败次数,超过则熔断器打开 |
-| `route.rate_limit.enabled` | true | 启用按 key 的 RPM/TPM 限流 |
-| `route.retry.max_retries` | 2 | 非流式请求最大重试次数 (仅云端 — 本地生成非幂等,快速失败, #208) |
+| `routing.token_threshold` | 8000 | token 数阈值:低于走本地,高于走云端 |
+| `routing.output_input_ratio_threshold` | 0.6 | 预测输出/input token 比例上限,超过则路由云端 (低于 `output_input_ratio_min_input_tokens` 时跳过) |
+| `routing.output_input_ratio_min_input_tokens` | 32 | output/input ratio 判据的最小 input token 数;低于此值跳过 ratio (避免极小请求误判, #48) |
+| `routing.mode` | hybrid | 路由模式:`local` (全本地)、`cloud` (全云端)、`hybrid` (按 token/比例/硬件智能路由)。mode 快路径覆盖整个 P0–P7 链 — 见下方"部署模式 profile"(#290) |
+| `routing.local_priority.max_system_memory_ratio` | 0.9 | 系统内存占比上限,超过则强制走云端 |
+| `routing.local_priority.max_mlx_memory_ratio` | 0.7 | MLX/GPU 内存占比上限,超过则强制走云端 |
+| `routing.circuit_breaker.failure_threshold` | 5 | 连续失败次数,超过则熔断器打开 |
+| `routing.rate_limit.enabled` | true | 启用按 key 的 RPM/TPM 限流 |
+| `routing.retry.max_retries` | 2 | 非流式请求最大重试次数 (仅云端 — 本地生成非幂等,快速失败, #208) |
 | `backends.<name>.response_header_timeout` | 30s (云端) / 300s (本地) | 传输层等待上游响应头的时长。本地后端 (loopback base_url、UDS `socket_path` 或 `type: fusion-mlx`) 默认 300s — 本地引擎非流式调用在生成完成后才发响应头 (#208)。短于该值时受 `backends.<name>.timeout` 约束。显式配置始终优先。 |
-| `route.fallback.context_window_fallback` | {} | 模型 → 更大模型的映射,用于上下文溢出回退 |
-| `route.fallback.enabled` | false | 启用下方 `model_mapping`(别名 → 云端模型 id) |
-| `route.fallback.model_mapping` | {} | 将客户端/SDK 模型别名(如 `claude-opus-4-7`)映射到云端后端真实模型 id(如 `glm5.2`);在转发前应用于 `/v1/messages` 和 `/v1/chat/completions`(避免上游 400 → 502 "response stopped arriving",#52) |
+| `routing.fallback.context_window_fallback` | {} | 模型 → 更大模型的映射,用于上下文溢出回退 |
+| `routing.fallback.enabled` | false | 启用下方 `model_mapping`(别名 → 云端模型 id) |
+| `routing.fallback.model_mapping` | {} | 将客户端/SDK 模型别名(如 `claude-opus-4-7`)映射到云端后端真实模型 id(如 `glm5.2`);在转发前应用于 `/v1/messages` 和 `/v1/chat/completions`(避免上游 400 → 502 "response stopped arriving",#52) |
 | `cache.enabled` | true | 启用非流式响应的 LRU 缓存 |
 | `cache.backend` | local | 缓存后端:local (LRU) 或 redis |
 | `cache.redis.addr` | localhost:6379 | Redis 地址 (backend=redis 时) |
@@ -127,7 +126,7 @@ cp config.example.yaml config.yaml
 | `/v1/rerank` | POST | 文档重排 (默认走云端,本地有模型时走本地) |
 | `/v1/cost` | GET | 成本跟踪汇总 (可选 `?key=<name>` 过滤) |
 | `/v1/realtime` | WebSocket | Realtime API 代理 (双向 WebSocket 中继) |
-| `/v1/models` | GET | 列出可用模型 (并发按 provider 拉取,各 3s 超时,失败跳过;`route.mode: local` 时仅列本地 provider) |
+| `/v1/models` | GET | 列出可用模型 (并发按 provider 拉取,各 3s 超时,失败跳过;`routing.mode: local` 时仅列本地 provider) |
 | `/v1/models/{id}/load` | POST | 加载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | 卸载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/health` | GET | 含后端状态的完整健康检查 |
@@ -351,6 +350,47 @@ cluster:
 ```
 
 语义层支持热重载:在配置中切换 `intent_classifier.enabled` 无需重启即生效。
+
+### 部署模式 profile 与按项目审计导出(#290)
+
+面向需要固定部署形态的消费方(如 EnviPermit:云端 SaaS vs 敏感文档不出内网的纯本地部署)。
+
+**1. 部署模式 profile — 纯配置切换,客户端零改动。** `routing.mode` 即受支持的开关。mode 快路径先于整个 P0–P7 链执行(见 `Engine.Decide`):
+
+- `hybrid`(默认)— 按 token/比例/硬件负载智能路由。
+- `local` — 所有 chat/embedding 请求钉在本地 fusion-mlx;云端 adapter 永不被拨号。本地模型不可用或过载 = 向客户端返回结构化错误,绝不静默回落云端(fail-closed)。
+- `cloud` — 所有请求走云端默认后端(配置了集群则优先集群)。
+
+纯本地(全内网)配方 — 连可泄露的云端 adapter 都不存在:
+
+```yaml
+routing:
+  mode: local
+  fallback:
+    enabled: false        # 不做别名 → 云端模型映射
+backends:
+  fusion-mlx:             # 唯一的 backend 条目 — 省略全部云端后端
+    type: fusion-mlx
+    base_url: http://127.0.0.1:11434
+```
+
+模式切换纯配置且热重载感知 — `routing.mode` 每请求从配置快照读取,改 `config.yaml`(或 `PUT /admin/api/config/routing`)即切换形态,无需重启,客户端零改动。
+
+**2. 按项目 LLM 调用审计导出。** 每个请求记录 model、路由(`channel_name`/`channel_type`:本地 vs 云端 provider)、`route_reason`、token 用量、费用、延迟、状态、时间戳 — 以及调用方 `X-Fusion-Project-Id` 头的值(`project_id`)。在每次 LLM 调用上携带 `X-Fusion-Project-Id: <project>` 与你自己的审计日志对齐,然后程序化查询:
+
+```bash
+# admin JWT(POST /admin/api/login)以 Cookie 或 Authorization: Bearer 携带
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/logs?project_id=envipermit&from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z&page=1&limit=100"
+
+# 全量导出 — json 或 csv(CSV 含 project_id 列)
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/logs/export?project_id=envipermit&format=csv" -o audit.csv
+```
+
+每次调用字段:`request_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`。其他过滤:`key_name`、`model`、`channel`、`status`、`min_tokens`、`min_cost`。Prometheus `/metrics` 暴露聚合计数(本地/云端 QPS、熔断次数)— 逐调用审计用 logs API,看板用 metrics。
+
+**保留期提示:** 内存日志存储是有界环形缓冲(默认 10,000 条)— 合规留存要么周期性轮询导出端点,要么把持久存储切到 Redis(`store.backend: "redis"`)。
 
 ### 启发式代码意图快路径 (<20ms)
 

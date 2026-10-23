@@ -1408,6 +1408,17 @@ func TestHandleLogs(t *testing.T) {
     _ = ms.AppendLog(&store.RequestLog{ID: "1", Model: "qwen3", StatusCode: 200, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, Cost: 0.01, Latency: 50})
     h := newTestHandler(t, ms, auth, "")
 
+    t.Run("parse_log_filter_project_id", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodGet, "/admin/api/logs?project_id=envipermit&model=qwen3", nil)
+        filter := parseLogFilter(req)
+        if filter.ProjectID != "envipermit" {
+            t.Fatalf("expected project_id envipermit, got %q", filter.ProjectID)
+        }
+        if filter.Model != "qwen3" {
+            t.Fatalf("expected model qwen3, got %q", filter.Model)
+        }
+    })
+
     t.Run("get_logs_success", func(t *testing.T) {
         req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/logs", nil)
         rec := httptest.NewRecorder()

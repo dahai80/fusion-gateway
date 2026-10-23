@@ -9,6 +9,32 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (per-project audit export filter, 2026-10-24) — #290
+
+- **`project_id` filter on the admin logs surface.** EnviPermit's compliance
+  flow needs per-LLM-call audit records (model, route local-vs-provider,
+  token usage, timestamp) scoped per project. `RequestLog` already captured
+  the caller's `X-Fusion-Project-Id` header; the query/export surface now
+  filters on it: `GET /admin/api/logs?project_id=<id>` and
+  `GET /admin/api/logs/export?project_id=<id>&format=json|csv`, with the CSV
+  export gaining a `project_id` column. Memory-store filter + admin
+  `parseLogFilter` wired; tests for the filter, the CSV column, and the
+  query-param parse.
+
+### Documented (deployment-mode profiles + routing.* key fix, 2026-10-24) — #290
+
+- **`routing.mode` confirmed as the deployment-profile switch** (local /
+  cloud / hybrid — mode fast-path overrides the whole P0–P7 chain,
+  fail-closed under `mode: local`, hot-reload aware, config-only). README
+  (EN/CN) gained a "Deployment-mode profiles & per-project audit export"
+  section with the fully-on-prem recipe (single fusion-mlx backend, no
+  cloud adapters configured) and the audit-export curl walkthrough.
+- **Stale `route.*` keys in the README config tables corrected to the
+  runtime `routing.*` namespace** (`route.mode` etc. never existed at
+  runtime — fixed in code by 6aa6477 but the doc tables were never updated;
+  dead `route.enable_hardware_judge` row removed, `route.local_max_*`
+  renamed to their real `routing.local_priority.*` keys).
+
 ### Documented (per-user module access workflow, 2026-10-23) — #289
 
 - **`web_shell.session.users[].modules` documented as THE module-visibility

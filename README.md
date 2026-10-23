@@ -85,20 +85,19 @@ See `config.example.yaml` for full reference. Key settings:
 | `server.auto_start.wait_secs` | 120 | Max seconds to wait for health check |
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
-| `route.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
-| `route.output_input_ratio_threshold` | 0.6 | Max predicted-output/input-token ratio before routing to cloud (skipped below `output_input_ratio_min_input_tokens`) |
-| `route.output_input_ratio_min_input_tokens` | 32 | Minimum input tokens for the output/input ratio check to apply; below this the ratio is skipped (avoids tiny-request misroute, #48) |
-| `route.mode` | hybrid | Routing mode: `local` (all local), `cloud` (all cloud), `hybrid` (smart routing by token/ratio/hardware) |
-| `route.enable_hardware_judge` | true | Enable hardware-aware routing |
-| `route.local_max_memory_ratio` | 0.9 | Max system memory ratio before forcing cloud |
-| `route.local_max_mlx_memory_ratio` | 0.7 | Max MLX/GPU memory ratio before forcing cloud |
-| `route.circuit_breaker.failure_threshold` | 5 | Consecutive failures before circuit opens |
-| `route.rate_limit.enabled` | true | Enable per-key RPM/TPM rate limiting |
-| `route.retry.max_retries` | 2 | Max retry attempts for non-streaming requests (cloud only — local generation is non-idempotent, fails fast, #208) |
+| `routing.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
+| `routing.output_input_ratio_threshold` | 0.6 | Max predicted-output/input-token ratio before routing to cloud (skipped below `output_input_ratio_min_input_tokens`) |
+| `routing.output_input_ratio_min_input_tokens` | 32 | Minimum input tokens for the output/input ratio check to apply; below this the ratio is skipped (avoids tiny-request misroute, #48) |
+| `routing.mode` | hybrid | Routing mode: `local` (all local), `cloud` (all cloud), `hybrid` (smart routing by token/ratio/hardware). The mode fast-path overrides the entire P0–P7 chain — see "Deployment-mode profiles" below (#290) |
+| `routing.local_priority.max_system_memory_ratio` | 0.9 | Max system memory ratio before forcing cloud |
+| `routing.local_priority.max_mlx_memory_ratio` | 0.7 | Max MLX/GPU memory ratio before forcing cloud |
+| `routing.circuit_breaker.failure_threshold` | 5 | Consecutive failures before circuit opens |
+| `routing.rate_limit.enabled` | true | Enable per-key RPM/TPM rate limiting |
+| `routing.retry.max_retries` | 2 | Max retry attempts for non-streaming requests (cloud only — local generation is non-idempotent, fails fast, #208) |
 | `backends.<name>.response_header_timeout` | 30s (cloud) / 300s (local) | How long the transport waits for upstream response headers. Local backends (loopback base_url, UDS `socket_path`, or `type: fusion-mlx`) default to 300s — local engines compute the full generation before sending headers on non-stream calls (#208). Bounded by `backends.<name>.timeout` when shorter. Explicit value always wins. |
-| `route.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
-| `route.fallback.enabled` | false | Enable `model_mapping` below (alias → cloud model id) |
-| `route.fallback.model_mapping` | {} | Map client/SDK model aliases (e.g. `claude-opus-4-7`) to the cloud backend's real model id (e.g. `glm5.2`); applied before forwarding on `/v1/messages` and `/v1/chat/completions` (avoids upstream 400 → 502 "response stopped arriving", #52) |
+| `routing.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
+| `routing.fallback.enabled` | false | Enable `model_mapping` below (alias → cloud model id) |
+| `routing.fallback.model_mapping` | {} | Map client/SDK model aliases (e.g. `claude-opus-4-7`) to the cloud backend's real model id (e.g. `glm5.2`); applied before forwarding on `/v1/messages` and `/v1/chat/completions` (avoids upstream 400 → 502 "response stopped arriving", #52) |
 | `cache.enabled` | true | Enable LRU response cache for non-streaming |
 | `cache.backend` | local | Cache backend: local (LRU) or redis |
 | `cache.redis.addr` | localhost:6379 | Redis address (when backend=redis) |
@@ -156,7 +155,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
-| `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `route.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
+| `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `routing.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
 | `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/health` | GET | Full health check with backend status. `backends.fusion-mlx` carries `{healthy, model_loaded, loaded_models}` from the authoritative fusion-mlx `/health` endpoint; a live process with no model loaded is reported as `degraded` (not a false green, #59). |
@@ -382,6 +381,47 @@ cluster:
 ```
 
 The semantic layer is hot-reload aware: toggling `intent_classifier.enabled` in config takes effect without a restart.
+
+### Deployment-mode profiles & per-project audit export (#290)
+
+For consumers that need a fixed deployment posture (e.g. EnviPermit: cloud SaaS vs fully on-prem where sensitive documents never leave the LAN).
+
+**1. Deployment-mode profiles — config-only, no client-code delta.** `routing.mode` is the supported switch. The mode fast-path runs before the entire P0–P7 chain (see `Engine.Decide`):
+
+- `hybrid` (default) — smart routing by token/ratio/hardware load.
+- `local` — every chat/embedding request pins to local fusion-mlx; cloud adapters are never dialed. Local model unavailable or overloaded = structured error to the client, never a silent cloud fallback (fail-closed).
+- `cloud` — every request goes to the cloud default backend (cluster first when configured).
+
+Fully on-prem recipe — no cloud adapter even exists to leak to:
+
+```yaml
+routing:
+  mode: local
+  fallback:
+    enabled: false        # no alias → cloud model mapping
+backends:
+  fusion-mlx:             # the ONLY backend entry — omit all cloud backends
+    type: fusion-mlx
+    base_url: http://127.0.0.1:11434
+```
+
+Switching modes is config-only and hot-reload aware — `routing.mode` is read per request from the config snapshot, so editing `config.yaml` (or `PUT /admin/api/config/routing`) flips the posture without a restart or any client-code change.
+
+**2. Per-project LLM call audit export.** Every request is logged with model, route (`channel_name`/`channel_type`: local vs cloud provider), `route_reason`, token usage, cost, latency, status, timestamp — and the caller's `X-Fusion-Project-Id` header value (`project_id`). Send `X-Fusion-Project-Id: <project>` on each LLM call to correlate with your own audit log, then query programmatically:
+
+```bash
+# admin JWT (POST /admin/api/login) as cookie or Authorization: Bearer
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/logs?project_id=envipermit&from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z&page=1&limit=100"
+
+# full export — json or csv (CSV carries a project_id column)
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/logs/export?project_id=envipermit&format=csv" -o audit.csv
+```
+
+Per-call fields: `request_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`. Other filters: `key_name`, `model`, `channel`, `status`, `min_tokens`, `min_cost`. Prometheus `/metrics` exposes the aggregate counters (local/cloud QPS, breaker trips) — use the logs API for per-call audit, metrics for dashboards.
+
+**Retention note:** the in-memory log store is a bounded ring (default 10,000 entries) — for compliance retention, either poll the export endpoint periodically or switch the persistent store to Redis (`store.backend: "redis"`).
 
 ### Heuristic Code-Intent Fast Path (<20ms)
 
