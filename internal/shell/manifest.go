@@ -283,6 +283,10 @@ func (r *Registry) save() error {
 }
 
 // Heartbeat refreshes the liveness clock of one dynamic manifest.
+// Liveness ONLY: an empty heartbeat body never touches the stored manifest
+// fields. Ext-field drift (pages/searchProviders/notifications/home) is
+// converged by HeartbeatWithManifest when the heartbeat carries the module's
+// current manifest (#284) — that is the documented refresh semantic.
 func (r *Registry) Heartbeat(id string) error {
     r.mu.Lock()
     defer r.mu.Unlock()
@@ -291,6 +295,65 @@ func (r *Registry) Heartbeat(id string) error {
         return fmt.Errorf("manifest %q not registered", id)
     }
     e.lastHeartbeat = time.Now()
+    return nil
+}
+
+// HeartbeatWithManifest refreshes the liveness clock AND converges the stored
+// manifest fields when the heartbeat body carries the module's current
+// manifest (#284). A module that only ever heartbeats (no restart, no
+// re-registration) previously kept the stale pages/searchProviders/
+// notifications/home forever; with this, a heartbeat carrying the full
+// manifest atomically overwrites the stored entry — same validation gates as
+// Upsert, same service-key retention (#261/#277: an empty api_key keeps the
+// gateway-issued fm- key material AND plaintext; a supplied api_key reverts
+// to the module-supplied path), and the change persists (unlike a plain
+// heartbeat, which is deliberately never persisted). m == nil falls back to
+// a plain Heartbeat. The id mismatch error and validation errors are
+// returned to the handler; the caller decides whether liveness still counts.
+func (r *Registry) HeartbeatWithManifest(id string, m *config.ShellManifest) error {
+    if m == nil {
+        return r.Heartbeat(id)
+    }
+    if m.ID != id {
+        return fmt.Errorf("manifest body id %q does not match heartbeat path id %q", m.ID, id)
+    }
+    if err := validateManifest(*m); err != nil {
+        return err
+    }
+    if !strings.HasPrefix(m.ID, "fusion-") {
+        return fmt.Errorf("manifest id %q must use the fusion-<name> prefix", m.ID)
+    }
+    if err := r.checkEntryAllowlist(m.Entry); err != nil {
+        return err
+    }
+    if err := validateUpstreamURL(*m); err != nil {
+        return err
+    }
+
+    r.mu.Lock()
+    e, ok := r.dynamic[id]
+    if !ok {
+        r.mu.Unlock()
+        return fmt.Errorf("manifest %q not registered", id)
+    }
+    // The entry is mutated in place, so the service-key state (hashes,
+    // rotation/revocation flags) on the entry survives untouched — only the
+    // manifest fields swap. An empty api_key keeps the retained upstream
+    // credential plaintext (#277); a supplied one reverts to the
+    // module-supplied path and drops the issued key (same rule as Upsert).
+    fresh := *m
+    if fresh.APIKey == "" {
+        fresh.APIKey = e.manifest.APIKey
+    }
+    e.manifest = fresh
+    e.lastHeartbeat = time.Now()
+    r.mu.Unlock()
+    // The manifest fields changed — persist, unlike a plain heartbeat
+    // (liveness-only refreshes are intentionally not persisted).
+    if err := r.save(); err != nil {
+        slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
+    }
+    slog.Info("shell manifest refreshed via heartbeat", "id", id, "entry", m.Entry)
     return nil
 }
 

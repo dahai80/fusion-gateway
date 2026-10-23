@@ -1,12 +1,14 @@
 package server
 
 import (
+    "bytes"
     "crypto/sha256"
     "crypto/subtle"
     "encoding/hex"
     "encoding/json"
     "errors"
     "fmt"
+    "io"
     "log/slog"
     "net/http"
     "path/filepath"
@@ -761,11 +763,51 @@ func (s *Server) writeShellServiceKeyError(w http.ResponseWriter, id string, err
 }
 
 // handleShellManifestHeartbeat: POST /api/v1/shell/manifests/{id}/heartbeat
-// — keepalive that keeps the registration online.
+// — keepalive that keeps the registration online. The body is OPTIONAL
+// (#284): an empty body (or one with no manifest id) is a plain liveness
+// keepalive; a body carrying the module's current manifest converges the
+// stored ext fields (pages/searchProviders/notifications/home) atomically,
+// with the same validation gates as registration and the same service-key
+// retention (#261/#277 — no plaintext re-reveal, key_id stable). A manifest
+// refresh that fails validation still counts for liveness (the module stays
+// online and observable) but returns 400 so the drift is surfaced loudly,
+// not silently swallowed.
 func (s *Server) handleShellManifestHeartbeat(w http.ResponseWriter, r *http.Request) {
     id := r.PathValue("id")
-    if err := s.shellRegistry.Heartbeat(id); err != nil {
-        shell.WriteEnvelope(w, http.StatusNotFound, "manifest_unknown", err.Error(), id, false)
+    var m *config.ShellManifest
+    body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxShellBody))
+    if readErr == nil && len(bytes.TrimSpace(body)) > 0 {
+        var candidate config.ShellManifest
+        if err := json.Unmarshal(body, &candidate); err != nil {
+            shell.WriteEnvelope(w, http.StatusBadRequest, "invalid_request",
+                fmt.Sprintf("heartbeat body is neither empty nor a valid manifest: %v", err), id, false)
+            return
+        }
+        // An id-less body (e.g. "{}") is treated as a plain liveness ping so
+        // existing keepalive senders that POST an empty JSON object keep
+        // working; only a body that names a manifest is a refresh attempt.
+        if candidate.ID != "" {
+            m = &candidate
+        }
+    }
+    if err := s.shellRegistry.HeartbeatWithManifest(id, m); err != nil {
+        notRegistered := strings.Contains(err.Error(), "not registered")
+        if m == nil || notRegistered {
+            // Plain heartbeat against an unregistered id (or the not-found
+            // arm of a refresh) is a 404.
+            shell.WriteEnvelope(w, http.StatusNotFound, "manifest_unknown", err.Error(), id, false)
+            return
+        }
+        // Refresh attempt failed validation/id-match: liveness still counts
+        // (recorded via the plain path), the error is surfaced as 400.
+        _ = s.shellRegistry.Heartbeat(id)
+        slog.Warn("shell heartbeat manifest refresh rejected (liveness still recorded)",
+            "id", id, "error", err)
+        shell.WriteEnvelope(w, http.StatusBadRequest, "manifest_refresh_rejected", err.Error(), id, false)
+        return
+    }
+    if m != nil {
+        shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted; manifest refreshed", id, false)
         return
     }
     shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted", id, false)
