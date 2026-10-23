@@ -44,6 +44,11 @@ var (
     // misconfigured module stays observable in /metrics.
     shellHeartbeatDenied *prometheus.CounterVec
 
+    // #282: invalid-key rejections by hash prefix. A client stuck on a
+    // rotated/stale key shows up as a recurring label value — spot it in
+    // /metrics without log grepping.
+    authInvalidKey *prometheus.CounterVec
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -180,6 +185,11 @@ func init() {
         Help: "Shell heartbeat denials (log line throttled; counter is not)",
     }, []string{"module_id", "reason"})
 
+    authInvalidKey = prometheus.NewCounterVec(prometheus.CounterOpts{
+        Name: "fusion_gateway_auth_invalid_key_total",
+        Help: "Invalid API key rejections by key hash prefix (8 hex chars, non-secret)",
+    }, []string{"hash_prefix"})
+
     // EI6: tokenizer_calibration_deviation removed — it was declared but never
     // had a write path, so /metrics exposed a permanent 0 that looked like a
     // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
@@ -196,6 +206,7 @@ func init() {
         hwCollectionErrors, configVersion, inFlightRequests,
         classifierLatency, classifierSLOBreaches,
         shellHeartbeatDenied,
+        authInvalidKey,
     )
 }
 
@@ -244,6 +255,13 @@ func RecordCircuitBreakerTrip(backend, reason string) {
 // misconfigured module stays visible in /metrics.
 func RecordShellHeartbeatDenied(moduleID, reason string) {
     shellHeartbeatDenied.WithLabelValues(moduleID, reason).Inc()
+}
+
+// RecordAuthInvalidKey counts an invalid-key rejection by hash prefix (#282).
+// The prefix (8 hex chars) identifies the key family, never the key itself —
+// a recurring label value pinpoints a client stuck on a rotated key.
+func RecordAuthInvalidKey(hashPrefix string) {
+    authInvalidKey.WithLabelValues(hashPrefix).Inc()
 }
 
 func UpdateCircuitBreakerState(backend string, state int) {
