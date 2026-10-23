@@ -41,6 +41,9 @@ behind a network policy.
 | `fusion_gateway_hw_collection_errors_total` | counter | source | Collector errors |
 | `fusion_gateway_config_version` | gauge | — | Config version |
 | `fusion_gateway_in_flight_requests` | gauge | backend | In-flight count |
+| `fusion_gateway_classifier_latency_seconds` | histogram | source | Intent classifier latency |
+| `fusion_gateway_classifier_slo_breach_total` | counter | source | Classifier SLO (>15ms) breaches |
+| `fusion_gateway_shell_heartbeat_denied_total` | counter | module_id, reason | Shell heartbeat denials (#281; log throttled, metric not) |
 
 ## Prometheus scrape config
 

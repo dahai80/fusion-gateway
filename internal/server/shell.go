@@ -15,7 +15,9 @@ import (
 
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "golang.org/x/crypto/bcrypt"
 )
@@ -638,6 +640,13 @@ func writeShellKeyResponse(w http.ResponseWriter, status int, code, message, mod
     }{Code: code, Message: message, ModuleID: moduleID, KeyID: keyID, RawKey: rawKey})
 }
 
+// heartbeatDenyLog throttles heartbeat-denial WARNs to 1 per 5m per
+// (id, reason) (#281): a module whose credential is permanently wrong used to
+// log one WARN every 15s forever (1944/day), burying real errors. Every
+// denial still increments fusion_gateway_shell_heartbeat_denied_total, so the
+// condition stays observable in /metrics while the log stays quiet.
+var heartbeatDenyLog = logthrottle.New(5 * time.Minute)
+
 // withShellHeartbeatAuth gates the heartbeat endpoint (#261 K1). Accepted
 // credentials, in order: master key, web_shell.admin_key (both constant-time
 // — back-compat for admin-plane scripts), or the module's gateway-issued
@@ -649,7 +658,10 @@ func (s *Server) withShellHeartbeatAuth(next http.HandlerFunc) http.HandlerFunc 
         id := r.PathValue("id")
         token := shellBearerToken(r)
         if token == "" {
-            slog.Warn("shell heartbeat denied: missing credential", "id", id)
+            if heartbeatDenyLog.Allow(id + "|missing") {
+                slog.Warn("shell heartbeat denied: missing credential (throttled to 1 per 5m)", "id", id)
+            }
+            observability.RecordShellHeartbeatDenied(id, "missing")
             shell.WriteEnvelope(w, http.StatusUnauthorized, "heartbeat_unauthorized", "missing Authorization Bearer credential", id, false)
             return
         }
@@ -668,7 +680,10 @@ func (s *Server) withShellHeartbeatAuth(next http.HandlerFunc) http.HandlerFunc 
                 return
             }
         }
-        slog.Warn("shell heartbeat denied: invalid credential", "id", id)
+        if heartbeatDenyLog.Allow(id + "|invalid") {
+            slog.Warn("shell heartbeat denied: invalid credential (throttled to 1 per 5m)", "id", id)
+        }
+        observability.RecordShellHeartbeatDenied(id, "invalid")
         shell.WriteEnvelope(w, http.StatusForbidden, "heartbeat_forbidden", "heartbeat requires the module service key, web_shell.admin_key, or the master key", id, false)
     }
 }

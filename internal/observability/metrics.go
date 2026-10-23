@@ -39,6 +39,11 @@ var (
     classifierLatency *prometheus.HistogramVec
     classifierSLOBreaches *prometheus.CounterVec
 
+    // #281: shell heartbeat denials. The WARN log line is throttled per
+    // (id, reason); this counter records EVERY denial so a permanently
+    // misconfigured module stays observable in /metrics.
+    shellHeartbeatDenied *prometheus.CounterVec
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -170,6 +175,11 @@ func init() {
         Help: "Intent classifier SLO breaches (latency > 15ms threshold)",
     }, []string{"source"})
 
+    shellHeartbeatDenied = prometheus.NewCounterVec(prometheus.CounterOpts{
+        Name: "fusion_gateway_shell_heartbeat_denied_total",
+        Help: "Shell heartbeat denials (log line throttled; counter is not)",
+    }, []string{"module_id", "reason"})
+
     // EI6: tokenizer_calibration_deviation removed — it was declared but never
     // had a write path, so /metrics exposed a permanent 0 that looked like a
     // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
@@ -185,6 +195,7 @@ func init() {
         hwMLXActiveMemoryBytes, hwMLXModelsLoaded, hwMLXInferenceQueueDepth,
         hwCollectionErrors, configVersion, inFlightRequests,
         classifierLatency, classifierSLOBreaches,
+        shellHeartbeatDenied,
     )
 }
 
@@ -226,6 +237,13 @@ func RecordRouteDecision(backend, reason string) {
 
 func RecordCircuitBreakerTrip(backend, reason string) {
     circuitBreakerTrips.WithLabelValues(backend, reason).Inc()
+}
+
+// RecordShellHeartbeatDenied counts every heartbeat denial (#281). The WARN
+// log is throttled per (id, reason) but this counter is not — a permanently
+// misconfigured module stays visible in /metrics.
+func RecordShellHeartbeatDenied(moduleID, reason string) {
+    shellHeartbeatDenied.WithLabelValues(moduleID, reason).Inc()
 }
 
 func UpdateCircuitBreakerState(backend string, state int) {
