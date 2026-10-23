@@ -2,6 +2,8 @@
 # deploy/helm/fusion-gateway/ chart dir and silently ignored the whole chart)
 /fusion-gateway
 /gateway
+/bin/
+/gateway.log
 
 # Local only
 CLAUDE.md

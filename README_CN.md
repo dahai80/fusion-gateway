@@ -240,6 +240,35 @@ web_shell:
 - **动态代理路由**(#232)— manifest 注册可携带 `upstream`(及 `api_key`),自注册模块无需改配置+重启即可经 `/shell/<id>/` 代理;静态 `web_shell.modules` 仍优先生效(override)。按路径例外(#256):manifest 在 ext 字段声明的端点(`searchProviders`/`notifications`,如引擎仅 web bridge 提供的 `/api/search/models` 与 `/api/notifications`)改走自注册 upstream,即使静态配置把模块钉在别处(引擎 vs bridge);其余路径保持静态 upstream,各 upstream 注入各自的凭证。`upstream` 必须为绝对 http(s) URL;entry 来源白名单与凭证注入语义完全一致。manifest 列表 API 永不外泄 `api_key`(服务端置零)。WebSocket 升级经代理双向透传(原始握手测试验证),与 SSE 并存。
 - **同源 SPA 托管**(#247)— `web_shell.spa_dir` 指向构建好的 shell SPA dist(fusion-web-shell `apps/shell` 构建产物),网关即在其根路径托管该 SPA,未命中路径回退 `index.html`(深链刷新不丢页面)。所有 API 命名空间优先(ServeMux 最长模式匹配:`/v1/*`、`/shell/`、`/admin/`、`/api/v1/shell/*`、`/health*` ...),单端口单进程同时承载 shell、模块代理与 API;cookie SSO 同源即通(#220)。SPA 无需鉴权即可加载(首屏即 shell 登录页),目录列表被抑制,`index.html` 发 `no-store`、`assets/*` 长缓存 immutable。`index.html` 回退仅服务于浏览器导航 — GET/HEAD 且 Accept 偏好 text/html(#249);其余未命中(API 形态方法、JSON/`*/*` fetch,如打错的 `/v1/*` 调用)一律 404 + 标准化 JSON 错误信封,不再以 200 HTML 静默掩盖真实 404、导致 `JSON.parse` 失败。留空(默认)不注册任何路由 — 开发态(vite dev server `:11430` 代理 `:11432`)照常;目录配置错误仅 WARN,网关保持原有 404 行为。
 
+### 按用户授权模块(#289)
+
+`web_shell.session.users[].modules` 就是"让用户只看到自己的模块"的机制 — 一个字段实现多租户隔离。不要与 `web_shell.modules` 混淆(那只是代理 upstream/凭证注册表,不是可见性控制)。
+
+- **config 种子键 `modules`,线上/API 键 `permissions`** — `web_shell.session.users` 用户条目写 `modules: [<manifest id>, ...]`;运行时同一列表以 `permissions` 读写(`GET /api/v1/shell/me` claims、`PATCH /api/v1/shell/users/{id}` 请求体)。
+- **语义** — 仅精确 manifest id,外加 `*` 通配(全部模块)。`admin` 角色无视该字段,隐含全部模块。无显式 modules 的普通 `user` 角色看到空侧边栏与"暂无被授权的模块"提示 — 设计上 fail-closed。
+- **三层强制** — 按权限过滤的 `GET /api/v1/shell/manifests`(#229,受限会话连其他模块 id 都无法枚举)、`/shell/<module>/` 代理层的模块级 RBAC 复检(#221,未授权模块 403 `module_forbidden`,不触达上游)、以及会话 claims 本身。
+- **运行时授权仅 API** — `PATCH /api/v1/shell/users/{id}` 携带 `{"permissions": ["fusion-charactervoice"]}`(需 admin 角色)。shell AdminUsers 界面尚未暴露该字段(fusion-web-shell#65 跟踪)。config 用户仅是种子数据:`shell_users.json` 一旦存在即为唯一事实源。
+
+实战示例 — 下游模块(fusion-charactervoice)把它的运营账号收窄到本模块 + 公共项:
+
+```yaml
+web_shell:
+  enabled: true
+  entry_origin_allowlist:
+    - "http://127.0.0.1:11432"
+  session:
+    users:
+      - username: admin
+        password_bcrypt: "$2a$..."
+        roles: [admin]                  # admin 角色隐含全部模块
+      - username: cv-operator
+        password_bcrypt: "$2a$..."
+        roles: [user]                   # 普通 user 角色
+        modules: [fusion-charactervoice]  # 仅此模块 + 公共项
+```
+
+登录后 `cv-operator` 的侧边栏收窄为公共入口 + fusion-charactervoice;其余模块代理层 403、manifest 列表不可见。
+
 ### 管理控制台作为 shell 远程模块(#216)
 
 内置管理控制台本身就是一个 shell 远程模块(PRD R-5),无需手动注册:

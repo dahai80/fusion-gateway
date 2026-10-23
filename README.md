@@ -270,6 +270,35 @@ web_shell:
 - **Dynamic proxy routing** (#232) — a manifest registration may carry `upstream` (+ `api_key`) so a self-registering module is proxied at `/shell/<id>/` without a config edit + restart; static `web_shell.modules` still wins as override. Per-path exception (#256): endpoints a manifest declares in its ext fields (`searchProviders`/`notifications` — e.g. an engine's web-bridge-only `/api/search/models` and `/api/notifications`) route to the self-registered upstream even when static config pins the module elsewhere (engine vs bridge), while everything else keeps the static upstream; each upstream's own credential is injected. `upstream` must be an absolute http(s) URL; the entry-origin allowlist and credential-injection semantics apply identically. The manifest list API never surfaces `api_key` (zeroed server-side). WebSocket upgrades pass through the proxy bidirectionally (verified by a raw-handshake test) alongside SSE.
 - **Same-origin SPA hosting** (#247) — `web_shell.spa_dir` points at the built shell SPA dist (fusion-web-shell `apps/shell` build output); the gateway then serves it at its root with an `index.html` fallback for deep links. Every API namespace keeps precedence (`/v1/*`, `/shell/`, `/admin/`, `/api/v1/shell/*`, `/health*`, ... — ServeMux longest-pattern wins), so one port/one process hosts the shell, its modules, and the API; cookie SSO works same-origin (#220). Served unauthenticated (the SPA's first screen is the shell login) with directory listings suppressed and `index.html` sent `no-store` while `assets/*` is immutable-cached. The index.html fallback is reserved for browser navigations — GET/HEAD whose Accept prefers text/html (#249); every other miss (API-shaped methods, JSON/`*/*` fetches, e.g. a typo'd `/v1/*` call) gets a 404 with the standardized JSON error envelope instead of a silent 200 HTML that breaks `JSON.parse`. Empty (default) registers nothing — the dev posture (vite dev server `:11430` proxying to `:11432`) stays for development; a misconfigured dir logs a WARN and the gateway keeps its previous 404 behavior.
 
+### Per-user module access (#289)
+
+`web_shell.session.users[].modules` is THE mechanism for granting a user only "their" modules — multi-tenant isolation in one field. Do not confuse it with `web_shell.modules` (that block is the proxy upstream/credential registry, NOT a visibility control).
+
+- **Config seed key `modules`, wire/API key `permissions`** — a user entry in `web_shell.session.users` takes `modules: [<manifest id>, ...]`; at runtime the same list is read/written as `permissions` (`GET /api/v1/shell/me` claims, `PATCH /api/v1/shell/users/{id}` body).
+- **Semantics** — exact manifest ids only, plus the `*` wildcard (all modules). The `admin` role implies all modules regardless of the field. A non-admin user with no explicit modules sees an empty sidebar with the correct "暂无被授权的模块" hint — fail-closed by design.
+- **Enforced in three layers** — permission-filtered `GET /api/v1/shell/manifests` (#229, a limited session cannot even enumerate other module ids), per-module RBAC re-check in the `/shell/<module>/` proxy (#221, unauthorized module gets 403 `module_forbidden` without an upstream dial), and the session claims themselves.
+- **Assignment at runtime is API-only** — `PATCH /api/v1/shell/users/{id}` with `{"permissions": ["fusion-charactervoice"]}` (admin role required). The shell AdminUsers UI does not yet surface the field (tracked in fusion-web-shell#65). Config users are seed data: once `shell_users.json` exists it is the source of truth.
+
+Worked example — a downstream module (fusion-charactervoice) restricts its operator to its own module plus the public items:
+
+```yaml
+web_shell:
+  enabled: true
+  entry_origin_allowlist:
+    - "http://127.0.0.1:11432"
+  session:
+    users:
+      - username: admin
+        password_bcrypt: "$2a$..."
+        roles: [admin]                  # admin role implies all modules
+      - username: cv-operator
+        password_bcrypt: "$2a$..."
+        roles: [user]                   # plain user role
+        modules: [fusion-charactervoice]  # ONLY this module + public items
+```
+
+After login, `cv-operator`'s sidebar collapses to public entries + fusion-charactervoice; every other module is 403 at the proxy and invisible in the manifest list.
+
 ### Admin console as a shell remote module (#216)
 
 The built-in admin console is itself a shell remote module (PRD R-5) — no manual registration:

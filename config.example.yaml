@@ -498,6 +498,28 @@ web_shell:
     admin_key: ""                         # e.g. the "shell-admin" auth key
     entry_origin_allowlist:
         - "http://127.0.0.1:11432"
+    # Session accounts. Empty users = a bootstrap admin with a random
+    # password (logged once, must_change_password). Passwords: bcrypt
+    # preferred (password_bcrypt); plaintext password works but WARNs.
+    # Per-user module access (#289): `modules` lists the manifest ids this
+    # user may see — THE visibility control for multi-tenant isolation.
+    # Exact ids, plus the "*" wildcard; the admin role implies all modules;
+    # a plain user role with no modules sees an empty sidebar
+    # (fail-closed). At runtime the same list is read/written as
+    # `permissions` (PATCH /api/v1/shell/users/{id}, /api/v1/shell/me).
+    # NOTE: web_shell.modules below is the proxy upstream/credential
+    # registry — NOT a visibility control.
+    # session:
+    #     ttl: 12h
+    #     secret: ""                      # empty = derived from auth.master_key
+    #     users:
+    #         - username: admin
+    #           password_bcrypt: "$2a$..."
+    #           roles: [admin]            # admin role implies all modules
+    #         - username: cv-operator
+    #           password_bcrypt: "$2a$..."
+    #           roles: [user]             # plain user role
+    #           modules: [fusion-charactervoice]  # ONLY this module + public items
     # #247: host the union-web shell SPA dist at the gateway root ("/", with
     # index.html fallback for deep links) — one port, one process, same-origin
     # cookie SSO. Point at the built fusion-web-shell apps/shell dist. Empty
