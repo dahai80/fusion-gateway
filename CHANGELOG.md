@@ -9,6 +9,33 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (log-flood + stale-key observability hardening, 2026-10-23) — #281/#282/#283
+
+- **Shell heartbeat-denial WARN flood throttled (#281).** A module sending a
+  permanently wrong credential logged one `shell heartbeat denied` WARN every
+  15s forever (1944/day in the current log), burying real errors. Denial
+  WARNs are now throttled to 1 per 5m per `(id, reason)` via the new
+  `internal/logthrottle` helper, while the new counter
+  `fusion_gateway_shell_heartbeat_denied_total{module_id,reason}` counts
+  every denial so a misconfigured module stays observable in `/metrics`.
+  Wire behavior (status codes, envelopes) unchanged.
+- **Invalid-key 401 surfaces the key hash prefix (#282).** A client stuck on
+  a rotated/stale key was only identifiable by grepping gateway logs. The
+  401 body now carries `key_hash_prefix` (8 hex chars of SHA-256 —
+  identifies the key family, never the key) so client-side tooling can
+  self-diagnose, the `invalid api key` WARN gains the same attribute, and
+  `fusion_gateway_auth_invalid_key_total{hash_prefix}` makes a recurring
+  stale key spottable in `/metrics`. Missing-key 401 unchanged.
+- **OTel export-failure log flood throttled (#283).** With
+  `otel_enabled: true` and no OTLP collector on `localhost:4317`, the SDK
+  logged one `traces export: exporter export timeout` error per batch (~1
+  per 30s, 194/day). `InitTracing` now installs a throttled
+  `otel.ErrorHandler`: first occurrence of each distinct error logs
+  immediately, then at most 1 per 5m, while
+  `fusion_gateway_otel_errors_total` counts every occurrence. Tracing
+  itself unchanged — exports keep retrying and recover once a collector
+  appears.
+
 ### Added (shell E6 admin surfaces, 2026-10-23) — #275
 
 - **Session-gated E6 admin surfaces: adapters vault / connectors / config
