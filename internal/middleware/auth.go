@@ -4,6 +4,7 @@ import (
     "crypto/sha256"
     "crypto/subtle"
     "encoding/hex"
+    "fmt"
     "log/slog"
     "net/http"
     "strings"
@@ -11,6 +12,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
@@ -90,8 +92,15 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
             }
 
             if matchedKey == nil {
-                slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr)
-                http.Error(w, `{"error":{"message":"Invalid API key","type":"auth_error"}}`, http.StatusUnauthorized)
+                // #282: surface the key's hash prefix in the 401 body and a
+                // metric so a client stuck on a rotated/stale key can
+                // self-diagnose without log access. 8 hex chars is not a
+                // secret: it identifies the key family, never the key.
+                sum := sha256.Sum256([]byte(key))
+                prefix := hex.EncodeToString(sum[:])[:8]
+                slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr, "hash_prefix", prefix)
+                observability.RecordAuthInvalidKey(prefix)
+                http.Error(w, fmt.Sprintf(`{"error":{"message":"Invalid API key","type":"auth_error","key_hash_prefix":%q}}`, prefix), http.StatusUnauthorized)
                 return
             }
 

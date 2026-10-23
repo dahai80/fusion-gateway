@@ -44,6 +44,7 @@ behind a network policy.
 | `fusion_gateway_classifier_latency_seconds` | histogram | source | Intent classifier latency |
 | `fusion_gateway_classifier_slo_breach_total` | counter | source | Classifier SLO (>15ms) breaches |
 | `fusion_gateway_shell_heartbeat_denied_total` | counter | module_id, reason | Shell heartbeat denials (#281; log throttled, metric not) |
+| `fusion_gateway_auth_invalid_key_total` | counter | hash_prefix | Invalid API key rejections (#282; prefix identifies key family, not the key) |
 
 ## Prometheus scrape config
 
