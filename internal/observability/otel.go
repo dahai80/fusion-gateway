@@ -118,6 +118,12 @@ func InitTracing(ctx context.Context, cfg OTelConfig) (func(context.Context) err
     )
 
     otel.SetTracerProvider(tp)
+    // #283: route the SDK's per-batch internal errors (e.g. "traces export:
+    // exporter export timeout" when no collector listens on the endpoint —
+    // ~1 log line per 30s, 194/day of pure noise) through the throttled
+    // handler: first occurrence logs immediately, then 1 per 5m per distinct
+    // error, with fusion_gateway_otel_errors_total counting every one.
+    otel.SetErrorHandler(throttledOtelErrorHandler{})
     otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
         propagation.TraceContext{},
         propagation.Baggage{},
