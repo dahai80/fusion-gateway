@@ -44,6 +44,11 @@ var (
     // misconfigured module stays observable in /metrics.
     shellHeartbeatDenied *prometheus.CounterVec
 
+    // #282: invalid-key rejections by hash prefix. A client stuck on a
+    // rotated/stale key shows up as a recurring label value — spot it in
+    // /metrics without log grepping.
+    authInvalidKey *prometheus.CounterVec
+
     // #283: OTel internal errors (mostly failed export batches when no
     // collector listens). The log line is throttled; this counter is not.
     otelErrors prometheus.Counter
@@ -184,6 +189,11 @@ func init() {
         Help: "Shell heartbeat denials (log line throttled; counter is not)",
     }, []string{"module_id", "reason"})
 
+    authInvalidKey = prometheus.NewCounterVec(prometheus.CounterOpts{
+        Name: "fusion_gateway_auth_invalid_key_total",
+        Help: "Invalid API key rejections by key hash prefix (8 hex chars, non-secret)",
+    }, []string{"hash_prefix"})
+
     otelErrors = prometheus.NewCounter(prometheus.CounterOpts{
         Name: "fusion_gateway_otel_errors_total",
         Help: "OTel internal errors (export failures etc.; log throttled, counter not)",
@@ -205,6 +215,7 @@ func init() {
         hwCollectionErrors, configVersion, inFlightRequests,
         classifierLatency, classifierSLOBreaches,
         shellHeartbeatDenied,
+        authInvalidKey,
         otelErrors,
     )
 }
@@ -254,6 +265,13 @@ func RecordCircuitBreakerTrip(backend, reason string) {
 // misconfigured module stays visible in /metrics.
 func RecordShellHeartbeatDenied(moduleID, reason string) {
     shellHeartbeatDenied.WithLabelValues(moduleID, reason).Inc()
+}
+
+// RecordAuthInvalidKey counts an invalid-key rejection by hash prefix (#282).
+// The prefix (8 hex chars) identifies the key family, never the key itself —
+// a recurring label value pinpoints a client stuck on a rotated key.
+func RecordAuthInvalidKey(hashPrefix string) {
+    authInvalidKey.WithLabelValues(hashPrefix).Inc()
 }
 
 // RecordOtelError counts an OTel internal error (mostly failed export
