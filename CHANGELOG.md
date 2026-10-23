@@ -9,6 +9,23 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Documented (per-user module access workflow, 2026-10-23) — #289
+
+- **`web_shell.session.users[].modules` documented as THE module-visibility
+  mechanism.** Downstream integrators were source-diving to discover that the
+  per-user module allowlist (config seed key `modules`, runtime/API key
+  `permissions`) is what grants a user only "their" modules, and that
+  `web_shell.modules` is just the proxy upstream/credential registry — not a
+  visibility control. README (EN/CN) gained a "Per-user module access"
+  section covering the semantics (exact manifest ids, `*` wildcard, admin
+  role implies all, fail-closed empty sidebar for plain users), the three
+  enforcement layers (permission-filtered manifest list #229, proxy 403
+  `module_forbidden` #221, session claims), the runtime assignment API
+  (`PATCH /api/v1/shell/users/{id}` with `permissions`), and a worked
+  multi-tenant example (fusion-charactervoice operator). config.example.yaml
+  gained the matching commented `session.users` example. No code change —
+  .gitignore also now covers local `bin/` and `gateway.log` artifacts.
+
 ### Fixed (heartbeat-carried manifest refresh, 2026-10-23) — #284
 
 - **Heartbeat body now converges stale shell manifest ext fields.** Modules
