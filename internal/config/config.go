@@ -1035,6 +1035,18 @@ type ShellManifest struct {
     // JSON wire key is camelCase like the other ext fields (searchProviders);
     // config.yaml static entries use snake_case (permissions_policy).
     PermissionsPolicy []string `json:"permissionsPolicy,omitempty" mapstructure:"permissions_policy"`
+    // Schema v2 grouping fields (#297): display-only aggregation for the
+    // shell host's two-level menu. Group is a stable group id shared by
+    // sibling modules (e.g. "fusion-office"); empty = ungrouped, renders
+    // top-level as today (backward compatible). GroupTitle/GroupTitleEn is
+    // the group's display name — siblings must agree, first registered
+    // wins, mismatch logs a warning. Sort is an ordering hint within a
+    // group (stable sort; ties by id). No group-level auth/RBAC:
+    // permissions stay per-module.
+    Group        string `json:"group,omitempty"         mapstructure:"group"`
+    GroupTitle   string `json:"group_title,omitempty"   mapstructure:"group_title"`
+    GroupTitleEn string `json:"group_title_en,omitempty" mapstructure:"group_title_en"`
+    Sort         int    `json:"sort,omitempty"          mapstructure:"sort"`
 }
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards

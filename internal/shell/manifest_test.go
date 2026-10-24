@@ -120,11 +120,49 @@ func TestRegistry_UpsertValidation(t *testing.T) {
         {"missing devices", func() config.ShellManifest { m := validManifest("fusion-x"); m.Devices = nil; return m }()},
         {"bad category", func() config.ShellManifest { m := validManifest("fusion-x"); m.Category = "junk"; return m }()},
         {"bad permissions_policy feature", func() config.ShellManifest { m := validManifest("fusion-x"); m.PermissionsPolicy = []string{"geolocation"}; return m }()},
+        {"bad group id uppercase", func() config.ShellManifest { m := validManifest("fusion-x"); m.Group = "FusionOffice"; return m }()},
+        {"bad group id too long", func() config.ShellManifest { m := validManifest("fusion-x"); m.Group = strings.Repeat("a", 65); return m }()},
+        {"group title too long", func() config.ShellManifest { m := validManifest("fusion-x"); m.Group = "fusion-office"; m.GroupTitle = strings.Repeat("标", 129); return m }()},
     }
     for _, tc := range cases {
         if err := r.Upsert(tc.m); err == nil {
             t.Errorf("%s: want error, got nil", tc.name)
         }
+    }
+}
+
+func TestRegistry_GroupFieldsRoundTrip(t *testing.T) {
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, time.Second)
+    m := validManifest("fusion-doc")
+    m.Group = "fusion-office"
+    m.GroupTitle = "Fusion Office"
+    m.GroupTitleEn = "Fusion Office"
+    m.Sort = 3
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("grouped manifest rejected: %v", err)
+    }
+    plain := validManifest("fusion-solo")
+    if err := r.Upsert(plain); err != nil {
+        t.Fatalf("ungrouped manifest rejected: %v", err)
+    }
+    var grouped, ungrouped *ManifestView
+    for i := range r.List() {
+        v := r.List()[i]
+        switch v.ID {
+        case "fusion-doc":
+            grouped = &v
+        case "fusion-solo":
+            ungrouped = &v
+        }
+    }
+    if grouped == nil || ungrouped == nil {
+        t.Fatal("expected both manifests listed")
+    }
+    if grouped.Group != "fusion-office" || grouped.GroupTitle != "Fusion Office" || grouped.GroupTitleEn != "Fusion Office" || grouped.Sort != 3 {
+        t.Fatalf("group fields not passed through verbatim: %+v", grouped.ShellManifest)
+    }
+    if ungrouped.Group != "" || ungrouped.GroupTitle != "" || ungrouped.GroupTitleEn != "" || ungrouped.Sort != 0 {
+        t.Fatalf("ungrouped manifest should carry no group fields: %+v", ungrouped.ShellManifest)
     }
 }
 

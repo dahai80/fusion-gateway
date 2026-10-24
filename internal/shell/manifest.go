@@ -8,11 +8,13 @@ import (
     "net/url"
     "os"
     "path/filepath"
+    "regexp"
     "strings"
     "sync"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
 )
 
 // Status of a manifest entry as surfaced by the list API. online = a dynamic
@@ -155,6 +157,7 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         e.serviceKeyRevoked = prev.serviceKeyRevoked
     }
     r.dynamic[m.ID] = e
+    r.warnGroupTitleMismatchLocked(m)
     if exists {
         slog.Info("shell manifest re-registered (idempotent upsert)", "id", m.ID, "entry", m.Entry)
     } else {
@@ -168,6 +171,37 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
     }
     return nil
+}
+
+// groupTitleWarn throttles group-title mismatch warnings (#297): sibling
+// modules re-register on every heartbeat (15s), an unthrottled WARN would
+// flood the log the way the #281 log-flood sweep cleaned up.
+var groupTitleWarn = logthrottle.New(5 * time.Minute)
+
+// warnGroupTitleMismatchLocked enforces the group-title agreement contract
+// (#297): siblings sharing a group id must agree on the display title —
+// first registered wins, a mismatch is a warning, never a rejection (the
+// field is display-only). Caller must hold r.mu (write).
+func (r *Registry) warnGroupTitleMismatchLocked(m config.ShellManifest) {
+    if m.Group == "" || m.GroupTitle == "" {
+        return
+    }
+    check := func(other config.ShellManifest) {
+        if other.ID == m.ID || other.Group != m.Group {
+            return
+        }
+        if other.GroupTitle != "" && other.GroupTitle != m.GroupTitle && groupTitleWarn.Allow(m.Group) {
+            slog.Warn("shell manifest group_title mismatch: first registered wins",
+                "group", m.Group, "id", m.ID, "group_title", m.GroupTitle,
+                "conflicting_id", other.ID, "registered_group_title", other.GroupTitle)
+        }
+    }
+    for _, other := range r.dynamic {
+        check(other.manifest)
+    }
+    for _, other := range r.staticFallback {
+        check(other)
+    }
 }
 
 // SetPersistence points the registry at a store file (must be called before
@@ -627,7 +661,33 @@ func validateManifest(m config.ShellManifest) error {
             return fmt.Errorf("manifest %q: permissions_policy feature %q must be microphone|camera", m.ID, f)
         }
     }
+    if err := validateManifestGroup(m); err != nil {
+        return err
+    }
     return validateManifestExt(m)
+}
+
+// groupIDPattern bounds the schema v2 group id (#297): stable lowercase
+// slug shared by sibling modules (e.g. "fusion-office").
+var groupIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+// validateManifestGroup gates the schema v2 grouping fields (#297). Group is
+// display-only aggregation — no group-level auth/RBAC rides on it, but the
+// id shape must stay stable so the shell host can key its menu groups.
+func validateManifestGroup(m config.ShellManifest) error {
+    if m.Group == "" {
+        return nil
+    }
+    if !groupIDPattern.MatchString(m.Group) {
+        return fmt.Errorf("manifest %q: group %q must match ^[a-z0-9-]{1,64}$", m.ID, m.Group)
+    }
+    if len([]rune(m.GroupTitle)) > 128 {
+        return fmt.Errorf("manifest %q: group_title exceeds 128 characters", m.ID)
+    }
+    if len([]rune(m.GroupTitleEn)) > 128 {
+        return fmt.Errorf("manifest %q: group_title_en exceeds 128 characters", m.ID)
+    }
+    return nil
 }
 
 // maxShellExtEntries bounds each schema v1 ext array (#250) so a module
