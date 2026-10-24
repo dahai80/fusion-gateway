@@ -533,6 +533,9 @@ web_shell:
     # Endpoints must be gateway-absolute /... paths; each field caps at 32
     # entries. Dynamic registrations carry the same fields (JSON wire keys:
     # searchProviders/pages/notifications).
+    # shell#66: permissions_policy lists the iframe Permissions-Policy features
+    # the module needs delegated ("microphone", "camera" — allowlist-enforced
+    # at registration and heartbeat refresh). Wire key: permissionsPolicy.
     manifests: []
     #  - id: fusion-cowork
     #    title: Cowork

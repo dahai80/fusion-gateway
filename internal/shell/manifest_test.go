@@ -119,11 +119,58 @@ func TestRegistry_UpsertValidation(t *testing.T) {
         {"missing entry", func() config.ShellManifest { m := validManifest("fusion-x"); m.Entry = ""; return m }()},
         {"missing devices", func() config.ShellManifest { m := validManifest("fusion-x"); m.Devices = nil; return m }()},
         {"bad category", func() config.ShellManifest { m := validManifest("fusion-x"); m.Category = "junk"; return m }()},
+        {"bad permissions_policy feature", func() config.ShellManifest { m := validManifest("fusion-x"); m.PermissionsPolicy = []string{"geolocation"}; return m }()},
     }
     for _, tc := range cases {
         if err := r.Upsert(tc.m); err == nil {
             t.Errorf("%s: want error, got nil", tc.name)
         }
+    }
+}
+
+func TestRegistry_PermissionsPolicyAllowed(t *testing.T) {
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, time.Second)
+    m := validManifest("fusion-voice")
+    m.PermissionsPolicy = []string{"microphone", "camera"}
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("allowed features rejected: %v", err)
+    }
+    views := r.List()
+    if len(views) != 1 {
+        t.Fatalf("expected 1 view, got %d", len(views))
+    }
+}
+
+func TestRegistry_CredentialFor(t *testing.T) {
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, time.Second)
+    if _, ok := r.CredentialFor("fusion-none"); ok {
+        t.Fatal("unknown id should report ok=false")
+    }
+    m := validManifest("fusion-agent-studio")
+    m.Upstream = "http://127.0.0.1:8080"
+    m.APIKey = "module-supplied-key"
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert failed: %v", err)
+    }
+    key, ok := r.CredentialFor("fusion-agent-studio")
+    if !ok || key != "module-supplied-key" {
+        t.Fatalf("want module-supplied-key, got %q ok=%v", key, ok)
+    }
+    // Issuance keeps CredentialFor in sync with the fm- plaintext (#294): the
+    // proxy reads this after a rotation.
+    _, plaintext, issued, err := r.EnsureServiceKey("fusion-agent-studio")
+    if err != nil || !issued {
+        t.Fatalf("issue failed: err=%v issued=%v", err, issued)
+    }
+    key, ok = r.CredentialFor("fusion-agent-studio")
+    if !ok || key != plaintext {
+        t.Fatalf("want issued fm- key after EnsureServiceKey, got %q ok=%v", key, ok)
+    }
+    if _, plaintext2, issued2, _ := r.EnsureServiceKey("fusion-agent-studio"); issued2 || plaintext2 != "" {
+        t.Fatalf("re-issuance must retain the key (issued=%v)", issued2)
+    }
+    if key2, _ := r.CredentialFor("fusion-agent-studio"); key2 != plaintext {
+        t.Fatalf("credential drifted after idempotent re-registration: %q vs %q", key2, plaintext)
     }
 }
 

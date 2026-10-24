@@ -1027,6 +1027,14 @@ type ShellManifest struct {
     // the module renders on the shell host's Home landing. Absent = no
     // contribution. Same passthrough contract as the other ext fields.
     Home *ShellHome `json:"home,omitempty" mapstructure:"home"`
+    // PermissionsPolicy is the module-declared Permissions-Policy feature list
+    // (shell#66): features the module's iframe needs delegated (e.g.
+    // "microphone", "camera"). The shell renders them as the iframe `allow`
+    // attribute, scoped to the frame's own origin. Validated against the
+    // feature allowlist at registration; absent = no delegation (default).
+    // JSON wire key is camelCase like the other ext fields (searchProviders);
+    // config.yaml static entries use snake_case (permissions_policy).
+    PermissionsPolicy []string `json:"permissionsPolicy,omitempty" mapstructure:"permissions_policy"`
 }
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards

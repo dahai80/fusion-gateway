@@ -65,16 +65,35 @@ func (s *Server) setupShell() {
         }
     }
     s.shellProxy = shell.NewProxy(func(moduleID string) (string, string) {
-        // #232: static config wins (override); a dynamic manifest carrying
-        // its own upstream is the fallback so self-registering modules are
-        // proxied without a config edit + restart. Both paths keep the same
-        // entry-origin allowlist (checked at registration) and api_key
-        // injection semantics.
+        // #232: static config wins the UPSTREAM (override); a dynamic
+        // manifest carrying its own upstream is the fallback so
+        // self-registering modules are proxied without a config edit +
+        // restart. Both paths keep the same entry-origin allowlist (checked
+        // at registration) and api_key injection semantics.
+        //
+        // #294: the CREDENTIAL prefers the dynamic registration when it
+        // points at the same upstream as the static entry — the fm- key the
+        // gateway issued (and the module validates) is kept fresh on the
+        // registry entry across rotations, while a hardcoded static api_key
+        // goes stale and produces module-side 401 API_KEY_INVALID. When the
+        // upstreams differ (#256 engine-vs-bridge split) the static api_key
+        // stays — it authenticates the static upstream, not the module's
+        // self-registered one.
+        dynUp, dynKey, dynOK := s.shellRegistry.UpstreamFor(moduleID)
         if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok && m.Upstream != "" {
+            if dynOK && dynKey != "" && sameShellUpstream(dynUp, m.Upstream) {
+                if m.APIKey != "" && m.APIKey != dynKey {
+                    if shellCredentialDivergeLog.Allow(moduleID) {
+                        slog.Warn("shell proxy: static api_key diverges from dynamic registration credential; dynamic wins (remove the stale static entry or leave it as fallback)",
+                            "module", moduleID)
+                    }
+                }
+                return m.Upstream, dynKey
+            }
             return m.Upstream, m.APIKey
         }
-        if up, key, ok := s.shellRegistry.UpstreamFor(moduleID); ok {
-            return up, key
+        if dynOK {
+            return dynUp, dynKey
         }
         return "", ""
     })
@@ -648,6 +667,19 @@ func writeShellKeyResponse(w http.ResponseWriter, status int, code, message, mod
 // denial still increments fusion_gateway_shell_heartbeat_denied_total, so the
 // condition stays observable in /metrics while the log stays quiet.
 var heartbeatDenyLog = logthrottle.New(5 * time.Minute)
+
+// shellCredentialDivergeLog throttles the #294 divergence WARN (1 per 5m per
+// module): a stale static api_key next to a live dynamic registration is a
+// permanent condition until the operator cleans the config — an unthrottled
+// log would flood at request rate.
+var shellCredentialDivergeLog = logthrottle.New(5 * time.Minute)
+
+// sameShellUpstream compares two module upstream URLs ignoring a trailing
+// slash so the #294 dynamic-credential preference is not defeated by
+// cosmetic config differences.
+func sameShellUpstream(a, b string) bool {
+    return strings.TrimSuffix(a, "/") == strings.TrimSuffix(b, "/")
+}
 
 // withShellHeartbeatAuth gates the heartbeat endpoint (#261 K1). Accepted
 // credentials, in order: master key, web_shell.admin_key (both constant-time
