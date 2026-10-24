@@ -464,6 +464,22 @@ func (r *Registry) UpstreamFor(id string) (string, string, bool) {
     return e.manifest.Upstream, e.manifest.APIKey, true
 }
 
+// CredentialFor returns the dynamic registration's current upstream
+// credential (#294) — the module-supplied api_key or the gateway-issued fm-
+// key (EnsureServiceKey/RotateServiceKey keep manifest.APIKey in sync with
+// what the module validates). ok=false when no dynamic registration exists;
+// the caller falls back to the static web_shell.modules[].api_key, which can
+// go stale across rotations.
+func (r *Registry) CredentialFor(id string) (string, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    e, ok := r.dynamic[id]
+    if !ok {
+        return "", false
+    }
+    return e.manifest.APIKey, true
+}
+
 // ExtRouteFor reports the dynamic registration's own upstream + credential
 // for one FULL gateway request path (#256). The static config may pin a
 // module to a different upstream than the one the module self-registered
@@ -603,6 +619,13 @@ func validateManifest(m config.ShellManifest) error {
     case "platform", "domain", "infra", "dev":
     default:
         return fmt.Errorf("manifest %q: category %q must be platform|domain|infra|dev", m.ID, m.Category)
+    }
+    for _, f := range m.PermissionsPolicy {
+        switch f {
+        case "microphone", "camera":
+        default:
+            return fmt.Errorf("manifest %q: permissions_policy feature %q must be microphone|camera", m.ID, f)
+        }
     }
     return validateManifestExt(m)
 }

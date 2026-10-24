@@ -6,6 +6,7 @@ import (
     "net/http"
     "net/http/httptest"
     "strings"
+    "sync/atomic"
     "testing"
     "time"
 
@@ -249,6 +250,89 @@ func TestShellManifestList_PermissionFiltered(t *testing.T) {
     _ = json.Unmarshal(w.Body.Bytes(), &adminView)
     if len(adminView) != 2 {
         t.Fatalf("admin manifest list = %+v, want all 2", adminView)
+    }
+}
+
+func TestShellProxy_DynamicCredentialWinsOverStaleStatic(t *testing.T) {
+    var gotAuth atomic.Value
+    up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotAuth.Store(r.Header.Get("Authorization"))
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer up.Close()
+
+    s := newShellTestServer(t, false)
+    // Static entry pins the module upstream with a STALE credential — the
+    // #294 incident shape (operator hand-copied an old fm- key).
+    s.cfg.Config.Shell.Modules["fusion-agent-studio"] = config.ShellModuleConfig{
+        Upstream: up.URL,
+        APIKey:   "stale-static-key",
+    }
+    s.setupShell()
+    // Dynamic self-registration at the SAME upstream carrying the module's
+    // CURRENT credential.
+    dyn := config.ShellManifest{
+        ID: "fusion-agent-studio", Title: "Agent Studio", Path: "/as",
+        Entry: "/shell/fusion-agent-studio/", Devices: []string{"desktop"},
+        Category: "platform", Upstream: up.URL, APIKey: "current-fm-key",
+    }
+    if err := s.shellRegistry.Upsert(dyn); err != nil {
+        t.Fatalf("dynamic upsert: %v", err)
+    }
+    _, resp := loginShell(t, s, "admin", "s3cret")
+    token := resp["token"].(string)
+
+    req := httptest.NewRequest(http.MethodGet, "/shell/fusion-agent-studio/api/ping", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
+    w := httptest.NewRecorder()
+    s.withShellSession(s.shellProxy.ServeHTTP)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("proxy code = %d body=%s", w.Code, w.Body.String())
+    }
+    if got := gotAuth.Load(); got != "Bearer current-fm-key" {
+        t.Fatalf("upstream Authorization = %v, want the dynamic registration credential", got)
+    }
+}
+
+func TestShellProxy_StaticCredentialKeptForDifferentUpstream(t *testing.T) {
+    var gotAuth atomic.Value
+    up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotAuth.Store(r.Header.Get("Authorization"))
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer up.Close()
+
+    s := newShellTestServer(t, false)
+    // #256 engine-vs-bridge shape: the static entry is a DIFFERENT service
+    // (engine) with its own credential; the dynamic registration is the
+    // module's bridge. Non-ext traffic keeps the static upstream AND the
+    // static credential — the bridge's fm- key must not be sent to the
+    // engine.
+    s.cfg.Config.Shell.Modules["fusion-mlx"] = config.ShellModuleConfig{
+        Upstream: up.URL,
+        APIKey:   "engine-credential",
+    }
+    s.setupShell()
+    dyn := config.ShellManifest{
+        ID: "fusion-mlx", Title: "MLX", Path: "/mlx",
+        Entry: "/shell/fusion-mlx/", Devices: []string{"desktop"},
+        Category: "platform", Upstream: "http://127.0.0.1:9", APIKey: "bridge-fm-key",
+    }
+    if err := s.shellRegistry.Upsert(dyn); err != nil {
+        t.Fatalf("dynamic upsert: %v", err)
+    }
+    _, resp := loginShell(t, s, "admin", "s3cret")
+    token := resp["token"].(string)
+
+    req := httptest.NewRequest(http.MethodGet, "/shell/fusion-mlx/v1/models", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
+    w := httptest.NewRecorder()
+    s.withShellSession(s.shellProxy.ServeHTTP)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("proxy code = %d body=%s", w.Code, w.Body.String())
+    }
+    if got := gotAuth.Load(); got != "Bearer engine-credential" {
+        t.Fatalf("upstream Authorization = %v, want the static static credential", got)
     }
 }
 
