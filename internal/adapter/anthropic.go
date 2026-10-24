@@ -697,14 +697,7 @@ func AnthropicToOpenAIChatRequest(antReq *AnthropicRequest) *ChatRequest {
     if len(antReq.StopSequences) > 0 { chatReq.Stop = antReq.StopSequences }
 
     if antReq.System != nil {
-        sysText := ""
-        switch v := antReq.System.(type) {
-        case string:
-            sysText = v
-        default:
-            b, _ := json.Marshal(v)
-            sysText = string(b)
-        }
+        sysText := systemToString(antReq.System)
         if sysText != "" {
             chatReq.Messages = append(chatReq.Messages, ChatMessage{Role: "system", Content: sysText})
         }
@@ -848,6 +841,41 @@ func contentToString(content interface{}) string {
         return strings.Join(parts, "\n")
     default:
         b, _ := json.Marshal(content)
+        return string(b)
+    }
+}
+
+// billingHeaderPrefix mirrors fusion-mlx's _BILLING_HEADER_PREFIX
+// (fusion_mlx/api/anthropic_utils.py): Claude Code ships a per-request
+// x-anthropic-billing-header system block with a random cch= value. Keeping it
+// in the flattened prompt would both pollute the model input and defeat
+// fusion-mlx's prefix-cache stabilization, so such blocks are dropped (#293).
+const billingHeaderPrefix = "x-anthropic-billing-header:"
+
+// systemToString flattens the Anthropic system field (#293). Claude Code always
+// sends system as an array of content blocks; the previous code JSON-marshaled
+// the array wholesale, so the block wrappers, escaped newlines, and the random
+// billing-header block ended up as literal prompt text. Mirrors the native
+// Anthropic route's flattening: keep type=="text" blocks, join with blank
+// lines, drop blocks starting with x-anthropic-billing-header:.
+func systemToString(system interface{}) string {
+    switch v := system.(type) {
+    case string:
+        return v
+    case []interface{}:
+        var parts []string
+        for _, item := range v {
+            m, ok := item.(map[string]interface{})
+            if !ok { continue }
+            if m["type"] != "text" { continue }
+            text, ok := m["text"].(string)
+            if !ok { continue }
+            if strings.HasPrefix(text, billingHeaderPrefix) { continue }
+            parts = append(parts, text)
+        }
+        return strings.Join(parts, "\n\n")
+    default:
+        b, _ := json.Marshal(system)
         return string(b)
     }
 }

@@ -3,6 +3,7 @@ package adapter
 import (
     "encoding/json"
     "log/slog"
+    "strings"
     "testing"
 )
 
@@ -416,6 +417,65 @@ func TestAnthropicToOpenAIChatRequest_NonStringSystem(t *testing.T) {
     }
     if chatReq.Messages[0].Role != "system" {
         t.Errorf("expected system role, got %s", chatReq.Messages[0].Role)
+    }
+}
+
+func TestAnthropicToOpenAIChatRequest_SystemArrayFlattened(t *testing.T) {
+    slog.Info("test AnthropicToOpenAIChatRequest_SystemArrayFlattened")
+    // Claude Code shape: system as an array of content blocks, first block
+    // the per-request billing header (random cch= value), second the real
+    // system text (#293).
+    antReq := &AnthropicRequest{
+        Model:     "claude-3",
+        MaxTokens: 1024,
+        System: []interface{}{
+            map[string]interface{}{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.309.5d; cch=abc123"},
+            map[string]interface{}{"type": "text", "text": "You are a helpful assistant."},
+            map[string]interface{}{"type": "text", "text": "Be concise."},
+        },
+        Messages: []AnthropicMessage{
+            {Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hello"}}},
+        },
+    }
+    chatReq := AnthropicToOpenAIChatRequest(antReq)
+    if len(chatReq.Messages) < 2 {
+        t.Fatalf("expected at least 2 messages, got %d", len(chatReq.Messages))
+    }
+    sys := chatReq.Messages[0]
+    if sys.Role != "system" {
+        t.Fatalf("expected system role, got %s", sys.Role)
+    }
+    sysText, _ := sys.Content.(string)
+    if strings.Contains(sysText, "x-anthropic-billing-header") {
+        t.Fatalf("billing-header block leaked into system text: %q", sysText)
+    }
+    if strings.Contains(sysText, `"type"`) || strings.Contains(sysText, `{"`) {
+        t.Fatalf("system text still carries JSON scaffolding: %q", sysText)
+    }
+    want := "You are a helpful assistant.\n\nBe concise."
+    if sysText != want {
+        t.Fatalf("expected %q, got %q", want, sys.Content)
+    }
+}
+
+func TestAnthropicToOpenAIChatRequest_SystemArrayBillingOnly(t *testing.T) {
+    slog.Info("test AnthropicToOpenAIChatRequest_SystemArrayBillingOnly")
+    // Every block stripped = no system message at all, not an empty one.
+    antReq := &AnthropicRequest{
+        Model:     "claude-3",
+        MaxTokens: 1024,
+        System: []interface{}{
+            map[string]interface{}{"type": "text", "text": "x-anthropic-billing-header: cch=xyz"},
+        },
+        Messages: []AnthropicMessage{
+            {Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "hello"}}},
+        },
+    }
+    chatReq := AnthropicToOpenAIChatRequest(antReq)
+    for _, m := range chatReq.Messages {
+        if m.Role == "system" {
+            t.Fatalf("expected no system message after stripping, got %q", m.Content)
+        }
     }
 }
 
