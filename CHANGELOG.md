@@ -9,6 +9,35 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (manifest schema v2 grouping, 2026-10-24) — #297
+
+- **Shell manifests gain optional `group` / `group_title` / `group_title_en` /
+  `sort` fields** — display-only aggregation for the shell host's two-level
+  menu (e.g. five fusion-office apps collapse into one `Fusion Office`
+  top-level entry). `group` is a stable id shared by siblings
+  (`^[a-z0-9-]{1,64}$`, empty = ungrouped, fully backward compatible);
+  titles cap at 128 chars; `sort` orders siblings within a group (stable,
+  ties by id). Siblings must agree on the group title — first registered
+  wins, mismatch logs a throttled WARN, never a rejection. No group-level
+  RBAC: module visibility stays per-module. Validated at registration and
+  heartbeat refresh; `Registry.List()` passes the fields through verbatim
+  (only `api_key` is zeroed). Static `web_shell.manifests` entries get the
+  same mapstructure keys.
+
+### Added (fusion-security union-web module wiring, 2026-10-24) — #296
+
+- **`web_shell.modules.fusion-security` static proxy wiring** — upstream
+  `http://127.0.0.1:11454`, credential is a tenant-assigned fusion-security
+  API key (the upstream validates its own keys; a gateway `fm-`/`fg-` key
+  would be rejected), plus a static fallback manifest so the menu entry
+  survives upstream restarts. The health poller probes through the proxy
+  with the injected credential and keeps the entry `online`. Documented the
+  self-keyed-module pattern (leave self-registration env off until the
+  module's registration body carries the same `api_key`, or #294's
+  dynamic-credential preference would inject the wrong key). Upstream gaps
+  (frontend static serving, registration api_key) tracked in
+  fusion-security#40.
+
 ### Fixed (Anthropic system array flattening, 2026-10-24) — #293
 
 - **Anthropic→OpenAI auto-convert no longer JSON-marshals the system array
