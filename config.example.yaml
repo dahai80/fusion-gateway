@@ -536,6 +536,12 @@ web_shell:
     # shell#66: permissions_policy lists the iframe Permissions-Policy features
     # the module needs delegated ("microphone", "camera" — allowlist-enforced
     # at registration and heartbeat refresh). Wire key: permissionsPolicy.
+    # #297 schema v2 grouping (display-only, two-level host menu): group is a
+    # stable id shared by sibling modules (^[a-z0-9-]{1,64}$, empty = top-level
+    # as today); group_title/group_title_en name the group (siblings must
+    # agree — first registered wins, mismatch WARNs); sort orders within a
+    # group (stable, ties by id). No group-level RBAC — visibility stays
+    # per-module.
     manifests: []
     #  - id: fusion-cowork
     #    title: Cowork
@@ -556,3 +562,15 @@ web_shell:
     #        label: 审批
     #        endpoint: /api/cowork/notifications
     #        kind: approvals
+    #    group: fusion-office            # #297: two-level menu grouping
+    #    group_title: Fusion Office
+    #    sort: 2
+    # #296: static proxy wiring for a self-keyed module (e.g. fusion-security).
+    # The upstream validates the injected Bearer credential itself — the key
+    # must be one of the UPSTREAM's API keys (with whatever tenant/role the
+    # upstream requires), not a gateway fm-/fg- key. Pair with a static
+    # fallback manifest above so the menu entry survives upstream restarts.
+    # modules:
+    #     fusion-security:
+    #         upstream: http://127.0.0.1:11454
+    #         api_key: "<fusion-security tenant-assigned key>"
