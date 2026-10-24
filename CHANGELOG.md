@@ -9,6 +9,48 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (Anthropic system array flattening, 2026-10-24) — #293
+
+- **Anthropic→OpenAI auto-convert no longer JSON-marshals the system array
+  into the prompt.** Claude Code always sends `system` as an array of content
+  blocks; the convert path's `default` arm marshaled it wholesale, so the
+  block wrappers (`{"type":"text","text":"..."}`), escaped newlines, and the
+  per-request `x-anthropic-billing-header` block (random `cch=` value) landed
+  in the model prompt as literal JSON — polluting the input and defeating
+  fusion-mlx's native-route `_BILLING_HEADER_PREFIX` prefix-cache
+  stabilization. New `systemToString` mirrors the message flattening: keep
+  `type=="text"` blocks, join with blank lines, drop blocks starting with
+  `x-anthropic-billing-header:`. All-billing input yields no system message
+  at all.
+
+### Fixed (shell proxy stale static api_key, 2026-10-24) — #294
+
+- **Dynamic registration's credential now wins on the shell proxy when it
+  points at the same upstream as the static entry.** Incident shape: a module
+  that self-registers gets an fm- key issued/rotated by the gateway (the
+  module validates incoming traffic against it), while the static
+  `web_shell.modules[].api_key` in config.yaml went stale — the proxy kept
+  injecting the old key and the module returned 401 API_KEY_INVALID
+  (18/min, console unusable) until an operator hand-edited config.yaml.
+  Resolution order now: dynamic credential (module-supplied api_key or the
+  fm- key `EnsureServiceKey`/`RotateServiceKey` keep on the registry entry)
+  when upstreams match; static api_key otherwise (fallback for never-
+  self-registered modules, and the correct credential for the #256
+  engine-vs-bridge split where upstreams differ). Divergence (both set,
+  same upstream, different keys) logs a throttled WARN (1 per 5m per module,
+  #281-style). Acceptance: rotation → zero manual config edits; static-only
+  modules unchanged; K1 issuance semantics unchanged (plaintext exactly
+  once, key_id stable).
+
+### Added (manifest Permissions-Policy delegation, 2026-10-24) — shell#66
+
+- **`permissionsPolicy` ext field on shell manifests** (upstream
+  fusion-web-shell#66): the iframe feature list the shell host renders as
+  the frame's `allow` attribute. Validated against the gateway allowlist
+  (`microphone`, `camera`) inside `validateManifest` — so registration AND
+  heartbeat-carried refresh (#284) both reject unknown features — with a
+  camelCase wire key / snake_case config key, matching the other ext fields.
+
 ### Added (per-project audit export filter, 2026-10-24) — #290
 
 - **`project_id` filter on the admin logs surface.** EnviPermit's compliance
