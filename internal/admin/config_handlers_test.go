@@ -7,6 +7,7 @@ import (
     "net/http/httptest"
     "os"
     "path/filepath"
+    "strings"
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -1928,3 +1929,61 @@ func TestConfigHandlersPUTNoConfigPath(t *testing.T) {
 func strPtr(s string) *string { return &s }
 func intPtr(i int) *int       { return &i }
 func boolPtr(b bool) *bool    { return &b }
+
+// ─── Pre-write validation ───────────────────────────────────────
+
+// TestUpdateYAMLSection_PreWriteValidationRejects: a mutation that cannot
+// load must be rejected BEFORE the file changes — the old write-then-Reload
+// order left broken YAML on disk with a stale live snapshot (production
+// incident: finding-apply wrote a models.supply entry viper could not
+// re-read).
+func TestUpdateYAMLSection_PreWriteValidationRejects(t *testing.T) {
+    _, ms, configPath := setupConfigTestWithFile(t)
+    h := newTestHandler(t, ms, newTestAuth(t), configPath)
+
+    _, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
+        doc["server"].(map[string]interface{})["port"] = -1
+        return nil
+    })
+    if err == nil {
+        t.Fatal("invalid mutation must be rejected")
+    }
+    if !strings.Contains(err.Error(), "file unchanged") {
+        t.Fatalf("error must say file unchanged, got: %v", err)
+    }
+
+    // file on disk must be untouched (yaml.v3 decodes ints as int, not float64)
+    sec := readYAMLSection(t, configPath, "server")
+    if getInt(sec, "port") != 8100 {
+        t.Fatalf("file was modified despite rejection, port = %v", sec["port"])
+    }
+}
+
+// TestUpdateYAMLSection_DottedSupplyModelWrites: applying a models.supply
+// entry whose key contains dots (real model names) must write AND reload
+// cleanly — the regression behind the finding-apply failure.
+func TestUpdateYAMLSection_DottedSupplyModelWrites(t *testing.T) {
+    _, ms, configPath := setupConfigTestWithFile(t)
+    h := newTestHandler(t, ms, newTestAuth(t), configPath)
+
+    const model = "mlx-community/Qwen3.5-4B-MLX-4bit"
+    _, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
+        models := getOrCreateSection(doc, "models")
+        supplySection := getOrCreateSection(models, "supply")
+        supplySection[model] = toIfaceSlice(mergeSupply(supplySection[model], model))
+        return nil
+    })
+    if err != nil {
+        t.Fatalf("dotted supply apply failed: %v", err)
+    }
+
+    sec := readYAMLNestedSection(t, configPath, "models", "supply")
+    if _, ok := sec[model]; !ok {
+        t.Fatalf("supply entry missing after apply: %v", sec)
+    }
+    // live snapshot must carry the entry through the raw-yaml load path
+    snap := config.GetSnapshot()
+    if got := snap.Config.Models.Supply[model]; len(got) == 0 || got[0] != "fusion-mlx" {
+        t.Fatalf("live snapshot supply = %v", snap.Config.Models.Supply)
+    }
+}

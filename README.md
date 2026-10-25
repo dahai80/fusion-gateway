@@ -171,6 +171,8 @@ curl ... -d '{"model": "glm-5", ...}'
 
 Resolution order: `models.aliases` → qualified pin → `routing.cloud_models` guard (outranks supply and cloud pins) → `models.supply` → historical chain (`local-first / token / ratio / fallback.model_mapping`).
 
+`models.supply`/`models.aliases` are loaded from the raw YAML with a plain yaml parse, not through viper: model-name keys contain dots and viper's flattened settings tree re-nests dotted keys, which broke reload. As a related hardening, every admin config write (PUT handlers, optimization-finding apply) is dry-run validated against the full load pipeline (`config.ProbeValidate`) before it touches `config.yaml` — a mutation that cannot load is rejected with the file left unchanged instead of leaving broken YAML on disk.
+
 ### Minimal backend entries
 
 `backends.<name>.api_key_env` names the environment variable holding the key (resolved at load/reload; plaintext `api_key` still works but logs a deprecation WARN). When `base_url`/`timeout` are omitted, a built-in vendor table fills them per `type` (deepseek, dashscope, baichuan, moonshot, minimax, hunyuan, qianfan, glm, anthropic, openai, siliconflow, openrouter, lingyiwanwu). Resource-specific providers (bedrock, foundry) still require an explicit `base_url`.

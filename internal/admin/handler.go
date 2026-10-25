@@ -1245,11 +1245,11 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
         }
     }
 
-    // B13 (audit): atomic write (writeYAMLDoc) instead of raw os.WriteFile,
-    // plus an explicit config.Reload — same EI1 semantics as updateYAMLSection.
-    // The raw write could race a concurrent Reload into a truncated read, and
-    // without the reload the live snapshot stayed stale until an unrelated PUT.
-    if err := writeYAMLDoc(h.configPath, doc); err != nil {
+    // B13 (audit): atomic write + pre-write validation + explicit reload —
+    // same EI1 semantics as updateYAMLSection. The raw write could race a
+    // concurrent Reload into a truncated read, and without the reload the
+    // live snapshot stayed stale until an unrelated PUT.
+    if err := validateAndWriteYAML(h.configPath, doc); err != nil {
         slog.Error("failed to write config file", "path", h.configPath, "error", err)
         writeError(w, http.StatusInternalServerError, "failed to write config file")
         return
@@ -1398,8 +1398,9 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             backend["timeout"] = *req.Timeout
         }
 
-        // B13 (audit): atomic write + explicit reload, same as routing PUT.
-        if err := writeYAMLDoc(h.configPath, doc); err != nil {
+        // B13 (audit): atomic write + pre-write validation + explicit reload,
+        // same as routing PUT.
+        if err := validateAndWriteYAML(h.configPath, doc); err != nil {
             slog.Error("failed to write config file", "path", h.configPath, "error", err)
             writeError(w, http.StatusInternalServerError, "failed to write config file")
             return

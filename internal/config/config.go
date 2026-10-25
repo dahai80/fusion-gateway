@@ -1316,6 +1316,15 @@ func Load(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
 
+    // models.supply/aliases: viper cannot decode dotted model-name keys
+    // (AllSettings re-nests them), so the fields are mapstructure:"-" and
+    // populated here from the raw file bytes. See models_raw.go.
+    rawCfg, err := os.ReadFile(path)
+    if err != nil {
+        return nil, fmt.Errorf("read config for models.*: %w", err)
+    }
+    loadModelsNamespace(&cfg, rawCfg)
+
     // §13.3: api_key_env resolution + vendor base_url/timeout fill, before
     // validate so downstream checks see the normalized entries.
     normalizeBackends(&cfg)
@@ -1412,6 +1421,14 @@ func Reload(path string) (*ConfigSnapshot, error) {
         slog.Error("reload: failed to unmarshal config", "error", err)
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
+
+    // models.supply/aliases: same raw-bytes bypass as Load (dotted keys).
+    rawCfg, err := os.ReadFile(path)
+    if err != nil {
+        slog.Error("reload: failed to read config for models.*", "error", err)
+        return nil, fmt.Errorf("read config for models.*: %w", err)
+    }
+    loadModelsNamespace(&cfg, rawCfg)
 
     // §13.3: same normalization as Load — hot-reloaded entries get
     // api_key_env resolution + vendor defaults fill.
