@@ -40,7 +40,7 @@ func (s *Service) Compare(ctx context.Context, fromStr, toStr, projectID string)
         SELECT backend,
                COALESCE(backend_type, '') AS backend_type,
                model,
-               count(*),
+               count(*) AS requests,
                COALESCE(avg((is_success)::int) * 100, 0),
                COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms), 0),
                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms), 0),
