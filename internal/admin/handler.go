@@ -15,6 +15,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/insights"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     "gopkg.in/yaml.v3"
 )
@@ -24,6 +25,7 @@ type Handler struct {
     auth        *AdminAuth
     configPath  string
     configMutex sync.Mutex
+    insights    *insights.Service
 }
 
 func NewHandler(st store.Store, auth *AdminAuth, configPath string) *Handler {
@@ -44,6 +46,13 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/analytics/models", h.withAuth(h.handleModelStats))
     mux.HandleFunc("/admin/api/analytics/latency", h.withAuth(h.handleLatencyStats))
     mux.HandleFunc("/admin/api/analytics/errors", h.withAuth(h.handleErrorStats))
+    // P3 PG-backed insights (plan §8). Strict role: these expose cross-project
+    // request rows and captured payloads (EI9 — logs are admin-only strict).
+    mux.HandleFunc("/admin/api/insights/latency", h.requireAdminRoleStrict(h.handleInsightsLatency))
+    mux.HandleFunc("/admin/api/insights/compare", h.requireAdminRoleStrict(h.handleInsightsCompare))
+    mux.HandleFunc("/admin/api/insights/logs/search", h.requireAdminRoleStrict(h.handleInsightsLogSearch))
+    mux.HandleFunc("/admin/api/insights/logs/", h.requireAdminRoleStrict(h.handleInsightsLogPayload))
+    mux.HandleFunc("/admin/api/persistence/test", h.requireAdminRoleStrict(h.handlePersistenceTest))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))

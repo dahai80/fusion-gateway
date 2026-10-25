@@ -34,6 +34,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
+    "github.com/fusion-gateway/fusion-gateway/internal/insights"
     "github.com/fusion-gateway/fusion-gateway/internal/persist"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
@@ -141,6 +142,9 @@ type Server struct {
     // skips capture + enqueue entirely when nil — the default (persistence
     // off) request path is byte-identical to before.
     persistSink persist.Sink
+    // adminHandler is the admin API handler, retained so main.go can wire the
+    // insights (PG read) service into it after New (P3).
+    adminHandler *admin.Handler
     // R1: lifecycle.Workers wrapping the 3 server-owned reaper goroutines so
     // Shutdown can Stop (cancel + join) each instead of leaking. The cache/
     // semantic/ratelimit evictors are owned by their respective constructors and
@@ -897,6 +901,7 @@ func (s *Server) Start() error {
         // A1 fix: use DI-constructed adminAuth instead of globals
         adminHandler := admin.NewHandler(s.store, s.adminAuth, s.cfgPath)
         adminHandler.RegisterRoutes(mux)
+        s.adminHandler = adminHandler
         mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
         mux.HandleFunc("/admin/api/logout", s.adminAuth.HandleLogout)
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
@@ -1149,6 +1154,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // request path capture-free.
 func (s *Server) SetPersistSink(sink persist.Sink) {
     s.persistSink = sink
+}
+
+// SetInsightsService wires the PG read layer into the admin API (P3). The
+// admin Handler reads the service at request time, so late wiring after New
+// is safe; a nil service keeps the insights endpoints answering 503.
+func (s *Server) SetInsightsService(svc *insights.Service) {
+    if s.adminHandler != nil {
+        s.adminHandler.SetInsightsService(svc)
+    }
 }
 
 // enqueuePersistEntry assembles the persist.Entry at request finalize and
