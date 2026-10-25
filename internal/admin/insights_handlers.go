@@ -175,3 +175,130 @@ func (h *Handler) handleInsightsHWSamples(w http.ResponseWriter, r *http.Request
     }
     writeJSON(w, http.StatusOK, map[string]any{"samples": samples, "total": len(samples)})
 }
+
+// SetEventRecorder wires the fg_gateway_events audit sink for anomaly
+// lifecycle mutations (ack/mute must leave an operator trail, plan §15.5).
+// *pg.Sink satisfies insights.EventRecorder; nil (default) skips auditing.
+func (h *Handler) SetEventRecorder(rec insights.EventRecorder) {
+    h.eventRecorder = rec
+}
+
+// auditEvent records an admin mutation. Best-effort: a broken event sink must
+// not fail the mutation itself.
+func (h *Handler) auditEvent(level, event string, detail map[string]any) {
+    if h.eventRecorder == nil {
+        return
+    }
+    h.eventRecorder.RecordEvent(level, event, detail)
+}
+
+// handleAnomaliesList — GET /admin/api/anomalies (plan §15.5)
+// Params: status (open|acked|muted), kind, backend, limit (default 100, cap 500).
+func (h *Handler) handleAnomaliesList(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    q := r.URL.Query()
+    limit := 0
+    if v, err := strconv.Atoi(q.Get("limit")); err == nil {
+        limit = v
+    }
+    anomalies, err := h.insights.Anomalies(r.Context(),
+        q.Get("status"), q.Get("kind"), q.Get("backend"), limit)
+    if err != nil {
+        slog.Warn("anomalies list query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"anomalies": anomalies, "total": len(anomalies)})
+}
+
+// handleAnomalyByID — POST /admin/api/anomalies/{id}/ack | /{id}/mute
+// ack body {"by": "..."}; mute body {"days": 7} (default 7, cap 90).
+// Both land an fg_gateway_events audit row.
+func (h *Handler) handleAnomalyByID(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodPost {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    rest := strings.TrimPrefix(r.URL.Path, "/admin/api/anomalies/")
+    parts := strings.Split(rest, "/")
+    if len(parts) != 2 || parts[0] == "" {
+        writeError(w, http.StatusBadRequest, "expected /admin/api/anomalies/{id}/ack or /mute")
+        return
+    }
+    id, err := strconv.ParseInt(parts[0], 10, 64)
+    if err != nil || id <= 0 {
+        writeError(w, http.StatusBadRequest, "invalid anomaly id")
+        return
+    }
+    actor := "admin"
+    if claims := GetAdminClaims(r.Context()); claims != nil && claims.Username != "" {
+        actor = claims.Username
+    }
+    switch parts[1] {
+    case "ack":
+        var req struct {
+            By string `json:"by"`
+        }
+        if r.Body != nil {
+            if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil && err.Error() != "EOF" {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+            }
+        }
+        if req.By != "" {
+            actor = req.By
+        }
+        a, err := h.insights.AckAnomaly(r.Context(), id, actor)
+        if err != nil {
+            slog.Warn("anomaly ack failed", "id", id, "error", err)
+            writeError(w, http.StatusNotFound, err.Error())
+            return
+        }
+        h.auditEvent("info", "anomaly_acked", map[string]any{
+            "id": id, "kind": a.Kind, "backend": a.Backend, "by": actor,
+        })
+        writeJSON(w, http.StatusOK, a)
+    case "mute":
+        var req struct {
+            Days int `json:"days"`
+        }
+        if r.Body != nil {
+            if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil && err.Error() != "EOF" {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+            }
+        }
+        days := req.Days
+        if days <= 0 {
+            days = 7
+        }
+        if days > 90 {
+            days = 90
+        }
+        until := time.Now().UTC().AddDate(0, 0, days)
+        a, err := h.insights.MuteAnomaly(r.Context(), id, until)
+        if err != nil {
+            slog.Warn("anomaly mute failed", "id", id, "error", err)
+            writeError(w, http.StatusNotFound, err.Error())
+            return
+        }
+        h.auditEvent("info", "anomaly_muted", map[string]any{
+            "id": id, "kind": a.Kind, "backend": a.Backend,
+            "days": days, "muted_until": until.Format(time.RFC3339),
+        })
+        writeJSON(w, http.StatusOK, a)
+    default:
+        writeError(w, http.StatusBadRequest, "unknown action: "+parts[1])
+    }
+}

@@ -96,3 +96,98 @@ func TestSQL_HWSamplesAgainstLiveDB(t *testing.T) {
     }
     t.Logf("hw samples returned=%d", len(samples))
 }
+
+// TestSQL_AnomaliesLifecycleAgainstLiveDB exercises insert suppression, list
+// filters, ack, and mute against the live schema. Uses kind='__test__' rows
+// and cleans up after itself.
+func TestSQL_AnomaliesLifecycleAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+
+    t.Cleanup(func() {
+        _, _ = svc.pool.Exec(context.Background(),
+            `DELETE FROM fg_anomalies WHERE kind = '__test__'`)
+    })
+
+    d := &Detector{svc: svc}
+    bucket := time.Now().UTC().Truncate(time.Hour).Add(-time.Duration(2) * time.Hour)
+    draft := anomalyDraft{
+        TS: bucket, Kind: "__test__", Backend: "test-backend",
+        Model: "test-model", Severity: "high",
+        Evidence: map[string]any{"count": 55, "window_min": 5},
+    }
+    if err := d.insert(ctx, draft); err != nil {
+        t.Fatalf("insert: %v", err)
+    }
+    // Same signature + same bucket → suppressed; a later bucket is not.
+    if !d.suppressed(ctx, draft) {
+        t.Fatalf("duplicate draft should be suppressed")
+    }
+    later := draft
+    later.TS = bucket.Add(time.Hour)
+    if d.suppressed(ctx, later) {
+        t.Fatalf("new-bucket draft should not be suppressed")
+    }
+
+    anomalies, err := svc.Anomalies(ctx, "", "__test__", "test-backend", 10)
+    if err != nil {
+        t.Fatalf("list: %v", err)
+    }
+    if len(anomalies) != 1 {
+        t.Fatalf("list rows=%d, want 1", len(anomalies))
+    }
+    a := anomalies[0]
+    if a.Status != "open" || a.Backend == nil || *a.Backend != "test-backend" {
+        t.Errorf("row wrong: %+v", a)
+    }
+
+    acked, err := svc.AckAnomaly(ctx, a.ID, "tester")
+    if err != nil {
+        t.Fatalf("ack: %v", err)
+    }
+    if acked.Status != "acked" || acked.AckedBy == nil || *acked.AckedBy != "tester" {
+        t.Errorf("acked wrong: %+v", acked)
+    }
+    // Idempotent re-ack.
+    if _, err := svc.AckAnomaly(ctx, a.ID, "tester2"); err != nil {
+        t.Fatalf("re-ack: %v", err)
+    }
+
+    muted, err := svc.MuteAnomaly(ctx, a.ID, time.Now().UTC().Add(24*time.Hour))
+    if err != nil {
+        t.Fatalf("mute: %v", err)
+    }
+    if muted.Status != "muted" || muted.MutedUntil == nil {
+        t.Errorf("muted wrong: %+v", muted)
+    }
+    // Muted signature suppresses even a fresh-bucket draft.
+    if !d.suppressed(ctx, later) {
+        t.Fatalf("muted signature should suppress new buckets")
+    }
+    // Mute of an already-muted row → no rows affected (err).
+    if _, err := svc.MuteAnomaly(ctx, a.ID, time.Now().UTC().Add(48*time.Hour)); err == nil {
+        t.Fatalf("re-mute of muted row should fail")
+    }
+}
+
+// TestSQL_DetectorFetchesAgainstLiveDB validates the four detector SQL
+// statements against the live schema (unit tests cannot catch malformed SQL).
+func TestSQL_DetectorFetchesAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    d := &Detector{svc: svc}
+    if _, err := d.fetchErrorRows(ctx); err != nil {
+        t.Fatalf("fetchErrorRows: %v", err)
+    }
+    if _, err := d.fetch15MinBuckets(ctx); err != nil {
+        t.Fatalf("fetch15MinBuckets: %v", err)
+    }
+    if _, err := d.fetchHourBuckets(ctx); err != nil {
+        t.Fatalf("fetchHourBuckets: %v", err)
+    }
+    if _, err := d.fetchBreakerDays(ctx); err != nil {
+        t.Fatalf("fetchBreakerDays: %v", err)
+    }
+}

@@ -1230,6 +1230,46 @@ drain。计数器 `fusion_gateway_persist_{enqueued,written,dropped}_total`。
 | GET | `/admin/api/insights/hw-samples` | 硬件时序;`from`/`to` (默认 24h,上限 31 天)、`limit` (默认 2880,上限 10000) |
 | GET | `/admin/api/events` | 网关事件流;过滤 `level`/`event`、`limit` (默认 100,上限 1000) |
 
+**异常检测 (P3b-2)**:5 分钟一次的后台检测器
+(`internal/insights/detector.go`,`lifecycle.Worker`)扫描
+`fg_request_logs` + `fg_gateway_events`,检测结论写入 `fg_anomalies`。
+五个检测器,均以"当前截断时间桶 vs 过去 7 天同时段基线"对比:
+
+| kind | 触发条件 | 严重级 | 窗口 |
+|---|---|---|---|
+| `error_storm` | 归一化错误类计数 ≥ 50 (按 backend+model) | high | 5 分钟 |
+| `error_spike` | 错误率 > 1% 绝对值 且 > 基线 2 倍 | high | 15 分钟 |
+| `ttft_shift` | TTFT P95 > 基线均值 1.5 倍 | medium | 1 小时 |
+| `traffic` | 全局请求量偏离基线 > ±60% | medium | 1 小时 |
+| `breaker` | 当日熔断次数 > 前 7 天日均 3 倍 (无基线时 ≥ 3 次) | medium | 1 天 |
+
+设计要点:
+
+- **去重在数据库而非内存**:签名 (kind, backend, model) 已存在 `ts >= 桶起点`
+  或 `muted` 且 `muted_until > now()` 的行则跳过。重启/慢 tick 不产生重复行;
+  抑制检查失败时放行 (fail open)。
+- **错误归一化** (`normalizeError`):有序子串匹配 (特殊在前),映射到稳定
+  错误类 (`connection_reset`、`context_deadline`、`eof`、`http_5xx` 等);
+  未知消息按截断 80 字符小写形式聚簇。
+- **熔断事件生产者**:`router.Engine.SetEventRecorder` 把熔断翻转
+  (强制 Trip 与失败阈值两种)以 `breaker_tripped` 事件写入
+  `fg_gateway_events`,熔断检测器消费这些事件。
+- **小样本防护**:每个基线对比都要求最小当前样本量与基线桶数,
+  小样本比率不触发。
+- 每次触发同时写一条 `anomaly_detected` 网关事件。
+
+admin 端点 (strict 角色,持久化关闭时 503):
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/api/anomalies` | 检测列表;过滤 `status`/`kind`/`backend`、`limit` (默认 100,上限 500) |
+| POST | `/admin/api/anomalies/{id}/ack` | 标记已处理;body `{"by": "..."}` (默认取 JWT 用户名) |
+| POST | `/admin/api/anomalies/{id}/mute` | 屏蔽该签名的重复检测;body `{"days": 7}` (默认 7,上限 90) |
+
+ack 与 mute 均写审计事件 (`anomaly_acked` / `anomaly_muted`) 到
+`fg_gateway_events`。被 mute 的签名跨重启持续抑制直至 `muted_until` 到期;
+对 muted 行执行 ack 会被拒绝 (静默解除屏蔽会重新武装操作员已压制的检测器)。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置

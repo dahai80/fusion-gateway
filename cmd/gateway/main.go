@@ -399,6 +399,7 @@ func run(configPath string) error {
 	// config file).
 	var persistSink *pg.Sink
 	var insightsSvc *insights.Service
+	var anomalyDetector *insights.Detector
 	if snap.Config.Persistence.Enabled {
 		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
 		if dsn == "" {
@@ -425,6 +426,14 @@ func run(configPath string) error {
 		sink.RecordEvent("info", "gateway_started", map[string]any{
 			"version": version, "commit": commit,
 		})
+		// P3b-2 (plan §15.1/§15.5): breaker trips become structured events (the
+		// breaker-storm detector consumes them), the anomaly detector runs the
+		// 5-minute pass, and ack/mute mutations audit through the same sink.
+		routerEngine.SetEventRecorder(func(level, event string, detail map[string]any) {
+			sink.RecordEvent(level, event, detail)
+		})
+		srv.SetEventRecorder(sink)
+		anomalyDetector = insightsSvc.StartDetector(context.Background(), sink)
 		slog.Info("request persistence enabled",
 			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
@@ -692,6 +701,11 @@ func run(configPath string) error {
 	// in-flight request can still Enqueue, and after the workers. Close
 	// flushes the queued batch best-effort (10s cap) so a graceful restart
 	// loses nothing.
+	// P3b-2: stop the anomaly detector before the sink/pool — its 5-minute
+	// pass queries via the insights pool and emits events via the sink.
+	if anomalyDetector != nil {
+		anomalyDetector.Stop()
+	}
 	if persistSink != nil {
 		// Sync variant: the async RecordEvent races the pool Close below and
 		// would lose the event.

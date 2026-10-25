@@ -21,11 +21,12 @@ import (
 )
 
 type Handler struct {
-    store       store.Store
-    auth        *AdminAuth
-    configPath  string
-    configMutex sync.Mutex
-    insights    *insights.Service
+    store         store.Store
+    auth          *AdminAuth
+    configPath    string
+    configMutex   sync.Mutex
+    insights      *insights.Service
+    eventRecorder insights.EventRecorder
 }
 
 func NewHandler(st store.Store, auth *AdminAuth, configPath string) *Handler {
@@ -57,6 +58,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     // role: event detail can carry backend errors, samples expose the host.
     mux.HandleFunc("/admin/api/events", h.requireAdminRoleStrict(h.handleInsightsEvents))
     mux.HandleFunc("/admin/api/insights/hw-samples", h.requireAdminRoleStrict(h.handleInsightsHWSamples))
+    // P3b-2 (plan §15.5): anomaly detections + ack/mute lifecycle. Strict role —
+    // evidence carries backend errors and host-level traffic volume.
+    mux.HandleFunc("/admin/api/anomalies", h.requireAdminRoleStrict(h.handleAnomaliesList))
+    mux.HandleFunc("/admin/api/anomalies/", h.requireAdminRoleStrict(h.handleAnomalyByID))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))
