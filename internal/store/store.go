@@ -38,6 +38,14 @@ type RequestLog struct {
 
     Latency      float64 `json:"latency_ms"`
     TTFT         float64 `json:"ttft_ms"`
+    // TPotMS / TPotP95 / ChunkCount / TokensPerSec are the stream-latency
+    // signals for the TTFT/TPOT report pipeline (plan §5.2): mean and P95
+    // inter-chunk gap (ms), chunk count, and output tokens per second over
+    // the generation window. Zero/omitted for non-stream requests.
+    TPotMS       float64 `json:"tpot_ms,omitempty"`
+    TPotP95      float64 `json:"tpot_p95_ms,omitempty"`
+    ChunkCount   int     `json:"chunk_count,omitempty"`
+    TokensPerSec float64 `json:"tokens_per_sec,omitempty"`
 
     StatusCode   int    `json:"status_code"`
     IsSuccess    bool   `json:"is_success"`

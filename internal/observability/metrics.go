@@ -53,6 +53,10 @@ var (
     // collector listens). The log line is throttled; this counter is not.
     otelErrors prometheus.Counter
 
+    // Plan §5.2: TTFT/TPOT latency histograms (see init for bucket rationale).
+    requestTTFT *prometheus.HistogramVec
+    requestTPOT *prometheus.HistogramVec
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -173,6 +177,22 @@ func init() {
         Help: "In-flight request count",
     }, []string{"backend"})
 
+    // Plan §5.2 (archi doc fusion-gateway-seriazation-1015.md): TTFT/TPOT
+    // histograms mirror the RequestLog columns into Prometheus so /metrics
+    // gives an immediate latency read while the PG-backed reports carry the
+    // long-term trend. ttft covers 50ms..4min; tpot covers 5ms..2.5s per
+    // output token.
+    requestTTFT = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+        Name:    "fusion_gateway_request_ttft_seconds",
+        Help:    "Time to first token (stream: first content chunk; non-stream: full response), from request start",
+        Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 30, 60, 120, 240},
+    }, []string{"backend", "model"})
+    requestTPOT = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+        Name:    "fusion_gateway_request_tpot_seconds",
+        Help:    "Mean time per output token (stream inter-chunk gap mean); absent for non-stream",
+        Buckets: []float64{0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56},
+    }, []string{"backend", "model"})
+
     // #204: classifier latency SLO metrics.
     classifierLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
         Name:    "fusion_gateway_classifier_latency_seconds",
@@ -213,6 +233,7 @@ func init() {
         hwGPUMemoryInUseBytes, hwGPUMemoryAllocBytes,
         hwMLXActiveMemoryBytes, hwMLXModelsLoaded, hwMLXInferenceQueueDepth,
         hwCollectionErrors, configVersion, inFlightRequests,
+        requestTTFT, requestTPOT,
         classifierLatency, classifierSLOBreaches,
         shellHeartbeatDenied,
         authInvalidKey,
@@ -246,6 +267,18 @@ func RecordRequest(backend, model, status string) {
 
 func RecordDuration(backend, model string, seconds float64) {
     requestDuration.WithLabelValues(backend, model).Observe(seconds)
+}
+
+// RecordLatencyMetrics observes the TTFT/TPOT histograms (plan §5.2). tpot
+// is 0 for non-stream requests and is skipped — an absent observation beats
+// a misleading 0 in the histogram.
+func RecordLatencyMetrics(backend, model string, ttftSec, tpotSec float64) {
+    if ttftSec > 0 {
+        requestTTFT.WithLabelValues(backend, model).Observe(ttftSec)
+    }
+    if tpotSec > 0 {
+        requestTPOT.WithLabelValues(backend, model).Observe(tpotSec)
+    }
 }
 
 func RecordTokens(direction, backend string, count int) {

@@ -12,6 +12,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
@@ -392,6 +393,7 @@ func (s *Server) nonStreamClientCanceled(ctx context.Context, w http.ResponseWri
 }
 
 func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
+    start := time.Now()
     // Internal stream + aggregate: reasoning upstreams (glm5.2 via LiteLLM)
     // withhold non-stream response headers until full generation completes,
     // tripping Client.Timeout / client-cancel 502s. Stream path has a 2s TTFB,
@@ -450,6 +452,10 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         logEntry.InputTokens = resp.Usage.InputTokens
         logEntry.OutputTokens = resp.Usage.OutputTokens
         logEntry.TotalTokens = resp.Usage.InputTokens + resp.Usage.OutputTokens
+        // Plan §5.2 non-stream: the aggregated wait IS the first token.
+        durationMS := float64(time.Since(start)) / float64(time.Millisecond)
+        stampTimingMetrics(logEntry, nil, resp.Usage.OutputTokens, durationMS)
+        observability.RecordLatencyMetrics(logEntry.ChannelType, req.Model, durationMS/1000, 0)
     }
     _ = json.NewEncoder(w).Encode(resp)
 }
@@ -574,6 +580,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // pin whether the stall was upstream (H-B) or CC-side (H-A). Pure
     // observation — no behavior change.
     streamStart := time.Now()
+    // Plan §5.2: per-stream TTFT/TPOT capture. observe() is fed ONLY from
+    // content_block_delta events — message_start arrives before generation
+    // begins, so counting it would collapse TTFT to ~0 and pollute the
+    // inter-chunk gaps with non-token events.
+    timing := newStreamTiming(streamStart)
     var firstEventAt time.Time
     var lastEventAt time.Time
     var lastEventType string
@@ -601,6 +612,15 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             "last_event_idle", lastIdle,
             "last_event_type", lastEventType,
             "end_reason", endReason)
+        // Plan §5.2: stamp TTFT/TPOT here — every exit path (client cancel,
+        // write failure, synth terminal, clean stop) calls streamSummary, so a
+        // canceled stream still contributes its partial timing instead of
+        // vanishing from the latency report.
+        if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+            stampTimingMetrics(logEntry, timing, usageOutput, float64(dur)/float64(time.Millisecond))
+            observability.RecordLatencyMetrics(logEntry.ChannelType, req.Model,
+                timing.ttftMS()/1000, timing.tpotMS()/1000)
+        }
     }
     // closeOpenBlocks emits a content_block_stop for every index still open,
     // in ascending order, then flushes. Returns the closed indices (nil if
@@ -647,6 +667,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             }
             if event.Type == "content_block_delta" {
                 deltaCount++
+                timing.observe(lastEventAt)
             }
             if event.Usage != nil {
                 captureUsage(event.Usage)
@@ -703,6 +724,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 }
                 if event.Type == "content_block_delta" {
                     deltaCount++
+                    timing.observe(lastEventAt)
                 }
                 if event.Type == "message_stop" {
                     sawMessageStop = true
