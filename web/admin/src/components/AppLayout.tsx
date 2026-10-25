@@ -32,6 +32,9 @@ import {
     InboxOutlined,
     CheckCircleOutlined,
     BankOutlined,
+    LineChartOutlined,
+    SearchOutlined,
+    BulbOutlined,
 } from "@ant-design/icons";
 
 const { Header, Sider, Content } = Layout;
@@ -43,6 +46,19 @@ const menuItems = [
     { key: "/admin/channels", icon: <CloudServerOutlined />, label: "Channels" },
     { key: "/admin/logs", icon: <FileTextOutlined />, label: "Logs" },
     { key: "/admin/analytics", icon: <BarChartOutlined />, label: "Analytics" },
+    {
+        key: "insights-group",
+        icon: <LineChartOutlined />,
+        label: "Insights",
+        children: [
+            { key: "/admin/insights/latency", icon: <LineChartOutlined />, label: "Latency" },
+            { key: "/admin/insights/compare", icon: <SwapOutlined />, label: "Compare" },
+            { key: "/admin/insights/explorer", icon: <SearchOutlined />, label: "Explorer" },
+            { key: "/admin/insights/optimize", icon: <BulbOutlined />, label: "Optimize" },
+            { key: "/admin/insights/anomalies", icon: <WarningOutlined />, label: "Anomalies" },
+            { key: "/admin/insights/reports", icon: <FileTextOutlined />, label: "Reports" },
+        ],
+    },
     {
         key: "config-group",
         icon: <SettingOutlined />,
@@ -71,6 +87,7 @@ const menuItems = [
             { key: "/admin/config/semantic-cache", icon: <ExperimentOutlined />, label: "Semantic Cache" },
             { key: "/admin/config/batch", icon: <InboxOutlined />, label: "Batch" },
             { key: "/admin/config/store", icon: <DatabaseOutlined />, label: "Store" },
+            { key: "/admin/config/persistence", icon: <DatabaseOutlined />, label: "Persistence" },
             { key: "/admin/config/validation", icon: <CheckCircleOutlined />, label: "Validation" },
             { key: "/admin/settings", icon: <SettingOutlined />, label: "Routing & Backends" },
         ],
