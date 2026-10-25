@@ -1210,6 +1210,26 @@ drain。计数器 `fusion_gateway_persist_{enqueued,written,dropped}_total`。
 (`internal/insights/sql_integration_test.go`) 由 `FUSION_GW_INSIGHTS_TEST_DSN`
 门控,CI 无 PG 自动跳过。
 
+**硬件采样 + 网关事件 (P3b)**:随持久化 schema 一并建的两张低量级普通表
+(`internal/persist/pg/copy.go`),保留期由小时级 sweep 的 DELETE 清理:
+
+- **`fg_hw_samples`** — 每 30s 一条硬件快照 (`StartHWSampler`,
+  `lifecycle.Worker`):系统/MLX 内存比率、swap 换页率、GPU 利用率、
+  已加载模型数、采集错误标记。`loaded_models` 是计数——采集器只暴露
+  `MLXModelsLoaded int`,非名称列表。
+- **`fg_gateway_events`** — 结构化生命周期审计:`gateway_started` /
+  `gateway_stopped` (停机路径用阻塞式 `RecordEventSync`——异步版本会和
+  pool Close 竞争)、`config_reloaded`、`persist_degraded` /
+  `persist_recovered` (每次故障一条事件,而非每条重试一条)。
+
+保留期:`persistence.retention.hw_samples_days` (30)、
+`gateway_events_days` (180)。admin 专属只读端点 (持久化关闭时 503):
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/api/insights/hw-samples` | 硬件时序;`from`/`to` (默认 24h,上限 31 天)、`limit` (默认 2880,上限 10000) |
+| GET | `/admin/api/events` | 网关事件流;过滤 `level`/`event`、`limit` (默认 100,上限 1000) |
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置

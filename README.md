@@ -772,6 +772,29 @@ Generation rows are isolated with `ttft_ms > 0` — Go zero values persist as
 percentiles to zero. Live-SQL integration tests (`internal/insights/
 sql_integration_test.go`) gate on `FUSION_GW_INSIGHTS_TEST_DSN` and skip in CI.
 
+### Hardware Samples & Gateway Events (P3b)
+
+Two low-volume plain tables provisioned with the persistence schema
+(`internal/persist/pg/copy.go`), DELETE-based retention in the hourly sweep:
+
+- **`fg_hw_samples`** — hardware snapshot every 30s (`StartHWSampler`,
+  `lifecycle.Worker`): system/MLX memory ratio, swap page rate, GPU util,
+  loaded-model count, collection-error flag. `loaded_models` is a count —
+  the collector exposes `MLXModelsLoaded int`, not a name list.
+- **`fg_gateway_events`** — structured lifecycle audit: `gateway_started` /
+  `gateway_stopped` (shutdown path uses the blocking `RecordEventSync` —
+  the async variant races pool Close), `config_reloaded`, `persist_degraded`
+  / `persist_recovered` (one event per outage, not per retry).
+
+Retention: `persistence.retention.hw_samples_days` (30),
+`gateway_events_days` (180). Admin-only read endpoints (503 when
+persistence is off):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/api/insights/hw-samples` | hardware timeseries; `from`/`to` (default 24h, max 31d), `limit` (default 2880, max 10000) |
+| GET | `/admin/api/events` | gateway event feed; filters `level`/`event`, `limit` (default 100, max 1000) |
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
