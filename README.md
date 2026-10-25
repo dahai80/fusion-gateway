@@ -752,6 +752,26 @@ Counters `fusion_gateway_persist_{enqueued,written,dropped}_total` on
 `/metrics`. Missing DSN with persistence enabled is a startup FATAL (fail
 visibly, not silently).
 
+### Insights Read APIs (P3a)
+
+Admin-only analytics and log-search endpoints over the persistence tables
+(`requireAdminRoleStrict`; 503 when persistence is off). All queries run on a
+dedicated read pool with a 10s `statement_timeout` and are window-guarded
+(default 24h, max 31 days).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95 timeseries; `granularity=minute\|hour\|day`, filters `backend`/`model`/`project_id` |
+| GET | `/admin/api/insights/compare` | per backend×model side-by-side: latency percentiles, success rate, tokens/sec, cost |
+| POST | `/admin/api/insights/logs/search` | Explorer DSL: time window, `q` (model/error/request-id substring), endpoint/backend/model/project/key/status/stream/success/min-duration, paging (limit ≤ 200) |
+| GET | `/admin/api/insights/logs/{id}` | captured request/response payload for one log row (jsonb + raw columns) |
+| GET | `/admin/api/persistence/test` | 5s connectivity ping to the configured PG |
+
+Generation rows are isolated with `ttft_ms > 0` — Go zero values persist as
+`0.0` (never NULL), so probes like `/v1/models` would otherwise drag TTFT
+percentiles to zero. Live-SQL integration tests (`internal/insights/
+sql_integration_test.go`) gate on `FUSION_GW_INSIGHTS_TEST_DSN` and skip in CI.
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in

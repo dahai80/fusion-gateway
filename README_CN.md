@@ -1193,6 +1193,23 @@ drain。计数器 `fusion_gateway_persist_{enqueued,written,dropped}_total`。
 捕获体默认脱敏 (api_key/apiKey/authorization/password 字段剥离),单方向
 512 KiB 截断并置 truncation 标志。
 
+**Insights 只读 API (P3a)**:基于持久化表的 admin 专属分析/检索端点
+(`requireAdminRoleStrict`;持久化关闭时 503)。查询走独立只读连接池,
+`statement_timeout=10s`,时间窗口强制约束 (默认 24h,上限 31 天):
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95 时序;`granularity=minute\|hour\|day`,过滤 `backend`/`model`/`project_id` |
+| GET | `/admin/api/insights/compare` | backend×model 横向对比:延迟分位、成功率、tokens/sec、成本 |
+| POST | `/admin/api/insights/logs/search` | Explorer 检索 DSL:时间窗、`q` (model/错误/request-id 子串)、endpoint/backend/model/project/key/状态/流式/成功/最小时长、分页 (limit ≤ 200) |
+| GET | `/admin/api/insights/logs/{id}` | 单条日志的捕获请求/响应体 (jsonb + raw 双列) |
+| GET | `/admin/api/persistence/test` | 5s 连通性 ping |
+
+生成类请求以 `ttft_ms > 0` 隔离——Go 零值落库为 `0.0` (非 NULL),否则
+`/v1/models` 等探针会把 TTFT 分位拖到零。SQL 集成测试
+(`internal/insights/sql_integration_test.go`) 由 `FUSION_GW_INSIGHTS_TEST_DSN`
+门控,CI 无 PG 自动跳过。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置
