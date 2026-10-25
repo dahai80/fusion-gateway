@@ -1755,7 +1755,7 @@ and all 26 config sections — exercising both the UI (buttons, inputs, forms)
 and the runtime coupling (admin-side config changes must take effect in the
 live gateway via hot-reload).
 
-**49 tests** across 5 spec files:
+**75 tests** across 6 spec files:
 
 | Spec | Covers |
 |------|--------|
@@ -1764,6 +1764,9 @@ live gateway via hot-reload).
 | `03-channels.spec.js` | channels table, create via UI form (name/type/base_url/priority/weight), UI delete, empty-name 400, PUT edit persistence |
 | `04-dashboard-analytics.spec.js` | dashboard, analytics overview + profit, logs + export endpoints |
 | `05-config.spec.js` | all 26 config sections GET (renders) + PUT (persists) + hot-reload round-trip; CORS preflight echo; per-key rate-limit 429; unauthenticated PUT rejected |
+| `06-insights.spec.js` | six insights pages render (persistence-on must not show the 503 alert); insights API surface (latency/compare/logs search/hw-samples/events/anomalies/findings/reports); persistence config GET + idempotent PUT round-trip |
+
+Note: `06-insights.spec.js` requires a gateway with PostgreSQL persistence enabled and the real admin password in `FG_ADMIN_PASS` (fixtures default is a placeholder; 5 failed logins trigger the 15-minute account lockout).
 
 ```bash
 # Prerequisites: gateway running on :11432 with admin enabled

@@ -1498,7 +1498,7 @@ go build -o fusion-gateway ./cmd/gateway
 
 管理后台 SPA 有 Playwright E2E 测试套件,位于 `tests/e2e/`。覆盖每个后台页面 — 登录、API key、channel、仪表盘/分析/日志,以及全部 26 个配置区段 — 既验证 UI (按钮、输入、表单),也验证运行时耦合 (后台侧配置变更须通过热重载在运行中的网关生效)。
 
-**49 个测试**,跨 5 个 spec 文件:
+**75 个测试**,跨 6 个 spec 文件:
 
 | Spec | 覆盖 |
 |------|--------|
@@ -1507,6 +1507,9 @@ go build -o fusion-gateway ./cmd/gateway
 | `03-channels.spec.js` | channel 表、UI 表单创建 (name/type/base_url/priority/weight)、UI 删除、空名 400、PUT 编辑持久化 |
 | `04-dashboard-analytics.spec.js` | 仪表盘、分析概览 + 利润、日志 + 导出端点 |
 | `05-config.spec.js` | 全部 26 个配置区段 GET (渲染) + PUT (持久化) + 热重载往返;CORS preflight 回显;按 key 限流 429;未鉴权 PUT 被拒 |
+| `06-insights.spec.js` | 六个 insights 页面渲染 (persistence 开启态不得出现 503 提示);insights API 面 (latency/compare/logs search/hw-samples/events/anomalies/findings/reports);persistence 配置 GET + 幂等 PUT 往返 |
+
+注:`06-insights.spec.js` 要求网关开启 PostgreSQL 持久化,且通过 `FG_ADMIN_PASS` 传入真实管理员密码 (fixtures 默认值是占位符;5 次登录失败会触发 15 分钟账号锁定)。
 
 ```bash
 # 前提:网关在 :11432 运行且启用 admin
