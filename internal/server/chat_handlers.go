@@ -604,6 +604,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     // flowing so a slow-but-live upstream is not timed out.
     streamCfg := s.cfg.Config.Routing.Stream
     streamStart := time.Now()
+    // Plan §5.2: per-stream TTFT/TPOT capture (request start = handler
+    // start, so queue/route time counts toward TTFT).
+    timing := newStreamTiming(start)
     var firstChunkAt time.Time
     var lastChunkAt time.Time
     chunkCount := 0
@@ -676,7 +679,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
             lastChunkModel = chunk.Model
             lastChunkCreated = chunk.Created
             chunkCount++
-            lastChunkAt = time.Now()
+            chunkNow := time.Now()
+            lastChunkAt = chunkNow
+            timing.observe(chunkNow)
             if firstChunkAt.IsZero() {
                 firstChunkAt = lastChunkAt
             }
@@ -714,6 +719,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 lastChunkCreated = chunk.Created
                 chunkCount++
                 lastChunkAt = time.Now()
+                timing.observe(lastChunkAt)
                 if firstChunkAt.IsZero() {
                     firstChunkAt = lastChunkAt
                 }
@@ -785,6 +791,16 @@ streamDone:
             "last_event_idle", lastIdle,
             "end_reason", endReason)
     }()
+
+    // Plan §5.2: stamp TTFT/TPOT/chunk signals BEFORE the cancel/write_failed
+    // early return below — a client cancel still has a meaningful TTFT and the
+    // partial generation's TPOT, and losing them would make the latency report
+    // blind to exactly the streams users abandon.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        stampTimingMetrics(logEntry, timing, outputTokens, float64(time.Since(start))/float64(time.Millisecond))
+    }
+    observability.RecordLatencyMetrics(string(decision.Backend), req.Model,
+        timing.ttftMS()/1000, timing.tpotMS()/1000)
 
     // F4: terminal handling by exit reason. client_canceled (ctx.Err()!=nil on
     // the PARENT ctx) or write_failed means the client is gone — do NOT write a
@@ -996,7 +1012,12 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                         logEntry.InputTokens = budget.InputTokens
                         logEntry.OutputTokens = fallbackResp.Usage.CompletionTokens
                         logEntry.TotalTokens = budget.InputTokens + fallbackResp.Usage.CompletionTokens
+                        // Plan §5.2: the fallback generation is the one the
+                        // client experienced — stamp its TTFT (full wait).
+                        stampTimingMetrics(logEntry, nil, fallbackResp.Usage.CompletionTokens,
+                            float64(duration)/float64(time.Millisecond))
                     }
+                    observability.RecordLatencyMetrics("cloud", req.Model, duration.Seconds(), 0)
                     if s.latencyTracker != nil {
                         s.latencyTracker.Record(fallbackProvider.Name(), duration)
                     }
@@ -1044,7 +1065,11 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         logEntry.InputTokens = budget.InputTokens
         logEntry.OutputTokens = resp.Usage.CompletionTokens
         logEntry.TotalTokens = budget.InputTokens + resp.Usage.CompletionTokens
+        // Plan §5.2 non-stream: the whole wait IS the first token; TPOT has no
+        // meaning without a chunk stream, so only TTFT lands.
+        stampTimingMetrics(logEntry, nil, resp.Usage.CompletionTokens, float64(duration)/float64(time.Millisecond))
     }
+    observability.RecordLatencyMetrics(string(decision.Backend), req.Model, duration.Seconds(), 0)
 
     // Latency tracking
     if s.latencyTracker != nil {

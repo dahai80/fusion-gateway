@@ -695,6 +695,26 @@ The classifier **fails open** on SLO breach — the result (or fallback to the
 rule chain) is still returned; the SLO is a visibility signal, not a hard
 reject.
 
+### TTFT / TPOT Latency Capture
+
+Every generation request captures first-token and per-token latency (plan
+§5.2, `architecture/fusion-gateway-seriazation-archi-1015.md` upstream of the
+repo):
+
+- **TTFT** — request start to first content chunk (stream) or full response
+  wait (non-stream). On the native Anthropic path only `content_block_delta`
+  counts — `message_start` arrives before generation and would collapse TTFT.
+- **TPOT** — mean inter-chunk gap; **TPOT P95** over a bounded sample
+  reservoir (2048 samples, exact mean regardless of cap); **chunk count**;
+  **tokens/sec** over the generation window.
+
+Signals land in two sinks: the request log entry (`ttft_ms`, `tpot_ms`,
+`tpot_p95_ms`, `chunk_count`, `tokens_per_sec` in `RequestLog`) and the
+Prometheus histograms `fusion_gateway_request_ttft_seconds` /
+`fusion_gateway_request_tpot_seconds` (labels `backend`, `model`). Client
+cancels and write failures still stamp their partial timing — abandoned
+streams are exactly the ones worth measuring.
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
