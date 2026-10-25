@@ -1330,6 +1330,27 @@ P95 及环比、最差模型 top3)、异常 (当前 open 数 + 按类型分布)�
 保留策略:`fg_reports` 随其他 insights 表按
 `persistence.retention.insights_days` (默认 180 天) 清理。
 
+### 洞察仪表盘 (P4)
+
+管理后台新增 **Insights** 菜单组,把上述持久化分析全部可视化 (insights
+端点返回 503 时页面显示友好的"持久化未开启"提示):
+
+| 页面 | 路由 | 内容 |
+|---|---|---|
+| Latency | `/admin/insights/latency` | TTFT / TPOT p50+p95 时间序列 (请求/错误数为副轴);支持 backend/model/project 过滤;粒度随窗口自动选择 (≤24h 按小时,否则按天) |
+| Compare | `/admin/insights/compare` | 跨 provider 的 TTFT p95 柱状图 + 可排序明细表 (成功率、TPOT、tok/s、平均 token、成本),local/cloud 标签 |
+| Explorer | `/admin/insights/explorer` | 全量日志检索 (支持全部搜索 DSL 过滤、服务端分页);行展开查看捕获的请求/响应 payload (优先原始字节,JSON body 兜底,标注截断) |
+| Optimize | `/admin/insights/optimize` | 优化结论列表,支持 Apply (MIGRATE_TO_LOCAL 会把 fusion-mlx 前插进 `models.supply`) / Dismiss |
+| Anomalies | `/admin/insights/anomalies` | 异常列表,支持 Ack 和 Mute (1–90 天),严重度标签 |
+| Reports | `/admin/insights/reports` | 周期报告列表,支持幂等的按需生成 + Markdown 查看器 |
+
+配置区的 **Persistence** 页面对应 GET/PUT
+`/admin/api/config/persistence`,覆盖整个 `persistence.*` 命名空间
+(postgres 连接池、写队列、body 捕获、保留天数)。连接池/队列/捕获改动
+需重启生效;`postgres.dsn_env` 指的是承载 DSN 的环境变量名 —— DSN 本身
+永远不落 `config.yaml`。PUT 响应从重载后的快照回读,因此
+`validatePersistence` 的归一化结果会体现在响应里。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置
@@ -1365,6 +1386,7 @@ P95 及环比、最差模型 top3)、异常 (当前 open 数 + 按类型分布)�
 | `/admin/api/config/batch` | GET/PUT | Batch API 设置 |
 | `/admin/api/config/store` | GET/PUT | Store 后端 (memory/Redis) |
 | `/admin/api/config/validation` | GET/PUT | 请求校验规则 |
+| `/admin/api/config/persistence` | GET/PUT | PostgreSQL 持久化 (连接池、队列、捕获、保留) |
 
 **行为**:
 - GET 返回当前内存配置,敏感字段掩码 (`****`)

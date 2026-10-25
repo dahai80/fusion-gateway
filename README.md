@@ -901,6 +901,29 @@ Admin endpoints (strict role, 503 when persistence is off):
 Retention: `fg_reports` rows are swept with the other insights tables after
 `persistence.retention.insights_days` (default 180).
 
+### Insights Dashboards (P4)
+
+The admin console ships a dedicated **Insights** menu group surfacing the
+persistence-backed analytics above (pages return a friendly "persistence
+disabled" alert when the insights endpoints answer 503):
+
+| Page | Route | What it shows |
+|---|---|---|
+| Latency | `/admin/insights/latency` | TTFT / TPOT p50+p95 timeseries (requests/errors on a secondary axis); backend/model/project filters; granularity auto-selected from the window (hour ≤ 24h, else day) |
+| Compare | `/admin/insights/compare` | Cross-provider TTFT p95 bar chart plus a sortable table (success rate, TPOT, tok/s, avg tokens, cost) with local/cloud tags |
+| Explorer | `/admin/insights/explorer` | Full log search over the persisted store (all search DSL filters, server-side paging); each row expands to the captured request/response payload (raw bytes preferred, JSON bodies as fallback, truncation marked) |
+| Optimize | `/admin/insights/optimize` | Optimization findings with Apply (MIGRATE_TO_LOCAL prepends fusion-mlx to `models.supply`) / Dismiss actions |
+| Anomalies | `/admin/insights/anomalies` | Anomaly list with Ack and Mute (1–90 days) actions, severity-coded tags |
+| Reports | `/admin/insights/reports` | Periodic report list with idempotent on-demand generate and a Markdown viewer |
+
+A **Persistence** page under Configuration exposes GET/PUT
+`/admin/api/config/persistence` for the whole `persistence.*` namespace
+(postgres pool, write queue, body capture, retention days). Pool/queue/capture
+changes take effect after a restart; `postgres.dsn_env` names the environment
+variable carrying the DSN — the DSN itself never lives in `config.yaml`. PUT
+responses are re-read from the reloaded snapshot, so
+`validatePersistence` normalization is reflected.
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
@@ -1614,6 +1637,7 @@ All gateway configuration can be managed through the admin dashboard — no manu
 | `/admin/api/config/batch` | GET/PUT | Batch API settings |
 | `/admin/api/config/store` | GET/PUT | Store backend (memory/Redis) |
 | `/admin/api/config/validation` | GET/PUT | Request validation rules |
+| `/admin/api/config/persistence` | GET/PUT | PostgreSQL persistence (pool, queue, capture, retention) |
 
 **Behavior**:
 - GET returns current in-memory config with sensitive fields masked (`****`)
