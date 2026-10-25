@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
 	"github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 	"github.com/fusion-gateway/fusion-gateway/internal/observability"
+	"github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
 	"github.com/fusion-gateway/fusion-gateway/internal/router"
 	"github.com/fusion-gateway/fusion-gateway/internal/server"
 	"github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
@@ -388,6 +390,31 @@ func run(configPath string) error {
 	// reports the running binary, not just config_version.
 	srv.SetVersion(version, commit)
 
+	// Plan §4.2: PostgreSQL request persistence. Opt-in via
+	// persistence.enabled + DSN env; failure to connect is FATAL by design —
+	// the operator asked for durable logs, and serving with silent
+	// non-persistence would defeat the compliance goal (fail visibly, not
+	// silently). The DSN is read from the configured env var (never the
+	// config file).
+	var persistSink *pg.Sink
+	if snap.Config.Persistence.Enabled {
+		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
+		if dsn == "" {
+			return fmt.Errorf("persistence.enabled=true but env %s (postgres DSN) is empty",
+				snap.Config.Persistence.Postgres.DsnEnv)
+		}
+		sink, err := pg.New(snap.Config.Persistence, dsn)
+		if err != nil {
+			return fmt.Errorf("persistence sink init failed: %w", err)
+		}
+		sink.Start(context.Background())
+		srv.SetPersistSink(sink)
+		persistSink = sink
+		slog.Info("request persistence enabled",
+			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
+			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
+	}
+
 	stopCh := make(chan struct{})
 
 	// EI10: track long-lived background workers so Server.Shutdown can Stop
@@ -645,6 +672,18 @@ func run(configPath string) error {
 	// hwCollector.Stop() is deferred at the top of run(); joining it here too
 	// would double-Stop (Worker.Stop is idempotent so that is safe, but the
 	// defer already covers it — leave the collector to its deferred Stop).
+
+	// Plan §4.2: drain the persistence sink LAST — after the HTTP drain so no
+	// in-flight request can still Enqueue, and after the workers. Close
+	// flushes the queued batch best-effort (10s cap) so a graceful restart
+	// loses nothing.
+	if persistSink != nil {
+		persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := persistSink.Close(persistCtx); err != nil {
+			slog.Error("persistence sink close error", "error", err)
+		}
+		persistCancel()
+	}
 
 	slog.Info("server stopped")
 	return nil

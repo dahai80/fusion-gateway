@@ -1180,6 +1180,19 @@ terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
 - 按时间范围、key、模型、channel、状态、token/成本阈值过滤
 - 可导出 JSON
 
+**PostgreSQL 持久化** (`persistence.enabled: true`,默认关闭):请求元数据 +
+延迟信号 (TTFT/TPOT/P95/分片数/tokens per sec) + 捕获的请求/响应体写入
+PostgreSQL,重启不丢日志。表 `fg_request_logs` / `fg_request_payloads` 按 `ts`
+日分区,保留期到点整分区 `DROP` (O(1) 无膨胀)。有效 JSON 体入 `req_body` /
+`resp_body` (jsonb 可查询);非 JSON 捕获 (SSE 帧、二进制) 入 `req_raw` /
+`resp_raw`,并以 `resp_raw_mime` 记录来源类型。DSN 走环境变量
+`FUSION_GW_PG_DSN` (bindSecretEnv 模式,绝不写进 config.yaml);开启但缺 DSN
+直接启动 FATAL。写入链路:非阻塞内存队列 (容量 8192,满则丢最旧),批量
+`COPY FROM` (500 条或 500ms),PG 故障指数退避重试,停机时合并批内 + 队列
+drain。计数器 `fusion_gateway_persist_{enqueued,written,dropped}_total`。
+捕获体默认脱敏 (api_key/apiKey/authorization/password 字段剥离),单方向
+512 KiB 截断并置 truncation 标志。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置

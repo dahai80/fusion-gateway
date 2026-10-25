@@ -715,6 +715,43 @@ Prometheus histograms `fusion_gateway_request_ttft_seconds` /
 cancels and write failures still stamp their partial timing — abandoned
 streams are exactly the ones worth measuring.
 
+### PostgreSQL Persistence
+
+`persistence.enabled: true` (default off) serializes every request — metadata,
+latency signals, and captured request/response bodies — to PostgreSQL so logs
+survive restarts (plan §4, same upstream archi doc). Off = zero overhead: no
+capture middleware, no sink, no DB connection.
+
+```yaml
+persistence:
+  enabled: true
+  postgres:
+    dsn_env: FUSION_GW_PG_DSN    # DSN via env (bindSecretEnv pattern), never in config.yaml
+  capture:
+    request_body: true           # both default true when capture is set
+    response_body: true
+    max_body_bytes: 524288       # 512 KiB per direction, truncation flagged
+    strip_auth_fields: true      # api_key/apiKey/authorization/password removed from captured bodies
+  retention:
+    request_logs_days: 90
+    request_payloads_days: 30    # clamped to <= request_logs_days
+```
+
+Schema: `fg_request_logs` (32 columns incl. `ttft_ms`/`tpot_ms`/`tpot_p95_ms`/
+`chunk_count`/`tokens_per_sec`) and `fg_request_payloads` — both daily RANGE
+partitions on `ts`; retention is a partition `DROP` (O(1), no bloat). Captured
+bodies that are valid JSON land in `req_body`/`resp_body` (jsonb, queryable);
+non-JSON captures (SSE frames, binary) land in `req_raw`/`resp_raw` (text) with
+`resp_raw_mime` recording the source content type.
+
+Delivery contract: non-blocking in-process queue (capacity 8192, keep-new
+eviction — persistence never backpressures a generation request), batched
+`COPY FROM` writes (500 entries or 500ms), exponential-backoff retry on PG
+outage, and a shutdown drain that merges the in-flight batch with the queue.
+Counters `fusion_gateway_persist_{enqueued,written,dropped}_total` on
+`/metrics`. Missing DSN with persistence enabled is a startup FATAL (fail
+visibly, not silently).
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
