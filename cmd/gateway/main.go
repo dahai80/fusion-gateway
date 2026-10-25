@@ -19,6 +19,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/cluster"
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
 	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
+	"github.com/fusion-gateway/fusion-gateway/internal/insights"
 	"github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 	"github.com/fusion-gateway/fusion-gateway/internal/observability"
 	"github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
@@ -397,6 +398,7 @@ func run(configPath string) error {
 	// silently). The DSN is read from the configured env var (never the
 	// config file).
 	var persistSink *pg.Sink
+	var insightsSvc *insights.Service
 	if snap.Config.Persistence.Enabled {
 		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
 		if dsn == "" {
@@ -410,6 +412,13 @@ func run(configPath string) error {
 		sink.Start(context.Background())
 		srv.SetPersistSink(sink)
 		persistSink = sink
+		// P3 read layer: dedicated pool with a 10s statement_timeout so admin
+		// analytics queries can never wedge; 503 when persistence is off.
+		insightsSvc, err = insights.New(snap.Config.Persistence, dsn)
+		if err != nil {
+			return fmt.Errorf("insights service init failed: %w", err)
+		}
+		srv.SetInsightsService(insightsSvc)
 		slog.Info("request persistence enabled",
 			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
@@ -683,6 +692,11 @@ func run(configPath string) error {
 			slog.Error("persistence sink close error", "error", err)
 		}
 		persistCancel()
+	}
+	// Insights read pool: closed after the sink (queries must stop before the
+	// DB goes away).
+	if insightsSvc != nil {
+		insightsSvc.Close()
 	}
 
 	slog.Info("server stopped")
