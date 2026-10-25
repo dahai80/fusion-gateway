@@ -62,6 +62,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     // evidence carries backend errors and host-level traffic volume.
     mux.HandleFunc("/admin/api/anomalies", h.requireAdminRoleStrict(h.handleAnomaliesList))
     mux.HandleFunc("/admin/api/anomalies/", h.requireAdminRoleStrict(h.handleAnomalyByID))
+    // P3b-3 (plan §14.2/§15.5): optimization findings + apply/dismiss. Strict
+    // role — apply rewrites routing config (models.supply), evidence exposes
+    // traffic splits.
+    mux.HandleFunc("/admin/api/optimization/findings", h.requireAdminRoleStrict(h.handleOptimizationFindingsList))
+    mux.HandleFunc("/admin/api/optimization/findings/", h.requireAdminRoleStrict(h.handleOptimizationFindingByID))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))

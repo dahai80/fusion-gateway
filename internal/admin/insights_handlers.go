@@ -302,3 +302,162 @@ func (h *Handler) handleAnomalyByID(w http.ResponseWriter, r *http.Request) {
         writeError(w, http.StatusBadRequest, "unknown action: "+parts[1])
     }
 }
+
+// handleOptimizationFindingsList — GET /admin/api/optimization/findings
+// (plan §15.5). Params: status (new|applied|dismissed), rule, limit.
+func (h *Handler) handleOptimizationFindingsList(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    q := r.URL.Query()
+    limit := 0
+    if v, err := strconv.Atoi(q.Get("limit")); err == nil {
+        limit = v
+    }
+    findings, err := h.insights.Findings(r.Context(),
+        q.Get("status"), q.Get("rule"), limit)
+    if err != nil {
+        slog.Warn("optimization findings query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"findings": findings, "total": len(findings)})
+}
+
+// handleOptimizationFindingByID — POST /admin/api/optimization/findings/{id}/apply
+// or /{id}/dismiss (plan §15.5). Apply is only implemented for
+// MIGRATE_TO_LOCAL: it prepends fusion-mlx to models.supply.<model> (existing
+// entries survive as fallback), reloads the live snapshot, and only then
+// stamps the finding applied. Other rules are advisory — the operator acts
+// outside the gateway or dismisses.
+func (h *Handler) handleOptimizationFindingByID(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodPost {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    rest := strings.TrimPrefix(r.URL.Path, "/admin/api/optimization/findings/")
+    parts := strings.Split(rest, "/")
+    if len(parts) != 2 || parts[0] == "" {
+        writeError(w, http.StatusBadRequest,
+            "expected /admin/api/optimization/findings/{id}/apply or /dismiss")
+        return
+    }
+    id, err := strconv.ParseInt(parts[0], 10, 64)
+    if err != nil || id <= 0 {
+        writeError(w, http.StatusBadRequest, "invalid finding id")
+        return
+    }
+    f, err := h.insights.FindingByID(r.Context(), id)
+    if err != nil {
+        writeError(w, http.StatusNotFound, err.Error())
+        return
+    }
+    actor := "admin"
+    if claims := GetAdminClaims(r.Context()); claims != nil && claims.Username != "" {
+        actor = claims.Username
+    }
+    switch parts[1] {
+    case "apply":
+        h.applyFinding(w, r, f, id, actor)
+    case "dismiss":
+        dismissed, err := h.insights.DismissFinding(r.Context(), id)
+        if err != nil {
+            slog.Warn("finding dismiss failed", "id", id, "error", err)
+            writeError(w, http.StatusConflict, err.Error())
+            return
+        }
+        h.auditEvent("info", "finding_dismissed", map[string]any{
+            "id": id, "rule": f.Rule, "scope": json.RawMessage(f.Scope), "by": actor,
+        })
+        writeJSON(w, http.StatusOK, dismissed)
+    default:
+        writeError(w, http.StatusBadRequest, "unknown action: "+parts[1])
+    }
+}
+
+// applyFinding executes the MIGRATE_TO_LOCAL config mutation. Config write
+// first, DB stamp second — a failed reload leaves the finding at 'new' so
+// the operator can retry instead of a phantom applied row.
+func (h *Handler) applyFinding(w http.ResponseWriter, r *http.Request, f *insights.Finding, id int64, actor string) {
+    if f.Rule != insights.RuleMigrateToLocal {
+        writeError(w, http.StatusBadRequest,
+            "rule "+f.Rule+" is advisory: no machine-applicable config mutation, use dismiss")
+        return
+    }
+    if f.Status != "new" {
+        writeError(w, http.StatusConflict, "finding already "+f.Status)
+        return
+    }
+    var scope struct {
+        Model string `json:"model"`
+    }
+    if err := json.Unmarshal(f.Scope, &scope); err != nil || scope.Model == "" {
+        writeError(w, http.StatusBadRequest, "finding scope has no model")
+        return
+    }
+    model := scope.Model
+    var supply []string
+    if _, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
+        models := getOrCreateSection(doc, "models")
+        supplySection := getOrCreateSection(models, "supply")
+        supply = mergeSupply(supplySection[model], model)
+        supplySection[model] = toIfaceSlice(supply)
+        return nil
+    }); err != nil {
+        slog.Warn("finding apply config write failed", "id", id, "model", model, "error", err)
+        writeError(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+    appliedCfg, _ := json.Marshal(map[string]any{
+        "models.supply." + model: supply,
+    })
+    applied, err := h.insights.ApplyFinding(r.Context(), id, string(appliedCfg))
+    if err != nil {
+        // Config is live but the stamp failed — log loudly, do not roll back
+        // (the supply entry is what the operator asked for; the row stays
+        // 'new' and a retry converges).
+        slog.Error("finding applied in config but DB stamp failed",
+            "id", id, "model", model, "error", err)
+        writeError(w, http.StatusInternalServerError,
+            "config applied but finding stamp failed, retry apply to converge")
+        return
+    }
+    h.auditEvent("info", "finding_applied", map[string]any{
+        "id": id, "rule": f.Rule, "model": model,
+        "supply": supply, "by": actor,
+    })
+    writeJSON(w, http.StatusOK, applied)
+}
+
+// toIfaceSlice converts []string to []interface{} for the YAML doc tree.
+func toIfaceSlice(in []string) []interface{} {
+    out := make([]interface{}, len(in))
+    for i, s := range in {
+        out[i] = s
+    }
+    return out
+}
+
+// mergeSupply builds the new models.supply list for a MIGRATE_TO_LOCAL apply:
+// fusion-mlx first, then the model's existing entries (minus fusion-mlx) as
+// fallback. A missing or non-list existing entry yields just fusion-mlx.
+func mergeSupply(existing any, model string) []string {
+    supply := []string{"fusion-mlx"}
+    if list, ok := existing.([]interface{}); ok {
+        for _, e := range list {
+            if es, _ := e.(string); es != "" && es != "fusion-mlx" {
+                supply = append(supply, es)
+            }
+        }
+    }
+    return supply
+}

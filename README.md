@@ -841,6 +841,36 @@ Ack and mute both write an audit row (`anomaly_acked` / `anomaly_muted`) into
 `muted_until` expires; acking a muted row is rejected (un-muting would silently
 re-arm a detector the operator suppressed).
 
+### Optimization Rules Engine (P3b-3)
+
+An hourly background worker (`internal/insights/rules.go`, `lifecycle.Worker`)
+evaluates six optimization rules over the persisted traffic and writes
+actionable findings into `fg_optimization_findings`. Same rule + scope within
+24 hours is deduped in the database, so restarts never duplicate rows.
+
+| Rule | Trigger (guards) | Action |
+|---|---|---|
+| `MIGRATE_TO_LOCAL` | cloud share > 10% AND local TTFT P95 < 0.7× cloud P95; ≥ 50 requests, ≥ 10 local generation samples, local error rate ≤ 2% | machine-applicable: apply writes `models.supply.<model> = ["fusion-mlx", ...existing]` and hot-reloads |
+| `KEEP_CLOUD` | local error rate > 2% with ≥ 50 local requests | advisory |
+| `MIGRATE_TO_CLOUD` | one hour-of-day erroring > 5% with ≥ 20 local requests | advisory (time-based routing) |
+| `TRIM_TOKENS` | > 5% of requests have input > 50× output tokens; ≥ 100 requests | advisory |
+| `DEDUP_PROMPT` | same request body sent > 3 times in 24h on chat endpoints (md5 hashed in SQL) | advisory (enable semantic cache) |
+| `PRELOAD_MODEL` | ≥ 3 distinct local models over 7d AND avg system memory ratio < 85% | advisory (preloading lives in fusion-mlx) |
+
+Admin endpoints (strict role, 503 when persistence is off):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/api/optimization/findings` | list findings; filters `status` (`new`/`applied`/`dismissed`), `rule`, `limit` |
+| POST | `/admin/api/optimization/findings/{id}/apply` | apply a `MIGRATE_TO_LOCAL` finding: prepends `fusion-mlx` to `models.supply.<model>`, reloads the live snapshot, stamps `applied` + `applied_config` |
+| POST | `/admin/api/optimization/findings/{id}/dismiss` | mark a finding not worth acting on |
+
+Apply ordering: the config write + reload happens **before** the DB stamp, so a
+failed reload leaves the finding at `new` for a retry instead of a phantom
+`applied` row. Only `new` findings transition; other rules answer 400
+(advisory). Both mutations write an audit row (`finding_applied` /
+`finding_dismissed`) into `fg_gateway_events`.
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in

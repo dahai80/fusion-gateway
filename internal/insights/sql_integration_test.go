@@ -191,3 +191,68 @@ func TestSQL_DetectorFetchesAgainstLiveDB(t *testing.T) {
         t.Fatalf("fetchBreakerDays: %v", err)
     }
 }
+
+// TestSQL_RulesFetchesAgainstLiveDB validates the rules engine SQL statements
+// against the live schema (unit tests cannot catch malformed SQL).
+func TestSQL_RulesFetchesAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    re := &RulesEngine{svc: svc}
+    if _, err := re.fetchModelSplit(ctx); err != nil {
+        t.Fatalf("fetchModelSplit: %v", err)
+    }
+    if _, err := re.fetchLocalHourErrors(ctx); err != nil {
+        t.Fatalf("fetchLocalHourErrors: %v", err)
+    }
+    if _, err := re.fetchPromptDupes(ctx); err != nil {
+        t.Fatalf("fetchPromptDupes: %v", err)
+    }
+    if _, _, err := re.fetchLocalModelDays(ctx); err != nil {
+        t.Fatalf("fetchLocalModelDays: %v", err)
+    }
+}
+
+// TestSQL_FindingsLifecycleAgainstLiveDB exercises insert, dedupe, list, and
+// the new-only apply/dismiss transitions with a __test__ row.
+func TestSQL_FindingsLifecycleAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+
+    draft := findingDraft{
+        Rule:     "__test__",
+        Scope:    map[string]any{"model": "__test_model__"},
+        Evidence: map[string]any{"n": 1},
+        Action:   map[string]any{"type": "models_supply"},
+    }
+    t.Cleanup(func() {
+        svc.pool.Exec(context.Background(),
+            `DELETE FROM fg_optimization_findings WHERE rule = '__test__'`)
+    })
+
+    re := &RulesEngine{svc: svc}
+    if err := re.insertFinding(ctx, draft); err != nil {
+        t.Fatalf("insert: %v", err)
+    }
+    if !re.deduped(ctx, draft) {
+        t.Fatalf("same rule+scope within 24h must dedupe")
+    }
+    findings, err := svc.Findings(ctx, "", "__test__", 10)
+    if err != nil || len(findings) != 1 {
+        t.Fatalf("list: %v len=%d", err, len(findings))
+    }
+    id := findings[0].ID
+
+    if _, err := svc.DismissFinding(ctx, id); err != nil {
+        t.Fatalf("dismiss: %v", err)
+    }
+    // Dismissed row can no longer be applied (new-only transition).
+    if _, err := svc.ApplyFinding(ctx, id, "{}"); err == nil {
+        t.Fatalf("apply of dismissed row must fail")
+    }
+    f, err := svc.FindingByID(ctx, id)
+    if err != nil || f.Status != "dismissed" {
+        t.Fatalf("finding fetch after dismiss: %v status=%s", err, f.Status)
+    }
+}
