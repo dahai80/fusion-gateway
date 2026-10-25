@@ -1,6 +1,8 @@
 package insights
 
 import (
+    "os"
+    "path/filepath"
     "strings"
     "testing"
     "time"
@@ -128,4 +130,23 @@ func TestRenderReport_EmptyData(t *testing.T) {
             t.Fatalf("empty report missing %q\n---\n%s", want, out)
         }
     }
+}
+
+func TestWriteReportFile(t *testing.T) {
+    dir := t.TempDir()
+    svc := &Service{reportDir: dir}
+    rep := &Report{
+        Period:     "daily",
+        RangeStart: time.Date(2026, 10, 25, 0, 0, 0, 0, reportLoc),
+        ContentMD:  "# Fusion Gateway Daily Report\n",
+    }
+    svc.WriteReportFile(rep)
+    got, err := os.ReadFile(filepath.Join(dir, "report-daily-2026-10-25.md"))
+    if err != nil || string(got) != rep.ContentMD {
+        t.Fatalf("file copy wrong: %v %q", err, got)
+    }
+    // Empty dir (worker never started) and empty content are no-ops.
+    svc2 := &Service{}
+    svc2.WriteReportFile(rep) // must not panic
+    svc.WriteReportFile(&Report{Period: "daily", RangeStart: rep.RangeStart})
 }

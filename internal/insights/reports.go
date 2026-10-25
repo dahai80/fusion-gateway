@@ -48,6 +48,9 @@ type ReportsWorker struct {
 // destination (already tilde-expanded); empty disables the file copy. Stop
 // before closing the pool (same shutdown contract as the detector).
 func (s *Service) StartReportsWorker(parent context.Context, rec EventRecorder, dir string) *ReportsWorker {
+    // dir is stored on the Service so the manual generate endpoint writes the
+    // same file copy the worker does (worker start precedes serving).
+    s.reportDir = dir
     rw := &ReportsWorker{svc: s, recorder: rec, dir: dir}
     rw.worker = lifecycle.Start(parent, "insights-reports", rw.loop)
     slog.Info("reports worker started", "tick", reportsTick.String(), "dir", dir)
@@ -241,15 +244,23 @@ func (s *Service) ReportByID(ctx context.Context, id int64) (*Report, error) {
 // writeFile drops the file copy under the worker dir. Best-effort: the DB row
 // is authoritative, a failed file write is a WARN not an error.
 func (rw *ReportsWorker) writeFile(rep *Report) {
-    if rw.dir == "" || rep.ContentMD == "" {
+    rw.svc.WriteReportFile(rep)
+}
+
+// WriteReportFile writes the file copy using the dir registered by
+// StartReportsWorker. No-op when the worker never started (empty dir) or the
+// report carries no content. Called by both the worker pass and the manual
+// generate endpoint so a forced report lands on disk immediately.
+func (s *Service) WriteReportFile(rep *Report) {
+    if s.reportDir == "" || rep.ContentMD == "" {
         return
     }
-    if err := os.MkdirAll(rw.dir, 0o755); err != nil {
-        slog.Warn("reports file copy mkdir failed", "dir", rw.dir, "error", err)
+    if err := os.MkdirAll(s.reportDir, 0o755); err != nil {
+        slog.Warn("reports file copy mkdir failed", "dir", s.reportDir, "error", err)
         return
     }
     name := fmt.Sprintf("report-%s-%s.md", rep.Period, rep.RangeStart.Format("2006-01-02"))
-    path := filepath.Join(rw.dir, name)
+    path := filepath.Join(s.reportDir, name)
     if err := os.WriteFile(path, []byte(rep.ContentMD), 0o644); err != nil {
         slog.Warn("reports file copy write failed", "path", path, "error", err)
         return
