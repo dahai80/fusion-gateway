@@ -84,16 +84,21 @@ func MarkRequestBodyCaptured(ctx context.Context) {
     }
 }
 
-// captureRequest reads the remaining request body into the buffer up to the
-// cap. Called at finalize: by then the handler has drained the body, so this
-// is normally a no-op on an already-full TeeReader buffer. Only un-read
-// bodies (handler rejected early, admin routes) need the explicit drain.
+// captureRequest drains the remaining request body to io.Discard. Called at
+// finalize: when the handler read the body, this is a no-op on an exhausted
+// reader. When the body is UNREAD (auth rejected the request early, admin
+// routes), draining must go to Discard — r.Body is the TeeReader installed by
+// withCapture, which already tees every byte into reqBuf as a side effect of
+// being read. Copying into reqBuf directly made the tee write each byte a
+// second time (401 rows carried body+body in req_raw). A replaced r.Body
+// (peek+restore sites) is safe too: those read through the tee first, so the
+// buffer already holds the full body and the Discard drain adds nothing.
 func (bc *bodyCapture) captureRequest(r *http.Request) {
     if bc.reqDone || r.Body == nil {
         return
     }
     bc.reqDone = true
-    _, err := io.Copy(&bc.reqBuf, r.Body)
+    _, err := io.Copy(io.Discard, r.Body)
     if err != nil && err != io.EOF {
         slog.Debug("request body capture drain stopped", "error", err)
     }
