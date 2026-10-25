@@ -845,6 +845,13 @@ func modelAllowedByCloudList(model string, patterns []string) bool {
     return false
 }
 
+// ModelAllowedByCloudList is the exported wrapper over the P0.15
+// cloud_models allowlist check, for server-layer callers that must apply
+// the same guard outside the engine (qualified model locks, §13.2/AC17).
+func ModelAllowedByCloudList(model string, patterns []string) bool {
+    return modelAllowedByCloudList(model, patterns)
+}
+
 // localExclusiveDecision returns a force-local RouteDecision when req.Model is
 // local-exclusive (in the local model set, not in routing.fallback.model_mapping),
 // or nil when the model is cloud-routable / not in the local set. Hoisted to P0.2
@@ -870,6 +877,68 @@ func localExclusiveDecision(cfg *config.ConfigSnapshot, req *RouteRequest, snap 
         )
         return &RouteDecision{Backend: LocalBackend, Reason: "local_exclusive_model"}
     }
+    return nil
+}
+
+// modelsSupplyDecision implements P0.18: resolve a bare model through the
+// models.supply priority list (plan §13.4). Returns nil when the model has
+// no Supply entry or no entry is currently eligible — the caller falls
+// through to the historical chain. A "miss" decision (all entries skipped,
+// allow_cross_supply=false) is returned as a Rejected decision so the
+// handler surfaces a clear error instead of an unlisted backend serving
+// the name. Called under breakerMu.RLock — breaker reads are the same
+// lock-free State() calls the affinity slot uses.
+func (e *Engine) modelsSupplyDecision(cfg *config.ConfigSnapshot, model string, snap routeSnapshot) *RouteDecision {
+    supply, ok := cfg.Config.Models.Supply[model]
+    if !ok || len(supply) == 0 {
+        return nil
+    }
+    for _, name := range supply {
+        name = strings.TrimSpace(name)
+        if name == "" {
+            continue
+        }
+        if name == "fusion-mlx" {
+            // Local slot: model must be in the local set and the local
+            // breaker must not be open (an open breaker = DOWN local, not
+            // an eligible supply — cloud remains the least-bad fallback).
+            localModels := snap.localModels()
+            if localModels != nil && localModels[model] && e.breakers["local"].State() != StateOpen && snap.localReady {
+                return &RouteDecision{Backend: LocalBackend, Reason: "models_supply:fusion-mlx"}
+            }
+            slog.Info("models.supply local entry not eligible, trying next",
+                "model", model, "backend", name)
+            continue
+        }
+        // Cloud slot: entry must exist and be enabled in backends:, and
+        // pass the cloud_models allowlist (P0.15 guard outranks supply).
+        be, exists := cfg.Config.Backends[name]
+        if !exists || !be.Enabled {
+            slog.Info("models.supply cloud entry missing or disabled, trying next",
+                "model", model, "backend", name)
+            continue
+        }
+        if !modelAllowedByCloudList(model, cfg.Config.Routing.CloudModels) {
+            slog.Info("models.supply cloud entry blocked by cloud_models allowlist, trying next",
+                "model", model, "backend", name)
+            continue
+        }
+        return &RouteDecision{Backend: CloudBackend, Reason: "models_supply:" + name, CloudTarget: name}
+    }
+    // All entries skipped. allow_cross_supply (default true) keeps the
+    // historical chain; false makes the explicit list exclusive.
+    if cfg.Config.Models.AllowCrossSupply != nil && !*cfg.Config.Models.AllowCrossSupply {
+        slog.Warn("models.supply exhausted and allow_cross_supply=false, rejecting",
+            "model", model, "supply", supply)
+        return &RouteDecision{
+            Backend:  CloudBackend,
+            Reason:   "models_supply_miss",
+            Rejected: true,
+            RejectDetail: `{"error":{"message":"model has no eligible provider in models.supply (allow_cross_supply=false)","type":"invalid_request"}}`,
+        }
+    }
+    slog.Info("models.supply exhausted, falling through to routing chain",
+        "model", model, "supply", supply)
     return nil
 }
 
@@ -1026,6 +1095,19 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             "config_version", cfg.Version,
         )
         return &RouteDecision{Backend: LocalBackend, Reason: "cloud_models_allowlist_miss"}
+    }
+
+    // P0.18: models.supply explicit ordering (plan §13.4). A bare model
+    // with a Supply list resolves to the first ELIGIBLE entry — local
+    // requires the model in the local set and a non-tripped breaker; cloud
+    // requires an enabled backends entry and the cloud_models allowlist
+    // (checked above, but restated per-entry for clarity of skips). No
+    // eligible entry falls through to the chain below (or, with
+    // allow_cross_supply=false, is rejected). Runs after P0.15 so the
+    // allowlist guard outranks supply, and after P0 so a DOWN local still
+    // loses its supply slot to cloud — a tripped local is not "eligible".
+    if decision := e.modelsSupplyDecision(cfg, req.Model, snap); decision != nil {
+        return decision
     }
 
     // P0.2: Local-exclusive model guard (issue #83, hoisted above P0.5/P1-P2.5

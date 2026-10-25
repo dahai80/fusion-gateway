@@ -144,6 +144,44 @@ See `config.example.yaml` for full reference. Key settings:
 | `mcp.node_port` | 11445 | Remote node port for forwarding |
 | `mcp.local_port` | 9000 | Local plugin server port |
 
+## Model Identity & Simplified Backends
+
+Same model served by several providers is explicitly distinguishable, and a new backend needs minimal config (`config.simple.yaml` is a complete working example).
+
+### Qualified model ids (`backend/model`)
+
+A request model of the form `<backend>/<model>` — where `<backend>` is a `backends:` key — pins the request to that provider deterministically, bypassing the routing chain's provider choice (breakers/allowlist guards still apply). The upstream receives the bare `<model>` part. Model ids that merely contain a slash (e.g. `deepseek-ai/DeepSeek-V3`) pass through untouched unless the prefix matches a configured backend name.
+
+```bash
+# Deterministic cloud provider pick:
+curl ... -d '{"model": "glm-cloud/glm-5", ...}'
+# Bare name keeps the historical routing chain (local-first, fallback):
+curl ... -d '{"model": "glm-5", ...}'
+```
+
+`/v1/models` lists one entry per (backend, model) pair with `fusion_backend` and `fusion_qualified_id` fields, so clients can render a provider-attributed model picker. Request logs record the bare name in `model` and the client-facing qualified/alias form in `model_mapped`.
+
+### `models:` namespace
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `models.supply` | {} | Bare model → ordered backend list; first eligible entry wins (engine slot P0.18). Local entries need the model loaded + a healthy local breaker; cloud entries need `enabled: true` + the `routing.cloud_models` allowlist |
+| `models.aliases` | {} | Client-visible alias → target (bare or qualified). Max 3 hops; aliases appear in `/v1/models` with `owned_by: alias` |
+| `models.allow_cross_supply` | true | `false` makes `models.supply` exclusive: when no listed entry is eligible, the request is rejected instead of falling through to the routing chain |
+
+Resolution order: `models.aliases` → qualified pin → `routing.cloud_models` guard (outranks supply and cloud pins) → `models.supply` → historical chain (`local-first / token / ratio / fallback.model_mapping`).
+
+### Minimal backend entries
+
+`backends.<name>.api_key_env` names the environment variable holding the key (resolved at load/reload; plaintext `api_key` still works but logs a deprecation WARN). When `base_url`/`timeout` are omitted, a built-in vendor table fills them per `type` (deepseek, dashscope, baichuan, moonshot, minimax, hunyuan, qianfan, glm, anthropic, openai, siliconflow, openrouter, lingyiwanwu). Resource-specific providers (bedrock, foundry) still require an explicit `base_url`.
+
+```yaml
+backends:
+    deepseek:
+        type: deepseek
+        api_key_env: DEEPSEEK_API_KEY   # base_url + timeout auto-filled
+```
+
 ## API Endpoints
 
 | Endpoint | Method | Description |

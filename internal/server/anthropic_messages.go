@@ -114,6 +114,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     // multimodal rewrite) since that is the model the caller is authorized for;
     // the forced local vision model is an internal gateway override, not a
     // tenant-chosen model, and must not be filtered out.
+    // §13.2/§13.4: alias/qualified-id resolution BEFORE the allowlist so
+    // the key is authorized on the bare id that will actually run (an
+    // alias cannot smuggle a disallowed model past CheckModelAllowlist).
+    modelIdent := s.resolveModelIdentity(antReq.Model)
+    if modelIdent.Bare != antReq.Model {
+        antReq.Model = modelIdent.Bare
+        stampModelIdentity(r, modelIdent)
+    }
+
     if !middleware.CheckModelAllowlist(r, antReq.Model) {
         slog.Warn("anthropic messages model not allowed for this key", "model", antReq.Model)
         http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
@@ -145,6 +154,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
     } else {
         decision = s.router.Decide(ctx, &router.RouteRequest{Model: antReq.Model, Text: textContent, Stream: antReq.Stream})
     }
+
+    // §13.2: qualified model pin (mirror /v1/chat/completions; cloud_models
+    // guard still outranks a cloud pin, AC17).
+    decision = s.applyQualifiedModelLock(modelIdent, decision)
 
     if decision.Rejected {
         body := decision.RejectDetail

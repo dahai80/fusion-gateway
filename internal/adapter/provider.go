@@ -374,6 +374,14 @@ type ModelInfo struct {
     // fusion-cowork chat-model filter contract (#245). Omitted when no
     // engine metadata is declared.
     EngineType string `json:"engine_type,omitempty"`
+    // Backend names the gateway backend (config backends: key) that listed
+    // this model, so a model served by several providers is explicitly
+    // attributable (plan §13.2). Omitted when unknown.
+    Backend string `json:"fusion_backend,omitempty"`
+    // QualifiedID is the deterministic request form "backend/id" that pins
+    // a request to this provider (plan §13.2). Same shape the client sends
+    // in the model field to bypass the routing chain.
+    QualifiedID string `json:"fusion_qualified_id,omitempty"`
 }
 
 type ModelCapabilities struct {
