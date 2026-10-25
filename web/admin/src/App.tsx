@@ -31,6 +31,13 @@ import ValidationConfig from "./pages/config/ValidationConfig";
 import CostMarkupConfig from "./pages/config/CostMarkupConfig";
 import AdminConfigPage from "./pages/config/AdminConfigPage";
 import PIIConfig from "./pages/config/PIIConfig";
+import PersistenceConfig from "./pages/config/PersistenceConfig";
+import Latency from "./pages/insights/Latency";
+import Compare from "./pages/insights/Compare";
+import Explorer from "./pages/insights/Explorer";
+import Optimize from "./pages/insights/Optimize";
+import Anomalies from "./pages/insights/Anomalies";
+import Reports from "./pages/insights/Reports";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const loggedIn = localStorage.getItem("admin_logged_in");
@@ -65,6 +72,12 @@ export default function App() {
                         <Route path="channels" element={<Channels />} />
                         <Route path="logs" element={<Logs />} />
                         <Route path="analytics" element={<Analytics />} />
+                        <Route path="insights/latency" element={<Latency />} />
+                        <Route path="insights/compare" element={<Compare />} />
+                        <Route path="insights/explorer" element={<Explorer />} />
+                        <Route path="insights/optimize" element={<Optimize />} />
+                        <Route path="insights/anomalies" element={<Anomalies />} />
+                        <Route path="insights/reports" element={<Reports />} />
                         <Route path="settings" element={<Navigate to="/admin/config/server" replace />} />
                         <Route path="config/server" element={<ServerConfig />} />
                         <Route path="config/auth" element={<AuthConfig />} />
@@ -90,6 +103,7 @@ export default function App() {
                         <Route path="config/batch" element={<BatchConfig />} />
                         <Route path="config/store" element={<StoreConfig />} />
                         <Route path="config/validation" element={<ValidationConfig />} />
+                        <Route path="config/persistence" element={<PersistenceConfig />} />
                     </Route>
                     <Route path="*" element={<Navigate to="/admin/" replace />} />
                 </Routes>

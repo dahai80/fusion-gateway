@@ -1840,6 +1840,185 @@ func interfaceToStringMap(v interface{}) map[string]string {
     return result
 }
 
+// ─── Persistence Config ───────────────────────────────────────
+
+type persistencePostgresResponse struct {
+    DsnEnv          string `json:"dsn_env"`
+    MaxOpenConns    int    `json:"max_open_conns"`
+    MaxIdleConns    int    `json:"max_idle_conns"`
+    ConnTimeoutSecs int    `json:"conn_timeout_secs"`
+}
+
+type persistenceQueueResponse struct {
+    Capacity        int `json:"capacity"`
+    BatchSize       int `json:"batch_size"`
+    FlushIntervalMS int `json:"flush_interval_ms"`
+}
+
+type persistenceCaptureResponse struct {
+    RequestBody    bool `json:"request_body"`
+    ResponseBody   bool `json:"response_body"`
+    MaxBodyBytes   int  `json:"max_body_bytes"`
+    StripAuthField bool `json:"strip_auth_fields"`
+}
+
+type persistenceRetentionResponse struct {
+    RequestLogsDays     int `json:"request_logs_days"`
+    RequestPayloadsDays int `json:"request_payloads_days"`
+    HwSamplesDays       int `json:"hw_samples_days"`
+    GatewayEventsDays   int `json:"gateway_events_days"`
+    InsightsDays        int `json:"insights_days"`
+}
+
+type persistenceConfigResponse struct {
+    Enabled   bool                         `json:"enabled"`
+    Postgres  persistencePostgresResponse  `json:"postgres"`
+    Queue     persistenceQueueResponse     `json:"queue"`
+    Capture   persistenceCaptureResponse   `json:"capture"`
+    Retention persistenceRetentionResponse `json:"retention"`
+}
+
+type persistencePostgresUpdate struct {
+    DsnEnv          *string `json:"dsn_env,omitempty"`
+    MaxOpenConns    *int    `json:"max_open_conns,omitempty"`
+    MaxIdleConns    *int    `json:"max_idle_conns,omitempty"`
+    ConnTimeoutSecs *int    `json:"conn_timeout_secs,omitempty"`
+}
+
+type persistenceQueueUpdate struct {
+    Capacity        *int `json:"capacity,omitempty"`
+    BatchSize       *int `json:"batch_size,omitempty"`
+    FlushIntervalMS *int `json:"flush_interval_ms,omitempty"`
+}
+
+type persistenceCaptureUpdate struct {
+    RequestBody    *bool `json:"request_body,omitempty"`
+    ResponseBody   *bool `json:"response_body,omitempty"`
+    MaxBodyBytes   *int  `json:"max_body_bytes,omitempty"`
+    StripAuthField *bool `json:"strip_auth_fields,omitempty"`
+}
+
+type persistenceRetentionUpdate struct {
+    RequestLogsDays     *int `json:"request_logs_days,omitempty"`
+    RequestPayloadsDays *int `json:"request_payloads_days,omitempty"`
+    HwSamplesDays       *int `json:"hw_samples_days,omitempty"`
+    GatewayEventsDays   *int `json:"gateway_events_days,omitempty"`
+    InsightsDays        *int `json:"insights_days,omitempty"`
+}
+
+type persistenceConfigUpdate struct {
+    Enabled   *bool                        `json:"enabled,omitempty"`
+    Postgres  *persistencePostgresUpdate   `json:"postgres,omitempty"`
+    Queue     *persistenceQueueUpdate      `json:"queue,omitempty"`
+    Capture   *persistenceCaptureUpdate    `json:"capture,omitempty"`
+    Retention *persistenceRetentionUpdate  `json:"retention,omitempty"`
+}
+
+// handlePersistenceConfig — GET/PUT /admin/api/config/persistence.
+// The DSN itself is never a config-file key: postgres.dsn_env names the env
+// var carrying it (bindSecretEnv pattern). Pool/queue/capture/retention
+// changes take effect after a gateway restart; validatePersistence normalizes
+// out-of-range values at reload time.
+func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodGet:
+        p := config.GetSnapshot().Config.Persistence
+        writeJSON(w, http.StatusOK, persistenceConfigResponse{
+            Enabled: p.Enabled,
+            Postgres: persistencePostgresResponse{
+                DsnEnv: p.Postgres.DsnEnv, MaxOpenConns: p.Postgres.MaxOpenConns,
+                MaxIdleConns: p.Postgres.MaxIdleConns, ConnTimeoutSecs: p.Postgres.ConnTimeoutSecs,
+            },
+            Queue: persistenceQueueResponse{
+                Capacity: p.Queue.Capacity, BatchSize: p.Queue.BatchSize,
+                FlushIntervalMS: p.Queue.FlushIntervalMS,
+            },
+            Capture: persistenceCaptureResponse{
+                RequestBody: p.Capture.RequestBody, ResponseBody: p.Capture.ResponseBody,
+                MaxBodyBytes: p.Capture.MaxBodyBytes, StripAuthField: p.Capture.StripAuthFields,
+            },
+            Retention: persistenceRetentionResponse{
+                RequestLogsDays: p.Retention.RequestLogsDays,
+                RequestPayloadsDays: p.Retention.RequestPayloadsDays,
+                HwSamplesDays: p.Retention.HwSamplesDays,
+                GatewayEventsDays: p.Retention.GatewayEventsDays,
+                InsightsDays: p.Retention.InsightsDays,
+            },
+        })
+    case http.MethodPut:
+        var req persistenceConfigUpdate
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            writeError(w, http.StatusBadRequest, "invalid request body")
+            return
+        }
+        _, err := h.updateYAMLSection(func(doc map[string]interface{}) error {
+            sec := getOrCreateSection(doc, "persistence")
+            applyBool(sec, "enabled", req.Enabled)
+            if req.Postgres != nil {
+                pg := getOrCreateSection(doc, "persistence", "postgres")
+                applyString(pg, "dsn_env", req.Postgres.DsnEnv)
+                applyInt(pg, "max_open_conns", req.Postgres.MaxOpenConns)
+                applyInt(pg, "max_idle_conns", req.Postgres.MaxIdleConns)
+                applyInt(pg, "conn_timeout_secs", req.Postgres.ConnTimeoutSecs)
+            }
+            if req.Queue != nil {
+                q := getOrCreateSection(doc, "persistence", "queue")
+                applyInt(q, "capacity", req.Queue.Capacity)
+                applyInt(q, "batch_size", req.Queue.BatchSize)
+                applyInt(q, "flush_interval_ms", req.Queue.FlushIntervalMS)
+            }
+            if req.Capture != nil {
+                c := getOrCreateSection(doc, "persistence", "capture")
+                applyBool(c, "request_body", req.Capture.RequestBody)
+                applyBool(c, "response_body", req.Capture.ResponseBody)
+                applyInt(c, "max_body_bytes", req.Capture.MaxBodyBytes)
+                applyBool(c, "strip_auth_fields", req.Capture.StripAuthField)
+            }
+            if req.Retention != nil {
+                rt := getOrCreateSection(doc, "persistence", "retention")
+                applyInt(rt, "request_logs_days", req.Retention.RequestLogsDays)
+                applyInt(rt, "request_payloads_days", req.Retention.RequestPayloadsDays)
+                applyInt(rt, "hw_samples_days", req.Retention.HwSamplesDays)
+                applyInt(rt, "gateway_events_days", req.Retention.GatewayEventsDays)
+                applyInt(rt, "insights_days", req.Retention.InsightsDays)
+            }
+            return nil
+        }); if err != nil {
+            writeYAMLError(w, err)
+            return
+        }
+        slog.Info("persistence config updated via admin API",
+            "note", "pool/capture changes take effect after restart", "by", adminUsername(r))
+        // Read back through the reloaded snapshot so the response reflects
+        // validatePersistence normalization, not the raw YAML doc.
+        p := config.GetSnapshot().Config.Persistence
+        writeJSON(w, http.StatusOK, persistenceConfigResponse{
+            Enabled: p.Enabled,
+            Postgres: persistencePostgresResponse{
+                DsnEnv: p.Postgres.DsnEnv, MaxOpenConns: p.Postgres.MaxOpenConns,
+                MaxIdleConns: p.Postgres.MaxIdleConns, ConnTimeoutSecs: p.Postgres.ConnTimeoutSecs,
+            },
+            Queue: persistenceQueueResponse{
+                Capacity: p.Queue.Capacity, BatchSize: p.Queue.BatchSize,
+                FlushIntervalMS: p.Queue.FlushIntervalMS,
+            },
+            Capture: persistenceCaptureResponse{
+                RequestBody: p.Capture.RequestBody, ResponseBody: p.Capture.ResponseBody,
+                MaxBodyBytes: p.Capture.MaxBodyBytes, StripAuthField: p.Capture.StripAuthFields,
+            },
+            Retention: persistenceRetentionResponse{
+                RequestLogsDays: p.Retention.RequestLogsDays,
+                RequestPayloadsDays: p.Retention.RequestPayloadsDays,
+                HwSamplesDays: p.Retention.HwSamplesDays,
+                GatewayEventsDays: p.Retention.GatewayEventsDays,
+                InsightsDays: p.Retention.InsightsDays,
+            },
+        })
+    default:
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+    }
+}
+
 func writeYAMLError(w http.ResponseWriter, err error) {
     if err == errNoConfigPath {
         writeError(w, http.StatusInternalServerError, "config file path not configured")

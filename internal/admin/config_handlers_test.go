@@ -1987,3 +1987,131 @@ func TestUpdateYAMLSection_DottedSupplyModelWrites(t *testing.T) {
         t.Fatalf("live snapshot supply = %v", snap.Config.Models.Supply)
     }
 }
+
+// ─── Persistence Config Tests ───────────────────────────────────
+
+func TestHandlePersistenceConfig(t *testing.T) {
+    auth, ms, _ := setupConfigTest(t)
+
+    t.Run("get", func(t *testing.T) {
+        h := newTestHandler(t, ms, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/config/persistence", nil)
+        rec := httptest.NewRecorder()
+        h.handlePersistenceConfig(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        body := decodeResponse(t, rec)
+        if body["enabled"] != false {
+            t.Errorf("expected enabled false, got %v", body["enabled"])
+        }
+        pg, ok := body["postgres"].(map[string]interface{})
+        if !ok {
+            t.Fatalf("expected postgres object, got %v", body["postgres"])
+        }
+        if pg["dsn_env"] != "FUSION_GW_PG_DSN" {
+            t.Errorf("expected dsn_env FUSION_GW_PG_DSN, got %v", pg["dsn_env"])
+        }
+    })
+
+    t.Run("method_not_allowed", func(t *testing.T) {
+        h := newTestHandler(t, ms, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/persistence", nil)
+        rec := httptest.NewRecorder()
+        h.handlePersistenceConfig(rec, req)
+        if rec.Code != http.StatusMethodNotAllowed {
+            t.Fatalf("expected 405, got %d", rec.Code)
+        }
+    })
+
+    t.Run("put_no_config_path", func(t *testing.T) {
+        h := newTestHandler(t, ms, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/persistence", map[string]interface{}{"enabled": true})
+        rec := httptest.NewRecorder()
+        h.handlePersistenceConfig(rec, req)
+        if rec.Code != http.StatusInternalServerError {
+            t.Fatalf("expected 500, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("put_invalid_json", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/persistence", "not-json{")
+        rec := httptest.NewRecorder()
+        h.handlePersistenceConfig(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("update_nested_sections", func(t *testing.T) {
+        _, _, configPath := setupConfigTestWithFile(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{
+            "enabled": true,
+            "postgres": map[string]interface{}{
+                "dsn_env":          "MY_PG_DSN",
+                "max_open_conns":   32,
+                "max_idle_conns":   8,
+                "conn_timeout_secs": 10,
+            },
+            "queue": map[string]interface{}{
+                "capacity":         16384,
+                "batch_size":       250,
+                "flush_interval_ms": 250,
+            },
+            "capture": map[string]interface{}{
+                "request_body":      false,
+                "response_body":     true,
+                "max_body_bytes":    262144,
+                "strip_auth_fields": true,
+            },
+            "retention": map[string]interface{}{
+                "request_logs_days":     60,
+                "request_payloads_days": 14,
+                "hw_samples_days":       15,
+                "gateway_events_days":   90,
+                "insights_days":         120,
+            },
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/persistence", body)
+        rec := httptest.NewRecorder()
+        h.handlePersistenceConfig(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        sec := readYAMLSection(t, configPath, "persistence")
+        if sec["enabled"] != true {
+            t.Errorf("expected enabled true, got %v", sec["enabled"])
+        }
+        pg := readYAMLNestedSection(t, configPath, "persistence", "postgres")
+        if pg["dsn_env"] != "MY_PG_DSN" {
+            t.Errorf("expected dsn_env MY_PG_DSN, got %v", pg["dsn_env"])
+        }
+        if pg["max_open_conns"] != 32 {
+            t.Errorf("expected max_open_conns 32, got %v", pg["max_open_conns"])
+        }
+        q := readYAMLNestedSection(t, configPath, "persistence", "queue")
+        if q["capacity"] != 16384 {
+            t.Errorf("expected capacity 16384, got %v", q["capacity"])
+        }
+        c := readYAMLNestedSection(t, configPath, "persistence", "capture")
+        if c["request_body"] != false {
+            t.Errorf("expected request_body false, got %v", c["request_body"])
+        }
+        rt := readYAMLNestedSection(t, configPath, "persistence", "retention")
+        if rt["request_logs_days"] != 60 {
+            t.Errorf("expected request_logs_days 60, got %v", rt["request_logs_days"])
+        }
+        // response reflects the reloaded snapshot
+        resp := decodeResponse(t, rec)
+        if resp["enabled"] != true {
+            t.Errorf("expected response enabled true, got %v", resp["enabled"])
+        }
+        respPg, ok := resp["postgres"].(map[string]interface{})
+        if !ok || respPg["dsn_env"] != "MY_PG_DSN" {
+            t.Errorf("expected response postgres.dsn_env MY_PG_DSN, got %v", resp["postgres"])
+        }
+    })
+}

@@ -103,6 +103,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/config/batch", h.requireAdminRole(h.handleBatchConfig))
     mux.HandleFunc("/admin/api/config/store", h.requireAdminRole(h.handleStoreConfig))
     mux.HandleFunc("/admin/api/config/validation", h.requireAdminRole(h.handleValidationConfig))
+    mux.HandleFunc("/admin/api/config/persistence", h.requireAdminRole(h.handlePersistenceConfig))
     slog.Info("admin API routes registered")
 }
 
