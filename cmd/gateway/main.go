@@ -419,6 +419,12 @@ func run(configPath string) error {
 			return fmt.Errorf("insights service init failed: %w", err)
 		}
 		srv.SetInsightsService(insightsSvc)
+		// P3b (plan §15.4): 30s hardware snapshots into fg_hw_samples, and
+		// the gateway lifecycle stamp into fg_gateway_events.
+		sink.StartHWSampler(context.Background(), hwCollector.Latest)
+		sink.RecordEvent("info", "gateway_started", map[string]any{
+			"version": version, "commit": commit,
+		})
 		slog.Info("request persistence enabled",
 			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
@@ -687,6 +693,11 @@ func run(configPath string) error {
 	// flushes the queued batch best-effort (10s cap) so a graceful restart
 	// loses nothing.
 	if persistSink != nil {
+		// Sync variant: the async RecordEvent races the pool Close below and
+		// would lose the event.
+		stopEvtCtx, stopEvtCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		persistSink.RecordEventSync(stopEvtCtx, "info", "gateway_stopped", nil)
+		stopEvtCancel()
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		if err := persistSink.Close(persistCtx); err != nil {
 			slog.Error("persistence sink close error", "error", err)

@@ -58,6 +58,14 @@ type PersistenceCaptureConfig struct {
 type PersistenceRetentionConfig struct {
     RequestLogsDays int `mapstructure:"request_logs_days"`
     RequestPayloadsDays int `mapstructure:"request_payloads_days"`
+    // HwSamplesDays: fg_hw_samples retention (plan §15.4 — capacity
+    // planning / anomaly correlation only needs a short window).
+    HwSamplesDays int `mapstructure:"hw_samples_days"`
+    // GatewayEventsDays: fg_gateway_events retention (ops audit trail).
+    GatewayEventsDays int `mapstructure:"gateway_events_days"`
+    // InsightsDays: fg_anomalies / fg_optimization_findings / fg_reports
+    // retention (disposal records, plan §15.4).
+    InsightsDays int `mapstructure:"insights_days"`
 }
 
 // defaultPersistenceConfig seeds the values a minimal config.yaml omits.
@@ -85,6 +93,9 @@ func defaultPersistenceConfig() PersistenceConfig {
         Retention: PersistenceRetentionConfig{
             RequestLogsDays:    90,
             RequestPayloadsDays: 30,
+            HwSamplesDays:      30,
+            GatewayEventsDays:  180,
+            InsightsDays:       180,
         },
     }
 }
@@ -132,6 +143,15 @@ func validatePersistence(cfg *Config) error {
         if p.Retention.RequestPayloadsDays <= 0 {
             p.Retention.RequestPayloadsDays = p.Retention.RequestLogsDays
         }
+    }
+    if p.Retention.HwSamplesDays <= 0 {
+        p.Retention.HwSamplesDays = 30
+    }
+    if p.Retention.GatewayEventsDays <= 0 {
+        p.Retention.GatewayEventsDays = 180
+    }
+    if p.Retention.InsightsDays <= 0 {
+        p.Retention.InsightsDays = 180
     }
     cfg.Persistence = p
     return nil
