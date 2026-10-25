@@ -461,6 +461,11 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
 }
 
 func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.ResponseWriter, p adapter.MessagesProvider, req *adapter.AnthropicRequest) {
+    // Same as the OpenAI stream handler: the body flag is authoritative over
+    // the URL query InitRequestLog reads.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.IsStream = true
+    }
     // wdCtx is a child of the request ctx. The idle watchdog cancels wdCtx to
     // unblock the upstream body.Read (via the Go transport context watcher)
     // when the upstream stalls mid-stream (issue #69: litellm/glm5.2 stops

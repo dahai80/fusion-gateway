@@ -924,6 +924,9 @@ type Config struct {
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
     Shell           ShellConfig             `mapstructure:"web_shell"`
+    // Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
+    // for request logs + payloads. Default off — zero behavior change.
+    Persistence     PersistenceConfig       `mapstructure:"persistence"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
@@ -1490,6 +1493,12 @@ func validate(cfg *Config) error {
 
     // §13.3 models.* namespace (alias/supply sanity, WARN-first).
     if err := validateModels(cfg); err != nil {
+        return err
+    }
+
+    // Plan §6: persistence.* namespace. Repairs degenerate tuning values
+    // in place (defaults, not errors) — they are knobs, not correctness.
+    if err := validatePersistence(cfg); err != nil {
         return err
     }
 
@@ -2390,5 +2399,6 @@ func DefaultConfig() Config {
                 TTL: 12 * time.Hour,
             },
         },
+        Persistence: defaultPersistenceConfig(),
     }
 }

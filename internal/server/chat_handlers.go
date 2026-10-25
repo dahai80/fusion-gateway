@@ -532,6 +532,11 @@ func (s *Server) applyBnupMode(req *adapter.ChatRequest, force bool) {
 }
 
 func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time) {
+    // InitRequestLog reads the stream flag from the URL query only; OpenAI
+    // clients put it in the JSON body. The stream handler is authoritative.
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.IsStream = true
+    }
     // #116 resumable streams: when resume is enabled AND the route decision
     // picked the local backend, take the resumable path (decoupled pump +
     // rolling buffer + per-event id). Cloud/cluster/first-party paths are NOT
@@ -902,6 +907,13 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             // #log-tokens: stamp the cached response's usage counts too
             // (were 0/0/0 on every cache hit).
             stampCachedUsage(ctx, cached)
+            // Plan §5.2: stamp TTFT so a cache-hit row is not a timing blank —
+            // the histogram is SKIPPED though: a cache hit is not generation
+            // latency and would skew the TTFT distribution.
+            if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
+                    float64(time.Since(start))/float64(time.Millisecond))
+            }
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -954,6 +966,14 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             s.stampRouteInfo(ctx, req, decision, provider.Name())
             // #log-tokens: stamp usage counts on the coalesced hit as well.
             stampCachedUsage(ctx, cached)
+            // Plan §5.2: the R2 leader ALSO lands here (it published the
+            // response inside Do, then re-checks the cache) — so without this
+            // stamp EVERY coalesced non-stream request recorded TTFT=0. The
+            // live P2 smoke caught it. Histogram stays generation-only.
+            if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
+                    float64(time.Since(start))/float64(time.Millisecond))
+            }
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))

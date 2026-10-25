@@ -57,6 +57,13 @@ var (
     requestTTFT *prometheus.HistogramVec
     requestTPOT *prometheus.HistogramVec
 
+    // Plan §4.2: persistence sink health. Written counters so a full/dropped
+    // queue is visible in /metrics without log scraping; enqueue drops during
+    // a PG outage are the "degraded but serving" signal.
+    persistEnqueued prometheus.Counter
+    persistWritten  prometheus.Counter
+    persistDropped  prometheus.Counter
+
     localRequests  atomic.Int64
     cloudRequests  atomic.Int64
     totalRequests  atomic.Int64
@@ -219,6 +226,19 @@ func init() {
         Help: "OTel internal errors (export failures etc.; log throttled, counter not)",
     })
 
+    persistEnqueued = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "fusion_gateway_persist_enqueued_total",
+        Help: "Request-log entries enqueued to the PostgreSQL persistence sink (plan §4.2)",
+    })
+    persistWritten = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "fusion_gateway_persist_written_total",
+        Help: "Request-log entries successfully written to PostgreSQL",
+    })
+    persistDropped = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "fusion_gateway_persist_dropped_total",
+        Help: "Persistence entries dropped (queue full keep-new eviction, or shutdown)",
+    })
+
     // EI6: tokenizer_calibration_deviation removed — it was declared but never
     // had a write path, so /metrics exposed a permanent 0 that looked like a
     // real signal. Do NOT redeclare until the tokenizer-deviation pipeline
@@ -238,6 +258,7 @@ func init() {
         shellHeartbeatDenied,
         authInvalidKey,
         otelErrors,
+        persistEnqueued, persistWritten, persistDropped,
     )
 }
 
@@ -313,6 +334,12 @@ func RecordAuthInvalidKey(hashPrefix string) {
 func RecordOtelError() {
     otelErrors.Inc()
 }
+
+// RecordPersistEnqueued/Written/Dropped track the persistence pipeline
+// (plan §4.2). dropped > 0 under load = PG outage or undersized queue.
+func RecordPersistEnqueued() { persistEnqueued.Inc() }
+func RecordPersistWritten()  { persistWritten.Inc() }
+func RecordPersistDropped()  { persistDropped.Inc() }
 
 func UpdateCircuitBreakerState(backend string, state int) {
     circuitBreakerState.WithLabelValues(backend).Set(float64(state))

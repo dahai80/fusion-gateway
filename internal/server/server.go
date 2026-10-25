@@ -34,6 +34,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
+    "github.com/fusion-gateway/fusion-gateway/internal/persist"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
     redisstore "github.com/fusion-gateway/fusion-gateway/internal/store/redis"
@@ -135,6 +136,11 @@ type Server struct {
     // routing.stream.resume_enabled; the /v1/messages/{stream_id}/events
     // replay endpoint drains it honoring Last-Event-ID. nil when disabled.
     streamBuffers *StreamBufferStore
+    // persistSink is the PostgreSQL request-persistence sink (plan §4.2),
+    // wired by main.go when persistence.enabled. nil-safe: withMiddleware
+    // skips capture + enqueue entirely when nil — the default (persistence
+    // off) request path is byte-identical to before.
+    persistSink persist.Sink
     // R1: lifecycle.Workers wrapping the 3 server-owned reaper goroutines so
     // Shutdown can Stop (cancel + join) each instead of leaking. The cache/
     // semantic/ratelimit evictors are owned by their respective constructors and
@@ -1138,6 +1144,62 @@ func (s *Server) Shutdown(ctx context.Context) error {
     return err
 }
 
+// SetPersistSink wires the PostgreSQL persistence sink (plan §4.2). Called
+// by main.go after New when persistence.enabled; nil (default) keeps the
+// request path capture-free.
+func (s *Server) SetPersistSink(sink persist.Sink) {
+    s.persistSink = sink
+}
+
+// enqueuePersistEntry assembles the persist.Entry at request finalize and
+// hands it to the async sink. Called on EVERY exit (success, error, client
+// cancel, panic-recovered) — cancel traffic is exactly what the persistence
+// layer must keep. Enqueue is non-blocking; a dropped entry is logged at
+// WARN with the drop counter as the only consequence.
+func (s *Server) enqueuePersistEntry(entry *store.RequestLog, r *http.Request, rec *middleware.ResponseRecorder, pcfg config.PersistenceConfig, start time.Time) {
+    capRes := middleware.FinalizeCapture(r, pcfg.Capture.RequestBody, pcfg.Capture.ResponseBody)
+    reqBody := capRes.ReqBody
+    if pcfg.Capture.StripAuthFields {
+        reqBody = middleware.StripAuthFields(reqBody)
+    }
+    // Stream responses accumulate raw SSE frames; the mime column tells the
+    // Explorer (P3) how to render them.
+    mime := rec.Header().Get("Content-Type")
+    e := &persist.Entry{
+        Log:        *entry,
+        Endpoint:   r.URL.Path,
+        ClientIP:   clientIPFromRequest(r),
+        UserAgent:  r.UserAgent(),
+        ReqBody:    reqBody,
+        RespBody:   capRes.RespBody,
+        ReqTruncated:  capRes.ReqTruncated,
+        RespTruncated: capRes.RespTruncated,
+        RespRawMime:   mime,
+    }
+    if err := s.persistSink.Enqueue(e); err != nil {
+        slog.Warn("persist enqueue dropped", "error", err, "endpoint", e.Endpoint)
+    }
+}
+
+// clientIPFromRequest prefers X-Forwarded-For (leftmost entry, proxy chain)
+// then X-Real-IP, falling back to the connection peer.
+func clientIPFromRequest(r *http.Request) string {
+    if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+        if i := strings.IndexByte(xff, ','); i > 0 {
+            return xff[:i]
+        }
+        return xff
+    }
+    if rip := r.Header.Get("X-Real-IP"); rip != "" {
+        return rip
+    }
+    host := r.RemoteAddr
+    if i := strings.IndexByte(host, ':'); i > 0 {
+        return host[:i]
+    }
+    return host
+}
+
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // M1 fix: use cached middleware chain, rebuild on reload
@@ -1153,6 +1215,16 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         // Per-request: inject fresh config snapshot, then run cached chain
         snap := config.GetSnapshot()
         snapMiddleware := middleware.ConfigSnapshot(snap)
+
+        // Plan §4.2: body capture (request TeeReader + response mirror) when
+        // persistence is on. crw is nil when off — the ServeHTTP call below
+        // keeps passing rec, zero behavior change.
+        var crw *middleware.CaptureResponseWriter
+        if s.persistSink != nil && snap.Config.Persistence.Enabled {
+            crw, r = middleware.InstallCapture(rec, r,
+                snap.Config.Persistence.Capture.MaxBodyBytes,
+                snap.Config.Persistence.Capture.RequestBody)
+        }
 
         var final http.Handler = snapMiddleware(chain(handler))
 
@@ -1176,7 +1248,11 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
                 }
             }
         }()
-        final.ServeHTTP(rec, r)
+        if crw != nil {
+            final.ServeHTTP(crw, r)
+        } else {
+            final.ServeHTTP(rec, r)
+        }
 
         keyCfg := middleware.GetAuthKeyConfig(r.Context())
         keyName := "anonymous"
@@ -1185,6 +1261,9 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         }
         entry.StatusCode = rec.StatusCode
         middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
+        if s.persistSink != nil && snap.Config.Persistence.Enabled {
+            s.enqueuePersistEntry(entry, r, rec, snap.Config.Persistence, start)
+        }
         // #157: release the identity lease + report usage at request end. The
         // lease was acquired by IdentityAuth (AuthorizeAndAcquire) and stamped
         // into ctx as *IdentityLease. Both calls are async + best-effort on
