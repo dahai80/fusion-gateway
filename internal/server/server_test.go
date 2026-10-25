@@ -26,6 +26,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/insights"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
@@ -3539,6 +3540,59 @@ func TestStartAndShutdown(t *testing.T) {
         t.Fatal("server didn't shut down in time")
     }
     slog.Info("TestStartAndShutdown passed")
+}
+
+// TestSetInsightsService_WiredBeforeStart pins the P3a wiring regression: the
+// admin handler is constructed inside Start, so main.go's SetInsightsService
+// call (made right after New) must be re-applied to that handler — otherwise
+// every /admin/api/insights/* route answers 503 despite a healthy PG pool.
+func TestSetInsightsService_WiredBeforeStart(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Admin.Enabled = true
+    if s.cfg.Config.Admin.JWTSecret == "" {
+        s.cfg.Config.Admin.JWTSecret = "test-jwt-secret-for-insights-wiring"
+    }
+    auth, err := admin.NewAdminAuth(s.cfg.Config.Admin.JWTSecret, s.cfg.Config.Admin.Users)
+    if err != nil {
+        t.Fatalf("admin auth: %v", err)
+    }
+    s.adminAuth = auth
+    s.cfg.Config.Server.Port = 0
+    s.cfg.Config.Server.Host = "127.0.0.1"
+
+    // Wired BEFORE Start, exactly like cmd/gateway/main.go does.
+    s.SetInsightsService(&insights.Service{})
+
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- s.Start()
+    }()
+
+    deadline := time.Now().Add(5 * time.Second)
+    for time.Now().Before(deadline) && s.adminHandler == nil {
+        time.Sleep(20 * time.Millisecond)
+    }
+    if s.adminHandler == nil {
+        t.Fatal("admin handler never constructed by Start")
+    }
+    if !s.adminHandler.InsightsAvailable() {
+        t.Fatal("insights service wired before Start was lost on the Start-built handler")
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := s.Shutdown(ctx); err != nil {
+        t.Fatalf("shutdown failed: %v", err)
+    }
+    select {
+    case e := <-errCh:
+        if e != nil && e != http.ErrServerClosed {
+            t.Fatalf("unexpected start error: %v", e)
+        }
+    case <-time.After(5 * time.Second):
+        t.Fatal("server didn't shut down in time")
+    }
+    slog.Info("TestSetInsightsService_WiredBeforeStart passed")
 }
 
 // --- New() constructor ---

@@ -16,6 +16,17 @@ import (
 // insights endpoints answer 503 with a clear reason.
 func (h *Handler) SetInsightsService(svc *insights.Service) {
     h.insights = svc
+    if svc != nil {
+        slog.Info("insights service attached to admin handler")
+    }
+}
+
+// InsightsAvailable reports whether the PG read layer is attached. The admin
+// handler is built inside Server.Start, so a service wired between New and
+// Start has no handler yet — Server re-applies it in Start and this predicate
+// is what the wiring regression test asserts on.
+func (h *Handler) InsightsAvailable() bool {
+    return h.insights != nil
 }
 
 func (h *Handler) insightsUnavailable(w http.ResponseWriter) {

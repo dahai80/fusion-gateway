@@ -145,6 +145,10 @@ type Server struct {
     // adminHandler is the admin API handler, retained so main.go can wire the
     // insights (PG read) service into it after New (P3).
     adminHandler *admin.Handler
+    // insightsSvc is the PG read layer (P3). The admin handler is constructed
+    // in Start (not New), so a service wired before Start would be lost —
+    // Start re-applies this field onto the fresh handler.
+    insightsSvc *insights.Service
     // R1: lifecycle.Workers wrapping the 3 server-owned reaper goroutines so
     // Shutdown can Stop (cancel + join) each instead of leaking. The cache/
     // semantic/ratelimit evictors are owned by their respective constructors and
@@ -902,6 +906,12 @@ func (s *Server) Start() error {
         adminHandler := admin.NewHandler(s.store, s.adminAuth, s.cfgPath)
         adminHandler.RegisterRoutes(mux)
         s.adminHandler = adminHandler
+        // P3: re-apply the insights service wired before Start — the handler
+        // above is created here, so a SetInsightsService call made between
+        // New and Start had no handler to attach to.
+        if s.insightsSvc != nil {
+            adminHandler.SetInsightsService(s.insightsSvc)
+        }
         mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
         mux.HandleFunc("/admin/api/logout", s.adminAuth.HandleLogout)
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
@@ -1160,6 +1170,7 @@ func (s *Server) SetPersistSink(sink persist.Sink) {
 // admin Handler reads the service at request time, so late wiring after New
 // is safe; a nil service keeps the insights endpoints answering 503.
 func (s *Server) SetInsightsService(svc *insights.Service) {
+    s.insightsSvc = svc
     if s.adminHandler != nil {
         s.adminHandler.SetInsightsService(svc)
     }
