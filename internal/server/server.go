@@ -1167,8 +1167,10 @@ func (s *Server) SetPersistSink(sink persist.Sink) {
 }
 
 // SetInsightsService wires the PG read layer into the admin API (P3). The
-// admin Handler reads the service at request time, so late wiring after New
-// is safe; a nil service keeps the insights endpoints answering 503.
+// admin Handler reads the service at request time, so wiring after New is
+// safe — but the call must happen BEFORE Start (Start builds the handler;
+// SetInsightsService re-application there races a post-Start call). A nil
+// service keeps the insights endpoints answering 503.
 func (s *Server) SetInsightsService(svc *insights.Service) {
     s.insightsSvc = svc
     if s.adminHandler != nil {

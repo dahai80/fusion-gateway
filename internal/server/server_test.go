@@ -3568,17 +3568,10 @@ func TestSetInsightsService_WiredBeforeStart(t *testing.T) {
         errCh <- s.Start()
     }()
 
-    deadline := time.Now().Add(5 * time.Second)
-    for time.Now().Before(deadline) && s.adminHandler == nil {
-        time.Sleep(20 * time.Millisecond)
-    }
-    if s.adminHandler == nil {
-        t.Fatal("admin handler never constructed by Start")
-    }
-    if !s.adminHandler.InsightsAvailable() {
-        t.Fatal("insights service wired before Start was lost on the Start-built handler")
-    }
-
+    // Start writes adminHandler from its own goroutine; read it only after
+    // Start has returned (channel receive = happens-before) so -race stays
+    // clean. 300ms is enough for Start to build the mux and bind :0.
+    time.Sleep(300 * time.Millisecond)
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
     if err := s.Shutdown(ctx); err != nil {
@@ -3591,6 +3584,13 @@ func TestSetInsightsService_WiredBeforeStart(t *testing.T) {
         }
     case <-time.After(5 * time.Second):
         t.Fatal("server didn't shut down in time")
+    }
+
+    if s.adminHandler == nil {
+        t.Fatal("admin handler never constructed by Start")
+    }
+    if !s.adminHandler.InsightsAvailable() {
+        t.Fatal("insights service wired before Start was lost on the Start-built handler")
     }
     slog.Info("TestSetInsightsService_WiredBeforeStart passed")
 }
