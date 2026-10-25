@@ -45,6 +45,45 @@ func (s *Sink) sweepOnce(ctx context.Context) {
             slog.Warn("pg persist retention drop failed", "table", t.name, "error", err)
         }
     }
+    s.sweepPlainTables(ctx)
+}
+
+// simpleRetainedTable is a non-partitioned P3b table cleaned by DELETE — the
+// volume is tiny (30s samples, rare events), so daily partition DROP would be
+// overhead without benefit (plan §15.4).
+type simpleRetainedTable struct {
+    name   string
+    tsCol  string
+    days   int
+}
+
+// sweepPlainTables runs DELETE-based retention over the P3b tables. Skipped
+// under the test fake writer, same as partition management.
+func (s *Sink) sweepPlainTables(ctx context.Context) {
+    cw, ok := s.writer.(*copyWriter)
+    if !ok {
+        return
+    }
+    tables := []simpleRetainedTable{
+        {name: "fg_hw_samples", tsCol: "ts", days: s.cfg.Retention.HwSamplesDays},
+        {name: "fg_gateway_events", tsCol: "ts", days: s.cfg.Retention.GatewayEventsDays},
+        {name: "fg_anomalies", tsCol: "ts", days: s.cfg.Retention.InsightsDays},
+        {name: "fg_optimization_findings", tsCol: "generated_at", days: s.cfg.Retention.InsightsDays},
+        {name: "fg_reports", tsCol: "created_at", days: s.cfg.Retention.InsightsDays},
+    }
+    for _, t := range tables {
+        tag, err := cw.pool.Exec(ctx,
+            `DELETE FROM `+t.name+` WHERE `+t.tsCol+` < now() - make_interval(days => $1)`,
+            t.days)
+        if err != nil {
+            slog.Warn("pg persist plain-table retention failed", "table", t.name, "error", err)
+            continue
+        }
+        if tag.RowsAffected() > 0 {
+            slog.Info("pg persist plain-table retention deleted rows",
+                "table", t.name, "rows", tag.RowsAffected())
+        }
+    }
 }
 
 // ensurePartition creates the daily partition for day if absent.

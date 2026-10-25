@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "log/slog"
     "net/http"
+    "strconv"
     "strings"
     "time"
 
@@ -130,4 +131,47 @@ func (h *Handler) handlePersistenceTest(w http.ResponseWriter, r *http.Request) 
         return
     }
     writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleInsightsEvents — GET /admin/api/events (plan §15.5)
+// Structured gateway lifecycle stream. Params: level, event, limit.
+func (h *Handler) handleInsightsEvents(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    limit := 0
+    if v, err := strconv.Atoi(q.Get("limit")); err == nil {
+        limit = v
+    }
+    events, err := h.insights.Events(r.Context(), q.Get("level"), q.Get("event"), limit)
+    if err != nil {
+        slog.Warn("insights events query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": len(events)})
+}
+
+// handleInsightsHWSamples — GET /admin/api/insights/hw-samples
+// Hardware snapshot series for the dashboard HW overlay (plan §14).
+// Params: from, to, limit.
+func (h *Handler) handleInsightsHWSamples(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    limit := 0
+    if v, err := strconv.Atoi(q.Get("limit")); err == nil {
+        limit = v
+    }
+    samples, err := h.insights.HWSamples(r.Context(), q.Get("from"), q.Get("to"), limit)
+    if err != nil {
+        slog.Warn("insights hw samples query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"samples": samples, "total": len(samples)})
 }

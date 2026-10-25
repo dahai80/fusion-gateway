@@ -71,3 +71,28 @@ func TestSQL_SearchAgainstLiveDB(t *testing.T) {
         }
     }
 }
+
+func TestSQL_EventsAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    events, err := svc.Events(ctx, "", "", 10)
+    if err != nil {
+        t.Fatalf("events query: %v", err)
+    }
+    t.Logf("events returned=%d", len(events))
+    if _, err := svc.Events(ctx, "info", "", 10); err != nil {
+        t.Fatalf("events level filter: %v", err)
+    }
+}
+
+func TestSQL_HWSamplesAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    samples, err := svc.HWSamples(ctx, "", "", 0)
+    if err != nil {
+        t.Fatalf("hw samples query: %v", err)
+    }
+    t.Logf("hw samples returned=%d", len(samples))
+}

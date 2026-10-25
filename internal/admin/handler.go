@@ -53,6 +53,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/insights/logs/search", h.requireAdminRoleStrict(h.handleInsightsLogSearch))
     mux.HandleFunc("/admin/api/insights/logs/", h.requireAdminRoleStrict(h.handleInsightsLogPayload))
     mux.HandleFunc("/admin/api/persistence/test", h.requireAdminRoleStrict(h.handlePersistenceTest))
+    // P3b (plan §15.5): structured event stream + hardware samples. Strict
+    // role: event detail can carry backend errors, samples expose the host.
+    mux.HandleFunc("/admin/api/events", h.requireAdminRoleStrict(h.handleInsightsEvents))
+    mux.HandleFunc("/admin/api/insights/hw-samples", h.requireAdminRoleStrict(h.handleInsightsHWSamples))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))

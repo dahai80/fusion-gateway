@@ -38,6 +38,7 @@ type Sink struct {
 
     flusher  *lifecycle.Worker
     sweeper  *lifecycle.Worker
+    sampler  *lifecycle.Worker
     stopCh   chan struct{}
     stopOnce atomic.Bool
 }
@@ -119,6 +120,7 @@ func (s *Sink) flushLoop(ctx context.Context) {
 
     batch := make([]*persist.Entry, 0, s.cfg.Queue.BatchSize)
     backoff := time.Duration(0)
+    degraded := false
 
     for {
         select {
@@ -156,6 +158,11 @@ func (s *Sink) flushLoop(ctx context.Context) {
         cancel()
         if err != nil {
             if backoff == 0 {
+                // First failure of an outage: one structured event, not one
+                // per retry (plan §4.2 — 连续失败记 fg_gateway_events).
+                s.RecordEvent("error", "persist_degraded",
+                    map[string]any{"batch_len": len(batch), "error": err.Error()})
+                degraded = true
                 backoff = 500 * time.Millisecond
             } else {
                 backoff *= 2
@@ -179,6 +186,9 @@ func (s *Sink) flushLoop(ctx context.Context) {
             continue
         }
         backoff = 0
+        if degraded {
+            s.RecordEvent("info", "persist_recovered", map[string]any{"batch_len": len(batch)})
+        }
         s.written.Add(int64(len(batch)))
         for i := 0; i < len(batch); i++ {
             observability.RecordPersistWritten()
@@ -247,6 +257,9 @@ func (s *Sink) Close(ctx context.Context) error {
     }
     if s.sweeper != nil {
         s.sweeper.Stop()
+    }
+    if s.sampler != nil {
+        s.sampler.Stop()
     }
     s.writer.Close()
     return nil

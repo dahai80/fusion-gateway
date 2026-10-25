@@ -80,6 +80,67 @@ CREATE TABLE IF NOT EXISTS fg_request_payloads (
     req_truncated  boolean NOT NULL DEFAULT false,
     resp_raw_mime  text
 ) PARTITION BY RANGE (ts);
+
+-- P3b tables (plan §15.4). All low-volume, plain tables — daily partitioning
+-- buys nothing here; retention is DELETE-based in the hourly sweep.
+CREATE TABLE IF NOT EXISTS fg_hw_samples (
+    -- hardware snapshot, 30s cadence. loaded_models is a count: the
+    -- collector exposes MLXModelsLoaded as int, not a name list.
+    ts               timestamptz PRIMARY KEY,
+    sys_mem_ratio    real,
+    mlx_mem_ratio    real,
+    swap_page_rate   real,
+    gpu_util         real,
+    loaded_models    int,
+    collection_error boolean
+);
+
+CREATE TABLE IF NOT EXISTS fg_gateway_events (
+    id      bigserial PRIMARY KEY,
+    ts      timestamptz NOT NULL DEFAULT now(),
+    level   text NOT NULL,
+    event   text NOT NULL,
+    detail  jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_fg_gateway_events_ts ON fg_gateway_events (ts DESC);
+
+CREATE TABLE IF NOT EXISTS fg_anomalies (
+    id          bigserial PRIMARY KEY,
+    ts          timestamptz NOT NULL,
+    detected_at timestamptz NOT NULL,
+    kind        text NOT NULL,
+    backend     text,
+    model       text,
+    severity    text NOT NULL,
+    evidence    jsonb NOT NULL,
+    status      text NOT NULL DEFAULT 'open',
+    acked_by    text,
+    muted_until timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_fg_anomalies_status_ts ON fg_anomalies (status, ts DESC);
+
+CREATE TABLE IF NOT EXISTS fg_optimization_findings (
+    id             bigserial PRIMARY KEY,
+    generated_at   timestamptz NOT NULL,
+    rule           text NOT NULL,
+    scope          jsonb NOT NULL,
+    evidence       jsonb NOT NULL,
+    action         jsonb,
+    status         text NOT NULL DEFAULT 'new',
+    applied_at     timestamptz,
+    applied_config text
+);
+CREATE INDEX IF NOT EXISTS idx_fg_findings_status ON fg_optimization_findings (status, generated_at DESC);
+
+CREATE TABLE IF NOT EXISTS fg_reports (
+    id          bigserial PRIMARY KEY,
+    period      text NOT NULL,
+    range_start timestamptz NOT NULL,
+    range_end   timestamptz NOT NULL,
+    content_md  text NOT NULL,
+    created_at  timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fg_reports_created ON fg_reports (created_at DESC);
 `
 
 // newCopyWriter connects the pool and provisions the schema.

@@ -53,3 +53,18 @@ func TestValidatePersistence_PayloadsRetentionClamped(t *testing.T) {
         t.Fatalf("payloads retention = %d, want clamped to 30", got)
     }
 }
+
+func TestValidatePersistence_P3bRetentionDefaults(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Persistence.Enabled = true
+    cfg.Persistence.Retention.HwSamplesDays = -1
+    cfg.Persistence.Retention.GatewayEventsDays = 0
+    cfg.Persistence.Retention.InsightsDays = 0
+    if err := validatePersistence(&cfg); err != nil {
+        t.Fatalf("validate: %v", err)
+    }
+    r := cfg.Persistence.Retention
+    if r.HwSamplesDays != 30 || r.GatewayEventsDays != 180 || r.InsightsDays != 180 {
+        t.Fatalf("P3b retention defaults not repaired: %+v", r)
+    }
+}

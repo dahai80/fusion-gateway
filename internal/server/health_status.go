@@ -13,6 +13,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
+    "github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
@@ -301,6 +302,12 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         return
     }
     slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
+    // P3b (plan §15.4): structured lifecycle audit — every hot reload lands
+    // in fg_gateway_events, not just stdout. Optional interface: no-op when
+    // persistence is off.
+    if rec, ok := s.persistSink.(pg.EventRecorder); ok {
+        rec.RecordEvent("info", "config_reloaded", map[string]any{"version": snap.Version})
+    }
     writeJSON(w, http.StatusOK, map[string]any{
         "status":  "reloaded",
         "version": snap.Version,
