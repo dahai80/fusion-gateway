@@ -8,6 +8,7 @@ import (
     "net/http"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
 )
 
 // handleSolveStream implements #203: a dedicated K-12 BNUP endpoint at
@@ -66,5 +67,9 @@ func (s *Server) handleSolveStream(w http.ResponseWriter, r *http.Request) {
     }
     r.Body = io.NopCloser(bytes.NewReader(modified))
     r.ContentLength = int64(len(modified))
+    // The tee already captured the original body; skip the finalize drain or
+    // an early exit in handleChatCompletions would append the re-marshaled
+    // body on top of it.
+    middleware.MarkRequestBodyCaptured(r.Context())
     s.handleChatCompletions(w, r)
 }
