@@ -12,6 +12,11 @@ type RequestLog struct {
 
     APIKeyName   string `json:"api_key_name"`
     Model        string `json:"model"`
+    // ModelMapped carries the client-facing qualified ("backend/model")
+    // or alias form when it differs from Model (plan §13.2): Model stays
+    // the bare id for aggregation, ModelMapped disambiguates the actual
+    // provider pin.
+    ModelMapped  string `json:"model_mapped,omitempty"`
     RequestType  string `json:"request_type"`
     IsStream     bool   `json:"is_stream"`
 

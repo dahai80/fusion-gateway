@@ -1,0 +1,49 @@
+# Fusion-Gateway minimal configuration (plan §13.3, archi doc
+# fusion-gateway-seriazation-1015.md).
+#
+# Everything not listed here has a sane built-in default. A new cloud
+# backend needs only `type` + `api_key_env` — the vendor table fills the
+# base_url and timeout. Full knob reference: config.yaml + README.
+
+server:
+    port: 11432
+    # fusion-mlx is managed by its own start.sh / fusion-supervisor.
+    auto_start:
+        enabled: false
+
+auth:
+    # The master key comes from the env (bindSecretEnv): export
+    # FG_MASTER_KEY before launch instead of writing auth.master_key.
+    # Per-key entries (api_keys) still live here; use enc: ciphertext or
+    # the admin key store for real deployments.
+    passthrough: true
+
+backends:
+    # Local engine. base_url explicit because it is deployment-specific.
+    fusion-mlx:
+        type: openai
+        base_url: http://127.0.0.1:11434
+        api_key_env: FUSION_MLX_API_KEY
+    # Cloud example: base_url + timeout come from the vendor table.
+    deepseek:
+        type: deepseek
+        api_key_env: DEEPSEEK_API_KEY
+
+models:
+    # Optional. Supply = explicit resolution priority for a bare model
+    # name (first eligible entry wins; local needs the model loaded, cloud
+    # needs enabled + cloud_models allowlist). Omit entirely for the
+    # historical routing chain.
+    supply:
+        glm-5: [fusion-mlx, glm-cloud]
+    # Optional. Client-visible stable aliases; targets may be bare or
+    # "backend/model" qualified. Aliases appear in /v1/models.
+    aliases:
+        "cc-main": "glm-cloud/glm-5"
+
+routing:
+    mode: hybrid
+    token_threshold: 8000
+    # routing.default_model, routing.cloud_models and
+    # routing.fallback.model_mapping keep their existing semantics; see
+    # README § Model Identity.

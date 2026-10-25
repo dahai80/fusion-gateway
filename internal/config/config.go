@@ -463,6 +463,12 @@ type BackendConfig struct {
     Type                string        `mapstructure:"type"`
     BaseURL             string        `mapstructure:"base_url"`
     APIKey              string        `mapstructure:"api_key"`
+    // APIKeyEnv names the environment variable holding this backend's key
+    // (plan §13.3): normalizeBackends resolves it into APIKey at load/
+    // reload time so plaintext keys never need to live in config.yaml.
+    // Takes precedence over an empty api_key; a set api_key with an empty
+    // api_key_env logs a deprecation WARN.
+    APIKeyEnv           string        `mapstructure:"api_key_env"`
     Timeout             time.Duration `mapstructure:"timeout"`
     HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
     Priority            int           `mapstructure:"priority"`
@@ -887,6 +893,10 @@ type Config struct {
     Auth          AuthConfig               `mapstructure:"auth"`
     Routing       RoutingConfig            `mapstructure:"routing"`
     Backends      map[string]BackendConfig `mapstructure:"backends"`
+    // Models is the models.* namespace (plan §13.3): supply priority,
+    // aliases, cross-supply toggle. Optional — zero value keeps the
+    // historical routing chain untouched.
+    Models        ModelsConfig             `mapstructure:"models"`
     Validation    ValidationConfig         `mapstructure:"validation"`
     Hardware      HardwareConfig           `mapstructure:"hardware"`
     Tokenizer     TokenizerConfig          `mapstructure:"tokenizer"`
@@ -1303,6 +1313,10 @@ func Load(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
 
+    // §13.3: api_key_env resolution + vendor base_url/timeout fill, before
+    // validate so downstream checks see the normalized entries.
+    normalizeBackends(&cfg)
+
     if err := validate(&cfg); err != nil {
         return nil, fmt.Errorf("validate config: %w", err)
     }
@@ -1396,6 +1410,10 @@ func Reload(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
 
+    // §13.3: same normalization as Load — hot-reloaded entries get
+    // api_key_env resolution + vendor defaults fill.
+    normalizeBackends(&cfg)
+
     if err := validate(&cfg); err != nil {
         slog.Error("reload: config validation failed", "error", err)
         return nil, fmt.Errorf("validate config: %w", err)
@@ -1468,6 +1486,11 @@ func validate(cfg *Config) error {
 
     if cfg.Routing.TokenThreshold <= 0 {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
+    }
+
+    // §13.3 models.* namespace (alias/supply sanity, WARN-first).
+    if err := validateModels(cfg); err != nil {
+        return err
     }
 
     // RC3: per-model context-limit map. Values must be positive; a zero/negative

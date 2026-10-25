@@ -74,6 +74,25 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
         return modelListLess(models[i], models[j])
     })
 
+    // §13.3: models.aliases surface as synthetic list entries so clients
+    // can discover them (AC16): id = the alias the client sends, qualified
+    // form = the resolution target. Appended AFTER the sort so real
+    // provider entries keep their local-first ordering; aliases sort to
+    // the tail alphabetically.
+    aliases := make([]adapter.ModelInfo, 0, len(snap.Config.Models.Aliases))
+    for alias := range snap.Config.Models.Aliases {
+        res := config.ResolveModel(alias, snap.Config.Backends, snap.Config.Models)
+        aliases = append(aliases, adapter.ModelInfo{
+            ID:          alias,
+            Object:      "model",
+            OwnedBy:     "alias",
+            Backend:     res.Backend,
+            QualifiedID: res.Qualified(),
+        })
+    }
+    sort.Slice(aliases, func(i, j int) bool { return aliases[i].ID < aliases[j].ID })
+    models = append(models, aliases...)
+
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",
@@ -141,6 +160,10 @@ func (s *Server) listModelsConcurrent(ctx context.Context, names []string) []ada
         }
         for _, m := range res.models {
             m.AvailableBackends = []string{res.name}
+            // §13.2: explicit provider attribution — the qualified form is
+            // what a client sends to pin this provider deterministically.
+            m.Backend = res.name
+            m.QualifiedID = res.name + "/" + m.ID
             models = append(models, m)
         }
     }

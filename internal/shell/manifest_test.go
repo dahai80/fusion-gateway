@@ -146,13 +146,16 @@ func TestRegistry_GroupFieldsRoundTrip(t *testing.T) {
         t.Fatalf("ungrouped manifest rejected: %v", err)
     }
     var grouped, ungrouped *ManifestView
-    for i := range r.List() {
-        v := r.List()[i]
+    // List() once: map iteration order is randomized per call, so indexing
+    // a fresh List() with a previous call's i can visit one view twice and
+    // skip the other (race-mode flake, caught by CI on an unrelated PR).
+    views := r.List()
+    for i, v := range views {
         switch v.ID {
         case "fusion-doc":
-            grouped = &v
+            grouped = &views[i]
         case "fusion-solo":
-            ungrouped = &v
+            ungrouped = &views[i]
         }
     }
     if grouped == nil || ungrouped == nil {

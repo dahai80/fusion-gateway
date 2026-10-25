@@ -30,6 +30,13 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     inputLen := len(req.Input)
 
+    // §13.2/§13.4: alias/qualified-id resolution (mirror chat handlers).
+    modelIdent := s.resolveModelIdentity(req.Model)
+    if modelIdent.Bare != req.Model {
+        req.Model = modelIdent.Bare
+        stampModelIdentity(r, modelIdent)
+    }
+
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
         http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)
@@ -42,7 +49,14 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         Type:  router.RequestTypeEmbedding,
     }
     decision := s.router.Decide(ctx, routeReq)
+    // §13.2: qualified model pin (mirror chat handlers).
+    decision = s.applyQualifiedModelLock(modelIdent, decision)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
+
+    if decision.Rejected {
+        http.Error(w, decision.RejectDetail, http.StatusForbidden)
+        return
+    }
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
         return
@@ -169,6 +183,13 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // §13.2/§13.4: alias/qualified-id resolution (mirror chat handlers).
+    rerankIdent := s.resolveModelIdentity(req.Model)
+    if rerankIdent.Bare != req.Model {
+        req.Model = rerankIdent.Bare
+        stampModelIdentity(r, rerankIdent)
+    }
+
     ctx := adapter.WithFusionHeaders(r.Context(), r)
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
@@ -182,7 +203,14 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         Type:  router.RequestTypeRerank,
     }
     decision := s.router.Decide(ctx, routeReq)
+    // §13.2: qualified model pin (mirror chat handlers).
+    decision = s.applyQualifiedModelLock(rerankIdent, decision)
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
+
+    if decision.Rejected {
+        http.Error(w, decision.RejectDetail, http.StatusForbidden)
+        return
+    }
 
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
         return

@@ -60,6 +60,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
     }
 
+    // §13.2/§13.4: model identity resolution — expand models.aliases and
+    // strip "backend/model" qualified prefixes BEFORE allowlist/routing so
+    // the engine and the upstream both see the bare id. The original form
+    // is stamped into the request log (ModelMapped).
+    modelIdent := s.resolveModelIdentity(req.Model)
+    if modelIdent.Bare != req.Model {
+        req.Model = modelIdent.Bare
+        stampModelIdentity(r, modelIdent)
+    }
+
     // #185: BNUP mode — when enabled, a model alias starting with "bnup-"
     // triggers two auto-attachments: (1) model remapped to bnup_model (the
     // merged Qwen2.5-32B-BNUP-Final weights), (2) grammar bnup_grammar
@@ -121,6 +131,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
         decision = s.router.Decide(ctx, routeReq)
     }
+
+    // §13.2: a qualified model id pins the backend deterministically
+    // (engine reason preserved; cloud_models guard still outranks cloud pins).
+    decision = s.applyQualifiedModelLock(modelIdent, decision)
 
     // #199/#20: laya-guard 403 short-circuit. /v1/chat/completions previously
     // skipped decision.Rejected (only /v1/messages checked it), leaving the
@@ -1092,6 +1106,13 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         TopP:        legacyReq.TopP,
     }
 
+    // §13.2/§13.4: alias/qualified-id resolution (mirror /v1/chat/completions).
+    modelIdent := s.resolveModelIdentity(chatReq.Model)
+    if modelIdent.Bare != chatReq.Model {
+        chatReq.Model = modelIdent.Bare
+        stampModelIdentity(r, modelIdent)
+    }
+
     // Re-encode and forward to chat completions handler via internal call
     ctx := adapter.WithFusionHeaders(r.Context(), r)
 
@@ -1130,6 +1151,9 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         Stream: chatReq.Stream,
     }
     decision := s.router.Decide(ctx, routeReq)
+
+    // §13.2: qualified model pin (mirror /v1/chat/completions).
+    decision = s.applyQualifiedModelLock(modelIdent, decision)
 
     // #199/#20: laya-guard 403 short-circuit (mirror /v1/chat/completions +
     // /v1/messages). /v1/completions previously skipped decision.Rejected.
