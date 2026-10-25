@@ -438,6 +438,99 @@ func (h *Handler) applyFinding(w http.ResponseWriter, r *http.Request, f *insigh
     writeJSON(w, http.StatusOK, applied)
 }
 
+// handleReportsList — GET /admin/api/reports (plan §15.5)
+// Params: period (daily|weekly), limit (default 50, cap 200). List rows omit
+// content_md; the detail endpoint serves it.
+func (h *Handler) handleReportsList(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    q := r.URL.Query()
+    limit := 0
+    if v, err := strconv.Atoi(q.Get("limit")); err == nil {
+        limit = v
+    }
+    reports, err := h.insights.Reports(r.Context(), q.Get("period"), limit)
+    if err != nil {
+        slog.Warn("reports list query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"reports": reports, "total": len(reports)})
+}
+
+// handleReportByID — GET /admin/api/reports/{id} (plan §15.5). Serves the
+// full row including content_md.
+func (h *Handler) handleReportByID(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    rest := strings.TrimPrefix(r.URL.Path, "/admin/api/reports/")
+    if rest == "" {
+        writeError(w, http.StatusBadRequest, "missing report id")
+        return
+    }
+    id, err := strconv.ParseInt(rest, 10, 64)
+    if err != nil || id <= 0 {
+        writeError(w, http.StatusBadRequest, "invalid report id")
+        return
+    }
+    rep, err := h.insights.ReportByID(r.Context(), id)
+    if err != nil {
+        slog.Warn("report fetch failed", "id", id, "error", err)
+        writeError(w, http.StatusNotFound, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, rep)
+}
+
+// handleReportGenerate — POST /admin/api/reports/generate
+// Body {"period": "daily"|"weekly"} (default daily). Manual trigger for the
+// operator: generates the last complete window now instead of waiting for
+// the 08:00 worker tick. Idempotent — an existing report is returned as-is.
+func (h *Handler) handleReportGenerate(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    if r.Method != http.MethodPost {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    var req struct {
+        Period string `json:"period"`
+    }
+    if r.Body != nil {
+        if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil && err.Error() != "EOF" {
+            writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+            return
+        }
+    }
+    if req.Period == "" {
+        req.Period = "daily"
+    }
+    rep, err := h.insights.GenerateReport(r.Context(), req.Period)
+    if err != nil {
+        slog.Warn("report generation failed", "period", req.Period, "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    h.auditEvent("info", "report_generated", map[string]any{
+        "period": rep.Period, "id": rep.ID, "by": "admin",
+    })
+    writeJSON(w, http.StatusOK, rep)
+}
+
 // toIfaceSlice converts []string to []interface{} for the YAML doc tree.
 func toIfaceSlice(in []string) []interface{} {
     out := make([]interface{}, len(in))

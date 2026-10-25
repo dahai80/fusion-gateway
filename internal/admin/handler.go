@@ -67,6 +67,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     // traffic splits.
     mux.HandleFunc("/admin/api/optimization/findings", h.requireAdminRoleStrict(h.handleOptimizationFindingsList))
     mux.HandleFunc("/admin/api/optimization/findings/", h.requireAdminRoleStrict(h.handleOptimizationFindingByID))
+    // P3b-3c (plan §15.3/§15.5): periodic Markdown reports. Strict role —
+    // content aggregates cross-project traffic, cost and anomaly evidence.
+    mux.HandleFunc("/admin/api/reports", h.requireAdminRoleStrict(h.handleReportsList))
+    mux.HandleFunc("/admin/api/reports/generate", h.requireAdminRoleStrict(h.handleReportGenerate))
+    mux.HandleFunc("/admin/api/reports/", h.requireAdminRoleStrict(h.handleReportByID))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))

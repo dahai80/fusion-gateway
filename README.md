@@ -873,6 +873,34 @@ failed reload leaves the finding at `new` for a retry instead of a phantom
 (advisory). Both mutations write an audit row (`finding_applied` /
 `finding_dismissed`) into `fg_gateway_events`.
 
+### Periodic Reports (P3b-3c)
+
+A background worker (`internal/insights/reports.go`, `lifecycle.Worker`)
+generates a Markdown operations report into `fg_reports` (plus a file copy
+under `~/.fusion-gateway/reports/`): **daily** for the previous calendar day
+and **weekly** for the last complete Mon–Sun, each published after 08:00
+local time. Dedupe is `(period, range_start)`, so restarts and overlapping
+ticks never duplicate rows; the DB row is authoritative, the file copy is
+best-effort.
+
+Report sections: volume (requests + success rate with deltas vs the previous
+window), latency (global TTFT P95 with delta, worst models top-3), anomalies
+(open count + per-kind breakdown), cost (cloud cost, local savings, oversized
+prompt waste estimate), and optimization (new findings + an applied-findings
+follow-up comparing each model's 7-day local/cloud split — did the supply
+entry actually move traffic local?).
+
+Admin endpoints (strict role, 503 when persistence is off):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/api/reports` | list reports (metadata only, no content); filters `period`, `limit` |
+| GET | `/admin/api/reports/{id}` | full report including `content_md` |
+| POST | `/admin/api/reports/generate` | manual trigger, body `{"period":"daily"\|"weekly"}` — idempotent, returns the existing row when already generated |
+
+Retention: `fg_reports` rows are swept with the other insights tables after
+`persistence.retention.insights_days` (default 180).
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in

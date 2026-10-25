@@ -3,6 +3,7 @@ package insights
 import (
     "context"
     "os"
+    "strings"
     "testing"
     "time"
 
@@ -254,5 +255,92 @@ func TestSQL_FindingsLifecycleAgainstLiveDB(t *testing.T) {
     f, err := svc.FindingByID(ctx, id)
     if err != nil || f.Status != "dismissed" {
         t.Fatalf("finding fetch after dismiss: %v status=%s", err, f.Status)
+    }
+}
+
+// TestSQL_ReportsLifecycleAgainstLiveDB validates every report SQL statement
+// (totals, worst models, anomaly kinds, cost, the findings UNION+JOIN) and
+// the generate/dedupe/list/fetch lifecycle with a daily report for the last
+// complete window.
+func TestSQL_ReportsLifecycleAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    start, end, _ := reportWindow("daily", time.Now())
+    t.Cleanup(func() {
+        svc.pool.Exec(context.Background(),
+            `DELETE FROM fg_reports WHERE period = 'daily' AND range_start = $1`, start)
+    })
+
+    if _, err := svc.fetchTotals(ctx, start, end); err != nil {
+        t.Fatalf("fetchTotals: %v", err)
+    }
+    if _, err := svc.fetchTotals(ctx, start.Add(-end.Sub(start)), start); err != nil {
+        t.Fatalf("fetchTotals (prev window): %v", err)
+    }
+    if _, err := svc.fetchWorstModels(ctx, start, end); err != nil {
+        t.Fatalf("fetchWorstModels: %v", err)
+    }
+    if _, err := svc.fetchAnomalyKinds(ctx, start, end); err != nil {
+        t.Fatalf("fetchAnomalyKinds: %v", err)
+    }
+    if _, err := svc.fetchFindingsForReport(ctx, start, end); err != nil {
+        t.Fatalf("fetchFindingsForReport: %v", err)
+    }
+    costRows, err := svc.pool.Query(ctx,
+        `SELECT COALESCE(sum(cost), 0), COALESCE(sum(local_savings), 0),
+                COALESCE(sum(cost) FILTER (WHERE input_tokens > 0 AND output_tokens > 0
+                    AND input_tokens > 50 * output_tokens), 0)
+         FROM fg_request_logs WHERE ts >= $1 AND ts < $2`, start, end)
+    if err != nil {
+        t.Fatalf("cost query: %v", err)
+    }
+    costRows.Close()
+
+    rep, err := svc.GenerateReport(ctx, "daily")
+    if err != nil {
+        t.Fatalf("generate: %v", err)
+    }
+    if rep.ContentMD == "" || !strings.Contains(rep.ContentMD, "# Fusion Gateway Daily Report") {
+        t.Fatalf("report content wrong: %q", rep.ContentMD[:min(80, len(rep.ContentMD))])
+    }
+    if rep.ID == 0 {
+        t.Fatalf("report id missing")
+    }
+    // Idempotent: second call must return the existing row, not a duplicate.
+    rep2, err := svc.GenerateReport(ctx, "daily")
+    if err != nil {
+        t.Fatalf("re-generate: %v", err)
+    }
+    if rep2.ID != rep.ID {
+        t.Fatalf("dedupe failed: got id=%d, want %d", rep2.ID, rep.ID)
+    }
+
+    reports, err := svc.Reports(ctx, "daily", 10)
+    if err != nil {
+        t.Fatalf("list: %v", err)
+    }
+    found := false
+    for _, r := range reports {
+        if r.ID == rep.ID {
+            found = true
+            if r.ContentMD != "" {
+                t.Fatalf("list rows must omit content_md")
+            }
+        }
+    }
+    if !found {
+        t.Fatalf("generated report missing from list (rows=%d)", len(reports))
+    }
+    got, err := svc.ReportByID(ctx, rep.ID)
+    if err != nil {
+        t.Fatalf("by id: %v", err)
+    }
+    if got.ContentMD != rep.ContentMD || got.ContentBytes != len(rep.ContentMD) {
+        t.Fatalf("detail row mismatch: bytes=%d want=%d", got.ContentBytes, len(rep.ContentMD))
+    }
+    if _, err := svc.GenerateReport(ctx, "bogus"); err == nil {
+        t.Fatalf("invalid period must fail")
     }
 }
