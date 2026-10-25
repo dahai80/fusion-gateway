@@ -401,6 +401,7 @@ func run(configPath string) error {
 	var insightsSvc *insights.Service
 	var anomalyDetector *insights.Detector
 	var rulesEngine *insights.RulesEngine
+	var reportsWorker *insights.ReportsWorker
 	if snap.Config.Persistence.Enabled {
 		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
 		if dsn == "" {
@@ -438,6 +439,10 @@ func run(configPath string) error {
 		// P3b-3 (plan §14.2/§15.5): hourly optimization rules pass into
 		// fg_optimization_findings; apply/dismiss audit through the same sink.
 		rulesEngine = insightsSvc.StartRulesEngine(context.Background(), sink)
+		// P3b-3c (plan §15.3): daily 08:00 / weekly Mon 08:00 Markdown
+		// reports into fg_reports + a file copy under ~/.fusion-gateway/reports/.
+		reportsWorker = insightsSvc.StartReportsWorker(context.Background(), sink,
+			config.ExpandPath("~/.fusion-gateway/reports"))
 		slog.Info("request persistence enabled",
 			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
@@ -714,6 +719,11 @@ func run(configPath string) error {
 	// same ordering rationale.
 	if rulesEngine != nil {
 		rulesEngine.Stop()
+	}
+	// P3b-3c: stop the reports worker with the other insights workers, before
+	// the sink/pool — its generation pass queries the pool and writes files.
+	if reportsWorker != nil {
+		reportsWorker.Stop()
 	}
 	if persistSink != nil {
 		// Sync variant: the async RecordEvent races the pool Close below and

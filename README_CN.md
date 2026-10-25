@@ -1305,6 +1305,31 @@ apply 顺序:先写配置并热加载,**之后**才写数据库状态 —— 热
 (PUT 处理器、finding apply) 落盘前先经 `config.ProbeValidate` 干跑校验:
 无法加载的修改直接拒绝,`config.yaml` 保持原样,不再把坏 YAML 写上磁盘。
 
+### 定期报告 (P3b-3c)
+
+后台 worker (`internal/insights/reports.go`,`lifecycle.Worker`) 定期生成
+Markdown 运维报告写入 `fg_reports`,并在 `~/.fusion-gateway/reports/`
+落一份文件副本:**日报** 覆盖上一个自然日,**周报** 覆盖上一个完整的
+周一至周日,均在本地时间 08:00 后发布。以 `(period, range_start)` 去重,
+重启不会重复生成;数据库行是权威,文件副本尽力而为。
+
+报告内容:总量 (请求数 + 成功率,含与上一窗口的环比)、延迟 (全局 TTFT
+P95 及环比、最差模型 top3)、异常 (当前 open 数 + 按类型分布)、成本
+(云端花费、本地节省、超大 prompt 浪费估算)、优化 (本期新结论 + 已应用
+结论的采纳回访 —— 对比该模型 7 天本地/云端流量占比,验证 supply 是否
+真的把流量搬到了本地)。
+
+管理端点 (strict 角色,persistence 关闭时 503):
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/api/reports` | 报告列表 (仅元信息,不含正文);过滤 `period`、`limit` |
+| GET | `/admin/api/reports/{id}` | 完整报告,含 `content_md` |
+| POST | `/admin/api/reports/generate` | 手动触发,body `{"period":"daily"\|"weekly"}` —— 幂等,已生成则直接返回已有行 |
+
+保留策略:`fg_reports` 随其他 insights 表按
+`persistence.retention.insights_days` (默认 180 天) 清理。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置
