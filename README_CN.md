@@ -1299,6 +1299,12 @@ apply 顺序:先写配置并热加载,**之后**才写数据库状态 —— 热
 其他规则返回 400 (建议性)。两种操作均写审计事件
 (`finding_applied` / `finding_dismissed`) 到 `fg_gateway_events`。
 
+附带修复:模型名带点 (如 `mlx-community/Qwen3.5-4B-MLX-4bit`) 时
+`models.supply`/`models.aliases` 的 key 被 viper 拍平机制拆嵌套导致重载失败 ——
+这两个映射现在绕过 viper,直接从原始 YAML 解析。同时所有管理端配置写入
+(PUT 处理器、finding apply) 落盘前先经 `config.ProbeValidate` 干跑校验:
+无法加载的修改直接拒绝,`config.yaml` 保持原样,不再把坏 YAML 写上磁盘。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置

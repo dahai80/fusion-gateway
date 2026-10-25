@@ -93,6 +93,24 @@ func getOrCreateSection(doc map[string]interface{}, keys ...string) map[string]i
     return current
 }
 
+// validateAndWriteYAML marshals the mutated doc, dry-run validates it, and
+// only then atomically writes it. Pre-write validation (config.ProbeValidate)
+// guarantees a mutation that cannot load never lands on disk — the old
+// write-then-Reload order left broken YAML behind on validation failure,
+// forcing a manual file repair while the live snapshot went stale.
+func validateAndWriteYAML(path string, doc map[string]interface{}) error {
+    out, err := yaml.Marshal(doc)
+    if err != nil {
+        return err
+    }
+    if err := config.ProbeValidate(out); err != nil {
+        slog.Error("config mutation rejected by pre-write validation — file unchanged",
+            "path", path, "error", err)
+        return fmt.Errorf("config mutation rejected (file unchanged): %w", err)
+    }
+    return atomicWriteFile(path, out, 0600)
+}
+
 // updateYAMLSection reads config YAML, applies fn to mutate the target section,
 // then writes back. fn receives the top-level doc and should mutate it directly.
 // Called by all config PUT handlers (handleUpdateRoutingConfig, handleUpdateCacheConfig, etc.).
@@ -114,7 +132,7 @@ func (h *Handler) updateYAMLSection(fn func(doc map[string]interface{}) error) (
         return nil, err
     }
 
-    if err := writeYAMLDoc(h.configPath, doc); err != nil {
+    if err := validateAndWriteYAML(h.configPath, doc); err != nil {
         slog.Error("failed to write config file", "path", h.configPath, "error", err)
         return nil, err
     }

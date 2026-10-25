@@ -19,11 +19,16 @@ type ModelsConfig struct {
     // the first eligible backend wins (engine slot P0.18, guarded by the
     // cloud_models allowlist and the local breaker). An entry absent from
     // Supply keeps the historical routing chain.
-    Supply map[string][]string `mapstructure:"supply"`
+    // Tagged mapstructure:"-": model-name keys contain dots and viper's
+    // AllSettings() (what Unmarshal decodes from) re-nests dotted keys into
+    // sub-maps, which made Unmarshal fail outright. Populated instead by
+    // loadModelsNamespace from the raw YAML bytes — see models_raw.go.
+    Supply map[string][]string `mapstructure:"-"`
     // Aliases maps a client-visible name to a target (bare or
     // "backend/model" qualified). Resolved before routing, max 3 hops to
     // bound alias chains; a cycle resolves to the last hop with a WARN.
-    Aliases map[string]string `mapstructure:"aliases"`
+    // Same viper dot-split hazard as Supply: loaded raw, not via viper.
+    Aliases map[string]string `mapstructure:"-"`
     // AllowCrossSupply toggles the historical fallback when a bare model
     // has a Supply list but none of its entries are currently eligible:
     // true (default/nil) = fall through to the routing chain (local-first,
