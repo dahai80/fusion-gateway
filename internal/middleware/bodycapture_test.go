@@ -108,9 +108,26 @@ func TestCapture_PeekRestoreNoDoubleCapture(t *testing.T) {
     }
 }
 
-func TestCapture_PeekRestoreWithoutMarkStillDoubles(t *testing.T) {
-    // Documents the pre-fix behavior: without the mark, the finalize drain
-    // re-appends the replaced body. Guards against removing the marker calls.
+func TestCapture_UnreadBodyFinalizeSingleCapture(t *testing.T) {
+    // Regression (production 401 rows): the finalize drain used to copy the
+    // unread body into reqBuf while r.Body — the TeeReader — teed the same
+    // bytes into reqBuf again, so early-rejected requests (bad API key)
+    // persisted body+body. The drain now discards; the tee does the capture.
+    body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = withCapture(req, 512, true)
+
+    // handler never reads the body (auth rejection path)
+    res := FinalizeCapture(req, true, true)
+    if string(res.ReqBody) != body {
+        t.Fatalf("unread body doubled on finalize: %q", res.ReqBody)
+    }
+}
+
+func TestCapture_PeekRestoreWithoutMarkNoDouble(t *testing.T) {
+    // Even without the mark, the Discard drain cannot re-append the replaced
+    // body: the peek already read through the tee, so the buffer holds one
+    // copy and draining the replacement writes nothing.
     body := `{"a":1}`
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
     req = withCapture(req, 512, true)
@@ -118,8 +135,8 @@ func TestCapture_PeekRestoreWithoutMarkStillDoubles(t *testing.T) {
     req.Body = io.NopCloser(strings.NewReader(string(read)))
 
     res := FinalizeCapture(req, true, true)
-    if string(res.ReqBody) != body+body {
-        t.Fatalf("expected doubled body without mark, got %q", res.ReqBody)
+    if string(res.ReqBody) != body {
+        t.Fatalf("expected single body without mark, got %q", res.ReqBody)
     }
 }
 
