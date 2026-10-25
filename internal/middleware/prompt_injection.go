@@ -85,6 +85,9 @@ func PromptInjectionMiddleware(cfg config.PromptInjectionConfig) func(http.Handl
                 return
             }
             r.Body = io.NopCloser(strings.NewReader(string(body)))
+            // The tee already captured what was read; a handler that exits
+            // without draining the replacement must not double-capture.
+            MarkRequestBodyCaptured(r.Context())
 
             var payload struct {
                 Messages []struct {

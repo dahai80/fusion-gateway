@@ -87,6 +87,42 @@ func TestCapture_MetadataOnlyMode(t *testing.T) {
     }
 }
 
+func TestCapture_PeekRestoreNoDoubleCapture(t *testing.T) {
+    body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = withCapture(req, 512, true)
+
+    // peek+restore pattern (TPM estimator / prompt-injection scan): read the
+    // full body through the tee, replace r.Body with a buffered copy, mark
+    // captured — then the handler exits WITHOUT draining the replacement.
+    read, err := io.ReadAll(req.Body)
+    if err != nil || string(read) != body {
+        t.Fatalf("peek read broken: len=%d err=%v", len(read), err)
+    }
+    req.Body = io.NopCloser(strings.NewReader(string(read)))
+    MarkRequestBodyCaptured(req.Context())
+
+    res := FinalizeCapture(req, true, true)
+    if string(res.ReqBody) != body {
+        t.Fatalf("double capture: %q", res.ReqBody)
+    }
+}
+
+func TestCapture_PeekRestoreWithoutMarkStillDoubles(t *testing.T) {
+    // Documents the pre-fix behavior: without the mark, the finalize drain
+    // re-appends the replaced body. Guards against removing the marker calls.
+    body := `{"a":1}`
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+    req = withCapture(req, 512, true)
+    read, _ := io.ReadAll(req.Body)
+    req.Body = io.NopCloser(strings.NewReader(string(read)))
+
+    res := FinalizeCapture(req, true, true)
+    if string(res.ReqBody) != body+body {
+        t.Fatalf("expected doubled body without mark, got %q", res.ReqBody)
+    }
+}
+
 func TestStripAuthFields(t *testing.T) {
     in := []byte(`{"model":"m","api_key":"sk-secret","password":"p","nested":{"authorization":"keep-me"}}`)
     out := StripAuthFields(in)

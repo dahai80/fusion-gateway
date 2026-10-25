@@ -72,6 +72,18 @@ func GetBodyCapture(ctx context.Context) *bodyCapture {
     return bc
 }
 
+// MarkRequestBodyCaptured stops the finalize drain from re-reading the request
+// body. Call right after replacing r.Body with a buffered copy (peek+restore
+// in TPM estimation, prompt-injection scan, stream solve): the replacement's
+// bytes were already tee-captured, and if the handler exits without draining
+// the replacement, the finalize io.Copy would append them a second time —
+// the duplicated req_body/req_raw rows seen in production.
+func MarkRequestBodyCaptured(ctx context.Context) {
+    if bc, _ := ctx.Value(captureKey).(*bodyCapture); bc != nil {
+        bc.reqDone = true
+    }
+}
+
 // captureRequest reads the remaining request body into the buffer up to the
 // cap. Called at finalize: by then the handler has drained the body, so this
 // is normally a no-op on an already-full TeeReader buffer. Only un-read

@@ -1466,10 +1466,12 @@ func (s *Server) estimateRequestTokens(r *http.Request) int {
         // Restore what was read so the downstream error path still sees a
         // readable body.
         r.Body = io.NopCloser(bytes.NewReader(body))
+        middleware.MarkRequestBodyCaptured(r.Context())
         slog.Debug("rate limit: token estimation read failed", "error", err)
         return 0
     }
     r.Body = io.NopCloser(bytes.NewReader(body))
+    middleware.MarkRequestBodyCaptured(r.Context())
     if len(body) == 0 {
         return 0
     }
