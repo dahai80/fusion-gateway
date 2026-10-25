@@ -1270,6 +1270,35 @@ ack 与 mute 均写审计事件 (`anomaly_acked` / `anomaly_muted`) 到
 `fg_gateway_events`。被 mute 的签名跨重启持续抑制直至 `muted_until` 到期;
 对 muted 行执行 ack 会被拒绝 (静默解除屏蔽会重新武装操作员已压制的检测器)。
 
+### 优化规则引擎 (P3b-3)
+
+每小时一次的后台 worker (`internal/insights/rules.go`,`lifecycle.Worker`)
+对已持久化的流量评估六条优化规则,把可执行的结论写入
+`fg_optimization_findings`。相同 rule + scope 在 24 小时内在数据库侧去重,
+重启不会产生重复行。
+
+| 规则 | 触发条件 (含护栏) | 动作 |
+|---|---|---|
+| `MIGRATE_TO_LOCAL` | 云端占比 > 10% 且本地 TTFT P95 < 0.7× 云端 P95;≥ 50 请求、≥ 10 本地生成样本、本地错误率 ≤ 2% | 可机执行:apply 写入 `models.supply.<model> = ["fusion-mlx", ...existing]` 并热加载 |
+| `KEEP_CLOUD` | 本地错误率 > 2% 且本地请求 ≥ 50 | 建议性 |
+| `MIGRATE_TO_CLOUD` | 某个小时段错误率 > 5% 且本地请求 ≥ 20 | 建议性 (按时段分流) |
+| `TRIM_TOKENS` | > 5% 的请求 input > 50× output tokens;≥ 100 请求 | 建议性 |
+| `DEDUP_PROMPT` | 24h 内相同请求体发送 > 3 次 (聊天端点,SQL 内 md5) | 建议性 (启用语义缓存) |
+| `PRELOAD_MODEL` | 7 天内 ≥ 3 个不同本地模型 且平均系统内存占用 < 85% | 建议性 (预加载在 fusion-mlx) |
+
+管理端点 (strict 角色,persistence 关闭时 503):
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/api/optimization/findings` | 结论列表;过滤 `status` (`new`/`applied`/`dismissed`)、`rule`、`limit` |
+| POST | `/admin/api/optimization/findings/{id}/apply` | 应用 `MIGRATE_TO_LOCAL` 结论:把 `fusion-mlx` 前插进 `models.supply.<model>`,热加载后打 `applied` + `applied_config` |
+| POST | `/admin/api/optimization/findings/{id}/dismiss` | 标记不予处理 |
+
+apply 顺序:先写配置并热加载,**之后**才写数据库状态 —— 热加载失败时结论
+保持 `new` 可重试,不会留下虚假的 `applied` 行。只有 `new` 状态可流转;
+其他规则返回 400 (建议性)。两种操作均写审计事件
+(`finding_applied` / `finding_dismissed`) 到 `fg_gateway_events`。
+
 **前端**:React + Ant Design + Vite SPA,嵌入 Go 二进制。
 
 ### GUI 配置

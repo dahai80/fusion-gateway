@@ -13,17 +13,20 @@ import (
 // cb fires N times.
 func TestDebouncedPersister_CoalescesBurst(t *testing.T) {
     var calls int32
-    p := newDebouncedPersister("test", 30*time.Millisecond, func() {
+    // 250ms window vs ~50ms burst: a mid-burst fire needs a >250ms stall
+    // between two Schedule calls. CI (loaded runner, -race) showed 30ms
+    // windows firing mid-burst on a 2ms sleep — 15x scheduling stretch.
+    p := newDebouncedPersister("test", 250*time.Millisecond, func() {
         atomic.AddInt32(&calls, 1)
     })
     for i := 0; i < 50; i++ {
         p.Schedule()
-        time.Sleep(2 * time.Millisecond)
+        time.Sleep(1 * time.Millisecond)
     }
     if !p.Pending() {
         t.Fatal("timer not armed after Schedule burst")
     }
-    time.Sleep(80 * time.Millisecond)
+    time.Sleep(400 * time.Millisecond)
     if got := atomic.LoadInt32(&calls); got != 1 {
         t.Fatalf("cb fired %d times, want 1 (burst must coalesce)", got)
     }

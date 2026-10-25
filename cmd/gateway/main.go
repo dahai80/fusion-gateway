@@ -400,6 +400,7 @@ func run(configPath string) error {
 	var persistSink *pg.Sink
 	var insightsSvc *insights.Service
 	var anomalyDetector *insights.Detector
+	var rulesEngine *insights.RulesEngine
 	if snap.Config.Persistence.Enabled {
 		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
 		if dsn == "" {
@@ -434,6 +435,9 @@ func run(configPath string) error {
 		})
 		srv.SetEventRecorder(sink)
 		anomalyDetector = insightsSvc.StartDetector(context.Background(), sink)
+		// P3b-3 (plan §14.2/§15.5): hourly optimization rules pass into
+		// fg_optimization_findings; apply/dismiss audit through the same sink.
+		rulesEngine = insightsSvc.StartRulesEngine(context.Background(), sink)
 		slog.Info("request persistence enabled",
 			"dsn_env", snap.Config.Persistence.Postgres.DsnEnv,
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
@@ -705,6 +709,11 @@ func run(configPath string) error {
 	// pass queries via the insights pool and emits events via the sink.
 	if anomalyDetector != nil {
 		anomalyDetector.Stop()
+	}
+	// P3b-3: stop the rules engine with the detector, before the sink/pool —
+	// same ordering rationale.
+	if rulesEngine != nil {
+		rulesEngine.Stop()
 	}
 	if persistSink != nil {
 		// Sync variant: the async RecordEvent races the pool Close below and
