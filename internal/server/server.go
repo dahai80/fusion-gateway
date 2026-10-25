@@ -149,6 +149,9 @@ type Server struct {
     // in Start (not New), so a service wired before Start would be lost —
     // Start re-applies this field onto the fresh handler.
     insightsSvc *insights.Service
+    // eventRecorder is the fg_gateway_events audit sink (P3b-2) for anomaly
+    // ack/mute trails; same Start-time re-apply contract as insightsSvc.
+    eventRecorder insights.EventRecorder
     // R1: lifecycle.Workers wrapping the 3 server-owned reaper goroutines so
     // Shutdown can Stop (cancel + join) each instead of leaking. The cache/
     // semantic/ratelimit evictors are owned by their respective constructors and
@@ -912,6 +915,9 @@ func (s *Server) Start() error {
         if s.insightsSvc != nil {
             adminHandler.SetInsightsService(s.insightsSvc)
         }
+        if s.eventRecorder != nil {
+            adminHandler.SetEventRecorder(s.eventRecorder)
+        }
         mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
         mux.HandleFunc("/admin/api/logout", s.adminAuth.HandleLogout)
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
@@ -1175,6 +1181,17 @@ func (s *Server) SetInsightsService(svc *insights.Service) {
     s.insightsSvc = svc
     if s.adminHandler != nil {
         s.adminHandler.SetInsightsService(svc)
+    }
+}
+
+// SetEventRecorder wires the fg_gateway_events audit sink into the admin API
+// for anomaly lifecycle mutations (P3b-2, plan §15.5). Same before-Start
+// contract as SetInsightsService; Start re-applies it to the freshly built
+// handler.
+func (s *Server) SetEventRecorder(rec insights.EventRecorder) {
+    s.eventRecorder = rec
+    if s.adminHandler != nil {
+        s.adminHandler.SetEventRecorder(rec)
     }
 }
 

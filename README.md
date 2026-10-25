@@ -795,6 +795,52 @@ persistence is off):
 | GET | `/admin/api/insights/hw-samples` | hardware timeseries; `from`/`to` (default 24h, max 31d), `limit` (default 2880, max 10000) |
 | GET | `/admin/api/events` | gateway event feed; filters `level`/`event`, `limit` (default 100, max 1000) |
 
+### Anomaly Detection (P3b-2)
+
+A 5-minute background detector (`internal/insights/detector.go`,
+`lifecycle.Worker`) scans `fg_request_logs` + `fg_gateway_events` and writes
+detections into `fg_anomalies`. Five detectors, each comparing the current
+truncated bucket against an hour-of-week baseline built from the previous 7
+days:
+
+| Kind | Trigger | Severity | Window |
+|---|---|---|---|
+| `error_storm` | normalized error class ≥ 50 per (backend, model) | high | 5 min |
+| `error_spike` | error rate > 1% absolute AND > 2× baseline | high | 15 min |
+| `ttft_shift` | TTFT P95 > 1.5× baseline average | medium | 1 hour |
+| `traffic` | global request volume deviates > ±60% from baseline | medium | 1 hour |
+| `breaker` | daily breaker trips > 3× prior-7-day average (≥ 3 trips with no baseline) | medium | 1 day |
+
+Design notes:
+
+- **Dedupe is in the database**, not memory: a detection is skipped when the
+  signature (kind, backend, model) already has a row with `ts >= bucket` or a
+  `muted` row with `muted_until > now()`. Restarts and slow ticks never
+  duplicate rows; the suppression check fails open.
+- **Error normalization** (`normalizeError`): ordered substring patterns
+  (specific before general) mapping raw messages to stable classes
+  (`connection_reset`, `context_deadline`, `eof`, `http_5xx`, ...); unknown
+  messages cluster on a truncated 80-char lowercased form.
+- **Breaker producer**: `router.Engine.SetEventRecorder` publishes
+  `breaker_tripped` events (both force-Trip and failure-threshold
+  transitions) into `fg_gateway_events` — the breaker detector consumes them.
+- **Small-sample guards**: every baseline comparison requires a minimum
+  current volume and baseline bucket count, so tiny-sample ratios never fire.
+- Each fired detection also lands an `anomaly_detected` gateway event.
+
+Admin endpoints (strict role, 503 when persistence is off):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/api/anomalies` | list detections; filters `status`/`kind`/`backend`, `limit` (default 100, max 500) |
+| POST | `/admin/api/anomalies/{id}/ack` | mark handled; body `{"by": "..."}` (defaults to the JWT username) |
+| POST | `/admin/api/anomalies/{id}/mute` | suppress re-detection of the signature; body `{"days": 7}` (default 7, max 90) |
+
+Ack and mute both write an audit row (`anomaly_acked` / `anomaly_muted`) into
+`fg_gateway_events`. Muted signatures stay suppressed across restarts until
+`muted_until` expires; acking a muted row is rejected (un-muting would silently
+re-arm a detector the operator suppressed).
+
 ### Caching Layering (#204)
 
 KV prefix caching (prompt-prefix reuse inside the inference engine) lives in

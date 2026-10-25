@@ -163,6 +163,18 @@ type Engine struct {
     // the handler falls back to localQueue (single-tier) or no queue. The
     // handler gates before forwarding; the engine stays pure (no blocking).
     tierQueue *TierQueue
+    // eventRecorder is the P3b structured-audit hook: breaker trip transitions
+    // land in fg_gateway_events so the anomaly detector (plan §15.1 熔断异常)
+    // has a durable signal. Wired via SetEventRecorder; nil = not wired. The
+    // callback must be non-blocking (pg.Sink.RecordEvent satisfies this).
+    eventRecorder func(level, event string, detail map[string]any)
+}
+
+// SetEventRecorder wires the structured-audit hook for breaker trips. The
+// callback fires after every open transition (force-Trip and failure
+// threshold), outside any engine lock; it must not block.
+func (e *Engine) SetEventRecorder(fn func(level, event string, detail map[string]any)) {
+    e.eventRecorder = fn
 }
 
 // routeSnapshot is the read-only capture of every wiring field Decide needs,
@@ -607,6 +619,7 @@ func (e *Engine) RecordFailure(backend string) {
             // RecordFailure opened the breaker — count the implicit trip so the
             // trips counter reflects all open transitions, not just force-Trip.
             observability.RecordCircuitBreakerTrip(backend, "failure_threshold")
+            e.recordTripEvent(backend, "failure_threshold")
         }
     }
 }
@@ -765,7 +778,19 @@ func (e *Engine) Trip(backend, reason string) {
         slog.Warn("circuit breaker tripped", "backend", backend, "reason", reason)
         observability.RecordCircuitBreakerTrip(backend, reason)
         observability.UpdateCircuitBreakerState(backend, int(StateOpen))
+        e.recordTripEvent(backend, reason)
     }
+}
+
+// recordTripEvent publishes one breaker_tripped gateway event (P3b §15.1).
+// Called outside breakerMu; nil hook = not wired.
+func (e *Engine) recordTripEvent(backend, reason string) {
+    if e.eventRecorder == nil {
+        return
+    }
+    e.eventRecorder("warn", "breaker_tripped", map[string]any{
+        "backend": backend, "reason": reason,
+    })
 }
 
 // snapshotWiring captures every inFlightMu/affinityMu/hardwareMu-owned field
