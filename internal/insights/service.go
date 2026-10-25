@@ -18,6 +18,9 @@ import (
 // Service is the admin-API query service over fg_request_logs/payloads.
 type Service struct {
     pool *pgxpool.Pool
+    // reportDir is the file-copy destination registered by
+    // StartReportsWorker (before serving); WriteReportFile no-ops on empty.
+    reportDir string
 }
 
 // New connects a read pool with a statement-level timeout (plan §8 guard:

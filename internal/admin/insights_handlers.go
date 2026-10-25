@@ -525,6 +525,9 @@ func (h *Handler) handleReportGenerate(w http.ResponseWriter, r *http.Request) {
         writeError(w, http.StatusBadRequest, err.Error())
         return
     }
+    // Same file copy the worker pass makes, so a forced report lands on disk
+    // immediately (no-op when the reports worker never started).
+    h.insights.WriteReportFile(rep)
     h.auditEvent("info", "report_generated", map[string]any{
         "period": rep.Period, "id": rep.ID, "by": "admin",
     })
