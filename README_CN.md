@@ -134,8 +134,17 @@ cp config.example.yaml config.yaml
 | `/v1/cost` | GET | 成本跟踪汇总 (可选 `?key=<name>` 过滤) |
 | `/v1/realtime` | WebSocket | Realtime API 代理 (双向 WebSocket 中继) |
 | `/v1/models` | GET | 列出可用模型 (并发按 provider 拉取,各 3s 超时,失败跳过;`routing.mode: local` 时仅列本地 provider) |
-| `/v1/models/{id}/load` | POST | 加载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
-| `/v1/models/{id}/unload` | POST | 卸载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
+| `/v1/models/{id}/load` | POST | 加载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`)。**仅接受 hub 注册表 ID** — id 必须存在于 model-hub 注册表;MLX repo 名会回环到 hub 并在那里 404。MLX 级加载/卸载请用 `/v1/admin/models/{name}/load` (#340)。 |
+| `/v1/models/{id}/unload` | POST | 卸载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`),契约同 load。 |
+| `/v1/models/{name}/{action}` | POST | 其他模型级工具动作 (如 `merge-adapter`) 原样透传到 fusion-mlx (#340)。 |
+| `/v1/admin/models/{name}/load` | POST | MLX 级模型加载 — 为可信调用方 (fusion-model-hub) 直连透传到 fusion-mlx,绕过 hub 注册表改写 (#340)。含 `/unload`。 |
+| `/v1/hardware` | GET | fusion-mlx 工具面透传 (#340):硬件报告。 |
+| `/v1/recommend` | POST | 工具面透传:模型推荐。 |
+| `/v1/analyze`, `/v1/analyze-batch` | POST | 工具面透传:模型分析。 |
+| `/v1/migration-level` | GET | 工具面透传:迁移等级。 |
+| `/v1/convert` | POST | 工具面透传:格式转换。 |
+| `/v1/quantize`, `/v1/quantize/*` | POST/GET | 工具面透传:量化任务 (含 `/v1/quantize/evaluate`)。 |
+| `/v1/benchmarks` | GET | 工具面透传:基准测试结果。 |
 | `/v1/laya/*` | GET/POST | Laya 路由透传到 fusion-mlx (`/v1/laya/status`、`/v1/laya/decide`),网关模式客户端 (fusion-bench) 无需直连 :11434 (#327)。fg-key 鉴权,自动注入后端凭据。 |
 | `/health` | GET | 含后端状态的完整健康检查 |
 | `/healthz` | GET | 存活探针 |

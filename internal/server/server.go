@@ -785,6 +785,9 @@ func (s *Server) Start() error {
     // Model load/unload interception -> redirect to model-hub
     mux.HandleFunc("/v1/models/", s.withMiddleware(s.handleModelLoadUnload))
 
+    // #340: fusion-mlx tool-surface passthrough + distinct model-manage route.
+    s.registerMLXToolRoutes(mux)
+
     // Model-hub reverse proxy routes
     s.setupModelHubRoutes(mux)
 

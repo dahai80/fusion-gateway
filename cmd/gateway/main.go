@@ -482,19 +482,33 @@ func run(configPath string) error {
 		// reload rebuilds providers (new FusionMLXProvider or shadow instance),
 		// and a worker holding the startup instance would keep refreshing a
 		// provider nobody reads, freezing the router's model set at the reload.
+		// #343: until the FIRST successful refresh the router runs with a nil
+		// local model set (P0.2 local-exclusive hoist + P6 availability guard
+		// are no-ops), so retry every 5s until success — a fusion-mlx that is
+		// still warming up at gateway start would otherwise leave the window
+		// open for a full 60s tick. After the first success, settle into the
+		// historical 60s cadence; a later failed refresh keeps the last good
+		// set (RefreshModelSet contract).
 		modelWorker := lifecycle.Start(context.Background(), "refresh_model_set", func(ctx context.Context) {
-			refresh := func() {
+			refresh := func() bool {
 				if mlx := pool.GetFusionMLX(); mlx != nil {
-					mlx.RefreshModelSet(ctx)
+					return mlx.RefreshModelSet(ctx)
 				}
+				return false
 			}
-			refresh()
+			bootstrapped := refresh()
+			bootstrapTicker := time.NewTicker(5 * time.Second)
 			ticker := time.NewTicker(60 * time.Second)
+			defer bootstrapTicker.Stop()
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
 					refresh()
+				case <-bootstrapTicker.C:
+					if !bootstrapped {
+						bootstrapped = refresh()
+					}
 				case <-ctx.Done():
 					return
 				}
