@@ -1635,6 +1635,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.70 — 云端溢流产品化 + Insights 时间线 + model-hub 鉴权修复
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#301 本地→云端溢流** | `routing.fallback.overflow` 策略:`enabled`(默认 fail-open)/ `cooldown` 改道 / `cost_ceiling`(每日美元上限,越线显式 503);每次溢流都写入 `fg_gateway_events` 的 `cloud_overflow` 审计事件(原因、源后端、目标后端、成本增量);响应携带 `X-Fusion-Routed: cloud`;流式仅在建立错误时溢流并按仅输入成本估算。见"本地优先云端溢流"。上游直连例外已提 issue:fusion-models-hub#58、fusion-agent-studio#470、fusion-bench#31。 |
+| 2 | **#321 Insights §15.2 时间线** | Anomalies 页面新增四轨时间线视图(请求 / 硬件采样 / 网关事件 / 异常合并到同一时间轴)。 |
+| 3 | **#320 model-hub 代理鉴权** | 网关在 model-hub 代理请求上注入 `X-API-Key` —— 此前 hub 鉴权从未读取代理发送的 Bearer token。 |
+| 4 | **Helm Chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.70(原为 0.8.51,落后约 19 个补丁版本)。 |
+
 ### v0.9.69 — 序列化架构治理落地 (P1–P5 + G 系列)
 
 完成序列化架构审计 (`audit/fusion-gateway-seraization-archi-report-1015.md`,

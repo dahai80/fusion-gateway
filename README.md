@@ -1896,6 +1896,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.70 — Cloud-overflow productization + Insights timeline + model-hub auth fix
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#301 local→cloud overflow** | `routing.fallback.overflow` policy: `enabled` (fail-open default) / `cooldown` divert / `cost_ceiling` (daily USD, explicit 503 at the ceiling); every overflow audited as a `cloud_overflow` event in `fg_gateway_events` (reason, source, target, cost delta); `X-Fusion-Routed: cloud` response header; stream establish-error overflow with input-only cost estimate. See "Local-first cloud overflow". Upstream direct-connect exceptions filed: fusion-models-hub#58, fusion-agent-studio#470, fusion-bench#31. |
+| 2 | **#321 Insights §15.2 timeline** | Four-track timeline view on the Anomalies page (requests / hardware samples / gateway events / anomalies merged on one time axis). |
+| 3 | **#320 model-hub proxy auth** | Gateway injects `X-API-Key` on model-hub proxy requests — hub auth previously never read the Bearer token the proxy sent. |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.70 (was 0.8.51, ~19 patch releases behind). |
+
 ### v0.9.69 — Serialization-architecture remediation (P1–P5 + G-series)
 
 Lands the full remediation of the serialization-architecture audit
