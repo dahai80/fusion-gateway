@@ -2008,6 +2008,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.74 — start.sh service lifecycle + local-model fallthrough fix + fusion-mlx tool proxy
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#344 `start.sh` service lifecycle** | fusion-supervisor manages every fusion-* service via `bash <repo>/start.sh <cmd>`; the gateway now ships a conforming `start.sh` (`start/stop/restart/status/log`), pidfile + health-poll startup, graceful SIGTERM stop. Secrets load from a gitignored `.env` (real env wins). Preflight fails loudly when `persistence.enabled=true` but `FUSION_GW_PG_DSN` is unset, instead of a start/die crash loop. Hot-reload flipping persistence on without a startup-built sink now logs ONE loud ERROR per process (`warnPersistNoSinkOnce`). See "Service lifecycle (`start.sh`, #344)". |
+| 2 | **#343 local-model cloud fallthrough window** | `/v1/chat/completions` requests naming a local-only model no longer fall through to cloud when the model is missing from `models.supply` — the P6 router rule logs a WARN naming the missing supply entry instead of silently routing out, and the local-model interception path closes the window before `Decide`. `RefreshModelSet` returns whether the set changed so the 5s bootstrap retry worker can re-sync early. |
+| 3 | **#340 fusion-mlx tool-surface passthrough** | `/v1/hardware`, `/v1/benchmarks`, `POST /v1/admin/models/{name}/load`, and merge-adapter endpoints are proxied verbatim to fusion-mlx so agent tooling can drive model load/bench without bypassing the gateway. |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.74. |
+
 ### v0.9.73 — Language-aware routing + Anthropic thinking bridge
 
 | # | Item | Details |
