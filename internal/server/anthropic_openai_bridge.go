@@ -5,11 +5,20 @@ import (
     "encoding/hex"
     "encoding/json"
     "fmt"
+    "log/slog"
     "net/http"
     "strings"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
 )
+
+// bridgeThinkingSignature (#329): OpenAI-compatible backends (fusion-mlx
+// thinking models) return reasoning in `reasoning_content` with no signature
+// concept. Anthropic protocol expects a signature on thinking blocks; the
+// bridge stamps this fixed placeholder. No local party verifies it (the
+// gateway forwards history back to fusion-mlx in OpenAI format), and a
+// non-empty value keeps the block keys present on the wire.
+const bridgeThinkingSignature = "ZnVzaW9uLWdhdGV3YXktYnJpZGdlLXN5bnRoZXRpYy1zaWduYXR1cmU="
 
 // #234: the /v1/messages fallback path (openai-compatible backends such as
 // fusion-mlx — providers that do NOT implement MessagesProvider) forwards the
@@ -42,8 +51,9 @@ type bridgeUsage struct {
 
 type bridgeChatChoice struct {
     Message struct {
-        Content   interface{}      `json:"content"`
-        ToolCalls []bridgeToolCall `json:"tool_calls"`
+        Content          interface{}      `json:"content"`
+        ReasoningContent string           `json:"reasoning_content"`
+        ToolCalls        []bridgeToolCall `json:"tool_calls"`
     } `json:"message"`
     FinishReason string `json:"finish_reason"`
 }
@@ -105,6 +115,18 @@ func openAICompletionToAnthropicMessage(raw []byte, status int) ([]byte, int) {
     }
     if len(cc.Choices) > 0 {
         ch := cc.Choices[0]
+        // #329: thinking models (fusion-mlx Qwen3 etc.) return the chain of
+        // thought in reasoning_content. Surface it as a thinking block BEFORE
+        // the text block so agent clients can see why a turn ended.
+        if rc := ch.Message.ReasoningContent; rc != "" {
+            resp.Content = append(resp.Content, adapter.AnthropicContentBlock{
+                Type:      "thinking",
+                Thinking:  rc,
+                Signature: bridgeThinkingSignature,
+            })
+            slog.Debug("bridge: mapped reasoning_content to thinking block",
+                "model", cc.Model, "thinking_len", len(rc))
+        }
         if text, ok := ch.Message.Content.(string); ok && text != "" {
             resp.Content = append(resp.Content, adapter.AnthropicContentBlock{Type: "text", Text: text})
         }
@@ -235,6 +257,8 @@ type anthropicSSEBridge struct {
     msgID      string
     model      string
     nextIndex  int
+    thinkOpen  bool
+    thinkIdx   int
     textOpen   bool
     textIdx    int
     toolBlocks map[int]int // openai tool call index -> anthropic block index
@@ -249,6 +273,8 @@ func newAnthropicSSEBridge(w http.ResponseWriter) *anthropicSSEBridge {
     return &anthropicSSEBridge{
         ResponseWriter: w,
         status:         http.StatusOK,
+        thinkOpen:      false,
+        thinkIdx:       -1,
         textOpen:       false,
         textIdx:        -1,
         toolBlocks:     make(map[int]int),
@@ -321,8 +347,9 @@ func (b *anthropicSSEBridge) handleFrame(frame string) {
         Model   string `json:"model"`
         Choices []struct {
             Delta struct {
-                Content   interface{}      `json:"content"`
-                ToolCalls []bridgeToolCall `json:"tool_calls"`
+                Content          interface{}      `json:"content"`
+                ReasoningContent string           `json:"reasoning_content"`
+                ToolCalls        []bridgeToolCall `json:"tool_calls"`
             } `json:"delta"`
             FinishReason *string `json:"finish_reason"`
         } `json:"choices"`
@@ -354,6 +381,10 @@ func (b *anthropicSSEBridge) handleFrame(frame string) {
     }
     emitted := false
     for _, ch := range cc.Choices {
+        if ch.Delta.ReasoningContent != "" {
+            b.emitThinkingDelta(ch.Delta.ReasoningContent)
+            emitted = true
+        }
         if text, ok := ch.Delta.Content.(string); ok && text != "" {
             b.emitTextDelta(text)
             emitted = true
@@ -404,7 +435,51 @@ func (b *anthropicSSEBridge) ensureMessageStart(id, model string) {
     b.forward("event: message_start\ndata: " + string(raw) + "\n\n")
 }
 
+// emitThinkingDelta (#329): reasoning_content deltas open a thinking block
+// (always the first block — reasoning streams before content) and replay as
+// thinking_delta events.
+func (b *anthropicSSEBridge) emitThinkingDelta(text string) {
+    if !b.thinkOpen {
+        b.thinkOpen = true
+        b.thinkIdx = b.nextIndex
+        b.nextIndex++
+        b.openBlocks[b.thinkIdx] = true
+        slog.Debug("bridge: thinking block opened", "model", b.model, "index", b.thinkIdx)
+        raw, _ := json.Marshal(adapter.AnthropicStreamEvent{
+            Type: "content_block_start", Index: b.thinkIdx,
+            ContentBlock: &adapter.AnthropicContentBlock{Type: "thinking", Thinking: ""},
+        })
+        b.forward("event: content_block_start\ndata: " + string(raw) + "\n\n")
+    }
+    delta, _ := json.Marshal(map[string]any{"type": "thinking_delta", "thinking": text})
+    raw, _ := json.Marshal(adapter.AnthropicStreamEvent{
+        Type: "content_block_delta", Index: b.thinkIdx,
+        Delta: delta,
+    })
+    b.forward("event: content_block_delta\ndata: " + string(raw) + "\n\n")
+}
+
+// closeThinkingBlock seals the thinking block with a signature_delta before
+// its content_block_stop — the Anthropic event shape clients expect. Called
+// lazily when the first text/tool delta arrives and at stream end.
+func (b *anthropicSSEBridge) closeThinkingBlock() {
+    if !b.thinkOpen {
+        return
+    }
+    b.thinkOpen = false
+    delete(b.openBlocks, b.thinkIdx)
+    sig, _ := json.Marshal(map[string]any{"type": "signature_delta", "signature": bridgeThinkingSignature})
+    raw, _ := json.Marshal(adapter.AnthropicStreamEvent{
+        Type: "content_block_delta", Index: b.thinkIdx,
+        Delta: sig,
+    })
+    b.forward("event: content_block_delta\ndata: " + string(raw) + "\n\n")
+    stop, _ := json.Marshal(map[string]any{"type": "content_block_stop", "index": b.thinkIdx})
+    b.forward("event: content_block_stop\ndata: " + string(stop) + "\n\n")
+}
+
 func (b *anthropicSSEBridge) emitTextDelta(text string) {
+    b.closeThinkingBlock()
     if !b.textOpen {
         b.textOpen = true
         b.textIdx = b.nextIndex
@@ -425,6 +500,7 @@ func (b *anthropicSSEBridge) emitTextDelta(text string) {
 }
 
 func (b *anthropicSSEBridge) emitToolDelta(tc bridgeToolCall) {
+    b.closeThinkingBlock()
     blockIdx, seen := b.toolBlocks[tc.Index]
     if !seen {
         blockIdx = b.nextIndex
@@ -456,6 +532,8 @@ func (b *anthropicSSEBridge) emitToolDelta(tc bridgeToolCall) {
 
 // closeOpenBlocks emits content_block_stop for every open block, ascending.
 func (b *anthropicSSEBridge) closeOpenBlocks() {
+    // Thinking block closes with its signature_delta first (#329).
+    b.closeThinkingBlock()
     if len(b.openBlocks) == 0 {
         return
     }
