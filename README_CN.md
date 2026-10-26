@@ -455,6 +455,28 @@ usage_alerts:
 
 每条阈值的冷却期等于其窗口 — 持续超预算的流量每窗口只告警一次,而非每 tick 一次。非法阈值(缺 `window` 或 `max_cost_usd`)启动时单独丢弃并 WARN,其余子系统照常工作。阈值在启动时读取 — 重新布防需重启。
 
+### 按语种择优路由 (#330)
+
+当多个模型已加载时,网关可依据 fusion-mlx 在 `/v1/models` 上暴露的每模型 `languages` 元数据(fusion-mlx#1416 — 小写 ISO 639-1 码,如 `["ar","en"]`),把请求路由到真正支持该语种的模型。
+
+在任意 chat 请求(`/v1/chat/completions`、`/v1/completions`、`/v1/messages`)上携带语种提示头:
+
+```bash
+curl http://127.0.0.1:11432/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-Fusion-Language: ar" \
+  -d '{"model":"qwen3","messages":[{"role":"user","content":"..."}]}'
+```
+
+行为:
+
+- 请求的模型已声明该语种 — 请求原样放行。
+- 否则网关改写到某个 `languages` 包含该语种且**已加载**的本地模型(多个匹配时按字母序确定性地选取)。决策写入日志(`language routing: rewrote model for language ...`),客户端请求的原始模型记入日志行的 `model_mapped`。
+- **绝不硬失败:** 无提示头、无元数据、无已加载候选、或候选被该 key 的模型白名单拒绝 — 一律按原请求模型放行。
+- 单模型部署不受影响:没有其他候选时,请求的模型即最终模型。
+
+v1 采用客户端声明的提示头;自动语种检测可后续叠加。
+
 ### 启发式代码意图快路径 (<20ms)
 
 上方的 LLM 分类器是一次完整模型调用(2s 超时、无缓存、每请求都跑)——对默认关闭的语义层尚可接受,但一旦启用就成为网关端到端开销的主导项。针对**代码**意图(vibe-coding / 重构 / 调试工作流中的最热路径),一个确定性的进程内启发式分类器替代了这次 LLM 调用,将网关开销控制在 20ms 以内。
