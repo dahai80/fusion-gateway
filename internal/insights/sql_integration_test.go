@@ -98,6 +98,20 @@ func TestSQL_HWSamplesAgainstLiveDB(t *testing.T) {
     t.Logf("hw samples returned=%d", len(samples))
 }
 
+func TestSQL_TimelineAgainstLiveDB(t *testing.T) {
+    svc := requireTestDSN(t)
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    resp, err := svc.Timeline(ctx, "", "", "hour")
+    if err != nil {
+        t.Fatalf("timeline query: %v", err)
+    }
+    t.Logf("timeline buckets=%d", len(resp.Series))
+    if _, err := svc.Timeline(ctx, "", "", "bogus"); err == nil {
+        t.Fatalf("invalid granularity must fail")
+    }
+}
+
 // TestSQL_AnomaliesLifecycleAgainstLiveDB exercises insert suppression, list
 // filters, ack, and mute against the live schema. Uses kind='__test__' rows
 // and cleans up after itself.

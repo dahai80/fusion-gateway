@@ -45,6 +45,29 @@ test.describe('insights: API surface', () => {
         expect(body.rows.length).toBeLessThanOrEqual(5);
     });
 
+    test('timeline returns 200 with four-track series (§15.2)', async ({ page }) => {
+        const { token } = await login(page);
+        const api = adminApi(page, token);
+        const now = new Date();
+        const from = new Date(now.getTime() - 24 * 3600 * 1000).toISOString();
+        const res = await api('GET', `/insights/timeline?from=${from}&to=${now.toISOString()}&granularity=hour`);
+        expect(res.status()).toBe(200);
+        const body = await res.json();
+        expect(Array.isArray(body.series)).toBe(true);
+        expect(body.granularity).toBe('hour');
+        // buckets are sorted ascending and carry all four tracks
+        for (let i = 1; i < body.series.length; i++) {
+            expect(body.series[i].bucket >= body.series[i - 1].bucket).toBe(true);
+        }
+        for (const b of body.series) {
+            expect(typeof b.requests).toBe('number');
+            expect(typeof b.errors).toBe('number');
+            expect(typeof b.breaker_events).toBe('number');
+            expect(typeof b.sys_mem_ratio).toBe('number');
+            expect(typeof b.mlx_mem_ratio).toBe('number');
+        }
+    });
+
     test('anomalies + findings + reports list return 200', async ({ page }) => {
         const { token } = await login(page);
         const api = adminApi(page, token);
@@ -75,6 +98,18 @@ test.describe('insights: pages render', () => {
             expect(await page.locator('.ant-result-error').count()).toBe(0);
         });
     }
+
+    test('anomalies page renders the §15.2 timeline chart', async ({ page }) => {
+        const { token } = await login(page);
+        await openAsAdmin(page, token, '/admin/insights/anomalies');
+        await expect(
+            page.locator('.ant-card-head').filter({ hasText: 'Timeline — requests / errors / breaker events / memory' })
+        ).toBeVisible({ timeout: 15_000 });
+        // chart body: either the recharts surface or the empty-window alert
+        const hasChart = await page.locator('.recharts-surface').count();
+        const hasEmpty = await page.getByText('No traffic, events, or hardware samples', { exact: false }).count();
+        expect(hasChart + hasEmpty).toBeGreaterThan(0);
+    });
 });
 
 test.describe('persistence config', () => {

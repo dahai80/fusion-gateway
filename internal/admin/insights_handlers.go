@@ -55,6 +55,26 @@ func (h *Handler) handleInsightsLatency(w http.ResponseWriter, r *http.Request) 
     writeJSON(w, http.StatusOK, resp)
 }
 
+// handleInsightsTimeline — GET /admin/api/insights/timeline (§15.2)
+// Four-track overlay: request volume + errors (fg_request_logs), breaker
+// events (fg_gateway_events), hardware memory ratios (fg_hw_samples).
+// Params: from,to (RFC3339, default 24h), granularity (minute|hour|day).
+func (h *Handler) handleInsightsTimeline(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    resp, err := h.insights.Timeline(r.Context(),
+        q.Get("from"), q.Get("to"), q.Get("granularity"))
+    if err != nil {
+        slog.Warn("insights timeline query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, resp)
+}
+
 // handleInsightsCompare — GET /admin/api/insights/compare
 // Params: from,to,project_id, input_min,input_max (prompt-length bucket,
 // <=0 unbounded), overlap=true (only hourly buckets where every group has
