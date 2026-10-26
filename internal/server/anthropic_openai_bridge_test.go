@@ -104,6 +104,37 @@ func TestOpenAICompletionToMessage_ErrorBodies(t *testing.T) {
     }
 }
 
+// TestOpenAICompletionToMessage_Reasoning (#329): reasoning_content becomes a
+// thinking block (with signature) placed BEFORE the text block.
+func TestOpenAICompletionToMessage_Reasoning(t *testing.T) {
+    raw := []byte(`{"id":"chatcmpl-r","model":"qwen3-8b",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"final answer","reasoning_content":"let me think"},"finish_reason":"stop"}]}`)
+    out, _ := openAICompletionToAnthropicMessage(raw, 200)
+    var msg struct {
+        Content []struct {
+            Type      string `json:"type"`
+            Text      string `json:"text"`
+            Thinking  string `json:"thinking"`
+            Signature string `json:"signature"`
+        } `json:"content"`
+    }
+    if err := json.Unmarshal(out, &msg); err != nil {
+        t.Fatalf("unmarshal: %v (%s)", err, out)
+    }
+    if len(msg.Content) != 2 {
+        t.Fatalf("content = %+v", msg.Content)
+    }
+    if msg.Content[0].Type != "thinking" || msg.Content[0].Thinking != "let me think" {
+        t.Fatalf("thinking block = %+v", msg.Content[0])
+    }
+    if msg.Content[0].Signature == "" {
+        t.Fatalf("thinking block missing signature: %s", out)
+    }
+    if msg.Content[1].Type != "text" || msg.Content[1].Text != "final answer" {
+        t.Fatalf("text block = %+v", msg.Content[1])
+    }
+}
+
 // bridgeFrames splits raw SSE output into (event, data) pairs for assertions.
 func bridgeFrames(t *testing.T, raw string) [][2]string {
     t.Helper()
