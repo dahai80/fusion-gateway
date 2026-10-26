@@ -118,6 +118,10 @@ See `config.example.yaml` for full reference. Key settings:
 | `observability.otel_endpoint` | localhost:4317 | OTel collector endpoint |
 | `observability.otel_protocol` | grpc | OTel export protocol: grpc or http |
 | `observability.otel_service_name` | fusion-gateway | Service name in OTel traces |
+| `file_log.enabled` | true | Daily-rolled structured file logging in addition to stderr |
+| `file_log.dir` | ~/.fusion-gateway/logs | Log directory; files named `gateway-YYYY-MM-DD.log`, rotated on first write past local midnight |
+| `file_log.retain_days` | 14 | Prune files older than N days at rotation; 0 keeps everything (max 365) |
+| `file_log.level` | info | File-side threshold: debug/info/warn/error; empty inherits `server.log_level` |
 | `rbac.enabled` | false | Enable RBAC role-based access control |
 | `rbac.default_role` | viewer | Default role when no OIDC claims: admin, editor, viewer |
 | `rbac.trust_oidc_claims` | false | Opt-in: map OIDC role/groups claims onto the RBAC role. Off by default so claim pollution cannot grant admin |
@@ -734,14 +738,20 @@ persistence:
     response_body: true
     max_body_bytes: 524288       # 512 KiB per direction, truncation flagged
     strip_auth_fields: true      # api_key/apiKey/authorization/password removed from captured bodies
+    stream_chunks: false         # per-SSE-chunk timing rows (fg_stream_chunks), default off
   retention:
     request_logs_days: 90
     request_payloads_days: 30    # clamped to <= request_logs_days
+    stream_chunks_days: 7        # short window — chunk rows are high-volume, timing-only
 ```
 
-Schema: `fg_request_logs` (32 columns incl. `ttft_ms`/`tpot_ms`/`tpot_p95_ms`/
-`chunk_count`/`tokens_per_sec`) and `fg_request_payloads` — both daily RANGE
-partitions on `ts`; retention is a partition `DROP` (O(1), no bloat). Captured
+Schema: `fg_request_logs` (33 columns incl. `ttft_ms`/`tpot_ms`/`tpot_p95_ms`/
+`chunk_count`/`tokens_per_sec`, `error_message` on failed requests, and
+`contains_pii` stamped by the post-response guard-PII scan) and
+`fg_request_payloads` — both daily RANGE partitions on `ts`; retention is a
+partition `DROP` (O(1), no bloat). With `capture.stream_chunks: true` each
+SSE chunk also lands in `fg_stream_chunks` (one row per chunk: `seq`, `ts`,
+`delta_ms`, `bytes`; retained `stream_chunks_days`, default 7). Captured
 bodies that are valid JSON land in `req_body`/`resp_body` (jsonb, queryable);
 non-JSON captures (SSE frames, binary) land in `req_raw`/`resp_raw` (text) with
 `resp_raw_mime` recording the source content type.
@@ -754,6 +764,13 @@ Counters `fusion_gateway_persist_{enqueued,written,dropped}_total` on
 `/metrics`. Missing DSN with persistence enabled is a startup FATAL (fail
 visibly, not silently).
 
+Measured overhead (isolation drill against a deterministic mock backend,
+interleaved ON/OFF rounds, concurrency 20 mixed stream/non-stream): median
+**+0.13 ms**, p99 **+0.04 ms** end-to-end, RSS **+0.3 MB** — far inside the
+<1 ms / <300 MB acceptance criteria. The hot path cost is a TeeReader +
+response-writer mirror (memory copies); PII scan, field stripping, and DB
+write all happen post-response in the finalize defer.
+
 ### Insights Read APIs (P3a)
 
 Admin-only analytics and log-search endpoints over the persistence tables
@@ -763,10 +780,12 @@ dedicated read pool with a 10s `statement_timeout` and are window-guarded
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95 timeseries; `granularity=minute\|hour\|day`, filters `backend`/`model`/`project_id` |
+| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95/p99 timeseries; `granularity=minute\|hour\|day`, filters `backend`/`model`/`project_id` |
 | GET | `/admin/api/insights/compare` | per backend×model side-by-side: latency percentiles, success rate, tokens/sec, cost |
 | POST | `/admin/api/insights/logs/search` | Explorer DSL: time window, `q` (model/error/request-id substring), endpoint/backend/model/project/key/status/stream/success/min-duration, paging (limit ≤ 200) |
-| GET | `/admin/api/insights/logs/{id}` | captured request/response payload for one log row (jsonb + raw columns) |
+| GET | `/admin/api/insights/logs/{id}/payload` | captured request/response payload for one log row (jsonb + raw columns) |
+| GET | `/admin/api/insights/logs/{id}/chunks` | per-SSE-chunk timing rows from `fg_stream_chunks` (empty list = chunk capture was off, not an error) |
+| POST | `/admin/api/insights/logs/{id}/replay` | server-side replay: re-sends the stored request body through the gateway's own `/v1` endpoint (stream forced off, master-key auth, 300s bound) so the full production chain — auth → routing → adapter → logging — executes; the replay itself appears in the Explorer as a new row |
 | GET | `/admin/api/persistence/test` | 5s connectivity ping to the configured PG |
 
 Generation rows are isolated with `ttft_ms > 0` — Go zero values persist as
@@ -911,10 +930,11 @@ disabled" alert when the insights endpoints answer 503):
 |---|---|---|
 | Latency | `/admin/insights/latency` | TTFT / TPOT p50+p95 timeseries (requests/errors on a secondary axis); backend/model/project filters; granularity auto-selected from the window (hour ≤ 24h, else day) |
 | Compare | `/admin/insights/compare` | Cross-provider TTFT p95 bar chart plus a sortable table (success rate, TPOT, tok/s, avg tokens, cost) with local/cloud tags |
-| Explorer | `/admin/insights/explorer` | Full log search over the persisted store (all search DSL filters, server-side paging); each row expands to the captured request/response payload (raw bytes preferred, JSON bodies as fallback, truncation marked) |
+| Explorer | `/admin/insights/explorer` | Full log search over the persisted store (all search DSL filters, server-side paging, URL-parameter prefill — the Optimize/Anomalies pages deep-link here with the finding's model/backend scoped); each row expands to the captured request/response payload plus a per-chunk stream-timing table (`fg_stream_chunks`, grayed out when capture was off), and a **Replay** button re-sends the stored body through the full gateway chain (stream forced off) and shows the response inline |
 | Optimize | `/admin/insights/optimize` | Optimization findings with Apply (MIGRATE_TO_LOCAL prepends fusion-mlx to `models.supply`) / Dismiss actions |
 | Anomalies | `/admin/insights/anomalies` | Anomaly list with Ack and Mute (1–90 days) actions, severity-coded tags |
 | Reports | `/admin/insights/reports` | Periodic report list with idempotent on-demand generate and a Markdown viewer |
+| Capacity | `/admin/insights/capacity` | Request-volume heatmap (24h × 7d hour buckets, intensity-scaled) over `fg_request_logs` plus a hardware capacity chart (system/MLX memory ratio, GPU util, loaded-model count) from `fg_hw_samples` |
 
 A **Persistence** page under Configuration exposes GET/PUT
 `/admin/api/config/persistence` for the whole `persistence.*` namespace
@@ -1858,6 +1878,33 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.9.69 — Serialization-architecture remediation (P1–P5 + G-series)
+
+Lands the full remediation of the serialization-architecture audit
+(`audit/fusion-gateway-seraization-archi-report-1015.md` upstream of the repo).
+Feature documentation lives in the sections above (TTFT/TPOT Capture,
+PostgreSQL Persistence, Insights Read APIs, HW Samples & Events, Anomaly
+Detection, Optimization Rules Engine, Periodic Reports, Insights Dashboards);
+this entry records the acceptance drills and the bugs the drills themselves
+flushed out.
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **P1–P4 platform** | TTFT/TPOT capture on every generation exit; PG persistence (`fg_request_logs` + `fg_request_payloads`, partition-DROP retention); insights read APIs + six admin dashboard pages; anomaly detectors, optimization rules engine, periodic reports (see linked sections). |
+| 2 | **G9 file logging** | `file_log.*` namespace: daily-rolled `gateway-YYYY-MM-DD.log` under `~/.fusion-gateway/logs`, rotation on the first write past local midnight, `retain_days` prune at rotation, file-side level threshold. |
+| 3 | **G6 PII stamping** | `contains_pii` column on `fg_request_logs`, stamped by the post-response guard-pattern scan (sync.Once-compiled vendored SSOT) — searchable in the Explorer. |
+| 4 | **G10 stream chunk capture** | `capture.stream_chunks` (default off): one `fg_stream_chunks` row per SSE chunk (seq/ts/delta_ms/bytes), 7-day retention; `GET /admin/api/insights/logs/{id}/chunks`; Explorer renders per-chunk timing per row. |
+| 5 | **G13 replay + capacity + p99** | `POST /admin/api/insights/logs/{id}/replay` re-sends the stored body through the gateway's own `/v1` chain (stream forced off, 300s bound); Explorer URL-parameter prefill from Optimize/Anomalies pages; Capacity page (24h×7d volume heatmap + hardware chart); latency API gains p99 percentiles. |
+| 6 | **G12 minimal config** | `config.simple.yaml` — a complete, runnable example showing the minimum a new deployment needs. |
+| 7 | **fix: failed-request stamping** | Failed requests left `model`/`backend`/`error_message` empty in the persisted log (error paths returned before the log entry was stamped), so error-storm analysis and the Explorer error search saw blank fields. All failure paths now stamp the three fields (upstream error capped at 512 chars) — found by the AC20 error-storm drill. |
+| 8 | **fix: retention partition DROP never fired** | Partitions are named `<table>_YYYY_MM_DD`, but the retention sweep re-sliced the date from a `_20`-extended LIKE prefix — chopping the century off the year — so every parse failed and expired partitions were never dropped. `partitionDay` now re-slices from the table prefix; found by the AC10 retention drill. |
+| 9 | **F8 key soft-delete** | `DELETE /admin/api/keys/{name}` is a soft-delete (row flips to Disabled), never a hard delete — keys are recoverable and request logs keep their `api_key_name` join. |
+| 10 | **AC6 persistence overhead drill** | Interleaved ON/OFF rounds against a deterministic mock backend (concurrency 20, mixed stream/non-stream): median **+0.13 ms**, p99 **+0.04 ms**, RSS **+0.3 MB** — far inside the <1 ms / <300 MB criteria. Real-model c=20 end-to-end variance is dominated by fusion-mlx queueing, not the persistence path. |
+| 11 | **AC10/AC11/AC20 drills** | Retention (partition DROP verified on expired slices), hot-reload (persistence toggle takes effect on the next request without restart), error-storm (detector fires, events recorded, Explorer surfaces `error_message`) — all verified against the live gateway. |
+| 12 | **Blocked upstream** | G4/AC12 (`X-Fusion-Via` header, `direct_calls_blocked`, strict fusion-mlx auth) remains blocked on fusion-mlx#1381. |
+
+**Verify**: `go vet ./...` clean; `go build ./...` OK; `go test ./... -count=1 -race` green; 73+ Playwright e2e tests green against a live gateway; AC6/AC10/AC11/AC20 drills executed on production with drill data purged afterwards.
 
 ### v0.8.51 — Log root-cause sweep (RC2/RC1/RC3/RC4/S3)
 

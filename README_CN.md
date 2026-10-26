@@ -44,7 +44,7 @@ cp config.example.yaml config.yaml
 
 ## 配置
 
-完整参考见 `config.example.yaml`。关键配置项:
+完整参考见 `config.example.yaml`;`config.simple.yaml` 是一份可直接运行的极简完整示例。关键配置项:
 
 | 键 | 默认值 | 说明 |
 |-----|---------|-------------|
@@ -89,6 +89,10 @@ cp config.example.yaml config.yaml
 | `observability.otel_endpoint` | localhost:4317 | OTel collector 端点 |
 | `observability.otel_protocol` | grpc | OTel 导出协议:grpc 或 http |
 | `observability.otel_service_name` | fusion-gateway | OTel 链路中的服务名 |
+| `file_log.enabled` | true | 在 stderr 之外启用按日滚动的结构化文件日志 |
+| `file_log.dir` | ~/.fusion-gateway/logs | 日志目录;文件名 `gateway-YYYY-MM-DD.log`,本地跨午夜后首次写入时轮转 |
+| `file_log.retain_days` | 14 | 轮转时清理超过 N 天的旧文件;0 表示永久保留 (上限 365) |
+| `file_log.level` | info | 文件侧日志阈值:debug/info/warn/error;留空继承 `server.log_level` |
 | `rbac.enabled` | false | 启用 RBAC 基于角色的访问控制 |
 | `rbac.default_role` | viewer | 无 OIDC claims 时的默认角色:admin、editor、viewer |
 | `rbac.trust_oidc_claims` | false | 可选:将 OIDC role/groups claims 映射到 RBAC 角色。默认关闭,防止 claim 污染获得 admin |
@@ -1183,7 +1187,11 @@ terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
 **PostgreSQL 持久化** (`persistence.enabled: true`,默认关闭):请求元数据 +
 延迟信号 (TTFT/TPOT/P95/分片数/tokens per sec) + 捕获的请求/响应体写入
 PostgreSQL,重启不丢日志。表 `fg_request_logs` / `fg_request_payloads` 按 `ts`
-日分区,保留期到点整分区 `DROP` (O(1) 无膨胀)。有效 JSON 体入 `req_body` /
+日分区,保留期到点整分区 `DROP` (O(1) 无膨胀)。`fg_request_logs` 共 33 列,
+含失败请求的 `error_message` (上游错误截断 512 字符) 和由响应后 guard-PII
+扫描打上的 `contains_pii`。开启 `capture.stream_chunks` (默认关闭) 时每个
+SSE 分片额外落一行 `fg_stream_chunks` (seq/ts/delta_ms/bytes),保留
+`stream_chunks_days` (默认 7 天)。有效 JSON 体入 `req_body` /
 `resp_body` (jsonb 可查询);非 JSON 捕获 (SSE 帧、二进制) 入 `req_raw` /
 `resp_raw`,并以 `resp_raw_mime` 记录来源类型。DSN 走环境变量
 `FUSION_GW_PG_DSN` (bindSecretEnv 模式,绝不写进 config.yaml);开启但缺 DSN
@@ -1193,16 +1201,25 @@ drain。计数器 `fusion_gateway_persist_{enqueued,written,dropped}_total`。
 捕获体默认脱敏 (api_key/apiKey/authorization/password 字段剥离),单方向
 512 KiB 截断并置 truncation 标志。
 
+实测开销 (隔离压测:对确定性 mock 后端做 ON/OFF 交错轮次,并发 20,
+流式/非流式混合):中位数 **+0.13 ms**、p99 **+0.04 ms** 端到端、RSS
+**+0.3 MB** —— 远优于 <1 ms / <300 MB 的验收标准。热路径成本只有
+TeeReader + 响应写入镜像 (内存拷贝);PII 扫描、字段剥离、落库全部发生在
+响应完成后的 finalize defer 中。真实模型 c=20 端到端测试的波动主要来自
+fusion-mlx 排队,而非持久化链路。
+
 **Insights 只读 API (P3a)**:基于持久化表的 admin 专属分析/检索端点
 (`requireAdminRoleStrict`;持久化关闭时 503)。查询走独立只读连接池,
 `statement_timeout=10s`,时间窗口强制约束 (默认 24h,上限 31 天):
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95 时序;`granularity=minute\|hour\|day`,过滤 `backend`/`model`/`project_id` |
+| GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95/p99 时序;`granularity=minute\|hour\|day`,过滤 `backend`/`model`/`project_id` |
 | GET | `/admin/api/insights/compare` | backend×model 横向对比:延迟分位、成功率、tokens/sec、成本 |
 | POST | `/admin/api/insights/logs/search` | Explorer 检索 DSL:时间窗、`q` (model/错误/request-id 子串)、endpoint/backend/model/project/key/状态/流式/成功/最小时长、分页 (limit ≤ 200) |
-| GET | `/admin/api/insights/logs/{id}` | 单条日志的捕获请求/响应体 (jsonb + raw 双列) |
+| GET | `/admin/api/insights/logs/{id}/payload` | 单条日志的捕获请求/响应体 (jsonb + raw 双列) |
+| GET | `/admin/api/insights/logs/{id}/chunks` | 单条请求的逐分片流式时序,来自 `fg_stream_chunks` (空列表表示该请求未开启分片捕获,非错误) |
+| POST | `/admin/api/insights/logs/{id}/replay` | 服务端重放:把存储的请求体重新发往网关自身的 `/v1` 端点 (强制关闭流式,master-key 鉴权,300s 上限),完整生产链路 (鉴权 → 路由 → 适配 → 日志) 真实执行;重放本身会作为新行出现在 Explorer 中 |
 | GET | `/admin/api/persistence/test` | 5s 连通性 ping |
 
 生成类请求以 `ttft_ms > 0` 隔离——Go 零值落库为 `0.0` (非 NULL),否则
@@ -1339,10 +1356,11 @@ P95 及环比、最差模型 top3)、异常 (当前 open 数 + 按类型分布)�
 |---|---|---|
 | Latency | `/admin/insights/latency` | TTFT / TPOT p50+p95 时间序列 (请求/错误数为副轴);支持 backend/model/project 过滤;粒度随窗口自动选择 (≤24h 按小时,否则按天) |
 | Compare | `/admin/insights/compare` | 跨 provider 的 TTFT p95 柱状图 + 可排序明细表 (成功率、TPOT、tok/s、平均 token、成本),local/cloud 标签 |
-| Explorer | `/admin/insights/explorer` | 全量日志检索 (支持全部搜索 DSL 过滤、服务端分页);行展开查看捕获的请求/响应 payload (优先原始字节,JSON body 兜底,标注截断) |
+| Explorer | `/admin/insights/explorer` | 全量日志检索 (支持全部搜索 DSL 过滤、服务端分页、URL 参数预填 —— Optimize/Anomalies 页会带该结论的 model/backend 深链到此);行展开查看捕获的请求/响应 payload + 逐分片流式时序表 (`fg_stream_chunks`,未开启捕获时置灰),并提供 **Replay** 按钮 —— 把存储的请求体经完整网关链路重发 (强制关闭流式) 并内联展示响应 |
 | Optimize | `/admin/insights/optimize` | 优化结论列表,支持 Apply (MIGRATE_TO_LOCAL 会把 fusion-mlx 前插进 `models.supply`) / Dismiss |
 | Anomalies | `/admin/insights/anomalies` | 异常列表,支持 Ack 和 Mute (1–90 天),严重度标签 |
 | Reports | `/admin/insights/reports` | 周期报告列表,支持幂等的按需生成 + Markdown 查看器 |
+| Capacity | `/admin/insights/capacity` | 请求量热力图 (24h × 7d 小时桶,强度渐变),基于 `fg_request_logs`;硬件容量曲线 (系统/MLX 内存占比、GPU 利用率、已加载模型数),基于 `fg_hw_samples` |
 
 配置区的 **Persistence** 页面对应 GET/PUT
 `/admin/api/config/persistence`,覆盖整个 `persistence.*` 命名空间
@@ -1599,6 +1617,30 @@ config.example.yaml   示例配置
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 
 ## 审计修复记录
+
+### v0.9.69 — 序列化架构治理落地 (P1–P5 + G 系列)
+
+完成序列化架构审计 (`audit/fusion-gateway-seraization-archi-report-1015.md`,
+repo 外围文档) 的全部整改。功能细节见上方各节 (TTFT/TPOT 采集、PostgreSQL
+持久化、Insights 只读 API、硬件采样与网关事件、异常检测、优化规则引擎、
+定期报告、洞察仪表盘);本条目记录验收演练及演练本身暴露的 bug。
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **P1–P4 平台** | 全部生成路径的 TTFT/TPOT 采集;PG 持久化 (`fg_request_logs` + `fg_request_payloads`,分区 DROP 保留);insights 读 API + 六个管理页;异常检测、优化规则引擎、定期报告 (见对应章节)。 |
+| 2 | **G9 文件日志** | `file_log.*` 命名空间:`~/.fusion-gateway/logs` 下按日滚动的 `gateway-YYYY-MM-DD.log`,本地跨午夜首次写入时轮转,轮转时按 `retain_days` 清理,支持文件侧日志级别。 |
+| 3 | **G6 PII 打标** | `fg_request_logs` 新增 `contains_pii` 列,由响应后的 guard 模式扫描 (sync.Once 编译的内置 SSOT) 打标 —— Explorer 中可检索。 |
+| 4 | **G10 流式分片捕获** | `capture.stream_chunks` (默认关闭):每个 SSE 分片一行 `fg_stream_chunks` (seq/ts/delta_ms/bytes),保留 7 天;`GET /admin/api/insights/logs/{id}/chunks`;Explorer 逐行渲染分片时序。 |
+| 5 | **G13 重放 + 容量 + p99** | `POST /admin/api/insights/logs/{id}/replay` 把存储的请求体经网关自身 `/v1` 链路重发 (强制关闭流式,300s 上限);Optimize/Anomalies 页通过 URL 参数预填深链 Explorer;新增 Capacity 页 (24h×7d 请求量热力图 + 硬件容量曲线);latency API 增加 p99 分位。 |
+| 6 | **G12 极简配置** | `config.simple.yaml` —— 一份可直接运行的完整示例,展示新部署所需的最小配置。 |
+| 7 | **修复:失败请求字段缺失** | 失败请求落库时 `model`/`backend`/`error_message` 为空 (错误路径在日志条目打标前就返回),导致错误风暴分析和 Explorer 错误检索看到空字段。现所有失败路径都打标这三个字段 (上游错误截断 512 字符) —— AC20 错误风暴演练发现。 |
+| 8 | **修复:保留期分区 DROP 从未生效** | 分区命名为 `<table>_YYYY_MM_DD`,但保留期 sweep 从 `_20` 扩展后的 LIKE 前缀切日期 —— 把年份的世纪部分截掉了 —— 导致解析全部失败,过期分区从未被 DROP。`partitionDay` 改为从表前缀重新切分;AC10 保留期演练发现。 |
+| 9 | **F8 key 软删除** | `DELETE /admin/api/keys/{name}` 是软删除 (行翻转为 Disabled),绝不硬删 —— key 可恢复,请求日志保留 `api_key_name` 关联。 |
+| 10 | **AC6 持久化开销演练** | 对确定性 mock 后端做 ON/OFF 交错轮次 (并发 20,流式/非流式混合):中位数 **+0.13 ms**、p99 **+0.04 ms**、RSS **+0.3 MB** —— 远优于 <1 ms / <300 MB 标准。真实模型 c=20 端到端波动由 fusion-mlx 排队主导,非持久化链路。 |
+| 11 | **AC10/AC11/AC20 演练** | 保留期 (过期分区 DROP 验证)、热加载 (持久化开关下一请求即生效,无需重启)、错误风暴 (检测器触发、事件落库、Explorer 展示 `error_message`) —— 均在真实网关上验证。 |
+| 12 | **上游阻塞** | G4/AC12 (`X-Fusion-Via` 头、`direct_calls_blocked`、fusion-mlx 严格鉴权) 仍阻塞于 fusion-mlx#1381。 |
+
+**验证**:`go vet ./...` 干净;`go build ./...` 通过;`go test ./... -count=1 -race` 全绿;73+ Playwright e2e 对真实网关全绿;AC6/AC10/AC11/AC20 演练在生产环境执行,演练数据事后清理。
 
 ### v0.8.16 — Anthropic /v1/messages 路径现应用模型别名映射 (#52)
 
