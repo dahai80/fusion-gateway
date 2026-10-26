@@ -201,6 +201,26 @@ func TestFusionMLXProvider_RefreshModelSet(t *testing.T) {
     }
 }
 
+// #343: RefreshModelSet reports success so the startup worker can retry a
+// cold-start refresh every 5s instead of waiting a full 60s tick.
+func TestFusionMLXProvider_RefreshModelSet_ReturnsSuccess(t *testing.T) {
+    slog.Info("test FusionMLXProvider_RefreshModelSet_ReturnsSuccess")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte(`{"data":[{"id":"m1","object":"model"}]}`))
+    }))
+    defer srv.Close()
+    p := NewFusionMLXProvider(config.BackendConfig{Type: "fusion-mlx", BaseURL: srv.URL}, config.RoutingConfig{})
+    if !p.RefreshModelSet(context.Background()) {
+        t.Fatal("expected true on successful refresh")
+    }
+
+    dead := NewFusionMLXProvider(config.BackendConfig{Type: "fusion-mlx", BaseURL: "http://127.0.0.1:1"}, config.RoutingConfig{})
+    if dead.RefreshModelSet(context.Background()) {
+        t.Fatal("expected false on failed refresh")
+    }
+}
+
 func TestFusionMLXProvider_RefreshModelSet_Error(t *testing.T) {
     slog.Info("test FusionMLXProvider_RefreshModelSet_Error")
     p := NewFusionMLXProvider(config.BackendConfig{

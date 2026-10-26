@@ -203,8 +203,17 @@ backends:
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
 | `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `routing.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
-| `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
-| `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
+| `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`). **Hub registry IDs only** — the id must exist in the model-hub registry; an MLX repo name loops back to the hub and 404s there. For MLX-level load/unload use `/v1/admin/models/{name}/load` (#340). |
+| `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`). Same hub-registry contract as load. |
+| `/v1/models/{name}/{action}` | POST | Other model-scoped tool actions (e.g. `merge-adapter`) proxy verbatim to fusion-mlx (#340). |
+| `/v1/admin/models/{name}/load` | POST | MLX-level model load — proxies straight to fusion-mlx for trusted callers (fusion-model-hub), bypassing the hub-registry rewrite (#340). Also `/unload`. |
+| `/v1/hardware` | GET | fusion-mlx tool-surface passthrough (#340): hardware report. |
+| `/v1/recommend` | POST | Tool-surface passthrough: model recommendation. |
+| `/v1/analyze`, `/v1/analyze-batch` | POST | Tool-surface passthrough: model analysis. |
+| `/v1/migration-level` | GET | Tool-surface passthrough: migration level. |
+| `/v1/convert` | POST | Tool-surface passthrough: format conversion. |
+| `/v1/quantize`, `/v1/quantize/*` | POST/GET | Tool-surface passthrough: quantization jobs (incl. `/v1/quantize/evaluate`). |
+| `/v1/benchmarks` | GET | Tool-surface passthrough: benchmark results. |
 | `/v1/laya/*` | GET/POST | Laya surface routes proxied verbatim to fusion-mlx (`/v1/laya/status`, `/v1/laya/decide`) so gateway-mode clients (fusion-bench) need no direct :11434 exception (#327). fg-key auth; backend credentials injected. |
 | `/health` | GET | Full health check with backend status. `backends.fusion-mlx` carries `{healthy, model_loaded, loaded_models}` from the authoritative fusion-mlx `/health` endpoint; a live process with no model loaded is reported as `degraded` (not a false green, #59). |
 | `/healthz` | GET | Liveness probe |

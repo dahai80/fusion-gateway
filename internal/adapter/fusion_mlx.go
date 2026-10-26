@@ -172,11 +172,17 @@ func (p *FusionMLXProvider) AcquireLocalSlot() (func(), bool) {
     return p.tryInFlightAcquire()
 }
 
-func (p *FusionMLXProvider) RefreshModelSet(ctx context.Context) {
+// RefreshModelSet re-fetches the fusion-mlx model list + loaded overlay into
+// the atomic modelSet/modelInfos slots. Returns true when the refresh
+// succeeded, false when ListModels failed (state kept from the last success).
+// #343: callers use the return value to retry a cold-start refresh — a failed
+// initial refresh left the router with a nil local model set for up to 60s,
+// disabling the P0.2 local-exclusive hoist and P6 availability guard.
+func (p *FusionMLXProvider) RefreshModelSet(ctx context.Context) bool {
     models, err := p.ListModels(ctx)
     if err != nil {
         slog.Warn("failed to refresh model set", "error", err)
-        return
+        return false
     }
     // Loaded overlay (#59/#330): /v1/models lists registered models, not
     // residency — the authoritative loaded set is /health loaded_models,
@@ -202,6 +208,7 @@ func (p *FusionMLXProvider) RefreshModelSet(ctx context.Context) {
     p.modelSet.Store(m)
     p.modelInfos.Store(infos)
     slog.Info("refreshed local model set", "count", len(m), "loaded", len(loadedSet))
+    return true
 }
 
 func (p *FusionMLXProvider) HealthCheck(ctx context.Context) error {

@@ -1348,6 +1348,14 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
             if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
                 return decision
             }
+            // #343: the misroute "model loaded locally but request went to
+            // cloud" was silent — name the model and the missing supply key
+            // so the operator can either load the model or add a
+            // models.supply entry without digging through config.
+            slog.Warn("model not in local model set, routing to cloud",
+                "model", req.Model,
+                "models_supply_entry", "models.supply."+req.Model+" (missing)",
+            )
             return &RouteDecision{Backend: CloudBackend, Reason: "model_not_available_locally"}
         }
     }

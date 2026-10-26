@@ -11,7 +11,10 @@ func (s *Server) handleModelLoadUnload(w http.ResponseWriter, r *http.Request) {
     path := r.URL.Path
     modelID, action := parseModelLoadPath(path)
     if modelID == "" || (action != "load" && action != "unload") {
-        http.NotFound(w, r)
+        // #340: /v1/models/{name}/<other-action> (e.g. merge-adapter) is part
+        // of the fusion-mlx tool surface, not the hub registry — forward
+        // verbatim to fusion-mlx instead of 404, same chain as the tool proxy.
+        s.proxyToFusionMLX(w, r, "model-load-fallthrough")
         return
     }
 
