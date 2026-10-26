@@ -572,13 +572,18 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 return
             }
             slog.Error("RR4 stream cloud diversion failed: no cloud provider available", "model", req.Model)
-            writeChatFailedError(w, "Stream chat failed", err)
+            s.stampRouteInfo(ctx, req, decision, provider.Name())
+            writeChatFailedError(ctx, w, "Stream chat failed", err)
             return
         }
         slog.Error("stream chat failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.recordOutcome(decision.Backend, decision.NodeID, false)
-        writeChatFailedError(w, "Stream chat failed", err)
+        // Stream failure previously left the log entry blank (model/backend/
+        // error_message all empty) — the non-stream path stamps at its error
+        // exit, the stream path did not.
+        s.stampRouteInfo(ctx, req, decision, provider.Name())
+        writeChatFailedError(ctx, w, "Stream chat failed", err)
         return
     }
 
@@ -1067,7 +1072,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         // #log-model: stamp route info on the failure path too — a 502 log
         // must still show which model/backend was attempted (was blank "-").
         s.stampRouteInfo(ctx, req, decision, provider.Name())
-        writeChatFailedError(w, "Chat failed", failErr)
+        writeChatFailedError(ctx, w, "Chat failed", failErr)
         return
     }
 
@@ -1300,13 +1305,19 @@ func (s *Server) stampRouteInfo(ctx context.Context, req *adapter.ChatRequest, d
     logEntry.ChannelType = string(decision.Backend)
 }
 
-func writeChatFailedError(w http.ResponseWriter, prefix string, err error) {
+// The ctx-stamped ErrorMessage is the only producer of fg_request_logs
+// error_message — without it the insights error-storm detector (which
+// filters error_message <> '') sees nothing and never fires.
+func writeChatFailedError(ctx context.Context, w http.ResponseWriter, prefix string, err error) {
     detail := ""
     if err != nil {
         detail = err.Error()
         if len(detail) > 512 {
             detail = detail[:512]
         }
+    }
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil && detail != "" {
+        logEntry.ErrorMessage = detail
     }
     status := http.StatusBadGateway
     errType := "server_error"

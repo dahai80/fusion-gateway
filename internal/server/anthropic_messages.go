@@ -321,8 +321,23 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 // writeMessagesError surfaces an upstream error to the client preserving the
 // upstream HTTP status code and request-id (issue #40) so fusion-code's error
 // bridge (isApiErrorLike) can identify failures. Non-MessagesHTTPError errors
-// fall back to 502 as before.
-func (s *Server) writeMessagesError(w http.ResponseWriter, err error) {
+// fall back to 502 as before. It also stamps the request log (model +
+// error_message) — the only producer of fg_request_logs error_message on the
+// /v1/messages path; the insights error-storm detector filters
+// error_message <> '' and would never fire without it.
+func (s *Server) writeMessagesError(ctx context.Context, w http.ResponseWriter, req *adapter.AnthropicRequest, err error) {
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        if req != nil {
+            logEntry.Model = req.Model
+        }
+        if err != nil {
+            msg := err.Error()
+            if len(msg) > 512 {
+                msg = msg[:512]
+            }
+            logEntry.ErrorMessage = msg
+        }
+    }
     status := http.StatusBadGateway
     body := fmt.Sprintf(`{"error":{"message":"%s","type":"api_error"}}`, err.Error())
     if httpErr, ok := err.(*adapter.MessagesHTTPError); ok {
@@ -424,7 +439,7 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         if s.nonStreamClientCanceled(ctx, w, err, "connection phase") {
             return
         }
-        s.writeMessagesError(w, err)
+        s.writeMessagesError(ctx, w, &streamReq, err)
         return
     }
     streamCfg := s.cfg.Config.Routing.Stream
@@ -442,7 +457,7 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         if s.nonStreamClientCanceled(ctx, w, err, "aggregate") {
             return
         }
-        s.writeMessagesError(w, err)
+        s.writeMessagesError(ctx, w, &streamReq, err)
         return
     }
     w.Header().Set("Content-Type", "application/json")
@@ -482,7 +497,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     msgFn = middleware.RetryStreamMessages(s.cfg.Config.Routing.Retry, msgFn)
     ch, err := msgFn(wdCtx, req)
     if err != nil {
-        s.writeMessagesError(w, err)
+        s.writeMessagesError(ctx, w, req, err)
         return
     }
 
