@@ -136,6 +136,7 @@ cp config.example.yaml config.yaml
 | `/v1/models` | GET | 列出可用模型 (并发按 provider 拉取,各 3s 超时,失败跳过;`routing.mode: local` 时仅列本地 provider) |
 | `/v1/models/{id}/load` | POST | 加载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | 卸载模型 (被拦截 → model-hub `POST /api/v1/models/{id}/serve`) |
+| `/v1/laya/*` | GET/POST | Laya 路由透传到 fusion-mlx (`/v1/laya/status`、`/v1/laya/decide`),网关模式客户端 (fusion-bench) 无需直连 :11434 (#327)。fg-key 鉴权,自动注入后端凭据。 |
 | `/health` | GET | 含后端状态的完整健康检查 |
 | `/healthz` | GET | 存活探针 |
 | `/readyz` | GET | 就绪探针 (熔断器 + 健康 + GPU 内存 + 队列深度 + 成功率) |
@@ -672,6 +673,7 @@ Key 来自**两个来源**,鉴权层均认可:
 - **轮换宽限期**:`auth.key_rotation_grace`(默认 `24h`)。轮换记录 `key_prev_hash` + `key_rotated_at`;宽限期内新旧 key 同时可用(双活),期满后旧 key 401。与 K1 `fm-` 模块服务 key 语义一致。
 - **租户绑定**:创建时可选 `tenant`,将 key 绑定到 team(`BindKeyToTeam`);请求路径从该绑定派生 `X-Fusion-Tenant`,绝不信任客户端伪造头。
 - **身份透传**:每个鉴权通过的 `/v1/*` 请求向下游携带 `X-Fusion-Principal: <key name>`,上游模块无需重新鉴权即可归因调用方。
+- **后端 key**(#327,可选):`auth.accept_backend_keys: true` 时,本地后端的 `api_key`(如 fusion-mlx 的 admin key)也可作为全权限网关凭据,同机客户端 (fusion-bench 网关默认模式) 可复用 fusion-mlx 本身接受的 key。仅本地后端生效 — 云厂商 key 永不匹配。默认关闭:后端 key 等于全量网关访问权,必须运维显式开启。
 - **吊销为软删除**:key 永不物理删除(审计 + 保留策略);`revoked` 状态即刻鉴权失败。
 
 ### MasterKey

@@ -759,3 +759,57 @@ func TestAPIKeyAuthShellSessionPrincipalSkipsKeyResolution(t *testing.T) {
         t.Fatalf("shell-session principal code = %d, want pass-through 200", rr.Code)
     }
 }
+
+// #327: the opt-in BackendKeyMatcher runs after the config/store lookups fail;
+// a hit authenticates with the matcher's key config, a miss keeps the 401.
+func TestAPIKeyAuth_BackendKeyMatcher(t *testing.T) {
+    slog.Info("test APIKeyAuth_BackendKeyMatcher")
+    cfg := &config.AuthConfig{Enabled: true}
+    matcher := func(key string) *config.AuthKeyConfig {
+        if key == "fg-admin-key" {
+            return &config.AuthKeyConfig{Key: key, Name: "backend:fusion-mlx"}
+        }
+        return nil
+    }
+    var called bool
+    handler := APIKeyAuthWithStore(cfg, nil, matcher)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        called = true
+        p := PrincipalFromContext(r.Context())
+        if p == nil || p.KeyConfig == nil || p.KeyConfig.Name != "backend:fusion-mlx" {
+            t.Error("expected backend key config in principal")
+        }
+        w.WriteHeader(http.StatusOK)
+    }))
+
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    req.Header.Set("Authorization", "Bearer fg-admin-key")
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if !called || rec.Code != http.StatusOK {
+        t.Fatalf("expected 200 via backend key, got %d called=%v", rec.Code, called)
+    }
+
+    req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+    req2.Header.Set("Authorization", "Bearer wrong-key")
+    rec2 := httptest.NewRecorder()
+    handler.ServeHTTP(rec2, req2)
+    if rec2.Code != http.StatusUnauthorized {
+        t.Fatalf("foreign key must 401, got %d", rec2.Code)
+    }
+}
+
+// A nil matcher (feature off) must be skipped, not panic.
+func TestAPIKeyAuth_NilMatcherSkipped(t *testing.T) {
+    slog.Info("test APIKeyAuth_NilMatcherSkipped")
+    cfg := &config.AuthConfig{Enabled: true}
+    handler := APIKeyAuthWithStore(cfg, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("should not reach next handler")
+    }))
+    req := httptest.NewRequest(http.MethodGet, "/test", nil)
+    req.Header.Set("Authorization", "Bearer anything")
+    rec := httptest.NewRecorder()
+    handler.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401, got %d", rec.Code)
+    }
+}

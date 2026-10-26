@@ -880,6 +880,13 @@ func (s *Server) Start() error {
     // Authorization + X-Fusion-Route. Path is forwarded verbatim (/stats).
     mux.HandleFunc("/stats", s.withMiddleware(s.handleMLXStats))
 
+    // #327: proxy fusion-mlx /v1/laya/* through the gateway verbatim so
+    // gateway-mode clients (fusion-bench gateway-default routing) reach the
+    // laya-mlx surface routes without a direct :11434 exception. Shares the
+    // /v1/* fg-key auth chain; the provider's ReverseProxy injects the backend
+    // Authorization + X-Fusion-Route.
+    mux.HandleFunc("/v1/laya/", s.withMiddleware(s.handleLayaProxy))
+
     // Audit fix: /metrics requires master-key auth
     mux.HandleFunc("/metrics", s.withMasterKey(observability.Handler().ServeHTTP))
 
@@ -1384,7 +1391,11 @@ func (s *Server) buildMiddlewareChain() {
         middleware.RequestID,
         observability.HTTPMiddleware,
         middleware.CORS(&s.cfg.Config.CORS),
-        middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store),
+        // #327: when auth.accept_backend_keys is on, also accept a local
+        // backend's api_key (e.g. fusion-mlx fg-admin-key) as a full-access
+        // credential. Built per-chain (rebuilt on reload) so backend key
+        // changes take effect without a restart.
+        middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store, s.backendKeyMatcher()),
         // #157: identity gRPC control-plane sits AFTER local key auth (needs
         // the resolved plaintext key in p.KeyConfig.Key) and BEFORE RBAC so
         // the identity-derived tenant is authoritative for downstream role

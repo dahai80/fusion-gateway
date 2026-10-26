@@ -51,6 +51,11 @@ auth:
           tpm: 0
           allowed_models:
               - "*"                            # Wildcard: all models allowed
+    # #327: opt-in — also accept a LOCAL backend's api_key (e.g. fusion-mlx's
+    # admin key) as a full-access gateway credential, so same-machine clients
+    # (fusion-bench) can reuse the key fusion-mlx itself accepts. Only local
+    # backends qualify; cloud provider keys never match. Default false.
+    accept_backend_keys: false
 
 # #157: fusion-identity gRPC control plane. When enabled, every inference
 # request calls AuthorizeAndAcquire before reaching fusion-mlx (tenant
