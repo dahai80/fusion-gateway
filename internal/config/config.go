@@ -967,6 +967,10 @@ type Config struct {
     Persistence     PersistenceConfig       `mapstructure:"persistence"`
     // FileLog is the file_log.* namespace (G9): daily-rolled file logging.
     FileLog         FileLogConfig           `mapstructure:"file_log"`
+    // UsageAlerts is the usage_alerts.* namespace (#326): periodic
+    // per-(app, scenario, model) cost threshold checks with webhook
+    // notification. Default off.
+    UsageAlerts     UsageAlertsConfig       `mapstructure:"usage_alerts"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the

@@ -496,6 +496,36 @@ With PG persistence on, `trace_id` is also a column on `fg_request_logs` (auto-a
 
 **Retention note:** the in-memory log store is a bounded ring (default 10,000 entries) — for compliance retention, either poll the export endpoint periodically or switch the persistent store to Redis (`store.backend: "redis"`).
 
+### Usage Cost Aggregation & Alerting (#326)
+
+Per-business-scenario cost visibility and budget alerting, keyed on two dimensions: **app** = the API key name (gateway-authoritative, not client-spoofable) and **scenario** = a free-form client label sent per request.
+
+**1. Scenario label.** Send `X-Fusion-Scenario: <label>` (e.g. `question-gen`, `oral-scoring`) on any `/v1/*` request. The value is stamped on the request log (empty when absent), persisted to PG (`fg_request_logs.scenario`), and becomes the aggregation/alerting key alongside the key name.
+
+**2. Aggregation API.** `GET /admin/api/usage/aggregate?from&to&app&scenario&model` — call counts, token sums, and USD cost grouped by (app, scenario, model) over `[from, to]` (RFC3339; defaults to the last 7 days). Omitted filters mean "any". Rows are sorted by cost descending. Requires admin role (rows carry per-key cost). **Redis store caveat:** log blobs carry a 72h TTL, so windows reaching past 3 days silently lose expired rows — use PG persistence or the in-memory store for longer audit windows.
+
+**3. Threshold alerting.** Opt-in periodic cost-ceiling checks with webhook notification:
+
+```yaml
+usage_alerts:
+  enabled: true
+  webhook_url: https://ops.example.com/hooks/fusion-gateway
+  check_interval: 5m                       # default
+  thresholds:
+    - app: education-app                   # API key name; empty = any
+      scenario: question-gen               # X-Fusion-Scenario label; empty = any
+      window: 24h                          # trailing window to sum
+      max_cost_usd: 5.0                    # ceiling that triggers the alert
+```
+
+On breach the gateway POSTs:
+
+```json
+{"type":"usage_alert","app":"education-app","scenario":"question-gen","model":"","window_hours":24,"cost_usd":5.42,"threshold_usd":5.0,"triggered_at":"2026-10-26T12:05:00Z"}
+```
+
+Per-threshold cooldown equals its window — a steady over-budget stream alerts once per window, not once per tick. Invalid thresholds (missing `window` or `max_cost_usd`) are dropped individually at startup with a WARN; the rest of the subsystem keeps working. Thresholds are read at startup — rearm requires a restart.
+
 ### Heuristic Code-Intent Fast Path (<20ms)
 
 The LLM classifier above is a full model call (2s timeout, no cache, every request) — acceptable for a disabled-by-default semantic layer, but it dominates gateway end-to-end overhead once enabled. For the **coding** intent specifically (the hottest path in vibe-coding / refactor / debug workflows), a deterministic in-process heuristic classifier replaces the LLM call and keeps gateway overhead well under 20ms.
@@ -1665,6 +1695,7 @@ Built-in web admin dashboard at `/admin`, served from the single binary via Go `
 | `/admin/api/analytics/models` | GET | Model distribution statistics |
 | `/admin/api/analytics/latency` | GET | Latency statistics |
 | `/admin/api/analytics/errors` | GET | Error statistics |
+| `/admin/api/usage/aggregate` | GET | Per-(app, scenario, model) call/token/cost aggregation (#326) |
 | `/admin/api/dashboard/overview` | GET | Dashboard overview (QPS, tokens, cost, local hit rate) |
 | `/admin/api/quota/:key` | GET/PUT | Get / Set key quota usage |
 | `/admin/api/config/:domain` | GET/PUT | Read / Update config domain (server, auth, rate-limit, retry, negotiation, cache, cost, cost-markup, pii, cloud-routing, hardware, tokenizer, observability, cors, hot-reload, cluster, realtime, admin, oidc, rbac, semantic-cache, prompt-injection, batch, store, validation) |

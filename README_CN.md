@@ -425,6 +425,36 @@ curl -H "Authorization: Bearer $ADMIN_JWT" \
 
 **保留期提示:** 内存日志存储是有界环形缓冲(默认 10,000 条)— 合规留存要么周期性轮询导出端点,要么把持久存储切到 Redis(`store.backend: "redis"`)。
 
+### 按场景用量聚合与告警 (#326)
+
+按业务场景的费用可见性与预算告警,基于两个维度:**app** = API key 名称(网关权威,客户端不可伪造)、**scenario** = 客户端每请求携带的自由标签。
+
+**1. 场景标签。** 任意 `/v1/*` 请求携带 `X-Fusion-Scenario: <label>`(如 `question-gen`、`oral-scoring`)。值会写入请求日志(缺省为空)、持久化到 PG(`fg_request_logs.scenario`),并与 key 名称一起构成聚合/告警键。
+
+**2. 聚合 API。** `GET /admin/api/usage/aggregate?from&to&app&scenario&model` — 按 (app, scenario, model) 分组的调用次数、token 合计与美元费用,时间窗 `[from, to]`(RFC3339,默认最近 7 天)。省略过滤 = "任意"。行按费用降序。需要 admin 角色(行含每 key 费用)。**Redis 存储注意:** 日志 blob 带 72h TTL,超过 3 天的窗口会静默丢失已过期行 — 长审计窗口请用 PG 持久化或内存存储。
+
+**3. 阈值告警。** 可选的周期性费用上限检查 + webhook 通知:
+
+```yaml
+usage_alerts:
+  enabled: true
+  webhook_url: https://ops.example.com/hooks/fusion-gateway
+  check_interval: 5m                       # 默认
+  thresholds:
+    - app: education-app                   # API key 名称;空 = 任意
+      scenario: question-gen               # X-Fusion-Scenario 标签;空 = 任意
+      window: 24h                          # 追溯窗口
+      max_cost_usd: 5.0                    # 触发告警的上限
+```
+
+触发时网关 POST:
+
+```json
+{"type":"usage_alert","app":"education-app","scenario":"question-gen","model":"","window_hours":24,"cost_usd":5.42,"threshold_usd":5.0,"triggered_at":"2026-10-26T12:05:00Z"}
+```
+
+每条阈值的冷却期等于其窗口 — 持续超预算的流量每窗口只告警一次,而非每 tick 一次。非法阈值(缺 `window` 或 `max_cost_usd`)启动时单独丢弃并 WARN,其余子系统照常工作。阈值在启动时读取 — 重新布防需重启。
+
 ### 启发式代码意图快路径 (<20ms)
 
 上方的 LLM 分类器是一次完整模型调用(2s 超时、无缓存、每请求都跑)——对默认关闭的语义层尚可接受,但一旦启用就成为网关端到端开销的主导项。针对**代码**意图(vibe-coding / 重构 / 调试工作流中的最热路径),一个确定性的进程内启发式分类器替代了这次 LLM 调用,将网关开销控制在 20ms 以内。
@@ -1227,6 +1257,7 @@ terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
 | `/admin/api/analytics/models` | GET | 模型分布统计 |
 | `/admin/api/analytics/latency` | GET | 延迟统计 |
 | `/admin/api/analytics/errors` | GET | 错误统计 |
+| `/admin/api/usage/aggregate` | GET | 按 (app, scenario, model) 的调用/token/费用聚合 (#326) |
 | `/admin/api/dashboard/overview` | GET | 仪表盘概览 (QPS、token、成本、本地命中率) |
 | `/admin/api/quota/:key` | GET/PUT | 获取 / 设置 key 配额用量 |
 | `/admin/api/config/:domain` | GET/PUT | 读 / 更新配置域 (server、auth、rate-limit、retry、negotiation、cache、cost、cost-markup、pii、cloud-routing、hardware、tokenizer、observability、cors、hot-reload、cluster、realtime、admin、oidc、rbac、semantic-cache、prompt-injection、batch、store、validation) |

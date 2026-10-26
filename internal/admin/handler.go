@@ -80,6 +80,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/reports", h.requireAdminRoleStrict(h.handleReportsList))
     mux.HandleFunc("/admin/api/reports/generate", h.requireAdminRoleStrict(h.handleReportGenerate))
     mux.HandleFunc("/admin/api/reports/", h.requireAdminRoleStrict(h.handleReportByID))
+    // #326: per-(app, scenario, model) usage aggregation. Strict role — rows
+    // carry per-key cost and traffic volume (same sensitivity as logs, EI9).
+    mux.HandleFunc("/admin/api/usage/aggregate", h.requireAdminRoleStrict(h.handleUsageAggregate))
     mux.HandleFunc("/admin/api/analytics/profit", h.withAuth(h.handleProfitStats))
     mux.HandleFunc("/admin/api/dashboard", h.withAuth(h.handleDashboard))
     mux.HandleFunc("/admin/api/quota/", h.requireAdminRole(h.handleQuota))
@@ -894,6 +897,7 @@ func parseLogFilter(r *http.Request) store.LogFilter {
         Status:    q.Get("status"),
         ProjectID: q.Get("project_id"),
         TraceID:   q.Get("trace_id"),
+        Scenario:  q.Get("scenario"),
         Page:      1,
         PageSize:  50,
     }
@@ -960,6 +964,38 @@ func writeError(w http.ResponseWriter, status int, msg string) {
             "message": msg,
             "type":    fmt.Sprintf("http_%d", status),
         },
+    })
+}
+
+// handleUsageAggregate (#326) serves GET /admin/api/usage/aggregate —
+// per-(app, scenario, model) call/token/cost totals over [from, to].
+// app maps to the API key name (gateway-authoritative identity), scenario
+// to the X-Fusion-Scenario label; an omitted filter means "any".
+func (h *Handler) handleUsageAggregate(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    q := r.URL.Query()
+    from, to := parseTimeRange(r)
+    app := q.Get("app")
+    scenario := q.Get("scenario")
+    model := q.Get("model")
+
+    rows, err := h.store.GetUsageAggregate(from, to, app, scenario, model)
+    if err != nil {
+        slog.Error("usage aggregate failed", "error", err)
+        writeError(w, http.StatusInternalServerError, "aggregation failed")
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "from":     from,
+        "to":       to,
+        "app":      app,
+        "scenario": scenario,
+        "model":    model,
+        "rows":     rows,
+        "total":    len(rows),
     })
 }
 

@@ -445,6 +445,68 @@ func (r *RedisStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitSt
     return []*store.KeyProfitStat{}, nil
 }
 
+// GetUsageAggregate (#326) groups log rows by (app, scenario, model) over
+// [from, to]. Walks the log index ZSET by score window (no pagination) and
+// GETs each log blob, aggregating in-process. Note: log blobs carry a 72h
+// TTL, so windows reaching past 3 days silently lose the expired rows —
+// documented limitation of the Redis store.
+func (r *RedisStore) GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*store.UsageAggItem, error) {
+    ctx, cancel := r.withTimeout(redisListTimeout)
+    defer cancel()
+    ids, err := r.client.ZRangeByScore(ctx, logPrefix+"index", &redis.ZRangeBy{
+        Min: strconv.FormatInt(from.Unix(), 10),
+        Max: strconv.FormatInt(to.Unix(), 10),
+    }).Result()
+    if err != nil {
+        return nil, fmt.Errorf("usage aggregate range: %w", err)
+    }
+
+    groups := make(map[string]*store.UsageAggItem)
+    for _, id := range ids {
+        data, err := r.client.Get(ctx, logPrefix+id).Bytes()
+        if err != nil {
+            continue
+        }
+        var l store.RequestLog
+        if err := json.Unmarshal(data, &l); err != nil {
+            continue
+        }
+        if app != "" && l.APIKeyName != app {
+            continue
+        }
+        if scenario != "" && l.Scenario != scenario {
+            continue
+        }
+        if model != "" && l.Model != model {
+            continue
+        }
+        key := l.APIKeyName + "\x00" + l.Scenario + "\x00" + l.Model
+        item, ok := groups[key]
+        if !ok {
+            item = &store.UsageAggItem{App: l.APIKeyName, Scenario: l.Scenario, Model: l.Model}
+            groups[key] = item
+        }
+        item.RequestCount++
+        item.InputTokens += int64(l.InputTokens)
+        item.OutputTokens += int64(l.OutputTokens)
+        item.TotalTokens += int64(l.TotalTokens)
+        item.CostUSD += l.CostUSD
+    }
+
+    out := make([]*store.UsageAggItem, 0, len(groups))
+    for _, item := range groups {
+        out = append(out, item)
+    }
+    sort.Slice(out, func(i, j int) bool {
+        if out[i].CostUSD != out[j].CostUSD {
+            return out[i].CostUSD > out[j].CostUSD
+        }
+        return out[i].App+"/"+out[i].Scenario+"/"+out[i].Model < out[j].App+"/"+out[j].Scenario+"/"+out[j].Model
+    })
+    slog.Debug("usage aggregate computed", "rows", len(out), "window_from", from, "window_to", to)
+    return out, nil
+}
+
 // --- Quota ---
 
 func (r *RedisStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {

@@ -33,6 +33,10 @@ type RequestLog struct {
     ProjectID    string `json:"project_id,omitempty"`
     ChatID       string `json:"chat_id,omitempty"`
     SpaceID      string `json:"space_id,omitempty"`
+    // Scenario (#326) is the business scenario label from the
+    // X-Fusion-Scenario header (e.g. "question-gen" / "oral-scoring") —
+    // the per-scenario cost aggregation and alerting key.
+    Scenario     string `json:"scenario,omitempty"`
 
     InputTokens  int `json:"input_tokens"`
     OutputTokens int `json:"output_tokens"`
@@ -141,6 +145,8 @@ type LogFilter struct {
     // TraceID (#325) filters by the X-Fusion-Trace business trace id —
     // exact match; the admin trace query endpoint's key.
     TraceID   string     `json:"trace_id,omitempty"`
+    // Scenario (#326) filters by the X-Fusion-Scenario business label.
+    Scenario  string     `json:"scenario,omitempty"`
     MinTokens int        `json:"min_tokens,omitempty"`
     MinCost   float64    `json:"min_cost,omitempty"`
     Page      int        `json:"page"`
@@ -208,6 +214,21 @@ type CostTrendItem struct {
 type ModelDistItem struct {
     Model string  `json:"model"`
     Count float64 `json:"count"`
+}
+
+// UsageAggItem is one (app, scenario, model) aggregation row (#326): call
+// counts, token totals, and estimated cost over the requested window.
+// App is the API key name (gateway-authoritative app identity); Scenario
+// is the X-Fusion-Scenario label; "" in a filter means "any".
+type UsageAggItem struct {
+    App           string  `json:"app"`
+    Scenario      string  `json:"scenario"`
+    Model         string  `json:"model"`
+    RequestCount  int64   `json:"request_count"`
+    InputTokens   int64   `json:"input_tokens"`
+    OutputTokens  int64   `json:"output_tokens"`
+    TotalTokens   int64   `json:"total_tokens"`
+    CostUSD       float64 `json:"cost_usd"`
 }
 
 type KeyProfitStat struct {
@@ -342,6 +363,10 @@ type Store interface {
     GetErrorStats(from, to time.Time) ([]*ErrorStat, error)
     GetDashboardOverview() (*DashboardOverview, error)
     GetKeyProfitStats(from, to time.Time) ([]*KeyProfitStat, error)
+    // GetUsageAggregate (#326) groups log rows by (app, scenario, model)
+    // over [from, to] — call counts, tokens, cost. Empty app/scenario/model
+    // means "any" (no restriction on that dimension).
+    GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*UsageAggItem, error)
 
     CheckQuota(keyName string) (used, limit float64, exceeded bool, err error)
     DeductQuota(keyName string, amount float64) error

@@ -104,6 +104,12 @@ func InitRequestLog(r *http.Request) *store.RequestLog {
     if v := r.Header.Get("X-Space-Id"); v != "" {
         entry.SpaceID = v
     }
+    // #326: business scenario label — the per-scenario cost aggregation and
+    // alerting key. Unlike ProjectID this is an explicit client-supplied tag
+    // (e.g. "question-gen"); empty means untagged traffic.
+    if v := r.Header.Get("X-Fusion-Scenario"); v != "" {
+        entry.Scenario = v
+    }
     return entry
 }
 

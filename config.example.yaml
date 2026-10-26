@@ -449,6 +449,25 @@ store:
         db: 0                          # Redis database number
         pool_size: 10                  # Connection pool size
 
+# #326: usage cost aggregation & alerting. Clients tag requests with
+# X-Fusion-Scenario: <label>; aggregation is keyed on (app=API key name,
+# scenario, model) via GET /admin/api/usage/aggregate. Thresholds below are
+# checked every check_interval (default 5m) and POST a JSON breach alert to
+# webhook_url. Per-threshold cooldown = its window. Redis store caveat: log
+# blobs carry a 72h TTL, so windows reaching past 3 days lose expired rows.
+# Thresholds are read at startup — rearm requires a restart.
+usage_alerts:
+    enabled: false                     # Master switch (default off — no worker, no webhook calls)
+    webhook_url: ""                    # Breach alert POST target; required when enabled
+    check_interval: 5m                 # Polling cadence
+    thresholds: []                     # Entries: {app, scenario, model, window, max_cost_usd}; empty dimension = any
+    # thresholds:
+    #     - app: education-app         # API key name; empty = any
+    #       scenario: question-gen     # X-Fusion-Scenario label; empty = any
+    #       model: ""                  # Model id; empty = any
+    #       window: 24h                # Trailing window to sum (required)
+    #       max_cost_usd: 5.0          # Ceiling that triggers the alert (required)
+
 # #118: MCP cluster gateway — security-domain isolation + independent auth gate.
 # When enabled, MCP routes (/mcp/v1/call, /mcp/v1/tools, etc.) require an MCP
 # credential INDEPENDENT of the main auth chain, so auth.enabled=false does NOT
