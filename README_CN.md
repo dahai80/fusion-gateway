@@ -1724,6 +1724,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.73 — 按语种择优路由 + Anthropic thinking 桥接
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#330 按语种择优路由** | 请求头 `X-Fusion-Language`(小写 ISO 639-1)将请求路由到 fusion-mlx `languages` 元数据(fusion-mlx#1416)声明了该语种且已加载的本地模型。请求模型本身支持该语种时不改写;改写决策写日志并盖到 `model_mapped`;绝不硬失败 — 无元数据、无候选、或被 allowlist 拒绝时保持原请求模型。接线到 `/v1/chat/completions`、旧版 `/v1/completions` 与 `/v1/messages`。见"按语种择优路由 (#330)"。 |
+| 2 | **#329 reasoning_content 桥接** | 推理模型输出的 OpenAI 线格式 `reasoning_content` 增量在 `/v1/messages` 流式响应中桥接为 Anthropic `thinking` 内容块 — Claude Code 收到原生 thinking 块,模型推理输出不再丢失。 |
+| 3 | **ModelInfo.Languages + Loaded 叠加** | `ModelInfo` 新增 `languages`;`RefreshModelSet` 从 fusion-mlx `/health` `loaded_models` 盖 `loaded` 标记,消费方可区分"已列出"与"可服务"(#59)。 |
+| 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.73。 |
+
 ### v0.9.72 — 按场景用量告警 + X-Fusion-Trace + azure-openai + laya 代理
 
 | # | 条目 | 详情 |

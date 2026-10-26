@@ -1985,6 +1985,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.73 — Language-aware routing + Anthropic thinking bridge
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#330 language-aware model routing** | `X-Fusion-Language` request header (lowercase ISO 639-1) routes the request to a loaded local model that declares the language in fusion-mlx `languages` metadata (fusion-mlx#1416). Unchanged when the requested model already supports it; rewrite decision logged and stamped to `model_mapped`; never hard-fails — no metadata, no candidate, or allowlist rejection keeps the requested model. Wired into `/v1/chat/completions`, legacy `/v1/completions`, and `/v1/messages`. See "Language-Aware Model Routing (#330)". |
+| 2 | **#329 reasoning_content bridge** | OpenAI-wire `reasoning_content` deltas from reasoning models are bridged into Anthropic `thinking` content blocks on `/v1/messages` streaming responses — Claude Code receives native thinking blocks instead of dropping the model's reasoning output. |
+| 3 | **ModelInfo.Languages + Loaded overlay** | `ModelInfo` gains `languages`; `RefreshModelSet` stamps `loaded` from fusion-mlx `/health` `loaded_models` so consumers distinguish listed from servable (#59). |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.73. |
+
 ### v0.9.72 — Per-scenario usage alerting + X-Fusion-Trace + azure-openai + laya proxy
 
 | # | Item | Details |
