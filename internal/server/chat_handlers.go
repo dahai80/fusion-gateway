@@ -13,6 +13,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/cache"
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
@@ -610,8 +611,10 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     streamCfg := s.cfg.Config.Routing.Stream
     streamStart := time.Now()
     // Plan §5.2: per-stream TTFT/TPOT capture (request start = handler
-    // start, so queue/route time counts toward TTFT).
-    timing := newStreamTiming(start)
+    // start, so queue/route time counts toward TTFT). G10: also collect
+    // per-chunk records when capture.stream_chunks is on (default off).
+    pcfg := config.GetSnapshot().Config.Persistence
+    timing := newStreamTiming(start, pcfg.Enabled && pcfg.Capture.StreamChunks)
     var firstChunkAt time.Time
     var lastChunkAt time.Time
     chunkCount := 0
@@ -686,7 +689,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
             chunkCount++
             chunkNow := time.Now()
             lastChunkAt = chunkNow
-            timing.observe(chunkNow)
+            timing.observe(chunkNow, len(chunk.Raw))
             if firstChunkAt.IsZero() {
                 firstChunkAt = lastChunkAt
             }
@@ -724,7 +727,7 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 lastChunkCreated = chunk.Created
                 chunkCount++
                 lastChunkAt = time.Now()
-                timing.observe(lastChunkAt)
+                timing.observe(lastChunkAt, len(chunk.Raw))
                 if firstChunkAt.IsZero() {
                     firstChunkAt = lastChunkAt
                 }

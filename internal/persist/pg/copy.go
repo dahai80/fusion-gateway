@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS fg_request_logs (
     chunk_count    int,
     tokens_per_sec real,
     client_ip      text,
-    user_agent     text
+    user_agent     text,
+    contains_pii   boolean NOT NULL DEFAULT false
 ) PARTITION BY RANGE (ts);
 
 CREATE TABLE IF NOT EXISTS fg_request_payloads (
@@ -79,6 +80,18 @@ CREATE TABLE IF NOT EXISTS fg_request_payloads (
     resp_truncated boolean NOT NULL DEFAULT false,
     req_truncated  boolean NOT NULL DEFAULT false,
     resp_raw_mime  text
+) PARTITION BY RANGE (ts);
+
+-- G10 (plan §4.1): per-chunk stream timings for timing forensics. One row
+-- per SSE chunk when capture.stream_chunks is on (default off); retention is
+-- a short 7-day window (stream_chunks_days). Same no-FK rule as payloads.
+CREATE TABLE IF NOT EXISTS fg_stream_chunks (
+    id       uuid NOT NULL,
+    ts       timestamptz NOT NULL,
+    seq      int NOT NULL,
+    delta_ms real NOT NULL DEFAULT 0,
+    bytes    int NOT NULL DEFAULT 0,
+    PRIMARY KEY (id, ts, seq)
 ) PARTITION BY RANGE (ts);
 
 -- P3b tables (plan §15.4). All low-volume, plain tables — daily partitioning
@@ -141,6 +154,11 @@ CREATE TABLE IF NOT EXISTS fg_reports (
     created_at  timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fg_reports_created ON fg_reports (created_at DESC);
+
+-- G6: contains_pii was added after the first production deployment;
+-- CREATE TABLE IF NOT EXISTS does not add columns to the existing table,
+-- so the ALTER is the migration path (propagates to all partitions).
+ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS contains_pii boolean NOT NULL DEFAULT false;
 `
 
 // newCopyWriter connects the pool and provisions the schema.
@@ -189,6 +207,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
     now := time.Now().UTC()
     logRows := make([][]any, 0, len(entries))
     payloadRows := make([][]any, 0, len(entries))
+    chunkRows := make([][]any, 0)
     for _, e := range entries {
         // The in-memory store assigns ids like "log-42" (not a UUID); the
         // PG column is uuid. Prefer whichever of ID/RequestID parses as a
@@ -217,7 +236,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             // tag — convert at this boundary, the column is duration_ms.
             e.Log.Latency * 1000, e.Log.TTFT, e.Log.TPotMS, e.Log.TPotP95,
             e.Log.ChunkCount, e.Log.TokensPerSec,
-            e.ClientIP, e.UserAgent,
+            e.ClientIP, e.UserAgent, e.Log.ContainsPII,
         })
         if len(e.ReqBody) > 0 || len(e.RespBody) > 0 {
             reqJSON, reqRaw := splitBody(e.ReqBody)
@@ -227,6 +246,15 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
                 reqJSON, respJSON, reqRaw, respRaw,
                 e.RespTruncated, e.ReqTruncated, e.RespRawMime,
             })
+        }
+        // G10: per-chunk timings share the log row's id/ts so the chunks
+        // endpoint joins them by id alone.
+        for _, c := range e.Log.Chunks {
+            cts := c.TS
+            if cts.IsZero() {
+                cts = ts
+            }
+            chunkRows = append(chunkRows, []any{id, cts, c.Seq, c.DeltaMS, c.Bytes})
         }
     }
 
@@ -242,7 +270,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             "cost", "cost_usd", "local_savings",
             "duration_ms", "ttft_ms", "tpot_ms", "tpot_p95_ms",
             "chunk_count", "tokens_per_sec",
-            "client_ip", "user_agent",
+            "client_ip", "user_agent", "contains_pii",
         },
         pgx.CopyFromRows(logRows)); err != nil {
         return fmt.Errorf("copy fg_request_logs: %w", err)
@@ -256,6 +284,14 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             },
             pgx.CopyFromRows(payloadRows)); err != nil {
             return fmt.Errorf("copy fg_request_payloads: %w", err)
+        }
+    }
+    if len(chunkRows) > 0 {
+        if _, err := tx.CopyFrom(ctx,
+            pgx.Identifier{"fg_stream_chunks"},
+            []string{"id", "ts", "seq", "delta_ms", "bytes"},
+            pgx.CopyFromRows(chunkRows)); err != nil {
+            return fmt.Errorf("copy fg_stream_chunks: %w", err)
         }
     }
     if err := tx.Commit(ctx); err != nil {

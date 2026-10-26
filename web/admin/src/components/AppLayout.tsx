@@ -57,6 +57,7 @@ const menuItems = [
             { key: "/admin/insights/optimize", icon: <BulbOutlined />, label: "Optimize" },
             { key: "/admin/insights/anomalies", icon: <WarningOutlined />, label: "Anomalies" },
             { key: "/admin/insights/reports", icon: <FileTextOutlined />, label: "Reports" },
+            { key: "/admin/insights/capacity", icon: <DatabaseOutlined />, label: "Capacity" },
         ],
     },
     {

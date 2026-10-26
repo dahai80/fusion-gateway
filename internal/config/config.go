@@ -927,6 +927,8 @@ type Config struct {
     // Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
     // for request logs + payloads. Default off — zero behavior change.
     Persistence     PersistenceConfig       `mapstructure:"persistence"`
+    // FileLog is the file_log.* namespace (G9): daily-rolled file logging.
+    FileLog         FileLogConfig           `mapstructure:"file_log"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
@@ -1516,6 +1518,11 @@ func validate(cfg *Config) error {
     // Plan §6: persistence.* namespace. Repairs degenerate tuning values
     // in place (defaults, not errors) — they are knobs, not correctness.
     if err := validatePersistence(cfg); err != nil {
+        return err
+    }
+
+    // G9: file_log.* namespace.
+    if err := validateFileLog(cfg); err != nil {
         return err
     }
 
@@ -2417,5 +2424,6 @@ func DefaultConfig() Config {
             },
         },
         Persistence: defaultPersistenceConfig(),
+        FileLog:     defaultFileLogConfig(),
     }
 }

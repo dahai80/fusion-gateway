@@ -11,6 +11,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
@@ -588,8 +589,10 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // Plan §5.2: per-stream TTFT/TPOT capture. observe() is fed ONLY from
     // content_block_delta events — message_start arrives before generation
     // begins, so counting it would collapse TTFT to ~0 and pollute the
-    // inter-chunk gaps with non-token events.
-    timing := newStreamTiming(streamStart)
+    // inter-chunk gaps with non-token events. G10: per-chunk records when
+    // capture.stream_chunks is on (default off).
+    pcfg := config.GetSnapshot().Config.Persistence
+    timing := newStreamTiming(streamStart, pcfg.Enabled && pcfg.Capture.StreamChunks)
     var firstEventAt time.Time
     var lastEventAt time.Time
     var lastEventType string
@@ -672,7 +675,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             }
             if event.Type == "content_block_delta" {
                 deltaCount++
-                timing.observe(lastEventAt)
+                timing.observe(lastEventAt, len(event.Raw))
             }
             if event.Usage != nil {
                 captureUsage(event.Usage)
@@ -729,7 +732,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 }
                 if event.Type == "content_block_delta" {
                     deltaCount++
-                    timing.observe(lastEventAt)
+                    timing.observe(lastEventAt, len(event.Raw))
                 }
                 if event.Type == "message_stop" {
                     sawMessageStop = true

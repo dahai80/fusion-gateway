@@ -1,5 +1,6 @@
-import { useState, useCallback } from "react";
-import { Card, Typography, Input, Row, Col, Table, Tag, Button, Select, Form } from "antd";
+import { useState, useCallback, useEffect } from "react";
+import { Card, Typography, Input, Row, Col, Table, Tag, Button, Select, Form, Modal, Tooltip } from "antd";
+import { useSearchParams } from "react-router-dom";
 import client from "../../api/client";
 import { isUnavailable, UnavailableAlert, windowFor } from "./shared";
 
@@ -31,6 +32,7 @@ interface SearchRow {
     tokens_per_sec: number;
     client_ip?: string;
     user_agent?: string;
+    contains_pii?: boolean;
 }
 
 interface PayloadResponse {
@@ -42,6 +44,25 @@ interface PayloadResponse {
     resp_raw?: string;
     req_truncated: boolean;
     resp_truncated: boolean;
+}
+
+interface ChunkRow {
+    seq: number;
+    ts: string;
+    delta_ms: number;
+    bytes: number;
+}
+
+interface ExpandedDetail {
+    body: string;
+    chunks: ChunkRow[] | null;
+}
+
+interface ReplayResult {
+    id: string;
+    endpoint: string;
+    status: number;
+    response: unknown;
 }
 
 const PAGE_SIZE = 50;
@@ -65,8 +86,26 @@ export default function Explorer() {
     const [rows, setRows] = useState<SearchRow[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
-    const [expanded, setExpanded] = useState<Record<string, string>>({});
+    const [expanded, setExpanded] = useState<Record<string, ExpandedDetail>>({});
+    const [replayBusy, setReplayBusy] = useState<string | null>(null);
+    const [replayResult, setReplayResult] = useState<ReplayResult | null>(null);
+    const [searchParams] = useSearchParams();
     const [form] = Form.useForm();
+
+    // AC18 evidence jump links: Optimize findings link here with ?model=...
+    // (and optional backend/period); prefill the form and auto-search once.
+    useEffect(() => {
+        const prefill: Record<string, unknown> = { period: 24 };
+        for (const key of ["q", "endpoint", "backend", "model", "project_id", "api_key_name"]) {
+            const v = searchParams.get(key);
+            if (v) prefill[key] = v;
+        }
+        const period = Number(searchParams.get("period"));
+        if (period > 0) prefill.period = period;
+        form.setFieldsValue(prefill);
+        runSearch(1);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchParams]);
 
     const runSearch = useCallback(async (pageNum = 1) => {
         setLoading(true);
@@ -102,11 +141,29 @@ export default function Explorer() {
 
     const expandRow = async (record: SearchRow) => {
         if (expanded[record.id] !== undefined) return;
+        const [payloadRes, chunksRes] = await Promise.allSettled([
+            client.get(`/insights/logs/${record.id}/payload`),
+            client.get(`/insights/logs/${record.id}/chunks`),
+        ]);
+        const body = payloadRes.status === "fulfilled"
+            ? bodyToText(payloadRes.value.data)
+            : "payload fetch failed";
+        const chunks = chunksRes.status === "fulfilled"
+            ? (chunksRes.value.data.chunks || []) as ChunkRow[]
+            : null;
+        setExpanded((prev) => ({ ...prev, [record.id]: { body, chunks } }));
+    };
+
+    const replayRow = async (record: SearchRow) => {
+        setReplayBusy(record.id);
         try {
-            const res = await client.get(`/insights/logs/${record.id}/payload`);
-            setExpanded((prev) => ({ ...prev, [record.id]: bodyToText(res.data) }));
-        } catch {
-            setExpanded((prev) => ({ ...prev, [record.id]: "payload fetch failed" }));
+            const res = await client.post(`/insights/logs/${record.id}/replay`, {});
+            setReplayResult(res.data as ReplayResult);
+        } catch (err) {
+            const detail = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || "replay failed";
+            setReplayResult({ id: record.id, endpoint: "-", status: 0, response: { error: detail } });
+        } finally {
+            setReplayBusy(null);
         }
     };
 
@@ -221,11 +278,37 @@ export default function Explorer() {
                         onChange: (p) => runSearch(p),
                     }}
                     expandable={{
-                        expandedRowRender: (record) => (
-                            <pre style={{ maxHeight: 400, overflow: "auto", fontSize: 12 }}>
-                                {expanded[record.id] ?? "loading…"}
-                            </pre>
-                        ),
+                        expandedRowRender: (record) => {
+                            const detail = expanded[record.id];
+                            return (
+                                <div>
+                                    <pre style={{ maxHeight: 400, overflow: "auto", fontSize: 12 }}>
+                                        {detail?.body ?? "loading…"}
+                                    </pre>
+                                    <Card type="inner" title="Stream chunk timing" size="small" style={{ marginTop: 8 }}>
+                                        {detail === undefined ? null : detail.chunks === null || detail.chunks.length === 0 ? (
+                                            <span style={{ color: "#999" }}>
+                                                No chunk rows — capture.stream_chunks is off or this was not a stream.
+                                            </span>
+                                        ) : (
+                                            <Table
+                                                size="small"
+                                                dataSource={detail.chunks}
+                                                rowKey="seq"
+                                                pagination={false}
+                                                scroll={{ y: 240 }}
+                                                columns={[
+                                                    { title: "Seq", dataIndex: "seq", width: 70 },
+                                                    { title: "Time", dataIndex: "ts", render: (v: string) => v.replace("T", " ").slice(11, 23) },
+                                                    { title: "Delta (ms)", dataIndex: "delta_ms", render: (v: number) => v.toFixed(1) },
+                                                    { title: "Bytes", dataIndex: "bytes", render: (v: number) => v.toLocaleString() },
+                                                ]}
+                                            />
+                                        )}
+                                    </Card>
+                                </div>
+                            );
+                        },
                         onExpand: (_expanded, record) => expandRow(record),
                     }}
                     columns={[
@@ -249,9 +332,51 @@ export default function Explorer() {
                         { title: "Dur", dataIndex: "duration_ms", width: 80, render: (v: number) => (v > 0 ? `${Math.round(v)}ms` : "-") },
                         { title: "Cost", dataIndex: "cost", width: 80, render: (v: number) => v.toFixed(4) },
                         { title: "Key", dataIndex: "api_key_name", ellipsis: true },
+                        {
+                            title: "PII",
+                            dataIndex: "contains_pii",
+                            width: 60,
+                            render: (v?: boolean) => (v ? <Tag color="orange">PII</Tag> : "-"),
+                        },
+                        {
+                            title: "",
+                            key: "replay",
+                            width: 80,
+                            render: (_v: unknown, r: SearchRow) => (
+                                <Tooltip title="Re-send the stored request body through the full gateway chain (stream forced off)">
+                                    <Button
+                                        type="link"
+                                        size="small"
+                                        loading={replayBusy === r.id}
+                                        onClick={() => replayRow(r)}
+                                    >
+                                        Replay
+                                    </Button>
+                                </Tooltip>
+                            ),
+                        },
                     ]}
                 />
             </Card>
+            <Modal
+                open={!!replayResult}
+                title={`Replay ${replayResult?.id || ""}`}
+                footer={null}
+                onCancel={() => setReplayResult(null)}
+                width={720}
+            >
+                {replayResult && (
+                    <>
+                        <p>
+                            endpoint <code>{replayResult.endpoint}</code>{" "}
+                            status <Tag color={replayResult.status >= 200 && replayResult.status < 300 ? "green" : "red"}>{replayResult.status || "err"}</Tag>
+                        </p>
+                        <pre style={{ maxHeight: 420, overflow: "auto", fontSize: 12 }}>
+                            {JSON.stringify(replayResult.response, null, 2)}
+                        </pre>
+                    </>
+                )}
+            </Modal>
         </div>
     );
 }

@@ -23,6 +23,8 @@ interface PersistenceConfig {
         response_body: boolean;
         max_body_bytes: number;
         strip_auth_fields: boolean;
+        image_placeholder: boolean;
+        stream_chunks: boolean;
     };
     retention: {
         request_logs_days: number;
@@ -30,6 +32,7 @@ interface PersistenceConfig {
         hw_samples_days: number;
         gateway_events_days: number;
         insights_days: number;
+        stream_chunks_days: number;
     };
 }
 
@@ -141,19 +144,46 @@ export default function PersistenceConfig() {
                         </Form.Item>
                     </Col>
                 </Row>
+                <Row gutter={16}>
+                    <Col span={12}>
+                        <Form.Item
+                            name={["capture", "image_placeholder"]}
+                            label="Image Placeholder"
+                            valuePropName="checked"
+                            tooltip="Swap inline base64 image payloads for a <image:NNNB> placeholder before persist — multimodal bodies otherwise dominate storage."
+                        >
+                            <Switch />
+                        </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                        <Form.Item
+                            name={["capture", "stream_chunks"]}
+                            label="Stream Chunk Timing Capture"
+                            valuePropName="checked"
+                            tooltip="Persist per-chunk stream timings (seq / delta / bytes) to fg_stream_chunks for Explorer timing forensics. High volume — keep off unless debugging stream pacing."
+                        >
+                            <Switch />
+                        </Form.Item>
+                    </Col>
+                </Row>
                 <Text strong>Retention (days, partition DROP)</Text>
                 <Row gutter={16} style={{ marginTop: 8 }}>
-                    <Col span={5}>
+                    <Col span={4}>
                         <Form.Item name={["retention", "request_logs_days"]} label="Request Logs">
                             <InputNumber min={1} style={{ width: "100%" }} />
                         </Form.Item>
                     </Col>
-                    <Col span={5}>
+                    <Col span={4}>
                         <Form.Item name={["retention", "request_payloads_days"]} label="Request Payloads">
                             <InputNumber min={1} style={{ width: "100%" }} />
                         </Form.Item>
                     </Col>
-                    <Col span={5}>
+                    <Col span={4}>
+                        <Form.Item name={["retention", "stream_chunks_days"]} label="Stream Chunks">
+                            <InputNumber min={1} style={{ width: "100%" }} />
+                        </Form.Item>
+                    </Col>
+                    <Col span={4}>
                         <Form.Item name={["retention", "hw_samples_days"]} label="HW Samples">
                             <InputNumber min={1} style={{ width: "100%" }} />
                         </Form.Item>
@@ -163,7 +193,7 @@ export default function PersistenceConfig() {
                             <InputNumber min={1} style={{ width: "100%" }} />
                         </Form.Item>
                     </Col>
-                    <Col span={5}>
+                    <Col span={4}>
                         <Form.Item name={["retention", "insights_days"]} label="Insights (anomalies/findings/reports)">
                             <InputNumber min={1} style={{ width: "100%" }} />
                         </Form.Item>

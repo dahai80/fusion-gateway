@@ -159,3 +159,41 @@ func TestStripAuthFields(t *testing.T) {
         t.Fatal("binary body must pass through untouched")
     }
 }
+
+func TestPlaceholderImages_OpenAI(t *testing.T) {
+    in := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJDREVG"}}]}]}`)
+    out := PlaceholderImages(in)
+    s := string(out)
+    if strings.Contains(s, "QUJDREVG") {
+        t.Fatalf("base64 payload not replaced: %s", s)
+    }
+    if !strings.Contains(s, "<image:30B>") {
+        t.Fatalf("placeholder marker missing: %s", s)
+    }
+    if !strings.Contains(s, "\"text\":\"hi\"") {
+        t.Fatalf("text blocks must survive: %s", s)
+    }
+}
+
+func TestPlaceholderImages_Anthropic(t *testing.T) {
+    in := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}]}`)
+    out := PlaceholderImages(in)
+    s := string(out)
+    if strings.Contains(s, "\"data\":\"QUJD\"") {
+        t.Fatalf("source.data not replaced: %s", s)
+    }
+    if !strings.Contains(s, "<image:4B>") {
+        t.Fatalf("placeholder marker missing: %s", s)
+    }
+}
+
+func TestPlaceholderImages_NoImagesUntouched(t *testing.T) {
+    in := []byte(`{"model":"m","messages":[{"role":"user","content":"plain"}]}`)
+    if !bytes.Equal(PlaceholderImages(in), in) {
+        t.Fatal("body without images must pass through byte-identical")
+    }
+    raw := []byte{0x00, 0x01}
+    if !bytes.Equal(PlaceholderImages(raw), raw) {
+        t.Fatal("binary body must pass through untouched")
+    }
+}

@@ -2066,6 +2066,8 @@ func TestHandlePersistenceConfig(t *testing.T) {
                 "response_body":     true,
                 "max_body_bytes":    262144,
                 "strip_auth_fields": true,
+                "image_placeholder": true,
+                "stream_chunks":     true,
             },
             "retention": map[string]interface{}{
                 "request_logs_days":     60,
@@ -2073,6 +2075,7 @@ func TestHandlePersistenceConfig(t *testing.T) {
                 "hw_samples_days":       15,
                 "gateway_events_days":   90,
                 "insights_days":         120,
+                "stream_chunks_days":    5,
             },
         }
         req := makeAuthenticatedRequest(t, auth, http.MethodPut, "/admin/api/config/persistence", body)
@@ -2100,9 +2103,18 @@ func TestHandlePersistenceConfig(t *testing.T) {
         if c["request_body"] != false {
             t.Errorf("expected request_body false, got %v", c["request_body"])
         }
+        if c["image_placeholder"] != true {
+            t.Errorf("expected image_placeholder true, got %v", c["image_placeholder"])
+        }
+        if c["stream_chunks"] != true {
+            t.Errorf("expected stream_chunks true, got %v", c["stream_chunks"])
+        }
         rt := readYAMLNestedSection(t, configPath, "persistence", "retention")
         if rt["request_logs_days"] != 60 {
             t.Errorf("expected request_logs_days 60, got %v", rt["request_logs_days"])
+        }
+        if rt["stream_chunks_days"] != 5 {
+            t.Errorf("expected stream_chunks_days 5, got %v", rt["stream_chunks_days"])
         }
         // response reflects the reloaded snapshot
         resp := decodeResponse(t, rec)
@@ -2112,6 +2124,14 @@ func TestHandlePersistenceConfig(t *testing.T) {
         respPg, ok := resp["postgres"].(map[string]interface{})
         if !ok || respPg["dsn_env"] != "MY_PG_DSN" {
             t.Errorf("expected response postgres.dsn_env MY_PG_DSN, got %v", resp["postgres"])
+        }
+        respCap, ok := resp["capture"].(map[string]interface{})
+        if !ok || respCap["stream_chunks"] != true {
+            t.Errorf("expected response capture.stream_chunks true, got %v", resp["capture"])
+        }
+        respRt, ok := resp["retention"].(map[string]interface{})
+        if !ok || respRt["stream_chunks_days"] != float64(5) {
+            t.Errorf("expected response retention.stream_chunks_days 5, got %v", resp["retention"])
         }
     })
 }

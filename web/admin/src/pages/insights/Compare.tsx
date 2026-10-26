@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
-import { Card, Spin, Select, Typography, Input, Row, Col, Alert, Table, Tag } from "antd";
+import { Card, Spin, Select, Switch, Typography, Input, InputNumber, Row, Col, Alert, Table, Tag, Tooltip } from "antd";
 import {
     BarChart,
     Bar,
     XAxis,
     YAxis,
     CartesianGrid,
-    Tooltip,
+    Tooltip as RTooltip,
     ResponsiveContainer,
 } from "recharts";
 import client from "../../api/client";
@@ -28,12 +28,23 @@ interface CompareRow {
     avg_input_tokens: number;
     avg_output_tokens: number;
     cost_total: number;
+    diff_x: number;
 }
+
+interface BreakerTrip {
+    backend: string;
+    reason: string;
+    count: number;
+}
+
+type DisplayRow = CompareRow & { label: string; diff_x: number };
 
 interface CompareResponse {
     from: string;
     to: string;
+    overlap: boolean;
     rows: CompareRow[];
+    breaker_trips?: BreakerTrip[];
 }
 
 export default function Compare() {
@@ -42,12 +53,18 @@ export default function Compare() {
     const [data, setData] = useState<CompareResponse | null>(null);
     const [period, setPeriod] = useState(168);
     const [projectID, setProjectID] = useState("");
+    const [overlap, setOverlap] = useState(false);
+    const [inputMin, setInputMin] = useState<number | null>(null);
+    const [inputMax, setInputMax] = useState<number | null>(null);
 
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
         const params: Record<string, unknown> = windowFor(period);
         if (projectID) params.project_id = projectID;
+        if (overlap) params.overlap = "true";
+        if (inputMin) params.input_min = inputMin;
+        if (inputMax) params.input_max = inputMax;
         client
             .get("/insights/compare", { params })
             .then((res) => {
@@ -65,17 +82,33 @@ export default function Compare() {
         return () => {
             cancelled = true;
         };
-    }, [period, projectID]);
+    }, [period, projectID, overlap, inputMin, inputMax]);
 
     if (unavailable) return <UnavailableAlert />;
 
-    const rows = (data?.rows || []).map((r) => ({
+    const rawRows = data?.rows || [];
+    // Diff auto-annotation (AC4): each row's TTFT p95 as a multiple of the
+    // best (lowest) p95 in the window — the fastest row is the baseline.
+    const bestP95 = Math.min(...rawRows.map((r) => r.ttft_p95_ms).filter((v) => v > 0));
+    const rows: DisplayRow[] = rawRows.map((r) => ({
         ...r,
         label: `${r.backend}/${r.model}`,
+        diff_x: bestP95 > 0 ? r.ttft_p95_ms / bestP95 : 0,
     }));
+    const tripsByBackend = new Map<string, number>();
+    for (const t of data?.breaker_trips || []) {
+        tripsByBackend.set(t.backend, (tripsByBackend.get(t.backend) || 0) + t.count);
+    }
+    const tripsFor = (backend: string) => {
+        let total = 0;
+        for (const [b, c] of tripsByBackend) {
+            if (backend === b || backend.startsWith(b + "/") || b.startsWith(backend)) total += c;
+        }
+        return total;
+    };
 
     const numSorter = (key: keyof CompareRow) =>
-        (a: CompareRow, b: CompareRow) => (a[key] as number) - (b[key] as number);
+        (a: DisplayRow, b: DisplayRow) => (a[key] as number) - (b[key] as number);
 
     return (
         <div>
@@ -90,6 +123,21 @@ export default function Compare() {
                             style={{ width: 140 }}
                             allowClear
                         />
+                    </Col>
+                    <Col>
+                        <Tooltip title="Fair comparison (AC5): keep only hourly buckets where every backend/model group has traffic — providers are compared over shared load, not each one's own peak hours.">
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                overlap <Switch size="small" checked={overlap} onChange={setOverlap} />
+                            </span>
+                        </Tooltip>
+                    </Col>
+                    <Col>
+                        <Tooltip title="Prompt-length bucket (AC5): restrict to requests with input_tokens in [min, max]. Empty = unbounded.">
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                in <InputNumber size="small" min={0} value={inputMin || undefined} onChange={(v) => setInputMin(v ?? 0)} style={{ width: 80 }} placeholder="min" />
+                                – <InputNumber size="small" min={0} value={inputMax || undefined} onChange={(v) => setInputMax(v ?? 0)} style={{ width: 80 }} placeholder="max" />
+                            </span>
+                        </Tooltip>
                     </Col>
                     <Col>
                         <Select
@@ -115,7 +163,7 @@ export default function Compare() {
                                 <CartesianGrid strokeDasharray="3 3" />
                                 <XAxis dataKey="label" angle={-20} textAnchor="end" height={70} />
                                 <YAxis unit="ms" />
-                                <Tooltip />
+                                <RTooltip />
                                 <Bar dataKey="ttft_p95_ms" name="TTFT p95" fill="#1677ff" />
                             </BarChart>
                         </ResponsiveContainer>
@@ -129,7 +177,7 @@ export default function Compare() {
                                 {
                                     title: "Backend",
                                     dataIndex: "backend",
-                                    render: (v: string, r: CompareRow) => (
+                                    render: (v: string, r: DisplayRow) => (
                                         <span>
                                             {v}{" "}
                                             <Tag color={r.backend_type === "local" ? "green" : "blue"}>{r.backend_type || "cloud"}</Tag>
@@ -141,12 +189,31 @@ export default function Compare() {
                                 { title: "Success %", dataIndex: "success_rate", sorter: numSorter("success_rate"), render: (v: number) => v.toFixed(2) },
                                 { title: "TTFT p50", dataIndex: "ttft_p50_ms", sorter: numSorter("ttft_p50_ms"), render: (v: number) => `${Math.round(v)} ms` },
                                 { title: "TTFT p95", dataIndex: "ttft_p95_ms", sorter: numSorter("ttft_p95_ms"), render: (v: number) => `${Math.round(v)} ms` },
+                                {
+                                    title: "Diff",
+                                    dataIndex: "diff_x",
+                                    width: 110,
+                                    sorter: (a: DisplayRow, b: DisplayRow) => a.diff_x - b.diff_x,
+                                    render: (v: number) =>
+                                        v > 0 && v < 1.05 ? <Tag color="green">baseline</Tag> :
+                                        v >= 2 ? <Tag color="red">{v.toFixed(1)}×</Tag> :
+                                        v > 0 ? <Tag color="orange">{v.toFixed(1)}×</Tag> : "-",
+                                },
                                 { title: "TPOT p50", dataIndex: "tpot_p50_ms", sorter: numSorter("tpot_p50_ms"), render: (v: number) => `${v.toFixed(1)} ms` },
                                 { title: "TPOT p95", dataIndex: "tpot_p95_ms", sorter: numSorter("tpot_p95_ms"), render: (v: number) => `${v.toFixed(1)} ms` },
                                 { title: "Tok/s", dataIndex: "avg_tokens_per_sec", sorter: numSorter("avg_tokens_per_sec"), render: (v: number) => v.toFixed(1) },
                                 { title: "Avg In", dataIndex: "avg_input_tokens", render: (v: number) => Math.round(v).toLocaleString() },
                                 { title: "Avg Out", dataIndex: "avg_output_tokens", render: (v: number) => Math.round(v).toLocaleString() },
                                 { title: "Cost", dataIndex: "cost_total", sorter: numSorter("cost_total"), render: (v: number) => v.toFixed(4) },
+                                {
+                                    title: "Breaker Trips",
+                                    key: "breaker",
+                                    width: 110,
+                                    render: (_v: unknown, r: DisplayRow) => {
+                                        const n = tripsFor(r.backend);
+                                        return n > 0 ? <Tag color="red">{n}</Tag> : <Tag>0</Tag>;
+                                    },
+                                },
                             ]}
                         />
                     </Card>
