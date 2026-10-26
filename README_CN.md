@@ -741,6 +741,29 @@ chat completions 完整支持 OpenAI `stream_options`:
 - **错误透明**:三个新 provider 的非 2xx 上游响应以原始状态码、body、`x-request-id`/`request-id` (经 `*MessagesHTTPError`) 透传给客户端,绝不返回通用 502。
 - **SSE 加固**:1 MiB/行 与 10 MiB 响应上限,与 adapter pool 其余部分一致。
 
+### Azure OpenAI (deployment 约定)
+
+后端 `type: azure-openai` (#324) 按 Azure OpenAI deployment 约定服务 chat/completions:URL 为 `{base_url}/openai/deployments/{deployment}/chat/completions?api-version=X`,鉴权用 `api-key` 头 (绝不用 Bearer)。
+
+```yaml
+backends:
+    azure-openai:
+        type: "azure-openai"
+        base_url: "https://your-resource.openai.azure.com"
+        api_key_env: "AZURE_OPENAI_API_KEY"   # 密钥不落 config.yaml
+        api_version: "2024-10-21"             # 留空时的默认值
+        deployments:                          # 请求模型 -> deployment 名
+            gpt-4o-exam: "exam-gpt4o"
+        models:
+            - "gpt-4o-exam"
+        enabled: true
+```
+
+- **Deployment 映射**:`deployments` 中的条目为请求模型钉死所服务的 deployment;未映射的模型直接用请求模型 id 作为 deployment 名 (1:1 别名零配置)。配合 `models.aliases`/`models.supply` 可按模型版本完整控制路由。
+- **model_version**:Azure 会在响应中报告 deployment 背后的实际模型;网关将其透出为 chat 响应与每个流式 chunk 上的 `model_version` (`model` 保持为请求的 id),下游审计记录 `(trace_id, prompt_version, model_version)` 由此可用。
+- **密钥来源**:优先 `api_key_env` (或 `AZURE_OPENAI_API_KEY` 兜底),密钥经 fusion-identity 签发,绝不写入应用配置。
+- Embeddings 走 deployment embeddings 路径;健康检查探测 `/openai/models`;不支持 `rerank`。
+
 ## 音频与审核
 
 - `/v1/audio/transcriptions`:multipart 表单上传,委托 provider 的 `Transcription()` 方法 (仅云端)
