@@ -105,6 +105,14 @@ type AuthConfig struct {
     // KeyRotationGrace (#262 K2): after a key rotation, the previous key
     // stays valid until this window elapses (dual-active grace). Default 24h.
     KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
+    // AcceptBackendKeys (#327): opt-in — also accept a Bearer/X-API-Key
+    // credential that matches a configured local backend's api_key (e.g.
+    // fusion-mlx's fg-admin-key from ~/.fusion-mlx/settings.json). Lets
+    // same-machine clients reuse the key fusion-mlx itself accepts instead
+    // of provisioning a separate gateway key. Default OFF: a backend key
+    // grants full gateway access (cloud routing included), so it stays
+    // operator-explicit.
+    AcceptBackendKeys bool `mapstructure:"accept_backend_keys"`
 }
 
 type RateLimitConfig struct {

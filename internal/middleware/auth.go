@@ -26,11 +26,17 @@ type keyLookupStore interface {
     GetTeamByKey(apiKey string) (*store.Team, error)
 }
 
+// BackendKeyMatcher resolves a credential against a source outside the
+// gateway's own key stores. #327: used to accept a local backend's api_key
+// (e.g. fusion-mlx's fg-admin-key) when auth.accept_backend_keys is enabled —
+// the operator opts in because a backend key then grants full gateway access.
+type BackendKeyMatcher func(key string) *config.AuthKeyConfig
+
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
     return APIKeyAuthWithStore(cfg, nil)
 }
 
-func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Handler) http.Handler {
+func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...BackendKeyMatcher) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             ctx, p := EnsurePrincipal(r.Context())
@@ -88,6 +94,22 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore) func(http.Ha
                 }
                 if kc, ok := lookupKeyByHash(st, key, grace); ok {
                     matchedKey = kc
+                }
+            }
+
+            // #327: optional backend-key matchers run last, only when the
+            // credential is not a gateway-issued key. A hit authenticates as a
+            // legacy full-access key (empty scopes) named after the backend.
+            if matchedKey == nil {
+                for _, match := range matchers {
+                    if match == nil {
+                        continue
+                    }
+                    if kc := match(key); kc != nil {
+                        slog.Info("backend api key authenticated", "path", r.URL.Path, "key_name", kc.Name)
+                        matchedKey = kc
+                        break
+                    }
                 }
             }
 

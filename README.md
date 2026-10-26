@@ -205,6 +205,7 @@ backends:
 | `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `routing.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
 | `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
 | `/v1/models/{id}/unload` | POST | Unload model (intercepted → model-hub `POST /api/v1/models/{id}/serve`) |
+| `/v1/laya/*` | GET/POST | Laya surface routes proxied verbatim to fusion-mlx (`/v1/laya/status`, `/v1/laya/decide`) so gateway-mode clients (fusion-bench) need no direct :11434 exception (#327). fg-key auth; backend credentials injected. |
 | `/health` | GET | Full health check with backend status. `backends.fusion-mlx` carries `{healthy, model_loaded, loaded_models}` from the authoritative fusion-mlx `/health` endpoint; a live process with no model loaded is reported as `degraded` (not a false green, #59). |
 | `/healthz` | GET | Liveness probe |
 | `/readyz` | GET | Readiness probe (circuit breaker + health + GPU memory + queue depth + success rate). Adds a fusion-mlx `model_loaded` check — when no model is resident the local path reports `not_ready`/`degraded` with `local_reasons:["model_not_loaded"]` even if the process responds 200 (#59). |
@@ -1041,6 +1042,7 @@ Gateway-issued `fk-` credentials for external callers — self-service scope gra
 - **Rotation grace**: `auth.key_rotation_grace` (default `24h`). Rotating records `key_prev_hash` + `key_rotated_at`; both old and new keys authenticate during the window (dual-active), after which the old key 401s. Same semantics as the K1 `fm-` module service keys.
 - **Tenant binding**: optional `tenant` at create binds the key to a team (`BindKeyToTeam`); the request path derives `X-Fusion-Tenant` from that binding and never trusts a client-supplied header.
 - **Identity propagation**: every authenticated `/v1/*` request carries `X-Fusion-Principal: <key name>` downstream, so upstream modules can attribute callers without re-authenticating.
+- **Backend keys** (#327, opt-in): `auth.accept_backend_keys: true` also accepts a LOCAL backend's `api_key` (e.g. fusion-mlx's admin key) as a full-access gateway credential, so same-machine clients (fusion-bench gateway-default mode) can reuse the key fusion-mlx itself accepts. Only local backends qualify — cloud provider keys never match. Default off: a backend key grants full gateway access, so it stays operator-explicit.
 - **Revocation is soft**: keys are never hard-deleted (audit + preserve-keys policy); a `revoked` status fails auth immediately.
 
 ### MasterKey
