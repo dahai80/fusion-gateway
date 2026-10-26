@@ -531,6 +531,13 @@ type BackendConfig struct {
     // stalled ALL requests to that backend. 0 = use the factory default (30s);
     // set lower for latency-sensitive backends, higher for slow first-token LLMs.
     ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
+    // APIVersion (#324): Azure OpenAI api-version query parameter for the
+    // azure-openai backend type. Default "2024-10-21" when empty.
+    APIVersion string `mapstructure:"api_version"`
+    // Deployments (#324): azure-openai requested-model -> deployment-name
+    // mapping. Unmapped models use the request model id verbatim as the
+    // deployment name. Lets business apps pin a deployment per model version.
+    Deployments map[string]string `mapstructure:"deployments"`
 }
 
 type IOKitConfig struct {

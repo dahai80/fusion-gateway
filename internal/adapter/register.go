@@ -54,6 +54,9 @@ func init() {
     providerFactories["foundry"] = func(name string, bc config.BackendConfig, snap *config.ConfigSnapshot) Provider {
         return NewFoundryProvider(name, bc)
     }
+    providerFactories["azure-openai"] = func(name string, bc config.BackendConfig, snap *config.ConfigSnapshot) Provider {
+        return NewAzureOpenAIProvider(name, bc)
+    }
     providerFactories["volcengine"] = func(name string, bc config.BackendConfig, snap *config.ConfigSnapshot) Provider {
         return NewVolcengineProvider(name, bc)
     }
