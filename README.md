@@ -1896,6 +1896,12 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.71 — Anthropic→OpenAI tool conversion fix
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#319 /v1/messages tool loop** | `AnthropicToOpenAIChatRequest` is now a real translation: assistant `tool_use` blocks become OpenAI `tool_calls`; user `tool_result` blocks become `role:"tool"` messages with `tool_call_id` and flattened string content; `tool_choice` maps `any`→`required`, named-tool→named-function. Fixes Claude Code infinite tool re-call loops against openai-compatible local backends (engine chat template silently dropped the non-OpenAI parts). |
+
 ### v0.9.70 — Cloud-overflow productization + Insights timeline + model-hub auth fix
 
 | # | Item | Details |

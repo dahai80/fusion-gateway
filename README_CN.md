@@ -1635,6 +1635,12 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.71 — Anthropic→OpenAI 工具转换修复
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#319 /v1/messages 工具循环** | `AnthropicToOpenAIChatRequest` 现为真正的转换:assistant `tool_use` 块转为 OpenAI `tool_calls`;user `tool_result` 块转为带 `tool_call_id` 和扁平字符串内容的 `role:"tool"` 消息;`tool_choice` 映射 `any`→`required`、具名工具→具名函数。修复 Claude Code 对 openai-compatible 本地后端的无限工具重调用循环(引擎 chat template 静默丢弃非 OpenAI 形状的部分)。 |
+
 ### v0.9.70 — 云端溢流产品化 + Insights 时间线 + model-hub 鉴权修复
 
 | # | 条目 | 详情 |
