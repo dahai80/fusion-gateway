@@ -115,13 +115,17 @@ func TestPool_GetModelHub(t *testing.T) {
 }
 
 func TestFusionModelHubProvider_ReverseProxyForwards(t *testing.T) {
+	var gotAPIKey, gotBearer, gotSource string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		gotBearer = r.Header.Get("Authorization")
+		gotSource = r.Header.Get("X-Fusion-Source")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer ts.Close()
 
-	cfg := config.BackendConfig{Type: "fusion-model-hub", BaseURL: ts.URL, Enabled: true}
+	cfg := config.BackendConfig{Type: "fusion-model-hub", BaseURL: ts.URL, APIKey: "hub-secret", Enabled: true}
 	p := NewFusionModelHubProvider("model-hub", cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
@@ -130,5 +134,16 @@ func TestFusionModelHubProvider_ReverseProxyForwards(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+	// #328/#316: the hub's auth middleware reads X-API-Key, not Bearer — both
+	// headers must reach the upstream request or proxied /api/v1/* calls 401.
+	if gotAPIKey != "hub-secret" {
+		t.Errorf("upstream X-API-Key = %q, want hub-secret", gotAPIKey)
+	}
+	if gotBearer != "Bearer hub-secret" {
+		t.Errorf("upstream Authorization = %q, want Bearer hub-secret", gotBearer)
+	}
+	if gotSource != "gateway" {
+		t.Errorf("upstream X-Fusion-Source = %q, want gateway", gotSource)
 	}
 }
