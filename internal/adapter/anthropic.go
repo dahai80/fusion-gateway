@@ -704,8 +704,75 @@ func AnthropicToOpenAIChatRequest(antReq *AnthropicRequest) *ChatRequest {
     }
 
     for _, antMsg := range antReq.Messages {
-        content := anthropicBlocksToContent(antMsg.Content)
-        chatReq.Messages = append(chatReq.Messages, ChatMessage{Role: antMsg.Role, Content: content})
+        switch antMsg.Role {
+        case "assistant":
+            // #319: a real conversion. Anthropic assistant tool_use blocks
+            // must become OpenAI tool_calls, not generic content parts — the
+            // engine's chat template rejects non-OpenAI part types and drops
+            // them, leaving the model blind to its own tool calls.
+            var textParts []string
+            var toolCalls []interface{}
+            var extraBlocks []AnthropicContentBlock
+            for _, b := range antMsg.Content {
+                switch b.Type {
+                case "text":
+                    textParts = append(textParts, b.Text)
+                case "tool_use":
+                    toolCalls = append(toolCalls, map[string]interface{}{
+                        "id":   b.ID,
+                        "type": "function",
+                        "function": map[string]interface{}{
+                            "name":      b.Name,
+                            "arguments": string(b.Input),
+                        },
+                    })
+                default:
+                    extraBlocks = append(extraBlocks, b)
+                }
+            }
+            content := interface{}(strings.Join(textParts, ""))
+            if len(extraBlocks) > 0 {
+                content = anthropicBlocksToContent(append(
+                    []AnthropicContentBlock{{Type: "text", Text: strings.Join(textParts, "")}},
+                    extraBlocks...,
+                ))
+            }
+            msg := ChatMessage{Role: "assistant", Content: content}
+            if len(toolCalls) > 0 {
+                msg.ToolCalls = toolCalls
+            }
+            chatReq.Messages = append(chatReq.Messages, msg)
+        case "user":
+            // #319: Anthropic carries tool results in user-message tool_result
+            // blocks; OpenAI needs one role:"tool" message per result with
+            // tool_call_id, placed right after the assistant tool_calls
+            // message. Remaining blocks stay in a trailing user message.
+            var toolMsgs []ChatMessage
+            var remaining []AnthropicContentBlock
+            for _, b := range antMsg.Content {
+                if b.Type == "tool_result" {
+                    toolMsgs = append(toolMsgs, ChatMessage{
+                        Role:       "tool",
+                        ToolCallID: b.ToolUseID,
+                        Content:    anthropicToolResultContent(b),
+                    })
+                    continue
+                }
+                remaining = append(remaining, b)
+            }
+            chatReq.Messages = append(chatReq.Messages, toolMsgs...)
+            if len(remaining) > 0 {
+                chatReq.Messages = append(chatReq.Messages, ChatMessage{
+                    Role:    "user",
+                    Content: anthropicBlocksToContent(remaining),
+                })
+            } else if len(toolMsgs) == 0 {
+                chatReq.Messages = append(chatReq.Messages, ChatMessage{Role: "user", Content: ""})
+            }
+        default:
+            content := anthropicBlocksToContent(antMsg.Content)
+            chatReq.Messages = append(chatReq.Messages, ChatMessage{Role: antMsg.Role, Content: content})
+        }
     }
 
     if len(antReq.Tools) > 0 {
@@ -722,8 +789,67 @@ func AnthropicToOpenAIChatRequest(antReq *AnthropicRequest) *ChatRequest {
         }
         chatReq.Tools = tools
     }
-    if antReq.ToolChoice != nil { chatReq.ToolChoice = antReq.ToolChoice }
+    if antReq.ToolChoice != nil { chatReq.ToolChoice = anthropicToolChoiceToOpenAI(antReq.ToolChoice) }
     return chatReq
+}
+
+// anthropicToolResultContent flattens a tool_result block's content into the
+// string OpenAI role:"tool" messages require (#319). Text parts concatenate;
+// non-text parts (images) become a placeholder so the model at least knows a
+// part existed.
+func anthropicToolResultContent(b AnthropicContentBlock) string {
+    switch v := b.ACContent.(type) {
+    case nil:
+        return ""
+    case string:
+        return v
+    case []interface{}:
+        var parts []string
+        for _, item := range v {
+            m, ok := item.(map[string]interface{})
+            if !ok {
+                continue
+            }
+            if typ, _ := m["type"].(string); typ == "text" {
+                if text, ok := m["text"].(string); ok {
+                    parts = append(parts, text)
+                }
+            } else {
+                parts = append(parts, fmt.Sprintf("[%s omitted]", typ))
+            }
+        }
+        return strings.Join(parts, "\n")
+    default:
+        raw, err := json.Marshal(b.ACContent)
+        if err != nil {
+            return ""
+        }
+        return string(raw)
+    }
+}
+
+// anthropicToolChoiceToOpenAI maps Anthropic tool_choice to the OpenAI shape
+// (#319). Anthropic {"type":"any"} has no OpenAI equivalent — "required" is
+// the closest; {"type":"tool","name":...} becomes the named-function form.
+func anthropicToolChoiceToOpenAI(choice interface{}) interface{} {
+    m, ok := choice.(map[string]interface{})
+    if !ok {
+        return choice
+    }
+    switch m["type"] {
+    case "auto":
+        return "auto"
+    case "any":
+        return "required"
+    case "tool":
+        name, _ := m["name"].(string)
+        return map[string]interface{}{
+            "type":     "function",
+            "function": map[string]interface{}{"name": name},
+        }
+    default:
+        return choice
+    }
 }
 
 func anthropicBlocksToContent(blocks []AnthropicContentBlock) interface{} {
