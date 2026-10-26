@@ -180,6 +180,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     if r.Body != nil {
         r.Body = http.MaxBytesReader(w, r.Body, p.bodyCap)
     }
+    // Module entry documents (SPA index.html) must never be cached: a stale
+    // cached entry page pins an old bundle hash (and any baked-in theme
+    // defaults) regardless of what the module currently serves. Hashed
+    // /assets/ responses keep their own immutable caching upstream.
+    // Navigation check mirrors server.spaFallbackRequest (GET/HEAD + HTML
+    // Accept) — inlined because it lives in the server package.
+    if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+        strings.Contains(r.Header.Get("Accept"), "text/html") {
+        w.Header().Set("Cache-Control", "no-store, max-age=0")
+    }
     rp.ServeHTTP(w, r)
 }
 
