@@ -69,6 +69,9 @@ cp config.example.yaml config.yaml
 | `routing.fallback.context_window_fallback` | {} | 模型 → 更大模型的映射,用于上下文溢出回退 |
 | `routing.fallback.enabled` | false | 启用下方 `model_mapping`(别名 → 云端模型 id) |
 | `routing.fallback.model_mapping` | {} | 将客户端/SDK 模型别名(如 `claude-opus-4-7`)映射到云端后端真实模型 id(如 `glm5.2`);在转发前应用于 `/v1/messages` 和 `/v1/chat/completions`(避免上游 400 → 502 "response stopped arriving",#52) |
+| `routing.fallback.overflow.enabled` | true | 允许本地后端请求中途失败时运行时逃逸到云端(默认 fail-open;`false` = fail closed,原样返回本地错误)。见下文"本地优先云端溢流"(#301) |
+| `routing.fallback.overflow.cooldown` | 0 (关闭) | 溢流触发后,在窗口期内将本地/集群决策直接改道云端(reason `overflow_cooldown`),请求不再重复支付已知失效的本地超时延迟 |
+| `routing.fallback.overflow.cost_ceiling` | 0 (不限) | 每日(UTC)溢流累计成本上限(美元)。在云端调用前检查、响应成功后记账——越线的那次请求仍会完成;下一次溢流返回明确指出上限的 503,绝不静默回落到已损坏的本地后端 |
 | `cache.enabled` | true | 启用非流式响应的 LRU 缓存 |
 | `cache.backend` | local | 缓存后端:local (LRU) 或 redis |
 | `cache.redis.addr` | localhost:6379 | Redis 地址 (backend=redis 时) |
@@ -311,6 +314,20 @@ web_shell:
 | P6 | 模型可用性 | 本地找不到模型 | 上下文窗口回退 → 集群 → 云端 |
 | P6.5 | 上下文窗口回退 | 本地无该模型但有更大变体 | 路由到更大的本地模型 |
 | P7 | 本地优先 | 所有检查通过 | 路由到本地 |
+
+### 本地优先云端溢流 (#301)
+
+本地优先路由意味着本地后端偶尔会在请求中途失败(引擎挂起、槽位耗尽、超时)。此时网关会**溢流到云端**:请求改用 `routing.fallback.cloud_default` 重试,用户仍能拿到结果而不是死请求。方向是显式的——**只有本地 → 云端**;云端失败绝不会静默重试到本地。
+
+溢流的代价与约束:
+
+- **默认 fail-open。** `routing.fallback.overflow.enabled: true` 保留逃逸通道;设为 `false` 则 fail closed,原样返回本地错误(未开启即不产生云端花费)。
+- **每次溢流都有审计。** 每次触发都会向 `fg_gateway_events` 写入 `cloud_overflow` warn 事件(Admin → Insights → Events),携带触发原因(`local_failure` / `local_slot_full` / `cluster_failure` / `overflow_cooldown`)、源后端、目标后端、模型和成本增量——"这条请求为什么花钱"始终可查。响应携带 `X-Route-Decision: cloud:fallback_from_local` 和 `X-Fusion-Routed: cloud`。
+- **成本受每日上限约束。** `routing.fallback.overflow.cost_ceiling`(美元,UTC 日)在当日溢流累计花费越线后拦截下一次溢流——越线的那次在途请求仍会完成;随后的请求得到明确指出上限的 `503` 外加 `ceiling_reached` 审计事件,而不是静默回落到已损坏的本地后端。成本按基础模型定价计算(计费加价属于计费侧,不进入策略)。
+- **冷却期阻止重复付费。** 没有冷却期时,本地故障期间每个请求都要先支付一遍本地超时延迟才能逃逸。`routing.fallback.overflow.cooldown`(时长)在每次溢流后开启窗口;窗口期内本地/集群决策直接改道云端(`reason: overflow_cooldown`),请求立即逃逸。
+- **流式仅在建立阶段错误时溢流。** 首个 token 之后的失败无法透明重试(客户端已收到部分输出),因此流中失败按错误返回;建立阶段失败会溢流,并按保守的仅输入 token 成本估算记账。
+
+三个开关都在 `routing.fallback.overflow` 下,随配置快照热加载,并在加载时校验(时长/金额非负)。
 
 ### 语义意图路由 (D4)
 

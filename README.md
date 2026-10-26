@@ -98,6 +98,9 @@ See `config.example.yaml` for full reference. Key settings:
 | `routing.fallback.context_window_fallback` | {} | Model → larger model mapping for context overflow |
 | `routing.fallback.enabled` | false | Enable `model_mapping` below (alias → cloud model id) |
 | `routing.fallback.model_mapping` | {} | Map client/SDK model aliases (e.g. `claude-opus-4-7`) to the cloud backend's real model id (e.g. `glm5.2`); applied before forwarding on `/v1/messages` and `/v1/chat/completions` (avoids upstream 400 → 502 "response stopped arriving", #52) |
+| `routing.fallback.overflow.enabled` | true | Allow the runtime local→cloud overflow when the local backend fails mid-request (fail-open by default; `false` = fail closed, surface the local error verbatim). See "Local-first cloud overflow" below (#301) |
+| `routing.fallback.overflow.cooldown` | 0 (off) | After an overflow fires, divert local/cluster decisions straight to cloud (reason `overflow_cooldown`) until the window expires — requests stop re-paying the known-bad local timeout before escaping |
+| `routing.fallback.overflow.cost_ceiling` | 0 (unlimited) | Daily (UTC) cumulative overflow cost cap in USD. Checked before the cloud call, charged after success — the crossing request completes; the NEXT overflow returns an explicit 503 naming the ceiling, never a silent fallback to the broken local backend |
 | `cache.enabled` | true | Enable LRU response cache for non-streaming |
 | `cache.backend` | local | Cache backend: local (LRU) or redis |
 | `cache.redis.addr` | localhost:6379 | Redis address (when backend=redis) |
@@ -381,6 +384,20 @@ Priority chain (high to low), three-tier fallback: **local → cluster → cloud
 | P6 | Model availability | Model not found locally | Context window fallback → cluster → cloud |
 | P6.5 | Context window fallback | Model not local but larger variant is | Route to larger local model |
 | P7 | Local priority | All checks passed | Route to local |
+
+### Local-first cloud overflow (#301)
+
+Local-first routing means the local backend occasionally fails mid-request (engine hang, slot exhaustion, timeout). When that happens the gateway **overflows to cloud**: the request is retried against `routing.fallback.cloud_default` so the user still gets an answer instead of a dead request. Direction is explicit — **local → cloud only**; a cloud failure never silently retries against local.
+
+What an overflow costs and how it is bounded:
+
+- **Fail direction is fail-open by default.** `routing.fallback.overflow.enabled: true` preserves the escape hatch; set `false` to fail closed and surface the local error verbatim (no cloud spend without opt-in).
+- **Every overflow is audited.** Each firing lands a `cloud_overflow` warn event in `fg_gateway_events` (Admin → Insights → Events) with the trigger reason (`local_failure` / `local_slot_full` / `cluster_failure` / `overflow_cooldown`), source backend, target backend, model, and cost delta — "why did this request cost money" is always queryable. Responses carry `X-Route-Decision: cloud:fallback_from_local` and `X-Fusion-Routed: cloud`.
+- **Cost is bounded by a daily ceiling.** `routing.fallback.overflow.cost_ceiling` (USD, UTC day) stops the NEXT overflow once today's cumulative overflow spend crosses it — the in-flight request that crosses the line still completes; the following one gets an explicit `503` naming the ceiling plus a `ceiling_reached` audit event, not a silent fallback to the broken local backend. Cost uses base model pricing (billing markup is a billing concern, not a policy input).
+- **Cooldown stops repeat tax.** Without a cooldown, every request during a local outage re-pays the local timeout latency before escaping. `routing.fallback.overflow.cooldown` (duration) arms a window on each overflow; while armed, local/cluster decisions divert straight to cloud (`reason: overflow_cooldown`) so requests escape immediately.
+- **Streams overflow on establish errors only.** A failure after the first token cannot be retried transparently (the client already received partial output), so mid-stream failures surface as errors; establish-phase failures overflow with a conservative input-only cost estimate.
+
+All three knobs live under `routing.fallback.overflow`, hot-reload with the config snapshot, and are validated at load time (non-negative durations/amounts).
 
 ### Semantic Intent Routing (D4)
 
