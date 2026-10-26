@@ -1,7 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
-import { Card, Typography, Select, Input, Table, Tag, Button, Popconfirm, Modal, InputNumber, message } from "antd";
+import { Card, Typography, Select, Input, Table, Tag, Button, Popconfirm, Modal, InputNumber, message, Spin, Alert } from "antd";
+import {
+    ComposedChart,
+    Bar,
+    Line,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip as RTooltip,
+    Legend,
+    ResponsiveContainer,
+} from "recharts";
 import client from "../../api/client";
-import { isUnavailable, UnavailableAlert } from "./shared";
+import { isUnavailable, UnavailableAlert, PERIOD_OPTIONS, windowFor } from "./shared";
 
 const { Title } = Typography;
 
@@ -22,6 +33,15 @@ interface Anomaly {
 const severityColor = (s: string) =>
     s === "high" ? "red" : s === "warn" ? "orange" : "blue";
 
+interface TimelineBucket {
+    bucket: string;
+    requests: number;
+    errors: number;
+    breaker_events: number;
+    sys_mem_ratio: number;
+    mlx_mem_ratio: number;
+}
+
 export default function Anomalies() {
     const [messageApi, messageCtx] = message.useMessage();
     const [loading, setLoading] = useState(true);
@@ -31,6 +51,30 @@ export default function Anomalies() {
     const [kind, setKind] = useState("");
     const [muteTarget, setMuteTarget] = useState<Anomaly | null>(null);
     const [muteDays, setMuteDays] = useState(7);
+    const [timelinePeriod, setTimelinePeriod] = useState(24);
+    const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
+    const [timelineLoading, setTimelineLoading] = useState(true);
+
+    useEffect(() => {
+        let cancelled = false;
+        setTimelineLoading(true);
+        const granularity = timelinePeriod > 72 ? "day" : "hour";
+        client.get("/insights/timeline", {
+            params: { ...windowFor(timelinePeriod), granularity },
+        })
+            .then((res) => {
+                if (!cancelled) setTimeline((res.data.series || []) as TimelineBucket[]);
+            })
+            .catch(() => {
+                if (!cancelled) setTimeline([]);
+            })
+            .finally(() => {
+                if (!cancelled) setTimelineLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [timelinePeriod]);
 
     const fetchAnomalies = useCallback(async () => {
         setLoading(true);
@@ -101,6 +145,53 @@ export default function Anomalies() {
                     />
                 </div>
             </div>
+            <Card
+                title="Timeline — requests / errors / breaker events / memory"
+                extra={
+                    <Select
+                        value={timelinePeriod}
+                        onChange={setTimelinePeriod}
+                        style={{ width: 120 }}
+                        options={PERIOD_OPTIONS}
+                    />
+                }
+                style={{ marginBottom: 24 }}
+            >
+                {timelineLoading ? (
+                    <div style={{ textAlign: "center", padding: 60 }}>
+                        <Spin size="large" />
+                    </div>
+                ) : timeline.length === 0 ? (
+                    <Alert
+                        type="info"
+                        showIcon
+                        message="No traffic, events, or hardware samples in this window."
+                    />
+                ) : (
+                    <ResponsiveContainer width="100%" height={320}>
+                        <ComposedChart
+                            data={timeline.map((b) => ({
+                                ...b,
+                                time: b.bucket.replace("T", " ").slice(5, 16),
+                                sys_mem_pct: Math.round(b.sys_mem_ratio * 1000) / 10,
+                                mlx_mem_pct: Math.round(b.mlx_mem_ratio * 1000) / 10,
+                            }))}
+                        >
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="time" minTickGap={60} />
+                            <YAxis yAxisId="traffic" allowDecimals={false} />
+                            <YAxis yAxisId="mem" orientation="right" unit="%" domain={[0, 100]} />
+                            <RTooltip />
+                            <Legend />
+                            <Bar yAxisId="traffic" dataKey="requests" name="requests" fill="#1677ff" />
+                            <Bar yAxisId="traffic" dataKey="errors" name="errors" fill="#ff4d4f" />
+                            <Bar yAxisId="traffic" dataKey="breaker_events" name="breaker events" fill="#faad14" />
+                            <Line yAxisId="mem" type="monotone" dataKey="sys_mem_pct" name="system mem %" stroke="#722ed1" strokeWidth={1.5} dot={false} />
+                            <Line yAxisId="mem" type="monotone" dataKey="mlx_mem_pct" name="MLX mem %" stroke="#13c2c2" strokeWidth={1.5} dot={false} />
+                        </ComposedChart>
+                    </ResponsiveContainer>
+                )}
+            </Card>
             <Card>
                 <Table
                     dataSource={rows}
