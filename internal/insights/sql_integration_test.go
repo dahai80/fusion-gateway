@@ -49,7 +49,7 @@ func TestSQL_CompareAgainstLiveDB(t *testing.T) {
     svc := requireTestDSN(t)
     ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
     defer cancel()
-    resp, err := svc.Compare(ctx, "", "", "")
+    resp, err := svc.Compare(ctx, "", "", "", 0, 0, false)
     if err != nil {
         t.Fatalf("compare query: %v", err)
     }

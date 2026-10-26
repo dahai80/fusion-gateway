@@ -26,6 +26,7 @@ func (s *Sink) sweepOnce(ctx context.Context) {
     tables := []partitionedTable{
         {name: "fg_request_logs", retentionDays: s.cfg.Retention.RequestLogsDays},
         {name: "fg_request_payloads", retentionDays: s.cfg.Retention.RequestPayloadsDays},
+        {name: "fg_stream_chunks", retentionDays: s.cfg.Retention.StreamChunksDays},
     }
     now := time.Now().UTC()
     for _, t := range tables {
@@ -104,6 +105,19 @@ func (s *Sink) ensurePartition(ctx context.Context, table string, day time.Time)
     return err
 }
 
+// partitionDay extracts the window-start date from a daily partition name
+// (<table>_YYYY_MM_DD). Second return is false for non-daily names.
+func partitionDay(table, relname string) (time.Time, bool) {
+    if len(relname) <= len(table)+1 {
+        return time.Time{}, false
+    }
+    start, err := time.Parse("2006_01_02", relname[len(table)+1:])
+    if err != nil {
+        return time.Time{}, false
+    }
+    return start, true
+}
+
 // dropExpiredPartitions lists the table's partitions and DROPs each whose
 // window upper bound is older than horizon. DROP is O(1) with no bloat — the
 // plan §4.3 retention mechanism.
@@ -113,11 +127,10 @@ func (s *Sink) dropExpiredPartitions(ctx context.Context, table string, horizon 
         return nil
     }
     pool := cw.pool
-    prefix := table + "_20"
     rows, err := pool.Query(ctx,
         `SELECT c.relname FROM pg_class c JOIN pg_inherits i ON i.inhrelid = c.oid
          WHERE i.inhparent = $1::regclass AND c.relname LIKE $2`,
-        table, prefix+"%")
+        table, table+"_20%")
     if err != nil {
         return err
     }
@@ -128,10 +141,12 @@ func (s *Sink) dropExpiredPartitions(ctx context.Context, table string, horizon 
         if err := rows.Scan(&relname); err != nil {
             return err
         }
-        // Partition name suffix _YYYY_MM_DD is the window start date.
-        dayStr := relname[len(prefix):] + "T00:00:00Z"
-        start, err := time.Parse("2006_01_02T15:04:05Z", dayStr)
-        if err != nil {
+        // Partition name suffix _YYYY_MM_DD is the window start date. The LIKE
+        // pattern keeps only date-suffixed names; partitionDay re-slices from
+        // the table prefix (NOT the "_20"-extended LIKE prefix — that chopped
+        // the century off the year and silently skipped every DROP).
+        start, ok := partitionDay(table, relname)
+        if !ok {
             continue
         }
         if start.Before(horizon.AddDate(0, 0, -1)) {

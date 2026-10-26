@@ -9,7 +9,6 @@ package persist
 import (
     "context"
     "errors"
-    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -18,15 +17,6 @@ import (
 // entry was discarded (the oldest, keep-new policy). Callers log-and-move-on:
 // persistence is observability, never a request-path dependency.
 var ErrDropped = errors.New("persist: queue full, entry dropped")
-
-// ChunkTiming is one observed stream-chunk gap for the chunks table
-// (plan §4.1 fg_stream_chunks). Optional per entry.
-type ChunkTiming struct {
-    Seq     int
-    TS      time.Time
-    DeltaMS float64
-    Bytes   int
-}
 
 // Entry is one fully-assembled persistence row: the request log plus the
 // captured bodies. Assembled ONCE at request finalize (all exits — success,
@@ -50,8 +40,8 @@ type Entry struct {
     // (non-stream) or "text/event-stream" (raw frames, not reassembled).
     RespRawMime string
 
-    // Chunks is optional (capture.stream_chunks, default off in the plan).
-    Chunks []ChunkTiming
+    // Log.Chunks carries the optional per-chunk timings (capture.stream_chunks,
+    // default off, plan §4.1 fg_stream_chunks).
 }
 
 // Sink is the persistence backend contract. Implementations must be safe for

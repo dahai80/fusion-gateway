@@ -1206,6 +1206,15 @@ func (s *Server) enqueuePersistEntry(entry *store.RequestLog, r *http.Request, r
     if pcfg.Capture.StripAuthFields {
         reqBody = middleware.StripAuthFields(reqBody)
     }
+    if pcfg.Capture.ImagePlaceholder {
+        reqBody = middleware.PlaceholderImages(reqBody)
+    }
+    // G6: stamp contains_pii with the guard SSOT patterns — detection runs
+    // regardless of the pii middleware config (Enabled gates request
+    // handling, not evidence). Both directions are scanned: the model may
+    // echo PII into the response.
+    entry.ContainsPII = middleware.ScanGuardPII(string(reqBody)) ||
+        middleware.ScanGuardPII(string(capRes.RespBody))
     // Stream responses accumulate raw SSE frames; the mime column tells the
     // Explorer (P3) how to render them.
     mime := rec.Header().Get("Content-Type")

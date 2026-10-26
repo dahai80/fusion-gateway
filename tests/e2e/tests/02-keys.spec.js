@@ -1,9 +1,10 @@
 // Key management page — covers create (all inputs: name, models, modules,
-// quota, rpm, tpm, budget, status), list, edit, and DELETE.
+// quota, rpm, tpm, budget, status), list, edit, and DELETE (soft-delete/F8).
 //
 // CRITICAL runtime invariant: after creating a key it must authenticate
 // against /v1/models; after DELETING it the same key must be rejected (401).
-// This is the exact end-to-end responsibility the user demanded.
+// DELETE revokes (Status=disabled) but keeps the entry for audit — the row
+// stays with a Disabled tag; the auth rejection is the real contract.
 //
 // Every temp key created here is deleted in cleanup so nothing leaks.
 
@@ -66,9 +67,20 @@ test.describe('key management', () => {
         const row = page.locator('.ant-table-row', { hasText: TMP + '-auth' }).first();
         await expect(row).toBeVisible({ timeout: 10_000 });
         await row.getByRole('button', { name: /delete|删除|remove/i }).click();
+        // antd Popconfirm renders the confirm button async — a bare isVisible()
+        // probe races the open animation and can skip the click, leaving the
+        // key alive. Wait for it deterministically.
         const confirm = page.getByRole('button', { name: /^ok|确定|确认|yes$/i }).last();
-        if (await confirm.isVisible().catch(() => false)) await confirm.click();
-        await page.waitForTimeout(1500);
+        await expect(confirm).toBeVisible({ timeout: 5000 });
+        await confirm.click();
+        // F8: DELETE is a SOFT-delete — the key is disabled (revoked) but kept
+        // in the list for audit/re-enable. The row must flip to the Disabled
+        // status tag, not disappear.
+        await expect(
+            page
+                .locator('.ant-table-row', { hasText: TMP + '-auth' })
+                .filter({ hasText: 'Disabled' })
+        ).toBeVisible({ timeout: 10_000 });
 
         // --- runtime invariant 2: deleted key is rejected ---
         const gone = await page.request.get(`${BASE}/v1/models`, {

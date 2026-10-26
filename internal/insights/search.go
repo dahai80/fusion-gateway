@@ -54,6 +54,7 @@ type SearchRow struct {
     TokensPerSec float64 `json:"tokens_per_sec"`
     ClientIP     string  `json:"client_ip,omitempty"`
     UserAgent    string  `json:"user_agent,omitempty"`
+    ContainsPII  bool    `json:"contains_pii"`
 }
 
 // SearchResponse is the Explorer list + total for pagination.
@@ -124,7 +125,8 @@ func (s *Service) Search(ctx context.Context, sq SearchQuery) (*SearchResponse, 
                COALESCE(output_tokens,0), COALESCE(total_tokens,0),
                COALESCE(cost,0), COALESCE(duration_ms,0), COALESCE(ttft_ms,0),
                COALESCE(tpot_ms,0), COALESCE(chunk_count,0),
-               COALESCE(tokens_per_sec,0), COALESCE(client_ip,''), COALESCE(user_agent,'')
+               COALESCE(tokens_per_sec,0), COALESCE(client_ip,''), COALESCE(user_agent,''),
+               contains_pii
         FROM fg_request_logs
         WHERE `+where+`
         ORDER BY ts DESC
@@ -145,7 +147,7 @@ func (s *Service) Search(ctx context.Context, sq SearchQuery) (*SearchResponse, 
             &r.RouteReason, &r.StatusCode, &r.IsSuccess, &r.ErrorMessage,
             &r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.Cost,
             &r.DurationMS, &r.TTFTMS, &r.TPotMS, &r.ChunkCount, &r.TokensPerSec,
-            &r.ClientIP, &r.UserAgent); err != nil {
+            &r.ClientIP, &r.UserAgent, &r.ContainsPII); err != nil {
             return nil, err
         }
         r.TS = ts.Format(time.RFC3339Nano)
@@ -170,7 +172,8 @@ func (s *Service) searchAll(ctx context.Context, sq SearchQuery, from, to time.T
                COALESCE(output_tokens,0), COALESCE(total_tokens,0),
                COALESCE(cost,0), COALESCE(duration_ms,0), COALESCE(ttft_ms,0),
                COALESCE(tpot_ms,0), COALESCE(chunk_count,0),
-               COALESCE(tokens_per_sec,0), COALESCE(client_ip,''), COALESCE(user_agent,'')
+               COALESCE(tokens_per_sec,0), COALESCE(client_ip,''), COALESCE(user_agent,''),
+               contains_pii
         FROM fg_request_logs
         WHERE ts >= $1 AND ts < $2
         ORDER BY ts DESC
@@ -190,7 +193,7 @@ func (s *Service) searchAll(ctx context.Context, sq SearchQuery, from, to time.T
             &r.RouteReason, &r.StatusCode, &r.IsSuccess, &r.ErrorMessage,
             &r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.Cost,
             &r.DurationMS, &r.TTFTMS, &r.TPotMS, &r.ChunkCount, &r.TokensPerSec,
-            &r.ClientIP, &r.UserAgent); err != nil {
+            &r.ClientIP, &r.UserAgent, &r.ContainsPII); err != nil {
             return nil, err
         }
         r.TS = ts.Format(time.RFC3339Nano)
@@ -222,6 +225,40 @@ type Payload struct {
     ReqTruncated bool            `json:"req_truncated"`
     RespTruncated bool           `json:"resp_truncated"`
     RespRawMime  string          `json:"resp_raw_mime,omitempty"`
+}
+
+// ChunkRow is one per-chunk timing record from fg_stream_chunks (G10).
+type ChunkRow struct {
+    Seq     int     `json:"seq"`
+    TS      string  `json:"ts"`
+    DeltaMS float64 `json:"delta_ms"`
+    Bytes   int     `json:"bytes"`
+}
+
+// StreamChunks fetches a request's per-chunk timings by row id, ordered by
+// seq. Empty slice (not an error) when the request predates chunk capture or
+// capture.stream_chunks was off — the caller renders the tab gray.
+func (s *Service) StreamChunks(ctx context.Context, id string) ([]ChunkRow, error) {
+    rows, err := s.pool.Query(ctx, `
+        SELECT seq, ts, delta_ms, bytes
+        FROM fg_stream_chunks
+        WHERE id = $1
+        ORDER BY seq`, id)
+    if err != nil {
+        return nil, fmt.Errorf("stream chunks %s: %w", id, err)
+    }
+    defer rows.Close()
+    out := []ChunkRow{}
+    for rows.Next() {
+        var c ChunkRow
+        var ts time.Time
+        if err := rows.Scan(&c.Seq, &ts, &c.DeltaMS, &c.Bytes); err != nil {
+            return nil, fmt.Errorf("stream chunks %s: %w", id, err)
+        }
+        c.TS = ts.Format(time.RFC3339Nano)
+        out = append(out, c)
+    }
+    return out, rows.Err()
 }
 
 // Payload fetches a single request's captured bodies by row id.

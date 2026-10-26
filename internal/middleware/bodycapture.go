@@ -4,9 +4,11 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "fmt"
     "io"
     "log/slog"
     "net/http"
+    "strings"
 )
 
 type captureContextKey string
@@ -130,6 +132,76 @@ func StripAuthFields(body []byte) []byte {
         return body
     }
     return out
+}
+
+// imagePlaceholderFor renders the "<image:NNNB>" marker for a replaced
+// inline image payload (plan §5.1) — the byte count preserves size evidence
+// for the Explorer without storing re-derivable bytes.
+func imagePlaceholderFor(s string) string {
+    return fmt.Sprintf("<image:%dB>", len(s))
+}
+
+// PlaceholderImages swaps inline base64 image payloads in a JSON chat
+// request body for "<image:NNNB>" markers before persist (plan §5.1
+// capture.image_placeholder). Covers both wire shapes: OpenAI
+// messages[].content[].image_url.url ("data:...;base64,...") and Anthropic
+// messages[].content[].source.data (source.type == "base64"). Best-effort:
+// a non-JSON body or absent image blocks pass through untouched.
+func PlaceholderImages(body []byte) []byte {
+    if len(body) == 0 || body[0] != '{' {
+        return body
+    }
+    var m map[string]any
+    if err := json.Unmarshal(body, &m); err != nil {
+        return body
+    }
+    msgs, ok := m["messages"].([]any)
+    if !ok {
+        return body
+    }
+    changed := false
+    for _, mi := range msgs {
+        msg, ok := mi.(map[string]any)
+        if !ok {
+            continue
+        }
+        parts, ok := msg["content"].([]any)
+        if !ok {
+            continue
+        }
+        for _, pi := range parts {
+            part, ok := pi.(map[string]any)
+            if !ok {
+                continue
+            }
+            if iu, ok := part["image_url"].(map[string]any); ok {
+                if url, ok := iu["url"].(string); ok && strings.HasPrefix(url, "data:") {
+                    iu["url"] = imagePlaceholderFor(url)
+                    changed = true
+                }
+            }
+            if src, ok := part["source"].(map[string]any); ok {
+                if t, _ := src["type"].(string); t == "base64" {
+                    if data, ok := src["data"].(string); ok && data != "" {
+                        src["data"] = imagePlaceholderFor(data)
+                        changed = true
+                    }
+                }
+            }
+        }
+    }
+    if !changed {
+        return body
+    }
+    // SetEscapeHTML(false): "<image:30B>" must stay literal in the stored
+    // payload — json.Marshal would escape it to < and wreck readability.
+    var buf bytes.Buffer
+    enc := json.NewEncoder(&buf)
+    enc.SetEscapeHTML(false)
+    if err := enc.Encode(m); err != nil {
+        return body
+    }
+    return bytes.TrimRight(buf.Bytes(), "\n")
 }
 
 // CaptureResult is the assembled body pair for one finished request.

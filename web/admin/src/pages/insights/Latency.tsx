@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Spin, Select, Typography, Input, Row, Col, Alert } from "antd";
+import { Card, Spin, Select, Switch, Typography, Input, Row, Col, Alert, Tooltip } from "antd";
 import {
     ComposedChart,
     Line,
@@ -7,9 +7,10 @@ import {
     XAxis,
     YAxis,
     CartesianGrid,
-    Tooltip,
+    Tooltip as RTooltip,
     Legend,
     ResponsiveContainer,
+    ReferenceLine,
 } from "recharts";
 import client from "../../api/client";
 import { isUnavailable, UnavailableAlert, PERIOD_OPTIONS, windowFor } from "./shared";
@@ -21,8 +22,10 @@ interface LatencyBucket {
     requests: number;
     ttft_p50_ms: number;
     ttft_p95_ms: number;
+    ttft_p99_ms: number;
     tpot_p50_ms: number;
     tpot_p95_ms: number;
+    tpot_p99_ms: number;
     avg_duration_ms: number;
     error_count: number;
 }
@@ -34,12 +37,21 @@ interface LatencyResponse {
     series: LatencyBucket[];
 }
 
+interface AnomalyMark {
+    id: number;
+    ts: string;
+    kind: string;
+    severity: string;
+}
+
 const granularityFor = (hours: number) => (hours <= 24 ? "hour" : "day");
 
 export default function Latency() {
     const [loading, setLoading] = useState(true);
     const [unavailable, setUnavailable] = useState(false);
     const [data, setData] = useState<LatencyResponse | null>(null);
+    const [anomalies, setAnomalies] = useState<AnomalyMark[]>([]);
+    const [showAnomalies, setShowAnomalies] = useState(true);
     const [period, setPeriod] = useState(24);
     const [backend, setBackend] = useState("");
     const [model, setModel] = useState("");
@@ -66,6 +78,23 @@ export default function Latency() {
             .finally(() => {
                 if (!cancelled) setLoading(false);
             });
+        // Anomaly timeline overlay (plan §15.2): fetched alongside the latency
+        // series so detected anomalies line up against the latency curve.
+        client
+            .get("/anomalies", { params: { limit: 200 } })
+            .then((res) => {
+                if (!cancelled) {
+                    setAnomalies((res.data.anomalies || []).map((a: { id: number; detected_at: string; kind: string; severity: string }) => ({
+                        id: a.id,
+                        ts: a.detected_at,
+                        kind: a.kind,
+                        severity: a.severity,
+                    })));
+                }
+            })
+            .catch(() => {
+                // overlay is best-effort — a failed fetch just drops the marks
+            });
         return () => {
             cancelled = true;
         };
@@ -74,6 +103,22 @@ export default function Latency() {
     if (unavailable) return <UnavailableAlert />;
 
     const series = data?.series || [];
+
+    // Match each anomaly to the latency bucket that contains it so the
+    // ReferenceLine x value is a bucket string the chart actually has.
+    const stepMS = (data?.granularity === "day" ? 24 : 1) * 3600 * 1000;
+    const anomalyLines = showAnomalies
+        ? anomalies
+              .map((a) => {
+                  const at = new Date(a.ts).getTime();
+                  const hit = series.find((b) => {
+                      const start = new Date(b.bucket).getTime();
+                      return at >= start && at < start + stepMS;
+                  });
+                  return hit ? { x: hit.bucket, kind: a.kind, severity: a.severity, id: a.id } : null;
+              })
+              .filter(Boolean) as { x: string; kind: string; severity: string; id: number }[]
+        : [];
 
     return (
         <div>
@@ -108,6 +153,13 @@ export default function Latency() {
                         />
                     </Col>
                     <Col>
+                        <Tooltip title="Overlay detected anomalies on the latency timeline (plan §15.2)">
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                anomalies <Switch size="small" checked={showAnomalies} onChange={setShowAnomalies} />
+                            </span>
+                        </Tooltip>
+                    </Col>
+                    <Col>
                         <Select
                             value={period}
                             onChange={setPeriod}
@@ -132,26 +184,45 @@ export default function Latency() {
                                 <XAxis dataKey="bucket" />
                                 <YAxis yAxisId="left" unit="ms" />
                                 <YAxis yAxisId="right" orientation="right" />
-                                <Tooltip />
+                                <RTooltip />
                                 <Legend />
                                 <Bar yAxisId="right" dataKey="requests" name="requests" fill="#1677ff" fillOpacity={0.15} />
                                 <Line yAxisId="left" type="monotone" dataKey="ttft_p50_ms" name="TTFT p50" stroke="#1677ff" strokeWidth={2} dot={false} />
                                 <Line yAxisId="left" type="monotone" dataKey="ttft_p95_ms" name="TTFT p95" stroke="#ff4d4f" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="ttft_p99_ms" name="TTFT p99" stroke="#722ed1" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
+                                {anomalyLines.map((a) => (
+                                    <ReferenceLine
+                                        key={`ttft-${a.id}`}
+                                        x={a.x}
+                                        stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
+                                        strokeDasharray="2 4"
+                                        label={{ value: a.kind, position: "insideTopLeft", fontSize: 10, fill: a.severity === "high" ? "#ff4d4f" : "#faad14" }}
+                                    />
+                                ))}
                             </ComposedChart>
                         </ResponsiveContainer>
                     </Card>
-                    <Card title="Time Per Output Token (ms)" style={{ marginBottom: 24 }}>
+                    <Card title="Time Per Output Token (ms/token)" style={{ marginBottom: 24 }}>
                         <ResponsiveContainer width="100%" height={320}>
                             <ComposedChart data={series}>
                                 <CartesianGrid strokeDasharray="3 3" />
                                 <XAxis dataKey="bucket" />
                                 <YAxis yAxisId="left" unit="ms" />
                                 <YAxis yAxisId="right" orientation="right" />
-                                <Tooltip />
+                                <RTooltip />
                                 <Legend />
                                 <Bar yAxisId="right" dataKey="error_count" name="errors" fill="#faad14" fillOpacity={0.2} />
                                 <Line yAxisId="left" type="monotone" dataKey="tpot_p50_ms" name="TPOT p50" stroke="#52c41a" strokeWidth={2} dot={false} />
                                 <Line yAxisId="left" type="monotone" dataKey="tpot_p95_ms" name="TPOT p95" stroke="#faad14" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="tpot_p99_ms" name="TPOT p99" stroke="#722ed1" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
+                                {anomalyLines.map((a) => (
+                                    <ReferenceLine
+                                        key={`tpot-${a.id}`}
+                                        x={a.x}
+                                        stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
+                                        strokeDasharray="2 4"
+                                    />
+                                ))}
                             </ComposedChart>
                         </ResponsiveContainer>
                     </Card>

@@ -302,3 +302,27 @@ func TestPIIMiddleware_ScanText_PhoneUS(t *testing.T) {
         }
     }
 }
+
+func TestScanGuardPII(t *testing.T) {
+    slog.Info("test ScanGuardPII")
+    // Detection runs regardless of the pii config — G6 stamps contains_pii
+    // on persisted rows with the same SSOT patterns the middleware uses.
+    cases := []struct {
+        name string
+        text string
+        want bool
+    }{
+        {"empty", "", false},
+        {"plain", `{"model":"m","messages":[{"content":"hello"}]}`, false},
+        {"email", "contact john.doe@example.com now", true},
+        {"credit_card", "card 4111111111111111 exp 12/26", true},
+        {"cc_validator_rejects_nonluhn", "card 1234567812345678 not luhn", false},
+        {"phone_cn", "call 13800138000 today", true},
+        {"bearer_token", "Authorization: Bearer ya29.a0AfH6", true},
+    }
+    for _, c := range cases {
+        if got := ScanGuardPII(c.text); got != c.want {
+            t.Errorf("%s: ScanGuardPII(%q) = %v, want %v", c.name, c.text, got, c.want)
+        }
+    }
+}

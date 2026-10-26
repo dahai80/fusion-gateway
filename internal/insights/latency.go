@@ -11,13 +11,15 @@ type LatencyBucket struct {
     Requests     int64   `json:"requests"`
     TTFTP50MS    float64 `json:"ttft_p50_ms"`
     TTFTP95MS    float64 `json:"ttft_p95_ms"`
+    TTFTP99MS    float64 `json:"ttft_p99_ms"`
     TPOTP50MS    float64 `json:"tpot_p50_ms"`
     TPOTP95MS    float64 `json:"tpot_p95_ms"`
+    TPOTP99MS    float64 `json:"tpot_p99_ms"`
     AvgDuration  float64 `json:"avg_duration_ms"`
     ErrorCount   int64   `json:"error_count"`
 }
 
-// LatencyResponse is the /admin/api/analytics/latency payload.
+// LatencyResponse is the /admin/api/insights/latency payload.
 type LatencyResponse struct {
     From         string         `json:"from"`
     To           string         `json:"to"`
@@ -46,8 +48,10 @@ func (s *Service) Latency(ctx context.Context, fromStr, toStr, gran, backend, mo
                count(*) AS requests,
                COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms), 0),
                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms), 0),
+               COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY ttft_ms), 0),
                COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),
                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),
+               COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),
                COALESCE(avg(duration_ms) FILTER (WHERE ttft_ms > 0), 0),
                count(*) FILTER (WHERE NOT is_success)
         FROM fg_request_logs
@@ -75,7 +79,8 @@ func (s *Service) Latency(ctx context.Context, fromStr, toStr, gran, backend, mo
     for rows.Next() {
         var b LatencyBucket
         if err := rows.Scan(&b.Bucket, &b.Requests, &b.TTFTP50MS, &b.TTFTP95MS,
-            &b.TPOTP50MS, &b.TPOTP95MS, &b.AvgDuration, &b.ErrorCount); err != nil {
+            &b.TTFTP99MS, &b.TPOTP50MS, &b.TPOTP95MS, &b.TPOTP99MS,
+            &b.AvgDuration, &b.ErrorCount); err != nil {
             return nil, err
         }
         resp.Series = append(resp.Series, b)

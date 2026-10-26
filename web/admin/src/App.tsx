@@ -38,6 +38,7 @@ import Explorer from "./pages/insights/Explorer";
 import Optimize from "./pages/insights/Optimize";
 import Anomalies from "./pages/insights/Anomalies";
 import Reports from "./pages/insights/Reports";
+import Capacity from "./pages/insights/Capacity";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const loggedIn = localStorage.getItem("admin_logged_in");
@@ -78,6 +79,7 @@ export default function App() {
                         <Route path="insights/optimize" element={<Optimize />} />
                         <Route path="insights/anomalies" element={<Anomalies />} />
                         <Route path="insights/reports" element={<Reports />} />
+                        <Route path="insights/capacity" element={<Capacity />} />
                         <Route path="settings" element={<Navigate to="/admin/config/server" replace />} />
                         <Route path="config/server" element={<ServerConfig />} />
                         <Route path="config/auth" element={<AuthConfig />} />

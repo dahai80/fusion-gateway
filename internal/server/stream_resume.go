@@ -113,14 +113,16 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
             }
             slog.Error("RR4 resumable cloud diversion failed: no cloud provider", "model", req.Model)
             s.streamBuffers.Release(sid)
-            writeChatFailedError(w, "Stream chat failed", err)
+            s.stampRouteInfo(ctx, req, decision, provider.Name())
+            writeChatFailedError(ctx, w, "Stream chat failed", err)
             return
         }
         slog.Error("resumable stream chat failed", "provider", provider.Name(), "error", err)
         s.streamBuffers.Release(sid)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.recordOutcome(decision.Backend, decision.NodeID, false)
-        writeChatFailedError(w, "Stream chat failed", err)
+        s.stampRouteInfo(ctx, req, decision, provider.Name())
+        writeChatFailedError(ctx, w, "Stream chat failed", err)
         return
     }
 

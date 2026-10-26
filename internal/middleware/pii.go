@@ -5,6 +5,7 @@ import (
     "net/http"
     "regexp"
     "strings"
+    "sync"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -126,4 +127,44 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
     }
 
     return false, nil
+}
+
+// guardScan holds the lazily compiled guard SSOT patterns for persistence
+// stamping (G6): contains_pii must be marked regardless of the pii config —
+// PIIConfig.Enabled gates request handling (deny/mask), not evidence.
+var (
+    guardScanOnce     sync.Once
+    guardScanPatterns []piiPattern
+)
+
+// ScanGuardPII reports whether the text matches any guard SSOT pattern.
+// Pure detection, no action semantics; used by the persistence layer to
+// stamp contains_pii on log rows.
+func ScanGuardPII(text string) bool {
+    guardScanOnce.Do(func() {
+        patterns, errs := compileGuardPatterns()
+        for _, err := range errs {
+            slog.Warn("PII guard SSOT pattern compile failed", "error", err)
+        }
+        guardScanPatterns = patterns
+    })
+    if len(text) == 0 {
+        return false
+    }
+    for _, p := range guardScanPatterns {
+        if p.validator == nil {
+            if p.regex.MatchString(text) {
+                return true
+            }
+            continue
+        }
+        // Same N5 semantics as ScanText: a validated pattern only counts
+        // when some candidate passes its validator.
+        for _, loc := range p.regex.FindAllStringIndex(text, -1) {
+            if p.validator(text, loc[0], loc[1]) {
+                return true
+            }
+        }
+    }
+    return false
 }

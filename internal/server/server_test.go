@@ -3415,6 +3415,46 @@ func TestHandleStreamChat_Error(t *testing.T) {
     slog.Info("TestHandleStreamChat_Error passed")
 }
 
+// A failed stream must stamp the request log with model/channel/error_message
+// exactly like the non-stream failure path. Previously the stream error exit
+// left all three blank, so fg_request_logs carried model-less, message-less
+// 502 rows and the insights error-storm detector (error_message <> '' filter)
+// could never see a streaming error storm.
+func TestHandleStreamChat_ErrorStampsLogEntry(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:      "test-cloud",
+        healthy:   true,
+        streamErr: fmt.Errorf("stream error"),
+    })
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    decision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "test"}
+    req := &adapter.ChatRequest{Model: "gpt-4", Messages: []adapter.ChatMessage{{Role: "user", Content: "hello"}}, Stream: true}
+    provider, _ := s.pool.Get("test-cloud")
+
+    httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry := middleware.InitRequestLog(httpReq)
+    httpReq = middleware.WithRequestLogContext(httpReq, entry)
+    entry.IsStream = true
+
+    rec := httptest.NewRecorder()
+    s.handleStreamChat(httpReq.Context(), rec, provider, req, decision, budget, time.Now())
+
+    if rec.Code != http.StatusBadGateway {
+        t.Fatalf("expected 502, got %d", rec.Code)
+    }
+    if entry.Model != "gpt-4" {
+        t.Fatalf("expected stamped model gpt-4, got %q", entry.Model)
+    }
+    if entry.ChannelName != "test-cloud" {
+        t.Fatalf("expected stamped channel test-cloud, got %q", entry.ChannelName)
+    }
+    if entry.ErrorMessage != "stream error" {
+        t.Fatalf("expected stamped error_message 'stream error', got %q", entry.ErrorMessage)
+    }
+    slog.Info("TestHandleStreamChat_ErrorStampsLogEntry passed")
+}
+
 // --- Connector action with valid path and JSON ---
 
 func TestConnectorAction_ValidPath(t *testing.T) {
@@ -9658,7 +9698,7 @@ func TestWriteChatFailedError_SurfacesUpstreamDetail(t *testing.T) {
     t.Parallel()
     rec := httptest.NewRecorder()
     upstreamErr := errors.New(`chat returned status 400: {"error":{"message":"Invalid model name passed in model=qwen3.5-9b"}}`)
-    writeChatFailedError(rec, "Chat failed", upstreamErr)
+    writeChatFailedError(context.Background(), rec, "Chat failed", upstreamErr)
 
     if rec.Code != http.StatusBadGateway {
         t.Fatalf("expected 502, got %d", rec.Code)
@@ -9687,7 +9727,7 @@ func TestWriteChatFailedError_CapsLongDetail(t *testing.T) {
     t.Parallel()
     rec := httptest.NewRecorder()
     longMsg := strings.Repeat("x", 2000)
-    writeChatFailedError(rec, "Chat failed", errors.New(longMsg))
+    writeChatFailedError(context.Background(), rec, "Chat failed", errors.New(longMsg))
 
     var got struct {
         Error struct {
@@ -9706,7 +9746,7 @@ func TestWriteChatFailedError_CapsLongDetail(t *testing.T) {
 func TestWriteChatFailedError_NilErr(t *testing.T) {
     t.Parallel()
     rec := httptest.NewRecorder()
-    writeChatFailedError(rec, "Stream chat failed", nil)
+    writeChatFailedError(context.Background(), rec, "Stream chat failed", nil)
 
     if rec.Code != http.StatusBadGateway {
         t.Fatalf("expected 502, got %d", rec.Code)

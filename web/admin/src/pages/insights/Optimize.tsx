@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, Typography, Select, Input, Table, Tag, Button, Popconfirm, message } from "antd";
+import { Link } from "react-router-dom";
 import client from "../../api/client";
 import { isUnavailable, UnavailableAlert } from "./shared";
 
@@ -118,7 +119,26 @@ export default function Optimize() {
                         {
                             title: "Evidence",
                             dataIndex: "evidence",
-                            render: (v: Finding["evidence"]) => <code style={{ fontSize: 12 }}>{JSON.stringify(v)}</code>,
+                            render: (v: Finding["evidence"], f: Finding) => {
+                                const model = typeof f.scope?.model === "string" ? f.scope.model : "";
+                                const backend = typeof f.scope?.backend === "string" ? f.scope.backend : "";
+                                // AC18: jump to the Explorer pre-filtered to the
+                                // finding's scope so the evidence rows are one
+                                // click away.
+                                const query = new URLSearchParams({ period: "168" });
+                                if (model) query.set("model", model);
+                                if (backend) query.set("backend", backend);
+                                return (
+                                    <>
+                                        <code style={{ fontSize: 12 }}>{JSON.stringify(v)}</code>
+                                        {(model || backend) && (
+                                            <div style={{ marginTop: 4 }}>
+                                                <Link to={`/admin/insights/explorer?${query.toString()}`}>View in Explorer →</Link>
+                                            </div>
+                                        )}
+                                    </>
+                                );
+                            },
                         },
                         {
                             title: "Status",

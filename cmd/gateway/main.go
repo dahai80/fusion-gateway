@@ -18,6 +18,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/browser"
 	"github.com/fusion-gateway/fusion-gateway/internal/cluster"
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
+	"github.com/fusion-gateway/fusion-gateway/internal/filelog"
 	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
 	"github.com/fusion-gateway/fusion-gateway/internal/insights"
 	"github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
@@ -285,6 +286,12 @@ func run(configPath string) error {
 	snap, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+
+	// G9: daily-rolled file logging in addition to stderr. Disabled or
+	// failed setup leaves the previous logger untouched.
+	if closer := filelog.Setup(snap.Config.FileLog, snap.Config.Server.LogLevel); closer != nil {
+		defer closer()
 	}
 
 	slog.Info("config loaded",

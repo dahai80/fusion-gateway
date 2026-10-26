@@ -39,9 +39,10 @@ type RequestLog struct {
     Latency      float64 `json:"latency_ms"`
     TTFT         float64 `json:"ttft_ms"`
     // TPotMS / TPotP95 / ChunkCount / TokensPerSec are the stream-latency
-    // signals for the TTFT/TPOT report pipeline (plan §5.2): mean and P95
-    // inter-chunk gap (ms), chunk count, and output tokens per second over
-    // the generation window. Zero/omitted for non-stream requests.
+    // signals for the TTFT/TPOT report pipeline (plan §5.2): per-token TPOT
+    // (duration-ttft)/(output_tokens-1) in ms, P95 inter-chunk gap (ms),
+    // chunk count, and output tokens per second over the generation window.
+    // Zero/omitted for non-stream requests.
     TPotMS       float64 `json:"tpot_ms,omitempty"`
     TPotP95      float64 `json:"tpot_p95_ms,omitempty"`
     ChunkCount   int     `json:"chunk_count,omitempty"`
@@ -50,6 +51,28 @@ type RequestLog struct {
     StatusCode   int    `json:"status_code"`
     IsSuccess    bool   `json:"is_success"`
     ErrorMessage string `json:"error_message,omitempty"`
+    // ContainsPII (G6) stamps whether the captured payload matched any guard
+    // SSOT pattern — an evidence marker on the row, independent of the pii
+    // middleware action config.
+    ContainsPII  bool   `json:"contains_pii,omitempty"`
+
+    // Chunks (G10) carries per-chunk stream timings for the fg_stream_chunks
+    // persistence table (capture.stream_chunks, default off). Collected by the
+    // streamTiming observer, emptied by the persist sink at finalize. json:"-":
+    // the in-memory log API never serializes it — it is persistence-only
+    // transport, not stored state.
+    Chunks []ChunkTiming `json:"-"`
+}
+
+// ChunkTiming is one observed stream chunk for the fg_stream_chunks table
+// (plan §4.1, G10). Seq starts at 1; DeltaMS is the gap to the previous
+// chunk (0 for the first); Bytes is the raw-passthrough payload length,
+// 0 for frames the gateway marshals in-process.
+type ChunkTiming struct {
+    Seq     int
+    TS      time.Time
+    DeltaMS float64
+    Bytes   int
 }
 
 type APIKeyEntry struct {

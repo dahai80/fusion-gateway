@@ -50,6 +50,16 @@ type PersistenceCaptureConfig struct {
     // StripAuthFields removes credential-shaped fields (api_key,
     // authorization) from the stored request JSON before persist.
     StripAuthFields bool `mapstructure:"strip_auth_fields"`
+    // ImagePlaceholder swaps inline base64 image payloads (OpenAI
+    // image_url.url data: URLs, Anthropic image source.data) for a
+    // "<image:NNNB>" placeholder before persist — plan §5.1: the bytes are
+    // re-derivable from the client and would otherwise dominate storage.
+    ImagePlaceholder bool `mapstructure:"image_placeholder"`
+    // StreamChunks persists per-chunk stream timings (seq / ts / delta /
+    // bytes) to fg_stream_chunks (G10, plan §4.1). Default off — one row
+    // per SSE chunk is high-volume and only needed for per-request timing
+    // forensics in the Explorer.
+    StreamChunks bool `mapstructure:"stream_chunks"`
 }
 
 // PersistenceRetentionConfig drives the partition-DROP retention manager.
@@ -63,6 +73,9 @@ type PersistenceRetentionConfig struct {
     HwSamplesDays int `mapstructure:"hw_samples_days"`
     // GatewayEventsDays: fg_gateway_events retention (ops audit trail).
     GatewayEventsDays int `mapstructure:"gateway_events_days"`
+    // StreamChunksDays: fg_stream_chunks retention (G10). Short window —
+    // chunk rows are per-SSE-frame forensics, not long-term analytics.
+    StreamChunksDays int `mapstructure:"stream_chunks_days"`
     // InsightsDays: fg_anomalies / fg_optimization_findings / fg_reports
     // retention (disposal records, plan §15.4).
     InsightsDays int `mapstructure:"insights_days"`
@@ -85,10 +98,11 @@ func defaultPersistenceConfig() PersistenceConfig {
             FlushIntervalMS: 500,
         },
         Capture: PersistenceCaptureConfig{
-            RequestBody:     true,
-            ResponseBody:    true,
-            MaxBodyBytes:    512 << 10,
-            StripAuthFields: true,
+            RequestBody:      true,
+            ResponseBody:     true,
+            MaxBodyBytes:     512 << 10,
+            StripAuthFields:  true,
+            ImagePlaceholder: true,
         },
         Retention: PersistenceRetentionConfig{
             RequestLogsDays:    90,
@@ -96,6 +110,7 @@ func defaultPersistenceConfig() PersistenceConfig {
             HwSamplesDays:      30,
             GatewayEventsDays:  180,
             InsightsDays:       180,
+            StreamChunksDays:   7,
         },
     }
 }
@@ -152,6 +167,14 @@ func validatePersistence(cfg *Config) error {
     }
     if p.Retention.InsightsDays <= 0 {
         p.Retention.InsightsDays = 180
+    }
+    if p.Retention.StreamChunksDays <= 0 {
+        p.Retention.StreamChunksDays = 7
+    }
+    if p.Retention.StreamChunksDays > p.Retention.RequestLogsDays {
+        // Same dangling-row rule as payloads: chunk rows must not outlive
+        // their request log row.
+        p.Retention.StreamChunksDays = p.Retention.RequestLogsDays
     }
     cfg.Persistence = p
     return nil

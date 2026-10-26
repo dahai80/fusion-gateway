@@ -1856,10 +1856,12 @@ type persistenceQueueResponse struct {
 }
 
 type persistenceCaptureResponse struct {
-    RequestBody    bool `json:"request_body"`
-    ResponseBody   bool `json:"response_body"`
-    MaxBodyBytes   int  `json:"max_body_bytes"`
-    StripAuthField bool `json:"strip_auth_fields"`
+    RequestBody      bool `json:"request_body"`
+    ResponseBody     bool `json:"response_body"`
+    MaxBodyBytes     int  `json:"max_body_bytes"`
+    StripAuthField   bool `json:"strip_auth_fields"`
+    ImagePlaceholder bool `json:"image_placeholder"`
+    StreamChunks     bool `json:"stream_chunks"`
 }
 
 type persistenceRetentionResponse struct {
@@ -1868,6 +1870,7 @@ type persistenceRetentionResponse struct {
     HwSamplesDays       int `json:"hw_samples_days"`
     GatewayEventsDays   int `json:"gateway_events_days"`
     InsightsDays        int `json:"insights_days"`
+    StreamChunksDays    int `json:"stream_chunks_days"`
 }
 
 type persistenceConfigResponse struct {
@@ -1892,10 +1895,12 @@ type persistenceQueueUpdate struct {
 }
 
 type persistenceCaptureUpdate struct {
-    RequestBody    *bool `json:"request_body,omitempty"`
-    ResponseBody   *bool `json:"response_body,omitempty"`
-    MaxBodyBytes   *int  `json:"max_body_bytes,omitempty"`
-    StripAuthField *bool `json:"strip_auth_fields,omitempty"`
+    RequestBody       *bool `json:"request_body,omitempty"`
+    ResponseBody      *bool `json:"response_body,omitempty"`
+    MaxBodyBytes      *int  `json:"max_body_bytes,omitempty"`
+    StripAuthField    *bool `json:"strip_auth_fields,omitempty"`
+    ImagePlaceholder  *bool `json:"image_placeholder,omitempty"`
+    StreamChunks      *bool `json:"stream_chunks,omitempty"`
 }
 
 type persistenceRetentionUpdate struct {
@@ -1904,6 +1909,7 @@ type persistenceRetentionUpdate struct {
     HwSamplesDays       *int `json:"hw_samples_days,omitempty"`
     GatewayEventsDays   *int `json:"gateway_events_days,omitempty"`
     InsightsDays        *int `json:"insights_days,omitempty"`
+    StreamChunksDays    *int `json:"stream_chunks_days,omitempty"`
 }
 
 type persistenceConfigUpdate struct {
@@ -1936,6 +1942,7 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
             Capture: persistenceCaptureResponse{
                 RequestBody: p.Capture.RequestBody, ResponseBody: p.Capture.ResponseBody,
                 MaxBodyBytes: p.Capture.MaxBodyBytes, StripAuthField: p.Capture.StripAuthFields,
+                ImagePlaceholder: p.Capture.ImagePlaceholder, StreamChunks: p.Capture.StreamChunks,
             },
             Retention: persistenceRetentionResponse{
                 RequestLogsDays: p.Retention.RequestLogsDays,
@@ -1943,6 +1950,7 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
                 HwSamplesDays: p.Retention.HwSamplesDays,
                 GatewayEventsDays: p.Retention.GatewayEventsDays,
                 InsightsDays: p.Retention.InsightsDays,
+                StreamChunksDays: p.Retention.StreamChunksDays,
             },
         })
     case http.MethodPut:
@@ -1973,6 +1981,8 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
                 applyBool(c, "response_body", req.Capture.ResponseBody)
                 applyInt(c, "max_body_bytes", req.Capture.MaxBodyBytes)
                 applyBool(c, "strip_auth_fields", req.Capture.StripAuthField)
+                applyBool(c, "image_placeholder", req.Capture.ImagePlaceholder)
+                applyBool(c, "stream_chunks", req.Capture.StreamChunks)
             }
             if req.Retention != nil {
                 rt := getOrCreateSection(doc, "persistence", "retention")
@@ -1981,6 +1991,7 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
                 applyInt(rt, "hw_samples_days", req.Retention.HwSamplesDays)
                 applyInt(rt, "gateway_events_days", req.Retention.GatewayEventsDays)
                 applyInt(rt, "insights_days", req.Retention.InsightsDays)
+                applyInt(rt, "stream_chunks_days", req.Retention.StreamChunksDays)
             }
             return nil
         }); if err != nil {
@@ -2005,6 +2016,7 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
             Capture: persistenceCaptureResponse{
                 RequestBody: p.Capture.RequestBody, ResponseBody: p.Capture.ResponseBody,
                 MaxBodyBytes: p.Capture.MaxBodyBytes, StripAuthField: p.Capture.StripAuthFields,
+                ImagePlaceholder: p.Capture.ImagePlaceholder, StreamChunks: p.Capture.StreamChunks,
             },
             Retention: persistenceRetentionResponse{
                 RequestLogsDays: p.Retention.RequestLogsDays,
@@ -2012,6 +2024,7 @@ func (h *Handler) handlePersistenceConfig(w http.ResponseWriter, r *http.Request
                 HwSamplesDays: p.Retention.HwSamplesDays,
                 GatewayEventsDays: p.Retention.GatewayEventsDays,
                 InsightsDays: p.Retention.InsightsDays,
+                StreamChunksDays: p.Retention.StreamChunksDays,
             },
         })
     default:

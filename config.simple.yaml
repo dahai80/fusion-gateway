@@ -47,3 +47,23 @@ routing:
     # routing.default_model, routing.cloud_models and
     # routing.fallback.model_mapping keep their existing semantics; see
     # README § Model Identity.
+
+# Request persistence: every request log (+ captured bodies) to PostgreSQL.
+# Default off — omit the whole block for zero PG dependency.
+persistence:
+    enabled: true
+    postgres:
+        dsn_env: FUSION_GW_PG_DSN        # DSN lives in env, never in config
+    capture:
+        request_body: true
+        response_body: true
+        # stream_chunks: per-SSE-frame timing forensics (fg_stream_chunks,
+        # 7-day retention). Off by default — one row per chunk is loud.
+        stream_chunks: false
+
+# Daily-rolled JSON logs at ~/.fusion-gateway/logs/gateway-YYYY-MM-DD.log,
+# pruned after retain_days. stderr keeps its text format either way.
+file_log:
+    enabled: true
+    retain_days: 14
+    level: info

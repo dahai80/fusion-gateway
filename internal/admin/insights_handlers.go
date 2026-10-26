@@ -56,14 +56,20 @@ func (h *Handler) handleInsightsLatency(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleInsightsCompare — GET /admin/api/insights/compare
-// Params: from,to,project_id.
+// Params: from,to,project_id, input_min,input_max (prompt-length bucket,
+// <=0 unbounded), overlap=true (only hourly buckets where every group has
+// traffic — AC5 shared-load fairness).
 func (h *Handler) handleInsightsCompare(w http.ResponseWriter, r *http.Request) {
     if h.insights == nil {
         h.insightsUnavailable(w)
         return
     }
     q := r.URL.Query()
-    resp, err := h.insights.Compare(r.Context(), q.Get("from"), q.Get("to"), q.Get("project_id"))
+    inputMin, _ := strconv.Atoi(q.Get("input_min"))
+    inputMax, _ := strconv.Atoi(q.Get("input_max"))
+    overlap := q.Get("overlap") == "true" || q.Get("overlap") == "1"
+    resp, err := h.insights.Compare(r.Context(),
+        q.Get("from"), q.Get("to"), q.Get("project_id"), inputMin, inputMax, overlap)
     if err != nil {
         slog.Warn("insights compare query failed", "error", err)
         writeError(w, http.StatusBadRequest, err.Error())
@@ -95,14 +101,34 @@ func (h *Handler) handleInsightsLogSearch(w http.ResponseWriter, r *http.Request
 }
 
 // handleInsightsLogPayload — GET /admin/api/insights/logs/{id}/payload
-// Single-row fetch; list queries never join payloads (plan §8 guard).
+// Single-row fetch; list queries never join payloads (plan §8 guard). Each
+// successful fetch lands a payload_queried audit row — sensitive-body access
+// must leave an operator trail (plan §15.5).
 func (h *Handler) handleInsightsLogPayload(w http.ResponseWriter, r *http.Request) {
     if h.insights == nil {
         h.insightsUnavailable(w)
         return
     }
-    id := strings.TrimPrefix(r.URL.Path, "/admin/api/insights/logs/")
-    id = strings.TrimSuffix(id, "/payload")
+    rest := strings.TrimPrefix(r.URL.Path, "/admin/api/insights/logs/")
+    if strings.HasSuffix(rest, "/replay") {
+        id := strings.TrimSuffix(rest, "/replay")
+        if id == "" {
+            writeError(w, http.StatusBadRequest, "missing log id")
+            return
+        }
+        h.handleInsightsLogReplay(w, r, id)
+        return
+    }
+    if strings.HasSuffix(rest, "/chunks") {
+        id := strings.TrimSuffix(rest, "/chunks")
+        if id == "" {
+            writeError(w, http.StatusBadRequest, "missing log id")
+            return
+        }
+        h.handleInsightsLogChunks(w, r, id)
+        return
+    }
+    id := strings.TrimSuffix(rest, "/payload")
     if id == "" {
         writeError(w, http.StatusBadRequest, "missing log id")
         return
@@ -113,7 +139,32 @@ func (h *Handler) handleInsightsLogPayload(w http.ResponseWriter, r *http.Reques
         writeError(w, http.StatusNotFound, err.Error())
         return
     }
+    actor := "admin"
+    if claims := GetAdminClaims(r.Context()); claims != nil && claims.Username != "" {
+        actor = claims.Username
+    }
+    h.auditEvent("info", "payload_queried", map[string]any{
+        "id": id, "by": actor,
+    })
     writeJSON(w, http.StatusOK, resp)
+}
+
+// handleInsightsLogChunks — GET /admin/api/insights/logs/{id}/chunks (G10).
+// Per-chunk stream timings from fg_stream_chunks; an empty list means chunk
+// capture was off for that request (Explorer renders the tab gray), not an
+// error.
+func (h *Handler) handleInsightsLogChunks(w http.ResponseWriter, r *http.Request, id string) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    rows, err := h.insights.StreamChunks(r.Context(), id)
+    if err != nil {
+        slog.Warn("insights stream chunks fetch failed", "id", id, "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"id": id, "chunks": rows})
 }
 
 // handlePersistenceTest — POST /admin/api/persistence/test
