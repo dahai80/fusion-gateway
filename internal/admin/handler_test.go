@@ -51,7 +51,18 @@ func (m *mockStore) AppendLog(log *store.RequestLog) error {
 }
 
 func (m *mockStore) QueryLogs(filter store.LogFilter) ([]*store.RequestLog, int, error) {
-    return m.logs, len(m.logs), nil
+    // Only the TraceID filter is honored (trace-query tests need it); every
+    // other filter is ignored so existing log tests see all rows.
+    if filter.TraceID == "" {
+        return m.logs, len(m.logs), nil
+    }
+    var out []*store.RequestLog
+    for _, l := range m.logs {
+        if l.TraceID == filter.TraceID {
+            out = append(out, l)
+        }
+    }
+    return out, len(out), nil
 }
 
 func (m *mockStore) GetLog(id string) (*store.RequestLog, error) {
@@ -1465,6 +1476,79 @@ func TestHandleLogs(t *testing.T) {
         }
         if row["input_tokens"] != float64(10) {
             t.Errorf("expected input_tokens 10, got %v", row["input_tokens"])
+        }
+    })
+}
+
+func TestHandleTraceQuery(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+    ms := newMockStore()
+    _ = ms.AppendLog(&store.RequestLog{ID: "1", TraceID: "01J8TRACE01", Model: "gpt-4", StatusCode: 200, Latency: 120})
+    _ = ms.AppendLog(&store.RequestLog{ID: "2", TraceID: "01J8TRACE01", Model: "gpt-4", StatusCode: 500, ErrorMessage: "boom"})
+    _ = ms.AppendLog(&store.RequestLog{ID: "3", TraceID: "01J8TRACE02", Model: "claude-3"})
+    h := newTestHandler(t, ms, auth, "")
+
+    t.Run("trace_records_returned", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/traces/01J8TRACE01", nil)
+        rec := httptest.NewRecorder()
+        h.handleTraceQuery(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        result := decodeResponse(t, rec)
+        if result["trace_id"] != "01J8TRACE01" {
+            t.Fatalf("expected trace_id 01J8TRACE01, got %v", result["trace_id"])
+        }
+        if result["total"] != float64(2) {
+            t.Fatalf("expected total 2, got %v", result["total"])
+        }
+        records, ok := result["records"].([]interface{})
+        if !ok {
+            t.Fatalf("expected 'records' array, got %T", result["records"])
+        }
+        if len(records) != 2 {
+            t.Fatalf("expected 2 records, got %d", len(records))
+        }
+    })
+
+    t.Run("unknown_trace_empty", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/traces/01J8NOPE", nil)
+        rec := httptest.NewRecorder()
+        h.handleTraceQuery(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("expected 200, got %d", rec.Code)
+        }
+        result := decodeResponse(t, rec)
+        if result["total"] != float64(0) {
+            t.Fatalf("expected total 0, got %v", result["total"])
+        }
+    })
+
+    t.Run("missing_trace_id_rejected", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/traces/", nil)
+        rec := httptest.NewRecorder()
+        h.handleTraceQuery(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("expected 400, got %d", rec.Code)
+        }
+    })
+
+    t.Run("method_not_allowed", func(t *testing.T) {
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/traces/01J8TRACE01", nil)
+        rec := httptest.NewRecorder()
+        h.handleTraceQuery(rec, req)
+        if rec.Code != http.StatusMethodNotAllowed {
+            t.Fatalf("expected 405, got %d", rec.Code)
+        }
+    })
+
+    t.Run("parse_log_filter_trace_id", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodGet, "/admin/api/logs?trace_id=01J8TRACE01", nil)
+        filter := parseLogFilter(req)
+        if filter.TraceID != "01J8TRACE01" {
+            t.Fatalf("expected trace_id 01J8TRACE01, got %q", filter.TraceID)
         }
     })
 }

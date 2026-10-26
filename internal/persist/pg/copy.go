@@ -159,6 +159,10 @@ CREATE INDEX IF NOT EXISTS idx_fg_reports_created ON fg_reports (created_at DESC
 -- CREATE TABLE IF NOT EXISTS does not add columns to the existing table,
 -- so the ALTER is the migration path (propagates to all partitions).
 ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS contains_pii boolean NOT NULL DEFAULT false;
+
+-- #325: business trace id (X-Fusion-Trace) — same ALTER migration path as
+-- contains_pii. Nullable: rows written by older binaries have no trace id.
+ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS trace_id text;
 `
 
 // newCopyWriter connects the pool and provisions the schema.
@@ -225,6 +229,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         }
         logRows = append(logRows, []any{
             id, ts, e.Log.RequestID, e.Log.APIKeyName,
+            e.Log.TraceID,
             e.Log.ProjectID, e.Log.SpaceID, e.Log.ChatID,
             e.Endpoint, e.Log.RequestType, e.Log.IsStream,
             e.Log.Model, e.Log.ModelMapped,
@@ -261,7 +266,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
     if _, err := tx.CopyFrom(ctx,
         pgx.Identifier{"fg_request_logs"},
         []string{
-            "id", "ts", "request_id", "api_key_name",
+            "id", "ts", "request_id", "api_key_name", "trace_id",
             "project_id", "space_id", "chat_id",
             "endpoint", "request_type", "is_stream",
             "model", "model_mapped", "backend", "backend_type", "route_reason",

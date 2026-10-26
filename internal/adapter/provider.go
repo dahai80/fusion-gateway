@@ -25,6 +25,11 @@ var fusionPassthroughHeaders = []string{
     // id onto r.Header when the client omits it, so this reads a value in both
     // the client-supplied and gateway-generated cases.
     "X-Request-ID",
+    // #325: cross-service business trace id. Accepted from the client (ULID
+    // issued by the business app), seeded by InitRequestLog when absent, and
+    // forwarded to every upstream so gateway/rag/speech calls correlate under
+    // one trace. Echoed back to the client in withMiddleware.
+    "X-Fusion-Trace",
 }
 
 func WithFusionHeaders(ctx context.Context, r *http.Request) context.Context {

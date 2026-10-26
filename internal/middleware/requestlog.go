@@ -79,8 +79,18 @@ func InitRequestLog(r *http.Request) *store.RequestLog {
     if reqID == "" {
         reqID, _ = r.Context().Value(RequestIDKey).(string)
     }
+    // #325: X-Fusion-Trace carries the business trace id (ULID from the
+    // calling app). Seed one when the client omits it — same header-seeding
+    // trick as X-Request-ID above — so every request has a trace id to
+    // forward upstream and echo back, and the log row is joinable either way.
+    traceID := r.Header.Get("X-Fusion-Trace")
+    if traceID == "" {
+        traceID = uuid.New().String()
+        r.Header.Set("X-Fusion-Trace", traceID)
+    }
     entry := &store.RequestLog{
         RequestID:   reqID,
+        TraceID:     traceID,
         RequestType: r.Method + " " + r.URL.Path,
         IsStream:    r.URL.Query().Get("stream") == "true",
         IsSuccess:   true,

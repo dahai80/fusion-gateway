@@ -411,7 +411,17 @@ curl -H "Authorization: Bearer $ADMIN_JWT" \
   "http://127.0.0.1:11432/admin/api/logs/export?project_id=envipermit&format=csv" -o audit.csv
 ```
 
-每次调用字段:`request_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`。其他过滤:`key_name`、`model`、`channel`、`status`、`min_tokens`、`min_cost`。Prometheus `/metrics` 暴露聚合计数(本地/云端 QPS、熔断次数)— 逐调用审计用 logs API,看板用 metrics。
+每次调用字段:`request_id, trace_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`。其他过滤:`key_name`、`model`、`channel`、`status`、`trace_id`、`min_tokens`、`min_cost`。Prometheus `/metrics` 暴露聚合计数(本地/云端 QPS、熔断次数)— 逐调用审计用 logs API,看板用 metrics。
+
+**3. 跨服务业务追踪。** 每次调用携带 `X-Fusion-Trace: <trace-id>`(任意不透明字符串,如业务方签发的 ULID):网关在响应头回显解析出的 trace id、写入日志行(`trace_id`)、转发给所有上游(fusion-mlx、云厂商——rag/speech/引擎日志可在同一 trace 下关联),客户端未携带时网关自动播种一个 uuid。按 trace 查询该 trace 下全部网关调用记录(延迟、token、后端、错误):
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/traces/01J8TRACEBUSINESS01"
+# → { "trace_id": "...", "total": 2, "records": [ ...RequestLog 行...] }
+```
+
+开启 PG 持久化时,`trace_id` 也是 `fg_request_logs` 的列(通过 `ALTER TABLE ... IF NOT EXISTS` 自动添加),可直接 SQL 关联上游表。
 
 **保留期提示:** 内存日志存储是有界环形缓冲(默认 10,000 条)— 合规留存要么周期性轮询导出端点,要么把持久存储切到 Redis(`store.backend: "redis"`)。
 
@@ -1211,6 +1221,7 @@ terraform apply -var="project_id=your-project" -var="master_key=your-secure-key"
 | `/admin/api/channels/:name` | GET/PUT/DELETE | 读 / 更新 / 删除 channel |
 | `/admin/api/logs` | GET | 带过滤条件查询请求日志 |
 | `/admin/api/logs/:id` | GET | 获取单条请求日志 |
+| `/admin/api/traces/:trace_id` | GET | 按业务 trace id(`X-Fusion-Trace`)查询全部调用记录 |
 | `/admin/api/analytics/tokens` | GET | token 用量统计 |
 | `/admin/api/analytics/cost` | GET | 成本统计 |
 | `/admin/api/analytics/models` | GET | 模型分布统计 |

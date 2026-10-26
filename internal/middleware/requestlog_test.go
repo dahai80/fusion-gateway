@@ -12,6 +12,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/store"
+    "github.com/google/uuid"
 )
 
 type logMockStore struct {
@@ -211,6 +212,34 @@ func TestInitRequestLog_NoHeaders(t *testing.T) {
     }
     if entry.IsStream {
         t.Error("expected stream=false")
+    }
+}
+
+func TestInitRequestLog_TraceID(t *testing.T) {
+    slog.Info("test InitRequestLog_TraceID")
+    // Client-supplied trace id passes through untouched.
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    req.Header.Set("X-Fusion-Trace", "01J8TRACECLIENTISSUED")
+    entry := InitRequestLog(req)
+    if entry.TraceID != "01J8TRACECLIENTISSUED" {
+        t.Errorf("expected client trace id, got %s", entry.TraceID)
+    }
+    if got := req.Header.Get("X-Fusion-Trace"); got != "01J8TRACECLIENTISSUED" {
+        t.Errorf("header should stay untouched, got %s", got)
+    }
+
+    // Absent header: gateway seeds a uuid and mirrors it onto the request
+    // header so downstream forwarding (fusionPassthroughHeaders) carries it.
+    req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    entry2 := InitRequestLog(req2)
+    if entry2.TraceID == "" {
+        t.Error("expected gateway-seeded trace id")
+    }
+    if got := req2.Header.Get("X-Fusion-Trace"); got != entry2.TraceID {
+        t.Errorf("seeded header mismatch: header=%s entry=%s", got, entry2.TraceID)
+    }
+    if _, err := uuid.Parse(entry2.TraceID); err != nil {
+        t.Errorf("seeded trace id not a uuid: %s", entry2.TraceID)
     }
 }
 

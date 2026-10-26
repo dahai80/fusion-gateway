@@ -10,6 +10,12 @@ type RequestLog struct {
     RequestID    string    `json:"request_id"`
     Timestamp    time.Time `json:"timestamp"`
 
+    // TraceID (#325): the X-Fusion-Trace business trace id (client-issued
+    // ULID, gateway-seeded uuid when the client omits it). One trace threads
+    // gateway + upstream (rag/speech) calls; the admin trace endpoint joins
+    // log rows on it.
+    TraceID      string    `json:"trace_id,omitempty"`
+
     APIKeyName   string `json:"api_key_name"`
     Model        string `json:"model"`
     // ModelMapped carries the client-facing qualified ("backend/model")
@@ -132,6 +138,9 @@ type LogFilter struct {
     // the request — the per-project audit export key for downstream
     // consumers (EnviPermit). Empty = no restriction.
     ProjectID string     `json:"project_id,omitempty"`
+    // TraceID (#325) filters by the X-Fusion-Trace business trace id —
+    // exact match; the admin trace query endpoint's key.
+    TraceID   string     `json:"trace_id,omitempty"`
     MinTokens int        `json:"min_tokens,omitempty"`
     MinCost   float64    `json:"min_cost,omitempty"`
     Page      int        `json:"page"`
