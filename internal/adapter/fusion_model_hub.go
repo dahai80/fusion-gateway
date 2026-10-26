@@ -64,7 +64,11 @@ func (p *FusionModelHubProvider) director(req *http.Request) {
 	req.Host = p.baseURL.Host
 
 	if p.apiKey != "" {
+		// #316: the hub's auth middleware reads X-API-Key (APIKeyHeader), not
+		// Authorization Bearer — a Bearer-only injection 401'd every proxied
+		// /api/v1/* call. Send both so either chain accepts the credential.
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		req.Header.Set("X-API-Key", p.apiKey)
 	}
 
 	req.Header.Set("X-Fusion-Source", "gateway")
