@@ -1274,6 +1274,10 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         entry := middleware.InitRequestLog(r)
         r = middleware.WithRequestLogContext(r, entry)
         rec := middleware.NewResponseRecorder(w)
+        // #325: echo the resolved business trace id back so the caller can
+        // correlate its own log lines with gateway call records — including
+        // the gateway-seeded uuid when the client sent no X-Fusion-Trace.
+        rec.Header().Set("X-Fusion-Trace", entry.TraceID)
 
         // Per-request: inject fresh config snapshot, then run cached chain
         snap := config.GetSnapshot()

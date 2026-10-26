@@ -211,6 +211,9 @@ func matchFilter(l *store.RequestLog, f store.LogFilter) bool {
     if f.ProjectID != "" && l.ProjectID != f.ProjectID {
         return false
     }
+    if f.TraceID != "" && l.TraceID != f.TraceID {
+        return false
+    }
     if f.Status == "success" && !l.IsSuccess {
         return false
     }

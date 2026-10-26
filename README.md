@@ -482,7 +482,17 @@ curl -H "Authorization: Bearer $ADMIN_JWT" \
   "http://127.0.0.1:11432/admin/api/logs/export?project_id=envipermit&format=csv" -o audit.csv
 ```
 
-Per-call fields: `request_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`. Other filters: `key_name`, `model`, `channel`, `status`, `min_tokens`, `min_cost`. Prometheus `/metrics` exposes the aggregate counters (local/cloud QPS, breaker trips) — use the logs API for per-call audit, metrics for dashboards.
+Per-call fields: `request_id, trace_id, timestamp, api_key_name, model, request_type, is_stream, channel_name, channel_type, route_reason, project_id, chat_id, space_id, input_tokens, output_tokens, total_tokens, cost, cost_usd, latency_ms, ttft_ms, status_code, is_success, error_message`. Other filters: `key_name`, `model`, `channel`, `status`, `trace_id`, `min_tokens`, `min_cost`. Prometheus `/metrics` exposes the aggregate counters (local/cloud QPS, breaker trips) — use the logs API for per-call audit, metrics for dashboards.
+
+**3. Cross-service business trace.** Send `X-Fusion-Trace: <trace-id>` (any opaque string, e.g. a ULID issued by your app) on each call: the gateway echoes the resolved trace id back in the response header, stamps it on the log row (`trace_id`), forwards it to every upstream (fusion-mlx, cloud providers — so rag/speech/engine logs correlate under one trace), and seeds a gateway uuid when the client omits the header. Query every gateway call record for one trace — latency, tokens, backend, errors — via the admin trace endpoint:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:11432/admin/api/traces/01J8TRACEBUSINESS01"
+# → { "trace_id": "...", "total": 2, "records": [ ...RequestLog rows... ] }
+```
+
+With PG persistence on, `trace_id` is also a column on `fg_request_logs` (auto-added via `ALTER TABLE ... IF NOT EXISTS`), so direct SQL joins against upstream tables work.
 
 **Retention note:** the in-memory log store is a bounded ring (default 10,000 entries) — for compliance retention, either poll the export endpoint periodically or switch the persistent store to Redis (`store.backend: "redis"`).
 
@@ -1649,6 +1659,7 @@ Built-in web admin dashboard at `/admin`, served from the single binary via Go `
 | `/admin/api/channels/:name` | GET/PUT/DELETE | Read / Update / Delete channel |
 | `/admin/api/logs` | GET | Query request logs with filters |
 | `/admin/api/logs/:id` | GET | Get single request log |
+| `/admin/api/traces/:trace_id` | GET | All call records for one business trace id (`X-Fusion-Trace`) |
 | `/admin/api/analytics/tokens` | GET | Token usage statistics |
 | `/admin/api/analytics/cost` | GET | Cost statistics |
 | `/admin/api/analytics/models` | GET | Model distribution statistics |

@@ -427,6 +427,25 @@ func TestLogStore_Filter_ProjectID(t *testing.T) {
     }
 }
 
+func TestLogStore_Filter_TraceID(t *testing.T) {
+    ls := NewLogStore(100)
+    _ = ls.Append(&store.RequestLog{TraceID: "01J8TRACEAAA", Model: "gpt-4"})
+    _ = ls.Append(&store.RequestLog{TraceID: "01J8TRACEBBB", Model: "claude-3"})
+    _ = ls.Append(&store.RequestLog{Model: "no-trace"})
+    logs, total, _ := ls.Query(store.LogFilter{TraceID: "01J8TRACEAAA", Page: 1, PageSize: 10})
+    if total != 1 {
+        t.Fatalf("expected 1, got %d", total)
+    }
+    if len(logs) > 0 && logs[0].TraceID != "01J8TRACEAAA" {
+        t.Fatalf("expected 01J8TRACEAAA, got %s", logs[0].TraceID)
+    }
+    // Empty filter must not restrict: all three rows match.
+    _, totalAll, _ := ls.Query(store.LogFilter{Page: 1, PageSize: 10})
+    if totalAll != 3 {
+        t.Fatalf("empty trace filter expected 3, got %d", totalAll)
+    }
+}
+
 func TestLogStore_ExportCSV_ProjectIDColumn(t *testing.T) {
     ls := NewLogStore(100)
     _ = ls.Append(&store.RequestLog{ProjectID: "envipermit", Model: "gpt-4"})

@@ -41,6 +41,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/logs", h.requireAdminRoleStrict(h.handleLogs))
     mux.HandleFunc("/admin/api/logs/export", h.requireAdminRoleStrict(h.handleLogsExport))
     mux.HandleFunc("/admin/api/logs/filters", h.requireAdminRoleStrict(h.handleLogsFilters))
+    // #325: business-trace query — given a trace id, return every gateway
+    // call record that carried it (latency, tokens, backend, errors) so one
+    // cross-service trace can be reconstructed from the gateway side.
+    // Strict role: same cross-project request rows as /admin/api/logs.
+    mux.HandleFunc("/admin/api/traces/", h.requireAdminRoleStrict(h.handleTraceQuery))
     mux.HandleFunc("/admin/api/analytics", h.withAuth(h.handleAnalyticsOverview))
     mux.HandleFunc("/admin/api/analytics/tokens", h.withAuth(h.handleTokenStats))
     mux.HandleFunc("/admin/api/analytics/cost", h.requireAdminRoleStrict(h.handleCostStats))
@@ -578,6 +583,37 @@ func (h *Handler) handleLogsFilters(w http.ResponseWriter, r *http.Request) {
     })
 }
 
+// handleTraceQuery (#325) serves GET /admin/api/traces/{trace_id}: every
+// gateway call record stamped with the X-Fusion-Trace business trace id,
+// newest first. The caller reconstructs one cross-service trace (gateway +
+// upstream rag/speech calls) from these rows — latency, tokens, backend,
+// and error fields are all on the RequestLog record.
+func (h *Handler) handleTraceQuery(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    traceID := strings.TrimPrefix(r.URL.Path, "/admin/api/traces/")
+    if traceID == "" || strings.Contains(traceID, "/") {
+        writeError(w, http.StatusBadRequest, "missing trace id")
+        return
+    }
+
+    filter := store.LogFilter{TraceID: traceID, Page: 1, PageSize: 100}
+    logs, total, err := h.store.QueryLogs(filter)
+    if err != nil {
+        slog.Error("trace query failed", "error", err, "trace_id", traceID)
+        writeError(w, http.StatusInternalServerError, "query failed")
+        return
+    }
+
+    writeJSON(w, http.StatusOK, map[string]interface{}{
+        "trace_id": traceID,
+        "records":  logs,
+        "total":    total,
+    })
+}
+
 func (h *Handler) handleLogsExport(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -857,6 +893,7 @@ func parseLogFilter(r *http.Request) store.LogFilter {
         Channel:   q.Get("channel"),
         Status:    q.Get("status"),
         ProjectID: q.Get("project_id"),
+        TraceID:   q.Get("trace_id"),
         Page:      1,
         PageSize:  50,
     }
