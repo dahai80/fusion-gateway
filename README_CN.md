@@ -1702,6 +1702,17 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.72 — 按场景用量告警 + X-Fusion-Trace + azure-openai + laya 代理
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#326 用量费用聚合与告警** | 每请求 `X-Fusion-Scenario` 业务标签;`GET /admin/api/usage/aggregate` — 按 (app = API key 名称, scenario, model) 分组的调用/token/美元费用合计,仅 admin;可选 `usage_alerts.*` 阈值 + JSON webhook 超限告警,每阈值冷却期 = 窗口;`fg_request_logs` 新增 `scenario` 列。见"按场景用量聚合与告警"。 |
+| 2 | **#325 X-Fusion-Trace** | 端到端业务追踪 id:种子/转发/回显 + `GET /admin/api/traces/:trace_id`;`trace_id` 写入每条日志行与 `fg_request_logs`,支持直接 SQL join。见"跨服务业务追踪"。 |
+| 3 | **#324 azure-openai 后端类型** | `type: azure-openai`:deployment 映射、`api-version` 查询参数、`model_version` 透传。 |
+| 4 | **#327 /v1/laya/* 代理** | Laya surface 路由原样代理到 fusion-mlx + 代理上游调用可选 backend-key 鉴权。 |
+| 5 | **Shell SPA 入口 no-store** | 代理的模块入口页(`index.html`)带 `Cache-Control: no-store` — 缓存的入口页不再钉住过期 bundle hash。带 hash 的 `/assets/` 保持上游的 immutable 缓存。 |
+| 6 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.72。 |
+
 ### v0.9.71 — Anthropic→OpenAI 工具转换修复
 
 | # | 条目 | 详情 |
