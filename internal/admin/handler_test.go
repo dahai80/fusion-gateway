@@ -31,6 +31,12 @@ type mockStore struct {
     channels []*store.ChannelEntry
     logs     []*store.RequestLog
     quota    map[string]quotaInfo
+    aggCalls []mockAggCall
+}
+
+type mockAggCall struct {
+    from, to             time.Time
+    app, scenario, model string
 }
 
 type quotaInfo struct {
@@ -240,6 +246,14 @@ func (m *mockStore) GetDashboardOverview() (*store.DashboardOverview, error) {
 
 func (m *mockStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitStat, error) {
     return []*store.KeyProfitStat{{KeyName: "test-key", TotalInput: 1000, TotalOutput: 500, Ratio: 0.5, TotalCost: 2.0, RequestCount: 50}}, nil
+}
+
+func (m *mockStore) GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*store.UsageAggItem, error) {
+    m.aggCalls = append(m.aggCalls, mockAggCall{from: from, to: to, app: app, scenario: scenario, model: model})
+    if len(m.aggCalls) == 1 {
+        return []*store.UsageAggItem{{App: "app-a", Scenario: "question-gen", Model: "glm-5", RequestCount: 2, CostUSD: 0.30}}, nil
+    }
+    return nil, nil
 }
 
 func (m *mockStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
@@ -1884,6 +1898,47 @@ func TestHandleProfitStats(t *testing.T) {
     result := decodeResponse(t, rec)
     if result["summary"] == nil {
         t.Fatal("expected summary field")
+    }
+}
+
+func TestHandleUsageAggregate(t *testing.T) {
+    t.Parallel()
+
+    auth := newTestAuth(t)
+    ms := newMockStore()
+    h := newTestHandler(t, ms, auth, "")
+
+    req := makeAuthenticatedRequest(t, auth, http.MethodGet, "/admin/api/usage/aggregate?app=app-a&scenario=question-gen", nil)
+    rec := httptest.NewRecorder()
+    h.handleUsageAggregate(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    result := decodeResponse(t, rec)
+    rows, ok := result["rows"].([]interface{})
+    if !ok || len(rows) != 1 {
+        t.Fatalf("expected 1 row, got %v", result["rows"])
+    }
+    if result["total"].(float64) != 1 {
+        t.Errorf("expected total 1, got %v", result["total"])
+    }
+    if len(ms.aggCalls) != 1 {
+        t.Fatalf("expected 1 store call, got %d", len(ms.aggCalls))
+    }
+    call := ms.aggCalls[0]
+    if call.app != "app-a" || call.scenario != "question-gen" {
+        t.Errorf("filters not passed through: %+v", call)
+    }
+    if call.to.Sub(call.from) != 7*24*time.Hour {
+        t.Errorf("expected default 7d window, got %v", call.to.Sub(call.from))
+    }
+
+    // Non-GET is rejected.
+    req = makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/usage/aggregate", nil)
+    rec = httptest.NewRecorder()
+    h.handleUsageAggregate(rec, req)
+    if rec.Code != http.StatusMethodNotAllowed {
+        t.Fatalf("expected 405, got %d", rec.Code)
     }
 }
 

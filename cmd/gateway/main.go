@@ -27,6 +27,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/router"
 	"github.com/fusion-gateway/fusion-gateway/internal/server"
 	"github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
+	"github.com/fusion-gateway/fusion-gateway/internal/usagealerts"
 )
 
 // R4 (audit): build-time version stamping. Defaults let a plain `go build` run
@@ -398,17 +399,24 @@ func run(configPath string) error {
 	// reports the running binary, not just config_version.
 	srv.SetVersion(version, commit)
 
+	var persistSink *pg.Sink
+	var insightsSvc *insights.Service
+	var anomalyDetector *insights.Detector
+	var rulesEngine *insights.RulesEngine
+	var reportsWorker *insights.ReportsWorker
+	// #326: usage cost alerting worker. Opt-in via usage_alerts.enabled +
+	// webhook_url; reads the live store's usage aggregation each tick and
+	// POSTs a breach alert to the webhook. Static at startup (a config
+	// change needs a restart to re-arm thresholds).
+	var usageAlertsWorker *usagealerts.Worker
+	usageAlertsWorker = usagealerts.Start(context.Background(), snap.Config.UsageAlerts, srv.GetStore())
+
 	// Plan §4.2: PostgreSQL request persistence. Opt-in via
 	// persistence.enabled + DSN env; failure to connect is FATAL by design —
 	// the operator asked for durable logs, and serving with silent
 	// non-persistence would defeat the compliance goal (fail visibly, not
 	// silently). The DSN is read from the configured env var (never the
 	// config file).
-	var persistSink *pg.Sink
-	var insightsSvc *insights.Service
-	var anomalyDetector *insights.Detector
-	var rulesEngine *insights.RulesEngine
-	var reportsWorker *insights.ReportsWorker
 	if snap.Config.Persistence.Enabled {
 		dsn := os.Getenv(snap.Config.Persistence.Postgres.DsnEnv)
 		if dsn == "" {
@@ -731,6 +739,12 @@ func run(configPath string) error {
 	// the sink/pool — its generation pass queries the pool and writes files.
 	if reportsWorker != nil {
 		reportsWorker.Stop()
+	}
+	// #326: stop the usage-alerts worker with the other periodic workers —
+	// it reads the store, which stays alive past this point, but a mid-tick
+	// webhook POST must not outlive shutdown.
+	if usageAlertsWorker != nil {
+		usageAlertsWorker.Stop()
 	}
 	if persistSink != nil {
 		// Sync variant: the async RecordEvent races the pool Close below and

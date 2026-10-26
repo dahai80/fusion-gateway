@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS fg_request_logs (
     project_id     text,
     space_id       text,
     chat_id        text,
+    scenario       text,
     endpoint       text NOT NULL,
     request_type   text NOT NULL,
     is_stream      boolean NOT NULL,
@@ -163,6 +164,10 @@ ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS contains_pii boolean NOT NU
 -- #325: business trace id (X-Fusion-Trace) — same ALTER migration path as
 -- contains_pii. Nullable: rows written by older binaries have no trace id.
 ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS trace_id text;
+
+-- #326: X-Fusion-Scenario business label for per-(app, scenario, model) cost
+-- aggregation. Same nullable-migration pattern as contains_pii above.
+ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS scenario text;
 `
 
 // newCopyWriter connects the pool and provisions the schema.
@@ -230,7 +235,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         logRows = append(logRows, []any{
             id, ts, e.Log.RequestID, e.Log.APIKeyName,
             e.Log.TraceID,
-            e.Log.ProjectID, e.Log.SpaceID, e.Log.ChatID,
+            e.Log.ProjectID, e.Log.SpaceID, e.Log.ChatID, e.Log.Scenario,
             e.Endpoint, e.Log.RequestType, e.Log.IsStream,
             e.Log.Model, e.Log.ModelMapped,
             backend, backendType, e.Log.RouteReason,
@@ -267,7 +272,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         pgx.Identifier{"fg_request_logs"},
         []string{
             "id", "ts", "request_id", "api_key_name", "trace_id",
-            "project_id", "space_id", "chat_id",
+            "project_id", "space_id", "chat_id", "scenario",
             "endpoint", "request_type", "is_stream",
             "model", "model_mapped", "backend", "backend_type", "route_reason",
             "status_code", "is_success", "error_message",

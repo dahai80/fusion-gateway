@@ -221,6 +221,10 @@ func (m *MemoryStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitS
     return m.profit.GetKeyProfitStats(from, to)
 }
 
+func (m *MemoryStore) GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*store.UsageAggItem, error) {
+    return m.logs.Aggregate(from, to, app, scenario, model), nil
+}
+
 func (m *MemoryStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
     return m.quota.Check(keyName)
 }

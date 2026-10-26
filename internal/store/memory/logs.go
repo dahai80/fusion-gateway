@@ -162,6 +162,54 @@ func (s *LogStore) AllLogs() []*store.RequestLog {
     return s.ordered()
 }
 
+// Aggregate (#326) groups live log rows by (app, scenario, model) over
+// [from, to] — call counts, tokens, cost. Empty app/scenario/model means
+// "any". Admin/alerting path only: full ring scan per call, so it is not on
+// the request hot path.
+func (s *LogStore) Aggregate(from, to time.Time, app, scenario, model string) []*store.UsageAggItem {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+
+    groups := make(map[string]*store.UsageAggItem)
+    for _, l := range s.ordered() {
+        if l.Timestamp.Before(from) || l.Timestamp.After(to) {
+            continue
+        }
+        if app != "" && l.APIKeyName != app {
+            continue
+        }
+        if scenario != "" && l.Scenario != scenario {
+            continue
+        }
+        if model != "" && l.Model != model {
+            continue
+        }
+        key := l.APIKeyName + "\x00" + l.Scenario + "\x00" + l.Model
+        item, ok := groups[key]
+        if !ok {
+            item = &store.UsageAggItem{App: l.APIKeyName, Scenario: l.Scenario, Model: l.Model}
+            groups[key] = item
+        }
+        item.RequestCount++
+        item.InputTokens += int64(l.InputTokens)
+        item.OutputTokens += int64(l.OutputTokens)
+        item.TotalTokens += int64(l.TotalTokens)
+        item.CostUSD += l.CostUSD
+    }
+
+    out := make([]*store.UsageAggItem, 0, len(groups))
+    for _, item := range groups {
+        out = append(out, item)
+    }
+    sort.Slice(out, func(i, j int) bool {
+        if out[i].CostUSD != out[j].CostUSD {
+            return out[i].CostUSD > out[j].CostUSD
+        }
+        return out[i].App+"/"+out[i].Scenario+"/"+out[i].Model < out[j].App+"/"+out[j].Scenario+"/"+out[j].Model
+    })
+    return out
+}
+
 func (s *LogStore) DistinctFilters() *store.LogFilters {
     s.mu.RLock()
     defer s.mu.RUnlock()
@@ -212,6 +260,9 @@ func matchFilter(l *store.RequestLog, f store.LogFilter) bool {
         return false
     }
     if f.TraceID != "" && l.TraceID != f.TraceID {
+        return false
+    }
+    if f.Scenario != "" && l.Scenario != f.Scenario {
         return false
     }
     if f.Status == "success" && !l.IsSuccess {

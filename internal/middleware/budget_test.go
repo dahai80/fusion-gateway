@@ -62,6 +62,9 @@ func (m *mockBudgetStore) GetDashboardOverview() (*store.DashboardOverview, erro
 func (m *mockBudgetStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitStat, error) {
     return nil, nil
 }
+func (m *mockBudgetStore) GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*store.UsageAggItem, error) {
+    return nil, nil
+}
 func (m *mockBudgetStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
     return m.used, m.limit, m.exceeded, m.err
 }

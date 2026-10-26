@@ -62,6 +62,9 @@ func (m *logMockStore) GetDashboardOverview() (*store.DashboardOverview, error) 
 func (m *logMockStore) GetKeyProfitStats(from, to time.Time) ([]*store.KeyProfitStat, error) {
     return nil, nil
 }
+func (m *logMockStore) GetUsageAggregate(from, to time.Time, app, scenario, model string) ([]*store.UsageAggItem, error) {
+    return nil, nil
+}
 func (m *logMockStore) CheckQuota(keyName string) (used, limit float64, exceeded bool, err error) {
     return 0, 0, false, nil
 }
@@ -176,6 +179,7 @@ func TestInitRequestLog(t *testing.T) {
     req.Header.Set("X-Fusion-Project-Id", "proj-1")
     req.Header.Set("X-Fusion-Chat-Id", "chat-1")
     req.Header.Set("X-Space-Id", "space-1")
+    req.Header.Set("X-Fusion-Scenario", "question-gen")
     ctx := context.WithValue(req.Context(), RequestIDKey, "req-123")
     req = req.WithContext(ctx)
 
@@ -198,6 +202,9 @@ func TestInitRequestLog(t *testing.T) {
     if entry.SpaceID != "space-1" {
         t.Errorf("expected space-1, got %s", entry.SpaceID)
     }
+    if entry.Scenario != "question-gen" {
+        t.Errorf("expected question-gen, got %s", entry.Scenario)
+    }
     if !entry.IsSuccess {
         t.Error("expected default success=true")
     }
@@ -212,6 +219,9 @@ func TestInitRequestLog_NoHeaders(t *testing.T) {
     }
     if entry.IsStream {
         t.Error("expected stream=false")
+    }
+    if entry.Scenario != "" {
+        t.Errorf("expected empty scenario without header, got %s", entry.Scenario)
     }
 }
 
