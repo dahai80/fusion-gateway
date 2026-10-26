@@ -1747,6 +1747,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.74 — start.sh 服务生命周期 + 本地模型 fallthrough 修复 + fusion-mlx 工具面透传
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#344 `start.sh` 服务生命周期** | fusion-supervisor 通过 `bash <repo>/start.sh <cmd>` 管理所有 fusion-* 服务;网关现已提供合规 `start.sh`(`start/stop/restart/status/log`),pidfile + 健康轮询启动,SIGTERM 优雅停止。密钥从 gitignore 的 `.env` 加载(真实环境变量优先)。`persistence.enabled=true` 而 `FUSION_GW_PG_DSN` 未设置时预检大声失败,不再 start/die 崩溃循环。热加载开启 persistence 但无启动期构建的 sink 时,每进程只打一条 ERROR(`warnPersistNoSinkOnce`)。见"服务生命周期 (`start.sh`,#344)"。 |
+| 2 | **#343 本地模型云端 fallthrough 窗口** | `/v1/chat/completions` 指定本地专属模型但 `models.supply` 缺条目时不再落到云端 — P6 路由规则打 WARN 并点名缺失的 supply 条目,本地模型拦截路径在 `Decide` 之前关闭窗口。`RefreshModelSet` 返回集合是否变化,5s 引导重试 worker 可提前重同步。 |
+| 3 | **#340 fusion-mlx 工具面透传** | `/v1/hardware`、`/v1/benchmarks`、`POST /v1/admin/models/{name}/load` 与 merge-adapter 端点原样代理到 fusion-mlx,agent 工具链可在不绕过网关的情况下驱动模型加载/压测。 |
+| 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.74。 |
+
 ### v0.9.73 — 按语种择优路由 + Anthropic thinking 桥接
 
 | # | 条目 | 详情 |
