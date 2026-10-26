@@ -196,6 +196,14 @@ func SpaceIDFromContext(ctx context.Context) string {
 type ChatMessage struct {
     Role    string      `json:"role"`
     Content interface{} `json:"content"`
+    // ToolCalls carries OpenAI assistant tool_calls (function name/arguments)
+    // reconstructed from Anthropic tool_use blocks (#319). Only the
+    // Anthropic→OpenAI request conversion populates it; OpenAI-native
+    // requests already inline tool_calls in their own message payloads.
+    ToolCalls interface{} `json:"tool_calls,omitempty"`
+    // ToolCallID pairs with Role "tool" messages (OpenAI shape) rebuilt from
+    // Anthropic tool_result blocks (#319).
+    ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type ChatRequest struct {
