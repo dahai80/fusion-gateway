@@ -30,17 +30,31 @@ Heterogeneous Inference Pool
 ## Quick Start
 
 ```bash
-# Build
-go build -o fusion-gateway ./cmd/gateway
-
 # Copy and edit config
 cp config.example.yaml config.yaml
 
-# Run (auto-starts fusion-mlx on :11434, gateway on :11432)
+# Secrets (only needed when persistence.enabled=true — see below)
+echo 'FUSION_GW_PG_DSN=host=localhost port=5432 user=<user> dbname=fusion_gateway' > .env
+
+# Start (builds the binary if missing, loads .env, waits for /healthz)
+./start.sh start
+./start.sh status   # / stop / restart / log [-f]
+```
+
+Or run the binary directly:
+
+```bash
+go build -o fusion-gateway ./cmd/gateway
 ./fusion-gateway --config config.yaml
 ```
 
 The gateway listens on **port 11432** by default. With `auto_start.enabled: true`, it automatically launches fusion-mlx on port 11434 and waits for it to become healthy before serving requests.
+
+### Service lifecycle (`start.sh`, #344)
+
+fusion-supervisor manages every fusion-* service through `bash <repo>/start.sh <cmd>`; the gateway ships the same script (`start|stop|restart|status|log [N]`). Secrets load from a `.env` file next to the script (git-ignored) — the real environment always wins over the file.
+
+**`FUSION_GW_PG_DSN`** (bindSecretEnv pattern): the PostgreSQL DSN required at startup when `persistence.enabled: true` — startup is fatally rejected without it (fail visibly rather than silently persist nothing). `start.sh` preflights this before launching: it refuses to start with a loud error instead of entering a start/die crash loop. Note the persistence sink is built once at startup: flipping `persistence.enabled` on via hot-reload logs a one-time ERROR and persists nothing until a restart.
 
 ### Container (#143)
 
