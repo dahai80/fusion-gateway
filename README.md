@@ -1963,6 +1963,17 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.72 — Per-scenario usage alerting + X-Fusion-Trace + azure-openai + laya proxy
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#326 usage cost aggregation & alerting** | `X-Fusion-Scenario` business label per request; `GET /admin/api/usage/aggregate` — call/token/USD-cost totals grouped by (app = API key name, scenario, model), admin-only; opt-in `usage_alerts.*` thresholds with JSON webhook breach alerts and per-threshold cooldown = window; `scenario` column on `fg_request_logs`. See "Usage Cost Aggregation & Alerting". |
+| 2 | **#325 X-Fusion-Trace** | End-to-end business trace id: seed/forward/echo + `GET /admin/api/traces/:trace_id`; `trace_id` stamped on every log row and on `fg_request_logs` for direct SQL joins. See "Cross-service business trace". |
+| 3 | **#324 azure-openai backend type** | `type: azure-openai`: deployment mapping, `api-version` query param, `model_version` passthrough. |
+| 4 | **#327 /v1/laya/* proxy** | Neutral proxy of the Laya surface routes to fusion-mlx + opt-in backend-key auth on the proxied upstream calls. |
+| 5 | **Shell SPA entry no-store** | Proxied module entry pages (`index.html`) served with `Cache-Control: no-store` — a cached entry page can no longer pin a stale bundle hash. Hashed `/assets/` keep immutable caching upstream. |
+| 6 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.72. |
+
 ### v0.9.71 — Anthropic→OpenAI tool conversion fix
 
 | # | Item | Details |
