@@ -1141,6 +1141,29 @@ Beyond the standard `anthropic` backend, the gateway forwards `/v1/messages` to 
 - **Error transparency**: Non-2xx upstream responses surface to the client with the original status code, body, and `x-request-id`/`request-id` (via `*MessagesHTTPError`), never a generic 502.
 - **SSE hardening**: 1 MiB/line and 10 MiB response caps apply, consistent with the rest of the adapter pool.
 
+### Azure OpenAI (deployment convention)
+
+Backend `type: azure-openai` (#324) serves Azure OpenAI chat/completions under the deployment calling convention: `{base_url}/openai/deployments/{deployment}/chat/completions?api-version=X`, authenticated with the `api-key` header (never Bearer).
+
+```yaml
+backends:
+    azure-openai:
+        type: "azure-openai"
+        base_url: "https://your-resource.openai.azure.com"
+        api_key_env: "AZURE_OPENAI_API_KEY"   # keep keys out of config.yaml
+        api_version: "2024-10-21"             # default when empty
+        deployments:                          # requested model -> deployment name
+            gpt-4o-exam: "exam-gpt4o"
+        models:
+            - "gpt-4o-exam"
+        enabled: true
+```
+
+- **Deployment mapping**: an entry in `deployments` pins the deployment served for a requested model; unmapped models use the request model id verbatim as the deployment name (1:1 aliases need no config). Combine with `models.aliases`/`models.supply` for full routing control per model version.
+- **model_version**: Azure reports the underlying model behind the deployment; the gateway surfaces it as `model_version` on chat responses and every stream chunk (`model` stays the requested id), so downstream audit records `(trace_id, prompt_version, model_version)` work.
+- **Key sourcing**: prefer `api_key_env` (or the `AZURE_OPENAI_API_KEY` fallback) so keys are issued via fusion-identity and never live in app configs.
+- Embeddings use the deployment embeddings path; health check probes `/openai/models`; `rerank` is not supported.
+
 ## Audio & Moderation
 
 - `/v1/audio/transcriptions`: Multipart form upload, delegates to provider's `Transcription()` method (cloud-only)

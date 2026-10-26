@@ -260,6 +260,27 @@ backends:
         base_url: "https://your-foundry-resource.services.ai.azure.com"
         timeout: 120s
         enabled: false
+    azure-openai:
+        # Azure OpenAI deployment convention (#324): requested model maps to a
+        # deployment name; URL becomes
+        # {base_url}/openai/deployments/{deployment}/chat/completions?api-version=X.
+        # Auth is the "api-key" header (never Bearer). The response carries the
+        # effective model_version (underlying model behind the deployment) so
+        # downstream audit records (trace_id, prompt_version, model_version)
+        # work. Pin deployments per model via `deployments`; unmapped models use
+        # the request model id as the deployment name. Prefer api_key_env over a
+        # plaintext key (keys are issued via fusion-identity, never stored in
+        # app configs).
+        type: "azure-openai"
+        base_url: "https://your-resource.openai.azure.com"
+        api_key_env: "AZURE_OPENAI_API_KEY"
+        api_version: "2024-10-21"     # default when empty
+        deployments:
+            gpt-4o-exam: "exam-gpt4o" # requested model -> deployment name
+        models:
+            - "gpt-4o-exam"
+        timeout: 120s
+        enabled: false
     volcengine:
         type: "volcengine"
         base_url: "https://ark.cn-beijing.volces.com/api/v3"

@@ -245,9 +245,12 @@ type StreamChunk struct {
     Object    string         `json:"object"`
     Created   int64          `json:"created"`
     Model     string         `json:"model"`
-    Choices   []ChoiceDelta  `json:"choices"`
-    Usage     *UsageResponse `json:"usage,omitempty"`
-    Degraded  bool           `json:"degraded,omitempty"`
+    // ModelVersion (#324): effective model version behind the served
+    // deployment, stamped per-chunk by providers that know it (azure-openai).
+    ModelVersion string        `json:"model_version,omitempty"`
+    Choices      []ChoiceDelta `json:"choices"`
+    Usage        *UsageResponse `json:"usage,omitempty"`
+    Degraded     bool           `json:"degraded,omitempty"`
     // E1 (audit): Raw carries the verbatim upstream SSE data bytes for
     // OpenAI-wire-format providers (fusion-mlx, openai_compatible). When set,
     // the server forward loop emits Raw directly instead of re-marshaling the
@@ -274,8 +277,13 @@ type ChatResponse struct {
     Object  string         `json:"object"`
     Created int64          `json:"created"`
     Model   string         `json:"model"`
-    Choices []ChatChoice   `json:"choices"`
-    Usage   UsageResponse  `json:"usage"`
+    // ModelVersion (#324): the effective model version behind the served
+    // deployment (Azure OpenAI reports the underlying model here; other
+    // providers leave it empty). Downstream audit records
+    // (trace_id, prompt_version, model_version) rely on it.
+    ModelVersion string       `json:"model_version,omitempty"`
+    Choices      []ChatChoice `json:"choices"`
+    Usage        UsageResponse `json:"usage"`
 }
 
 type ChatChoice struct {
