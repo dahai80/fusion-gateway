@@ -41,6 +41,7 @@ type FusionMLXProvider struct {
     routeHeader      string
     routeHeaderValue string
     modelSet         atomic.Value
+    modelInfos       atomic.Value
     gcPending        atomic.Bool
     reverseProxy     *httputil.ReverseProxy
     reverseProxyOnce atomic.Bool
@@ -150,6 +151,17 @@ func (p *FusionMLXProvider) ModelSet() map[string]bool {
     return v.(map[string]bool)
 }
 
+// ModelInfos returns the last-refreshed per-model metadata keyed by id
+// (#330): carries fusion-mlx /v1/models fields including the Languages
+// capability array. nil before the first successful refresh.
+func (p *FusionMLXProvider) ModelInfos() map[string]ModelInfo {
+    v := p.modelInfos.Load()
+    if v == nil {
+        return nil
+    }
+    return v.(map[string]ModelInfo)
+}
+
 // AcquireLocalSlot exposes the RR4 slot accounting to the local-slot
 // decorator (WrapLocalSlot) so a local-classified serving provider — e.g. an
 // openai-compatible backend pointed at this same fusion-mlx engine (#210) —
@@ -166,12 +178,30 @@ func (p *FusionMLXProvider) RefreshModelSet(ctx context.Context) {
         slog.Warn("failed to refresh model set", "error", err)
         return
     }
+    // Loaded overlay (#59/#330): /v1/models lists registered models, not
+    // residency — the authoritative loaded set is /health loaded_models,
+    // same source the models endpoint uses. Stamped here so the stored
+    // ModelInfos (language routing candidates) carry servable state.
+    loadedSet := map[string]bool{}
+    if detail := p.HealthDetail(ctx); detail.FetchError == nil {
+        for _, id := range detail.LoadedModels {
+            loadedSet[id] = true
+        }
+    } else {
+        slog.Warn("model set refresh: health detail failed, loaded flags may be stale", "error", detail.FetchError)
+    }
     m := make(map[string]bool, len(models))
+    infos := make(map[string]ModelInfo, len(models))
     for _, model := range models {
         m[model.ID] = true
+        if loadedSet[model.ID] {
+            model.Loaded = true
+        }
+        infos[model.ID] = model
     }
     p.modelSet.Store(m)
-    slog.Info("refreshed local model set", "count", len(m))
+    p.modelInfos.Store(infos)
+    slog.Info("refreshed local model set", "count", len(m), "loaded", len(loadedSet))
 }
 
 func (p *FusionMLXProvider) HealthCheck(ctx context.Context) error {

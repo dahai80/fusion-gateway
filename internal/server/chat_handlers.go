@@ -72,6 +72,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         stampModelIdentity(r, modelIdent)
     }
 
+    // #330: language-aware routing — rewrite to a loaded model declaring the
+    // X-Fusion-Language hint when the requested model does not. No-op without
+    // the header; falls back to the requested model when no candidate exists.
+    req.Model = s.rewriteForLanguage(r, req.Model)
+
     // #185: BNUP mode — when enabled, a model alias starting with "bnup-"
     // triggers two auto-attachments: (1) model remapped to bnup_model (the
     // merged Qwen2.5-32B-BNUP-Final weights), (2) grammar bnup_grammar
@@ -1263,6 +1268,9 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         chatReq.Model = modelIdent.Bare
         stampModelIdentity(r, modelIdent)
     }
+
+    // #330: language-aware routing (mirror /v1/chat/completions).
+    chatReq.Model = s.rewriteForLanguage(r, chatReq.Model)
 
     // Re-encode and forward to chat completions handler via internal call
     ctx := adapter.WithFusionHeaders(r.Context(), r)

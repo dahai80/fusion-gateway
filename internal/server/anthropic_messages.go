@@ -125,6 +125,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         stampModelIdentity(r, modelIdent)
     }
 
+    // #330: language-aware routing — same rewrite as /v1/chat/completions
+    // (X-Fusion-Language hint). Runs after identity resolution, before the
+    // allowlist: an allowlist-restricted key keeps its requested model when
+    // the language candidate is not permitted (never hard-fails).
+    antReq.Model = s.rewriteForLanguage(r, antReq.Model)
+
     if !middleware.CheckModelAllowlist(r, antReq.Model) {
         slog.Warn("anthropic messages model not allowed for this key", "model", antReq.Model)
         http.Error(w, `{"error":{"message":"Model not allowed for this API key","type":"auth_error"}}`, http.StatusForbidden)

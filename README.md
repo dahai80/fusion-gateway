@@ -526,6 +526,28 @@ On breach the gateway POSTs:
 
 Per-threshold cooldown equals its window — a steady over-budget stream alerts once per window, not once per tick. Invalid thresholds (missing `window` or `max_cost_usd`) are dropped individually at startup with a WARN; the rest of the subsystem keeps working. Thresholds are read at startup — rearm requires a restart.
 
+### Language-Aware Model Routing (#330)
+
+When several models are loaded, the gateway can route a request to the model that actually speaks the request's language, keyed off the per-model `languages` metadata fusion-mlx exposes on `/v1/models` (fusion-mlx#1416 — lowercase ISO 639-1 codes, e.g. `["ar","en"]`).
+
+Send a language hint header on any chat request (`/v1/chat/completions`, `/v1/completions`, `/v1/messages`):
+
+```bash
+curl http://127.0.0.1:11432/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-Fusion-Language: ar" \
+  -d '{"model":"qwen3","messages":[{"role":"user","content":"..."}]}'
+```
+
+Behavior:
+
+- If the requested model already declares the hinted language, the request is untouched.
+- Otherwise the gateway rewrites to a **loaded** local model whose `languages` include the hint (deterministic alphabetical pick when several match). The decision is logged (`language routing: rewrote model for language ...`) and the client-facing requested model is kept on the log row as `model_mapped`.
+- **Never hard-fails:** no hint header, no metadata, no loaded candidate, or a key model-allowlist that rejects the candidate — the requested model is used as-is.
+- Single-model deployments are unaffected: with no other candidate the requested model wins by definition.
+
+v1 uses the client-declared hint; automatic language detection can layer on later.
+
 ### Heuristic Code-Intent Fast Path (<20ms)
 
 The LLM classifier above is a full model call (2s timeout, no cache, every request) — acceptable for a disabled-by-default semantic layer, but it dominates gateway end-to-end overhead once enabled. For the **coding** intent specifically (the hottest path in vibe-coding / refactor / debug workflows), a deterministic in-process heuristic classifier replaces the LLM call and keeps gateway overhead well under 20ms.

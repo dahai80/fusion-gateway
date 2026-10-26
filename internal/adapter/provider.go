@@ -390,6 +390,10 @@ type ModelInfo struct {
     // Capabilities mirrors fusion-mlx per-model capability flags; nil when
     // the backend does not declare them.
     Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+    // Languages mirrors fusion-mlx per-model language capability metadata
+    // (#330, fusion-mlx#1416): lowercase ISO codes the model advertises
+    // (e.g. ["ar","en"]). Empty = unknown/undeclared — never guessed.
+    Languages []string `json:"languages,omitempty"`
     // EngineType is the normalized cross-project alias derived from
     // Modality+Capabilities (adapter.NormalizedEngineType) honoring the
     // fusion-cowork chat-model filter contract (#245). Omitted when no
