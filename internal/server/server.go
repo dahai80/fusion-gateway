@@ -77,6 +77,9 @@ type Server struct {
     // fetch path skips coalescing when this is nil (e.g. cache disabled).
     fetchCoalescer  *coalescer
     costTracker     *cost.Tracker
+    // #301: runtime cloud-overflow state (cooldown window + daily cost
+    // counter). Policy knobs live in routing.fallback.overflow config.
+    overflow        overflowState
     piiMiddleware   *middleware.PIIMiddleware
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker

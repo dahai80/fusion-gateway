@@ -146,6 +146,29 @@ type FallbackConfig struct {
     CloudDefault          string            `mapstructure:"cloud_default"`
     ModelMapping          map[string]string `mapstructure:"model_mapping"`
     ContextWindowFallback map[string]string `mapstructure:"context_window_fallback"`
+    Overflow              OverflowConfig    `mapstructure:"overflow"`
+}
+
+// OverflowConfig productizes the runtime cloud-overflow path (#301): when a
+// local/cluster generation fails at request time, the handler re-routes to a
+// cloud backend with the same API shape. Three knobs:
+//
+//   - Enabled: fail-open direction made explicit. true (default) = local
+//     failures overflow to cloud; false = fail-closed, the local error is
+//     surfaced to the client and no cloud call is made. Cloud-to-local is
+//     NEVER implicit in either direction.
+//   - Cooldown: after an overflow fires, subsequent requests skip the known-
+//     bad local path for this window and go straight to cloud — without this
+//     every request pays the local timeout latency again before escaping
+//     (the 600s x3 eval failure arm). 0 = off.
+//   - CostCeiling: daily cumulative USD budget for overflow traffic (base
+//     pricing via cost.CalculateCost). Once the day's overflow spend reaches
+//     the ceiling, further overflows are refused with an explicit error —
+//     never a silent fallback to the broken local backend. 0 = unlimited.
+type OverflowConfig struct {
+    Enabled     bool          `mapstructure:"enabled"`
+    Cooldown    time.Duration `mapstructure:"cooldown"`
+    CostCeiling float64       `mapstructure:"cost_ceiling"`
 }
 
 type NegotiationConfig struct {
@@ -1680,6 +1703,15 @@ func validate(cfg *Config) error {
     if cfg.Routing.CircuitBreaker.HalfOpenMaxRequests <= 0 {
         return fmt.Errorf("circuit_breaker.half_open_max_requests must be positive, got: %d", cfg.Routing.CircuitBreaker.HalfOpenMaxRequests)
     }
+    // #301: overflow policy knobs — 0 is each knob's documented opt-out
+    // (no cooldown / no ceiling), negatives are unit mistakes (e.g. "500"
+    // parsed as milliseconds by viper into a wrong-sign Duration).
+    if cfg.Routing.Fallback.Overflow.Cooldown < 0 {
+        return fmt.Errorf("fallback.overflow.cooldown must be non-negative (0 = off), got: %s", cfg.Routing.Fallback.Overflow.Cooldown)
+    }
+    if cfg.Routing.Fallback.Overflow.CostCeiling < 0 {
+        return fmt.Errorf("fallback.overflow.cost_ceiling must be non-negative (0 = unlimited), got: %f", cfg.Routing.Fallback.Overflow.CostCeiling)
+    }
     // RR11 MaxConnsPerHost: 0 means unlimited (Go transport default), which is
     // exactly the FD-exhaustion vector RR11 closed. Reject negative (invalid);
     // 0 is allowed only as the explicit "unlimited" opt-out the operator typed
@@ -2291,6 +2323,14 @@ func DefaultConfig() Config {
                 Timeout:             30 * time.Second,
                 HalfOpenMaxRequests: 1,
                 SuccessThreshold:    3,
+            },
+            // #301: overflow enabled by default — fail-open is the documented
+            // local-first direction (local failure escapes to cloud). Set
+            // routing.fallback.overflow.enabled=false for fail-closed.
+            Fallback: FallbackConfig{
+                Overflow: OverflowConfig{
+                    Enabled: true,
+                },
             },
             Negotiation: NegotiationConfig{
                 DisableFusionMLXRouting: true,
