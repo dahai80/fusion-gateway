@@ -30,17 +30,31 @@ Fusion-Gateway :11432
 ## 快速开始
 
 ```bash
-# 构建
-go build -o fusion-gateway ./cmd/gateway
-
 # 复制并编辑配置
 cp config.example.yaml config.yaml
 
-# 运行 (自动在 :11434 启动 fusion-mlx,网关在 :11432)
+# 密钥 (仅 persistence.enabled=true 时需要,见下)
+echo 'FUSION_GW_PG_DSN=host=localhost port=5432 user=<user> dbname=fusion_gateway' > .env
+
+# 启动 (二进制缺失时自动构建,加载 .env,等待 /healthz 就绪)
+./start.sh start
+./start.sh status   # / stop / restart / log [-f]
+```
+
+或直接运行二进制:
+
+```bash
+go build -o fusion-gateway ./cmd/gateway
 ./fusion-gateway --config config.yaml
 ```
 
 网关默认监听 **11432 端口**。当 `auto_start.enabled: true` 时,会在启动时自动拉起 11434 端口的 fusion-mlx,并等待其健康就绪后再开始对外服务。
+
+### 服务生命周期 (`start.sh`,#344)
+
+fusion-supervisor 通过 `bash <repo>/start.sh <cmd>` 统一管理 fusion-* 服务,网关提供同款脚本 (`start|stop|restart|status|log [N]`)。密钥从脚本旁的 `.env` 文件加载(已 git-ignore),真实环境变量优先于文件。
+
+**`FUSION_GW_PG_DSN`** (bindSecretEnv 模式):`persistence.enabled: true` 时启动必需的 PostgreSQL DSN —— 缺失时启动直接致命退出(显式失败,而不是静默不落库)。`start.sh` 启动前会做预检:缺 DSN 时大声报错拒绝启动,而不是陷入 启动即死 的崩溃循环。注意持久化 sink 只在启动时构建一次:热加载把 `persistence.enabled` 打开后只会记录一次 ERROR 日志,重启前不会真正落库。
 
 ## 配置
 

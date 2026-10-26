@@ -24,6 +24,7 @@ Thumbs.db
 
 # Config with secrets
 config.yaml
+.env
 
 # Test/build artifacts
 *.test

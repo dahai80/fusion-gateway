@@ -178,6 +178,9 @@ type Server struct {
     liveFallbackOnce   sync.Once
     liveFallbackCtx    context.Context
     liveFallbackCancel context.CancelFunc
+    // #344: persistence enabled via hot-reload but no sink (built once at
+    // startup) — warn once per process, not per request.
+    persistNoSinkWarned sync.Once
     // R4 (audit): build-time version/commit, stamped by main.go via SetVersion
     // and surfaced on /v1/status. Defaults until SetVersion is called.
     version string
@@ -1185,6 +1188,18 @@ func (s *Server) SetPersistSink(sink persist.Sink) {
     s.persistSink = sink
 }
 
+// warnPersistNoSinkOnce (#344): a hot-reload can flip persistence.enabled on,
+// but the sink is built once at startup — until a restart the gateway serves
+// normally yet persists nothing. Fail visibly: one loud ERROR per process.
+func (s *Server) warnPersistNoSinkOnce() {
+    s.persistNoSinkWarned.Do(func() {
+        slog.Error("persistence.enabled=true (hot-reload) but no persist sink — "+
+            "request logs are NOT being persisted; restart the gateway with "+
+            "FUSION_GW_PG_DSN set to activate persistence",
+            "hint", "persistence sink is built once at startup; hot-reload cannot create it")
+    })
+}
+
 // SetInsightsService wires the PG read layer into the admin API (P3). The
 // admin Handler reads the service at request time, so wiring after New is
 // safe — but the call must happen BEFORE Start (Start builds the handler;
@@ -1294,6 +1309,11 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             crw, r = middleware.InstallCapture(rec, r,
                 snap.Config.Persistence.Capture.MaxBodyBytes,
                 snap.Config.Persistence.Capture.RequestBody)
+        } else if s.persistSink == nil && snap.Config.Persistence.Enabled {
+            // #344: persistence was flipped on via hot-reload but the sink is
+            // built once at startup — logs are silently NOT persisted until a
+            // restart. Warn once per process instead of failing silently.
+            s.warnPersistNoSinkOnce()
         }
 
         var final http.Handler = snapMiddleware(chain(handler))
