@@ -9,6 +9,19 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (shell RBAC user roles, 2026-10-27) — #359
+
+- **`PATCH /api/v1/shell/users/{id}` persisted role names that do not exist in
+  the role store** — roles landed verbatim on the account, so a client bug could
+  plant a phantom role that never appears in `GET /shell/roles` and is
+  unmanageable in the admin UI (the symmetric delete-side guard `role in use`
+  already existed). Both user-write paths now validate every role against
+  `RoleStore.Exists` (built-in or custom) and reject unknown names with
+  **400 `role_rejected`** listing them — mirroring the menu-permissions PUT
+  gate in `internal/shell/roles.go`. POST validates its assigned default role
+  set through the same helper so the default can never drift out of the
+  resolvable set.
+
 ### Fixed (admin dashboard render, 2026-10-27) — #360
 
 - **Insights Latency page unmounted entirely by a recharts invariant** — the

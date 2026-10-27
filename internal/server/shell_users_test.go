@@ -229,6 +229,72 @@ func TestShellUsers_BootstrapPasswordRotation(t *testing.T) {
     }
 }
 
+func TestShellUsers_RoleValidation(t *testing.T) {
+    s := newShellTestServer(t, false)
+    _, login := loginShell(t, s, "admin", "s3cret")
+    token := login["token"].(string)
+
+    // Target user for role patches.
+    w := shellRequest(t, s, token, http.MethodPost, "/api/v1/shell/users",
+        `{"username":"carol","password":"carolpassword","permissions":[]}`)
+    if w.Code != http.StatusCreated {
+        t.Fatalf("create carol code = %d body=%s", w.Code, w.Body.String())
+    }
+
+    // PATCH with a phantom role is rejected 400 role_rejected (#359).
+    w = shellRequest(t, s, token, http.MethodPatch, "/api/v1/shell/users/carol", `{"roles":["nonexistent-role"]}`)
+    if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"role_rejected"`) {
+        t.Fatalf("phantom role patch code = %d body=%s", w.Code, w.Body.String())
+    }
+    if !strings.Contains(w.Body.String(), "nonexistent-role") {
+        t.Fatalf("rejection must list the unknown role, body=%s", w.Body.String())
+    }
+    // The account must be untouched by the rejected patch.
+    w = shellRequest(t, s, token, http.MethodGet, "/api/v1/shell/users", "")
+    rows := decodeJSON[[]shellAdminRow](t, w)
+    for _, row := range rows {
+        if row.UserID == "carol" && !sameRoles(row.Roles, []string{"user"}) {
+            t.Fatalf("carol roles mutated by rejected patch: %+v", row.Roles)
+        }
+    }
+
+    // Mixed valid + invalid lists the unknown names only.
+    w = shellRequest(t, s, token, http.MethodPatch, "/api/v1/shell/users/carol", `{"roles":["auditor","ghost-role"]}`)
+    if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "ghost-role") {
+        t.Fatalf("mixed role patch code = %d body=%s", w.Code, w.Body.String())
+    }
+
+    // Built-in roles still assign cleanly.
+    w = shellRequest(t, s, token, http.MethodPatch, "/api/v1/shell/users/carol", `{"roles":["auditor"]}`)
+    if w.Code != http.StatusOK {
+        t.Fatalf("builtin role patch code = %d body=%s", w.Code, w.Body.String())
+    }
+    if row := decodeJSON[shellAdminRow](t, w); !sameRoles(row.Roles, []string{"auditor"}) {
+        t.Fatalf("carol roles = %+v", row.Roles)
+    }
+
+    // Custom roles created through the RoleStore resolve too.
+    if err := s.shellRoles.Create("ops", "e2e ops role", []string{"read", "write"}); err != nil {
+        t.Fatalf("custom role create: %v", err)
+    }
+    w = shellRequest(t, s, token, http.MethodPatch, "/api/v1/shell/users/carol", `{"roles":["ops"]}`)
+    if w.Code != http.StatusOK {
+        t.Fatalf("custom role patch code = %d body=%s", w.Code, w.Body.String())
+    }
+}
+
+func sameRoles(got, want []string) bool {
+    if len(got) != len(want) {
+        return false
+    }
+    for i := range got {
+        if got[i] != want[i] {
+            return false
+        }
+    }
+    return true
+}
+
 func TestShellUsers_StorePersistence(t *testing.T) {
     dir := t.TempDir()
     cfg := newShellCfg(t)
