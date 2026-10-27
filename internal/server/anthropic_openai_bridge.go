@@ -579,6 +579,14 @@ func (b *anthropicSSEBridge) finalizeMessage() {
     b.forward("event: message_stop\ndata: " + string(raw) + "\n\n")
 }
 
+// UsageTotals exposes the upstream usage-chunk counts the bridge observed
+// while converting frames (#351 follow-up): the caller stamps them onto the
+// request log after Finalize so bridge-path rows carry real prompt/completion
+// counts instead of the tokenizer estimate.
+func (b *anthropicSSEBridge) UsageTotals() (inputTokens, outputTokens int) {
+    return b.inTok, b.outTok
+}
+
 func (b *anthropicSSEBridge) emitError(e *bridgeErrorBody) {
     typ := e.Type
     if typ == "" {
