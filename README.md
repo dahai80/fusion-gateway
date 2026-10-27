@@ -2044,6 +2044,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.78 — shell RBAC user role validation
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#359 phantom shell user roles accepted** | `PATCH /api/v1/shell/users/{id}` stored `req.Roles` verbatim with no existence check, so a typo'd or removed role name landed on the account — invisible in the roles admin surface and unmanageable, exactly like the menu-permissions phantom the roles page already guards against. Both create (default `user` role) and update now validate every name against the RoleStore (built-in admin/user/auditor + custom) via `validateShellRoles`, rejecting unknown names with 400 `role_rejected` that lists them; validation runs before the last-admin guard so a rejected patch never touches the account. Pinned by `TestShellUsers_RoleValidation` (phantom 400 + role listed + account untouched, mixed lists unknown-only, built-in and custom roles still assign). |
+| 2 | **Dropped e2e spec restored** | `tests/e2e/tests/08-latency-render.spec.js` (the v0.9.77 latency-render pin) was accidentally left out of PR #361's commits and landed via PR #364. |
+| 3 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.78. |
+
 ### v0.9.77 — Latency page render fix + replay contract
 
 | # | Item | Details |
