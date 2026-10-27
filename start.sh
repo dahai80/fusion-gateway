@@ -89,10 +89,30 @@ check_config() {
     fi
 }
 
+# Port the gateway serves on, derived from HEALTH_URL (default 11432).
+gw_port() {
+    echo "$HEALTH_URL" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p'
+}
+
+# PID currently listening on the port. -sTCP:LISTEN is mandatory — bare
+# `lsof -ti :PORT` also matches outbound sockets and returns the wrong PID.
+listener_pid() {
+    lsof -ti ":$(gw_port)" -sTCP:LISTEN 2>/dev/null | head -1
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
         return 0
+    fi
+    # #356: a foreign process on the port makes the health probe lie — the
+    # spawned child dies on bind failure while the foreign process answers
+    # /healthz, so start() used to report "healthy" for a dead PID. Refuse
+    # to start instead, naming the PID to kill.
+    if foreign="$(listener_pid)" && [ -n "$foreign" ]; then
+        echo "ERROR: port $(gw_port) is already held by PID $foreign (not started via start.sh)." >&2
+        echo "       Stop it first: kill $foreign" >&2
+        exit 1
     fi
     check_persistence_dsn
     ensure_binary
@@ -109,7 +129,17 @@ start() {
             exit 1
         fi
         if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
-            echo "Started (PID $(cat "$PID_FILE")) — healthy at $HEALTH_URL"
+            # #356: health answered — confirm OUR child is the listener, not
+            # a process that grabbed the port between preflight and bind.
+            local child listener
+            child="$(cat "$PID_FILE")"
+            listener="$(listener_pid)"
+            if [ "$listener" != "$child" ]; then
+                echo "ERROR: $HEALTH_URL answered but the listener is PID ${listener:-?}, not the spawned PID $child." >&2
+                echo "       The child likely failed to bind. Kill ${listener:-the foreign PID} and retry." >&2
+                exit 1
+            fi
+            echo "Started (PID $child) — healthy at $HEALTH_URL"
             return 0
         fi
         sleep 1
@@ -130,6 +160,7 @@ stop() {
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$PID_FILE"
             echo "Stopped (graceful)"
+            warn_foreign_listener
             return 0
         fi
         sleep 1
@@ -138,6 +169,18 @@ stop() {
     kill -9 "$pid" 2>/dev/null || true
     rm -f "$PID_FILE"
     echo "Stopped (forced)"
+    warn_foreign_listener
+}
+
+# #356: after stop, the port may still be held by an externally started
+# process the pidfile never governed — surface it so the next start()'s
+# preflight failure is not a surprise.
+warn_foreign_listener() {
+    local foreign
+    if foreign="$(listener_pid)" && [ -n "$foreign" ]; then
+        echo "WARNING: port $(gw_port) is still held by PID $foreign (not started via start.sh)." >&2
+        echo "         Stop it first: kill $foreign" >&2
+    fi
 }
 
 status() {
