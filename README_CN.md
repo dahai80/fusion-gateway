@@ -1747,6 +1747,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.79 — PRD 1015 G5 网关侧切片
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **X-Fusion-Via + Server 自标识响应头** | 落地实现与优化 PRD（`architecture/fusion-gateway-seriazation-archi-1015.md`）全量核对后仅剩一处网关侧缺口：方案 §9（G5 统一入口）。`withMiddleware` 现在在每个 `/v1/*` 响应上打 `X-Fusion-Via: gateway` 与 `Server: fusion-gateway/<version>`，客户端可自检流量确实经过网关（AC12b）。 |
+| 2 | **`/v1/status` 新增 `direct_calls_blocked` 提示位** | 方案 §9.3 迁移期观察项：新增 `server.direct_calls_blocked` 配置（默认 false，走请求 context snapshot 热加载），透出于 `/v1/status`；fusion-mlx 启用 strict auth（上游 fusion-mlx#1381）后运维置 true。纯提示位，网关不据此拦截任何请求。由 `TestG5_ViaHeadersOnMiddlewareResponses` 与两个 status 位测试钉死。 |
+| 3 | **PRD 对照核对收口** | schema 列、persistence 配置默认值、§8 全部 admin 端点、§13 模型身份、§14.2 规则引擎、§15.1 检测器、§15.3 定期报告逐项核对一致；有意偏差（`/admin/api/insights/*` 命名空间、Prometheus 秒制指标名、顶层 `file_log.*`）已记录在方案落地进度注记中。剩余方案项为跨仓或上游阻塞（fusion-mlx#1381）。 |
+| 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.79。 |
+
 ### v0.9.78 — shell RBAC 用户角色校验
 
 | # | 条目 | 详情 |
