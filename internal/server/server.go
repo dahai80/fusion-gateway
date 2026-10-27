@@ -1312,6 +1312,12 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         // correlate its own log lines with gateway call records — including
         // the gateway-seeded uuid when the client sent no X-Fusion-Trace.
         rec.Header().Set("X-Fusion-Trace", entry.TraceID)
+        // Plan §9.2 (G5): self-identification headers so a client can verify
+        // its request actually traversed the gateway — not a bare fusion-mlx
+        // or a cloud endpoint answering directly. Server header carries the
+        // build version for the same self-check.
+        rec.Header().Set("X-Fusion-Via", "gateway")
+        rec.Header().Set("Server", "fusion-gateway/"+s.version)
 
         // Per-request: inject fresh config snapshot, then run cached chain
         snap := config.GetSnapshot()
