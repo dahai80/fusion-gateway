@@ -1747,6 +1747,14 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.77 — Latency 页面渲染修复 + replay 契约
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#360 Insights Latency 页面被 recharts invariant 整页卸载** | 异常叠加层渲染 `ReferenceLine` 时未带 `yAxisId`，recharts 默认查 axis id `0` —— 而两张图的 Y 轴命名是 `left`/`right`，不存在 id 0 —— 抛 `Invariant failed: Could not find yAxis by id "0"`，React 将整页卸载。只要所选窗口内匹配到 ≥1 个已检测异常就崩（库里 17 个异常 → 必崩；无匹配异常时页面正常，这也是此前检查漏掉的原因）。两张图现在都设 `yAxisId="left"`。由 `tests/e2e/tests/08-latency-render.spec.js` 钉死（无 invariant 控制台报错、双卡渲染、≥6 条分位曲线、叠加层不致命）。 |
+| 2 | **Replay 404→409 契约** | `POST /admin/api/insights/logs/{id}/replay` 对无捕获 payload 的日志行（`GET /v1/models` 轮询行、保留期已清理的分区）返回 404，违反文档化的"无捕获请求体"契约。payload 查询的 `ErrNoRows` 现在映射为 409；真实查询失败仍为 500。e2e replay 用例改为自建 4-token 请求再重放（任意存量行可能带 64k-token 上下文，本地引擎需数分钟，超出测试超时）。 |
+| 3 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.77。 |
+
 ### v0.9.76 — 桥接路径 usage 采集 + start.sh 端口预检
 
 | # | 条目 | 详情 |

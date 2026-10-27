@@ -2044,6 +2044,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.77 — Latency page render fix + replay contract
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#360 Insights Latency page unmounted by recharts invariant** | The anomaly overlay rendered `ReferenceLine` without `yAxisId`, so recharts looked up axis id `0` — which doesn't exist on charts whose Y axes are named `left`/`right` — threw `Invariant failed: Could not find yAxis by id "0"`, and React unmounted the entire page whenever at least one detected anomaly fell inside the selected window (17 stored anomalies → always crashed; pages without matched anomalies rendered fine, which is why earlier checks missed it). Both charts now set `yAxisId="left"`. Pinned by `tests/e2e/tests/08-latency-render.spec.js` (no invariant console error, both cards, ≥6 percentile curves, overlay non-fatal). |
+| 2 | **Replay 404→409 contract** | `POST /admin/api/insights/logs/{id}/replay` on a log row without a captured payload (`GET /v1/models` poll rows, retention-pruned partition) answered 404, violating the documented "no captured request body" contract. `ErrNoRows` from the payload fetch now maps to 409; real fetch failures stay 500. The e2e replay test mints its own 4-token request instead of replaying an arbitrary stored row (a stored 64k-token context takes minutes on the local engine and blows the test timeout). |
+| 3 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.77. |
+
 ### v0.9.76 — bridge-path usage stamping + start.sh port preflight
 
 | # | Item | Details |
