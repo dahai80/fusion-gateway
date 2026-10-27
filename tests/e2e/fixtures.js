@@ -12,12 +12,20 @@
 // the shipped config: admin / change-me-secure-password.
 
 const { test: base, expect } = require('@playwright/test');
+const fs = require('fs');
 const path = require('path');
 
 const BASE = process.env.FG_BASE || 'http://127.0.0.1:11432';
 const CFG = process.env.FG_CONFIG || path.resolve(__dirname, '../../config.yaml');
 const ADMIN_USER = process.env.FG_ADMIN_USER || 'admin';
 const ADMIN_PASS = process.env.FG_ADMIN_PASS || 'change-me-secure-password';
+
+// Master key from config.yaml — needed for tests that drive /v1 directly
+// (e.g. generating a small log to replay). Empty when not configured.
+function masterKey() {
+    const m = fs.readFileSync(CFG, 'utf8').match(/^\s*master_key:\s*"?([^"\n#]+)"?/m);
+    return m ? m[1].trim() : '';
+}
 
 // login via the admin API; returns { token, role }.
 async function login(page) {
@@ -89,6 +97,7 @@ module.exports = {
     ADMIN_PASS,
     login,
     adminApi,
+    masterKey,
     waitForConfig,
     openAsAdmin,
 };

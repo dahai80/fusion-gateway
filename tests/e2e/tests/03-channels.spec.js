@@ -94,7 +94,11 @@ test.describe('channel management', () => {
         const row = page.locator('.ant-table-row', { hasText: name }).first();
         await expect(row).toBeVisible({ timeout: 10_000 });
         await row.getByRole('button', { name: /delete|删除|remove/i }).click();
+        // antd Popconfirm renders async — checking visibility immediately after
+        // the delete click races the popover and can skip the confirm, leaving
+        // the channel alive (full-suite flake). Wait for it first.
         const confirm = page.getByRole('button', { name: /^ok|确定|确认|yes$/i }).last();
+        await confirm.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
         if (await confirm.isVisible().catch(() => false)) await confirm.click();
         // Confirm delete via API polling.
         const gone = await pollUntil(async () => {

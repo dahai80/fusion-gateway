@@ -3,12 +3,15 @@ package admin
 import (
     "bytes"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log/slog"
     "net/http"
     "strconv"
     "time"
+
+    "github.com/jackc/pgx/v5"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
@@ -50,8 +53,18 @@ func (h *Handler) handleInsightsLogReplay(w http.ResponseWriter, r *http.Request
     }
     p, err := h.insights.Payload(r.Context(), id)
     if err != nil {
+        // No captured payload row (GET polls like /v1/models, requests logged
+        // before body capture, retention pruned the payload partition) is the
+        // same condition as an empty captured body below: nothing to replay.
+        // Answer 409, the documented "no captured request body" contract, not
+        // 404 — the log row itself exists (it came from the search listing).
+        if errors.Is(err, pgx.ErrNoRows) {
+            slog.Warn("replay skipped: no captured payload", "id", id)
+            writeError(w, http.StatusConflict, "no captured request body to replay")
+            return
+        }
         slog.Warn("replay payload fetch failed", "id", id, "error", err)
-        writeError(w, http.StatusNotFound, err.Error())
+        writeError(w, http.StatusInternalServerError, err.Error())
         return
     }
     body := []byte(p.ReqBody)

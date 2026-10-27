@@ -3,7 +3,7 @@
 // stream_chunks round-trip. Read-only except the persistence PUT, which
 // writes the same values back (fixtures.js backs up / restores config.yaml).
 
-const { test, expect, login, adminApi, openAsAdmin } = require('../fixtures');
+const { test, expect, login, adminApi, openAsAdmin, masterKey, BASE } = require('../fixtures');
 
 const WINDOW = (hours) => {
     const now = new Date();
@@ -108,12 +108,58 @@ test.describe('ac18/g3/g10: explorer', () => {
     test('replay endpoint on a stored log returns endpoint+status', async ({ page }) => {
         const { token } = await login(page);
         const api = adminApi(page, token);
-        const w = WINDOW(24);
-        const search = await api('POST', '/insights/logs/search', { from: w.from, to: w.to, limit: 5, offset: 0 });
-        expect(search.status()).toBe(200);
-        const rows = (await search.json()).rows || [];
-        test.skip(rows.length === 0, 'no stored logs in the last 24h to replay');
-        const res = await api('POST', `/insights/logs/${rows[0].id}/replay`);
+        const key = masterKey();
+        test.skip(!key, 'no master key in config.yaml to mint a replayable request');
+
+        // Mint our own tiny chat request instead of replaying an arbitrary
+        // stored row: a stored row may carry a 64k-token context that the
+        // local engine needs minutes to regenerate, blowing the test timeout.
+        // Our request is 4 tokens — the replayed generation is fast and the
+        // outcome deterministic.
+        const models = await page.request.get(`${BASE}/v1/models`, {
+            headers: { Authorization: `Bearer ${key}` },
+        });
+        expect(models.status()).toBe(200);
+        const modelList = (await models.json()).data || [];
+        test.skip(modelList.length === 0, 'no models available to mint a replayable request');
+        const gen = await page.request.post(`${BASE}/v1/chat/completions`, {
+            headers: { Authorization: `Bearer ${key}` },
+            data: {
+                model: modelList[0].id,
+                messages: [{ role: 'user', content: 'replay e2e: reply with the single word ok' }],
+                max_tokens: 4,
+                stream: false,
+            },
+            timeout: 60_000,
+        });
+        expect(gen.status(), `mint request failed: ${await gen.text()}`).toBe(200);
+        const genID = (await gen.json()).id;
+
+        // The persistence sink is async — poll the search listing until our
+        // request shows up (match by request_id), then replay that row.
+        const w = WINDOW(1);
+        let target = null;
+        for (let i = 0; i < 10 && !target; i++) {
+            const search = await api('POST', '/insights/logs/search', { from: w.from, to: w.to, limit: 50, offset: 0 });
+            expect(search.status()).toBe(200);
+            const rows = (await search.json()).rows || [];
+            target = rows.find((r) => r.request_id === genID);
+            if (!target) await page.waitForTimeout(1000);
+        }
+        // Fallback for setups where the log row id and the chatcmpl id differ:
+        // the most recent generation row still exercises the replay path.
+        if (!target) {
+            const search = await api('POST', '/insights/logs/search', { from: w.from, to: w.to, limit: 50, offset: 0 });
+            const rows = (await search.json()).rows || [];
+            target = rows.find((r) => /chat|messages|completions/.test(r.endpoint || ''));
+        }
+        test.skip(!target, 'minted request never appeared in the search listing');
+
+        const res = await page.request.fetch(`${BASE}/admin/api/insights/logs/${target.id}/replay`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 60_000,
+        });
         // replay surfaces the upstream outcome, whatever it is — never a 5xx
         // gateway crash. A stored log without a captured body answers 409.
         expect([200, 409, 422].includes(res.status())).toBe(true);
