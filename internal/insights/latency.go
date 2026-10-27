@@ -43,12 +43,18 @@ func (s *Service) Latency(ctx context.Context, fromStr, toStr, gran, backend, mo
     // Generation rows only: every generation path stamps ttft_ms, and the Go
     // zero value persists as 0.0 (never NULL) — so ttft_ms > 0 excludes
     // probes (/v1/models etc.) that carry no latency semantics.
+    //
+    // #351: TTFT percentiles are FILTERed to streaming rows. Non-stream
+    // requests stamp ttft_ms = full duration (by design, stream_timing.go),
+    // so a multi-minute non-stream generation would otherwise stretch the
+    // Latency chart y-axis into the hundreds of seconds. Non-stream traffic
+    // still counts toward requests/errors/avg_duration.
     rows, err := s.pool.Query(ctx, `
         SELECT to_char(date_trunc($1, ts), 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket,
                count(*) AS requests,
-               COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms), 0),
-               COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms), 0),
-               COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY ttft_ms), 0),
+               COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms) FILTER (WHERE is_stream), 0),
+               COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms) FILTER (WHERE is_stream), 0),
+               COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY ttft_ms) FILTER (WHERE is_stream), 0),
                COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),
                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),
                COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY tpot_ms) FILTER (WHERE tpot_ms > 0), 0),

@@ -1281,6 +1281,22 @@ func clientIPFromRequest(r *http.Request) string {
     return host
 }
 
+// isLogSkippedPoll reports whether the request is a high-frequency poll that
+// must not enter the request log (#351). Clients poll GET /v1/models and the
+// shell manifest registry several times per second across keys; those rows
+// flooded the 10k memory ring (and fg_request_logs) until the admin Logs page
+// showed almost nothing but blank model/channel rows. Only logging is skipped
+// — the handler itself still runs (stale-binary detection reads /v1/models).
+func isLogSkippedPoll(r *http.Request) bool {
+    if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || strings.HasPrefix(r.URL.Path, "/v1/models/")) {
+        return true
+    }
+    if r.Method == http.MethodPost && r.URL.Path == "/api/v1/shell/manifests" {
+        return true
+    }
+    return false
+}
+
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // M1 fix: use cached middleware chain, rebuild on reload
@@ -1344,6 +1360,12 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             final.ServeHTTP(rec, r)
         }
 
+        // #351: skip logging for high-frequency poll endpoints so they do not
+        // flood the ring / fg_request_logs with blank rows.
+        if isLogSkippedPoll(r) {
+            s.releaseIdentityLease(r.Context(), entry)
+            return
+        }
         keyCfg := middleware.GetAuthKeyConfig(r.Context())
         keyName := "anonymous"
         if keyCfg != nil && keyCfg.Name != "" {

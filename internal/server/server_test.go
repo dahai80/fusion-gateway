@@ -10119,3 +10119,118 @@ func TestStampRouteInfo_OnCacheHitAndFailure(t *testing.T) {
         t.Fatalf("failure log entry ChannelName = %q, want %q", entry3.ChannelName, "test-cloud")
     }
 }
+
+// Regression (#351): the hardened /v1/messages stream loop (KeepaliveInterval>0,
+// the production path) dropped usage events, so the admin Logs page showed
+// 0/0/0 tokens on every streaming row. Also covers the message_start nested
+// message.usage capture — the only place the wire format carries input_tokens.
+func TestHandleStreamAnthropicMessages_HardenedCapturesUsage(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11}}}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 10 * time.Millisecond
+    s.cfg.Config.Routing.Stream.IdleTimeout = 30 * time.Second
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    base := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+    entry := middleware.InitRequestLog(base)
+    ctx := middleware.WithRequestLogContext(base, entry).Context()
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(ctx, rec, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung")
+    }
+
+    if entry.InputTokens != 11 || entry.OutputTokens != 7 || entry.TotalTokens != 18 {
+        t.Fatalf("hardened-loop log entry tokens = %d/%d/%d, want 11/7/18 (message_start input + message_delta output)",
+            entry.InputTokens, entry.OutputTokens, entry.TotalTokens)
+    }
+    slog.Info("TestHandleStreamAnthropicMessages_HardenedCapturesUsage passed",
+        "input", entry.InputTokens, "output", entry.OutputTokens)
+}
+
+// Same capture through the backward-compat loop (KeepaliveInterval=0): input
+// tokens come from message_start's nested usage there too.
+func TestHandleStreamAnthropicMessages_CompatCapturesUsage(t *testing.T) {
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":21}}}\n\n")
+        fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n")
+        fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+        fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n")
+        fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    s.cfg.Config.Routing.Stream.KeepaliveInterval = 0
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "glm5.2", MaxTokens: 100, Stream: true}
+
+    base := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+    entry := middleware.InitRequestLog(base)
+    ctx := middleware.WithRequestLogContext(base, entry).Context()
+
+    rec := httptest.NewRecorder()
+    done := make(chan struct{})
+    go func() {
+        s.handleStreamAnthropicMessages(ctx, rec, p, req)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(3 * time.Second):
+        t.Fatal("handleStreamAnthropicMessages hung")
+    }
+
+    if entry.InputTokens != 21 || entry.OutputTokens != 4 || entry.TotalTokens != 25 {
+        t.Fatalf("compat-loop log entry tokens = %d/%d/%d, want 21/4/25",
+            entry.InputTokens, entry.OutputTokens, entry.TotalTokens)
+    }
+}
+
+// #351: high-frequency poll endpoints must not enter the request log — they
+// flooded the ring until the Logs page showed nothing but blank rows.
+func TestIsLogSkippedPoll(t *testing.T) {
+    cases := []struct {
+        method, path string
+        want         bool
+    }{
+        {http.MethodGet, "/v1/models", true},
+        {http.MethodGet, "/v1/models/", true},
+        {http.MethodGet, "/v1/models/glm-5", true},
+        {http.MethodPost, "/v1/models", false},
+        {http.MethodPost, "/api/v1/shell/manifests", true},
+        {http.MethodGet, "/api/v1/shell/manifests", false},
+        {http.MethodPost, "/v1/messages", false},
+        {http.MethodGet, "/healthz", false},
+    }
+    for _, c := range cases {
+        r := httptest.NewRequest(c.method, c.path, nil)
+        if got := isLogSkippedPoll(r); got != c.want {
+            t.Errorf("isLogSkippedPoll(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+        }
+    }
+}

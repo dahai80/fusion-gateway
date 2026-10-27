@@ -597,6 +597,18 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         logEntry.OutputTokens = usageOutput
         logEntry.TotalTokens = usageInput + usageOutput
     }
+    // captureEventUsage reads usage from both shapes the Anthropic wire format
+    // uses: top-level "usage" (message_delta carries output_tokens there) and
+    // message_start's nested message.usage (the only place input_tokens ever
+    // appears — without this the Logs page showed Prompt=0 on every row, #351).
+    captureEventUsage := func(event adapter.AnthropicStreamEvent) {
+        if event.Usage != nil {
+            captureUsage(event.Usage)
+        }
+        if event.Type == "message_start" && event.Message != nil {
+            captureUsage(&event.Message.Usage)
+        }
+    }
     // Per-stream timing instrumentation (issue #81). "The response stopped
     // arriving" is a Claude Code internal judgment that an upstream stream
     // stopped producing deltas; the gateway previously logged only the
@@ -698,9 +710,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                 deltaCount++
                 timing.observe(lastEventAt, len(event.Raw))
             }
-            if event.Usage != nil {
-                captureUsage(event.Usage)
-            }
+            captureEventUsage(event)
             if event.Type == "message_stop" {
                 sawMessageStop = true
                 if closed := closeOpenBlocks(); closed != nil {
@@ -755,6 +765,11 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
                     deltaCount++
                     timing.observe(lastEventAt, len(event.Raw))
                 }
+                // #log-tokens: the hardened loop previously dropped usage
+                // events, so every production stream (keepalive enabled) logged
+                // 0/0/0 tokens in the admin Logs page (#351). Mirror the
+                // backward-compat loop's capture.
+                captureEventUsage(event)
                 if event.Type == "message_stop" {
                     sawMessageStop = true
                     if closed := closeOpenBlocks(); closed != nil {
@@ -810,6 +825,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             // pipe is pointless and risks a second write error. The cancelled
             // ctx is just the downstream consequence (issue #79); do not also
             // log a client cancel (conflation blind spot).
+            stampStreamUsage()
             streamSummary()
             return
         }
