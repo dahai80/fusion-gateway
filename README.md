@@ -2044,6 +2044,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.76 — bridge-path usage stamping + start.sh port preflight
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#354 bridge-path `/v1/messages` token counts** | Follow-up to #351: the `captureEventUsage` fix only covered the native MessagesProvider loop, but local-MLX serving via an openai-compatible backend (`localSlotProvider` shadow role, #210) resolves to nil in `resolveMessagesProvider`, so production local traffic takes the OpenAI-conversion else branch — where the token budget was seeded `InputTokens: 0` and the SSE bridge's exact `include_usage` counts were never exposed. The bridge-path budget now carries the tokenizer estimate, the stream path stamps exact upstream usage after `bridge.Finalize()` via the new `anthropicSSEBridge.UsageTotals()`, and the non-stream path reuses `stampCachedUsage` over the captured completion body. |
+| 2 | **#356 start.sh false-healthy guard** | `start()`'s health poll only checked that some process answered `/healthz`, so with an externally started process on :11432 the spawned child died on bind failure while the old process answered the probe — `start()` reported "Started (PID x) — healthy" for a dead PID, silently keeping the stale binary in production. start.sh now refuses to launch when the port is held by a foreign PID (naming it), verifies the listener PID equals the spawned child before reporting healthy, and warns after `stop` when the port is still held. Listener lookup uses `lsof -sTCP:LISTEN`. |
+| 3 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.76. |
+
 ### v0.9.75 — config file protection + admin dashboard data fixes
 
 | # | Item | Details |

@@ -1747,6 +1747,14 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.76 — 桥接路径 usage 采集 + start.sh 端口预检
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#354 桥接路径 `/v1/messages` token 计数** | #351 后续：`captureEventUsage` 修复只覆盖原生 MessagesProvider 循环，但本地 MLX 经 openai-compatible 后端供给时（`localSlotProvider` 影子角色，#210）`resolveMessagesProvider` 解析为 nil，生产本地流量实际走 OpenAI 转换 else 分支 —— 该分支 token budget 硬编码 `InputTokens: 0`，SSE 桥持有的精确 `include_usage` 计数也从未暴露。现在桥接路径 budget 携带 tokenizer 估算值，流式路径在 `bridge.Finalize()` 后通过新增的 `anthropicSSEBridge.UsageTotals()` 覆盖为上游精确 usage，非流式路径复用 `stampCachedUsage` 解析捕获的 completion body。 |
+| 2 | **#356 start.sh 假健康防护** | `start()` 的健康轮询只检查"有进程应答 `/healthz`"，外部启动的进程占着 :11432 时，新 child 绑定失败退出、旧进程应答探测 —— `start()` 对一个已死 PID 报 "Started (PID x) — healthy"，旧二进制静默滞留生产。现在端口被非 pidfile 管辖的 PID 占用时拒绝启动（点名该 PID），健康后校验监听 PID 等于自身 child 才报 healthy，`stop` 后端口仍被占时告警。监听查找使用 `lsof -sTCP:LISTEN`。 |
+| 3 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.76。 |
+
 ### v0.9.75 — 配置文件保护 + 管理控制台数据修复
 
 | # | 条目 | 详情 |
