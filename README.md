@@ -2044,6 +2044,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.79 — PRD 1015 G5 gateway-side slice
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **X-Fusion-Via + Server self-identification headers** | Full audit of the landed implementation against the optimization PRD (`architecture/fusion-gateway-seriazation-archi-1015.md`) found one unimplemented gateway-side slice: plan §9 (G5 unified entry). `withMiddleware` now stamps `X-Fusion-Via: gateway` and `Server: fusion-gateway/<version>` on every `/v1/*` response so a client can self-verify its traffic traversed the gateway (AC12b). |
+| 2 | **`direct_calls_blocked` hint bit on `/v1/status`** | Plan §9.3 migration-phase observability: the new `server.direct_calls_blocked` config key (default false, hot-reloadable via the request-context snapshot) is surfaced on `/v1/status`; operators flip it to true once fusion-mlx enforces strict auth (upstream fusion-mlx#1381). Advisory only — the gateway never blocks on it. Pinned by `TestG5_ViaHeadersOnMiddlewareResponses` and the two status-bit tests. |
+| 3 | **PRD-vs-implementation audit closed** | Schema columns, persistence config defaults, all §8 admin endpoints, §13 model identity, §14.2 rules, §15.1 detectors and §15.3 reports verified as matching the plan; intentional deviations (`/admin/api/insights/*` namespace, Prometheus second-based metric names, top-level `file_log.*`) recorded in the plan's progress notes. Remaining plan items are cross-repo or upstream-blocked (fusion-mlx#1381). |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.79. |
+
 ### v0.9.78 — shell RBAC user role validation
 
 | # | Item | Details |
