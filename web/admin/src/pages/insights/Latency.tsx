@@ -193,6 +193,10 @@ export default function Latency() {
                                 {anomalyLines.map((a) => (
                                     <ReferenceLine
                                         key={`ttft-${a.id}`}
+                                        // yAxisId is mandatory: without it recharts defaults to
+                                        // axis id 0, which doesn't exist here (left/right) and
+                                        // throws an invariant that unmounts the whole page.
+                                        yAxisId="left"
                                         x={a.x}
                                         stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
                                         strokeDasharray="2 4"
@@ -218,6 +222,7 @@ export default function Latency() {
                                 {anomalyLines.map((a) => (
                                     <ReferenceLine
                                         key={`tpot-${a.id}`}
+                                        yAxisId="left"
                                         x={a.x}
                                         stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
                                         strokeDasharray="2 4"

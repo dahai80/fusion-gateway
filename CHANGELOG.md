@@ -9,6 +9,36 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (admin dashboard render, 2026-10-27) — #360
+
+- **Insights Latency page unmounted entirely by a recharts invariant** — the
+  anomaly overlay drew `ReferenceLine` elements without `yAxisId`, so recharts
+  defaulted to axis id `0` which does not exist on charts whose Y axes are
+  named `left`/`right`, threw
+  `Invariant failed: Could not find yAxis by id "0"`, and React unmounted the
+  whole page whenever at least one detected anomaly fell inside the selected
+  window. Both charts (TTFT + TPOT) now set `yAxisId="left"` on their
+  `ReferenceLine` marks. Regression-pinned by
+  `tests/e2e/tests/08-latency-render.spec.js` (no invariant, both cards, ≥6
+  percentile curves, overlay non-fatal).
+
+### Fixed (admin replay contract, 2026-10-27)
+
+- **`POST /admin/api/insights/logs/{id}/replay` answered 404 for a log row
+  without a captured payload** — `GET /v1/models` poll rows and retention-pruned
+  payload partitions have a log row but no `fg_request_payloads` entry;
+  `insights.Payload` returns `pgx.ErrNoRows` and the handler leaked it as a
+  404, violating the documented "no captured request body" contract. The
+  handler now maps `ErrNoRows` to **409** (same as an empty captured body)
+  and reserves 500 for real fetch failures. The e2e replay test also mints
+  its own 4-token chat request (master key from config) instead of replaying
+  an arbitrary stored row — a stored row can carry a 64k-token context the
+  local engine needs minutes to regenerate, blowing the test timeout.
+- **`03-channels.spec.js` full-suite flake** — the delete-confirm step checked
+  `Popconfirm` visibility immediately after the delete click, racing the
+  popover render and silently skipping the confirm. It now waits for the
+  popover (3s) before deciding.
+
 ### Fixed (admin dashboard data, 2026-10-27) — #354
 
 - **`/v1/messages` bridge path still logged Prompt=0** — follow-up to #351:
