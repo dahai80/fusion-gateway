@@ -52,6 +52,12 @@ type ServerConfig struct {
     // backward compatible. Orthogonal to outbound UDS (backends.socket_path) and
     // to auto_start (which launches fusion-mlx over TCP/UDS independently).
     UnixSocket              *UnixSocketConfig `mapstructure:"unix_socket"`
+    // DirectCallsBlocked is the migration-phase hint bit surfaced on
+    // /v1/status (plan §9.3): operators flip it to true once fusion-mlx
+    // enforces strict auth (upstream fusion-mlx#1381), telling clients
+    // direct :11434 calls are expected to be rejected. Advisory only —
+    // the gateway never blocks anything based on it.
+    DirectCallsBlocked      bool             `mapstructure:"direct_calls_blocked"`
 }
 
 // UnixSocketConfig configures the inbound UDS listener. Path is the socket

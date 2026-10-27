@@ -185,10 +185,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
         localHitRate = float64(local) / float64(total)
     }
 
+    // Plan §9.3 (G5): migration-phase hint bit — true once fusion-mlx enforces
+    // strict auth and direct :11434 calls are expected to be rejected. Read
+    // from the request-context snapshot so hot-reload takes effect without a
+    // restart (SnapshotFromContext falls back to the global snapshot).
+    directCallsBlocked := config.SnapshotFromContext(r.Context()).Config.Server.DirectCallsBlocked
+
     status := map[string]interface{}{
         "status":         "ok",
         "uptime_seconds": int(time.Since(s.startTime).Seconds()),
         "config_version": s.cfg.Version,
+        "direct_calls_blocked": directCallsBlocked,
         // R4 (audit): surface the running binary version/commit (build-time
         // ldflags), not just config_version, so operators can confirm the
         // deployed artifact. Defaults to "dev"/"unknown" on a plain go build.
