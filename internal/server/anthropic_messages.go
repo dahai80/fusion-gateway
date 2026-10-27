@@ -282,7 +282,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         chatReq := adapter.AnthropicToOpenAIChatRequest(&antReq)
         chatReq.Stream = antReq.Stream
         start := time.Now()
-        budget := tokenizer.TokenBudget{InputTokens: 0, TotalBudget: antReq.MaxTokens}
+        // #351 follow-up: seed the estimated input count (tokenizer count from
+        // the top of this handler) instead of 0. handleStreamChat /
+        // handleNonStreamChat stamp logEntry.InputTokens from this budget, so
+        // the hardcoded 0 kept Prompt=0 on every bridge-path row (local mlx
+        // serving via an openai-compatible backend does not resolve to
+        // MessagesProvider, so this else branch — not the native loop — is the
+        // production path for it). The stream branch below then overrides with
+        // the exact upstream usage chunk after the bridge finishes.
+        budget := tokenizer.TokenBudget{InputTokens: inputTokens, TotalBudget: antReq.MaxTokens}
         tenant := "anonymous"
         if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil && kc.Name != "" {
             tenant = kc.Name
@@ -314,12 +322,33 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
             bridge := newAnthropicSSEBridge(w)
             s.handleStreamChat(streamCtx, bridge, provider, chatReq, decision, budget, start)
             bridge.Finalize()
+            // #351 follow-up: the bridge tracks the exact upstream usage chunk
+            // (include_usage) as it converts frames — stamp it over the
+            // estimate so the request log carries real prompt/completion
+            // counts on the bridge path too, matching the native loop.
+            if inTok, outTok := bridge.UsageTotals(); inTok > 0 || outTok > 0 {
+                if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                    if inTok > 0 {
+                        logEntry.InputTokens = inTok
+                    }
+                    if outTok > 0 {
+                        logEntry.OutputTokens = outTok
+                    }
+                    logEntry.TotalTokens = logEntry.InputTokens + logEntry.OutputTokens
+                    slog.Debug("anthropic bridge path stamped stream usage",
+                        "input_tokens", logEntry.InputTokens, "output_tokens", logEntry.OutputTokens)
+                }
+            }
         } else {
             // #234: capture the OpenAI ChatCompletion body and convert it to
             // an Anthropic Message before it reaches the client.
             capture := newNonStreamBridgeWriter()
             s.handleNonStreamChat(ctx, capture, provider, chatReq, decision, budget, start, tenant)
             capture.finalize(w)
+            // #351 follow-up: the captured body is an OpenAI completion with
+            // exact usage — stamp it over the estimate (best-effort; an error
+            // body simply leaves the estimate in place).
+            stampCachedUsage(ctx, capture.body)
         }
     }
 }

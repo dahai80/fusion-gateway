@@ -9,6 +9,20 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (admin dashboard data, 2026-10-27) — #354
+
+- **`/v1/messages` bridge path still logged Prompt=0** — follow-up to #351:
+  the `captureEventUsage` fix only covered the native MessagesProvider loop,
+  but local-MLX serving via an openai-compatible backend (localSlotProvider
+  shadow role, #210) resolves to nil in `resolveMessagesProvider`, so
+  production local traffic takes the OpenAI-conversion else branch. There the
+  token budget was seeded `InputTokens: 0` (discarding the tokenizer count)
+  and the SSE bridge's exact `include_usage` counts were never exposed. The
+  bridge-path budget now carries the tokenizer estimate, the stream path
+  stamps exact upstream usage after `bridge.Finalize()` via the new
+  `anthropicSSEBridge.UsageTotals()`, and the non-stream path reuses
+  `stampCachedUsage` over the captured completion body.
+
 ### Fixed (admin dashboard data, 2026-10-27) — #351
 
 - **Logs page 0/0/0 tokens on streaming `/v1/messages`** — the hardened

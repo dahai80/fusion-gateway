@@ -328,3 +328,22 @@ func TestNonStreamBridgeWriter_CapturesAndConverts(t *testing.T) {
         t.Fatalf("body = %s", real.Body.String())
     }
 }
+
+// TestSSEBridge_UsageTotals (#351 follow-up): the bridge must expose the
+// upstream usage-chunk counts so the /v1/messages bridge path can stamp real
+// prompt/completion tokens onto the request log after Finalize.
+func TestSSEBridge_UsageTotals(t *testing.T) {
+    inner := httptest.NewRecorder()
+    b := newAnthropicSSEBridge(inner)
+    if in, out := b.UsageTotals(); in != 0 || out != 0 {
+        t.Fatalf("fresh bridge usage = %d/%d, want 0/0", in, out)
+    }
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":3}}\n\n"))
+    b.Write([]byte("data: [DONE]\n\n"))
+    in, out := b.UsageTotals()
+    if in != 30 || out != 3 {
+        t.Fatalf("bridge usage = %d/%d, want 30/3", in, out)
+    }
+}
