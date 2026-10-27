@@ -273,10 +273,27 @@ func (s adapterIndexRefresherShim) Refresh() error {
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
+	checkConfig := flag.Bool("check-config", false, "validate the config file and exit (0 ok, 78 config-fatal)")
 	flag.Parse()
+
+	if *checkConfig {
+		if _, err := config.LoadWithRecovery(*configPath); err != nil {
+			slog.Error("config check failed", "path", *configPath, "error", err)
+			os.Exit(config.ExitCodeConfigFatal)
+		}
+		fmt.Println("config OK")
+		return
+	}
 
 	if err := run(*configPath); err != nil {
 		slog.Error("fatal error", "error", err)
+		var cfgErr *config.ConfigFatalError
+		if errors.As(err, &cfgErr) {
+			// ExitCodeConfigFatal lets fusion-supervisor distinguish a
+			// config-fatal start from a crash and back off instead of
+			// restart-looping a process that can never come up.
+			os.Exit(config.ExitCodeConfigFatal)
+		}
 		os.Exit(1)
 	}
 }
@@ -284,7 +301,9 @@ func main() {
 func run(configPath string) error {
 	slog.Info("loading config", "path", configPath)
 
-	snap, err := config.Load(configPath)
+	// LoadWithRecovery self-heals a corrupt config.yaml: quarantines the
+	// broken file, restores the last-good copy, keeps the gateway up.
+	snap, err := config.LoadWithRecovery(configPath)
 	if err != nil {
 		return err
 	}

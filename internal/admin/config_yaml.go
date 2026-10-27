@@ -70,6 +70,15 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
         cleanup()
         return err
     }
+    // Config guard: snapshot the pre-write bytes to path+".lastgood" so any
+    // later corruption (external textual edit, partial write) is recoverable
+    // by LoadWithRecovery. No-op when path does not exist or is unchanged.
+    if err := config.BackupFile(path); err != nil {
+        slog.Error("config guard: last-good backup failed, aborting write to keep the old file",
+            "path", path, "error", err)
+        cleanup()
+        return err
+    }
     if err := os.Rename(tmp, path); err != nil {
         cleanup()
         return err

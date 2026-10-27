@@ -295,7 +295,7 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
         return
     }
-    snap, err := config.Reload(s.cfgPath)
+    snap, err := config.ReloadWithRecovery(s.cfgPath)
     if err != nil {
         slog.Error("admin config reload failed", "path", s.cfgPath, "error", err)
         http.Error(w, fmt.Sprintf(`{"error":{"message":"config reload failed: %s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
