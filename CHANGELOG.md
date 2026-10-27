@@ -9,6 +9,30 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (admin dashboard data, 2026-10-27) — #351
+
+- **Logs page 0/0/0 tokens on streaming `/v1/messages`** — the hardened
+  stream forward loop (keepalive enabled, the production path) never called
+  `captureUsage`, so every streaming Claude Code request logged zero
+  prompt/completion/total tokens. Both forward loops now share
+  `captureEventUsage`, which also reads `message_start`'s nested
+  `message.usage` — the only wire shape carrying `input_tokens`, so the
+  Prompt column was 0 even through the backward-compat loop.
+- **Logs page flooded by blank poll rows** — `GET /v1/models` and
+  `POST /api/v1/shell/manifests` are polled several times per second across
+  keys and filled the 10k request-log ring until the most-recent rows were
+  almost all blank model/channel noise. `withMiddleware` now skips request
+  logging (memory ring + persist sink) for those endpoints; the handlers
+  still run.
+- **Insights Latency chart y-axis blown up by non-stream rows** — non-stream
+  requests stamp `ttft_ms` as the full response duration (by design), and the
+  Latency percentile aggregation did not split by stream mode, so a
+  multi-minute non-stream generation stretched the TTFT percentiles past
+  200,000 ms. TTFT percentiles now filter to streaming rows
+  (`FILTER (WHERE is_stream)`); requests/errors/avg_duration keep counting
+  all generation rows, and the source stamp semantics stay untouched for the
+  other `ttft_ms` consumers (detectors, rules, reports, search).
+
 ### Added (config file protection, 2026-10-27) — #349
 
 - **Config guard: last-good backup + self-healing load/reload** — closes the

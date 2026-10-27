@@ -2044,6 +2044,16 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.75 — config file protection + admin dashboard data fixes
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#349 config file protection** | Last-good backup + self-healing config load/reload: `config.yaml` is snapshotted to `config.yaml.lastgood` before every admin overwrite and after every successful load; a corrupt file (e.g. an external edit that duplicated a YAML block) is quarantined as `config.yaml.corrupt-<ts>` and restored from the last-good copy at startup, fsnotify reload, and `/admin/config/reload` — the gateway comes up instead of crash-looping. When recovery is impossible the process exits 78 (`EX_CONFIG`) and `--check-config` validates a file with the same contract; `start.sh` preflights the config before launch (upstream ask: fusion-supervisor#47). |
+| 2 | **#351 Logs page token counts** | The hardened `/v1/messages` stream loop (keepalive enabled, the production path) dropped usage events, so every streaming request logged 0/0/0 prompt/completion/total tokens. Both forward loops now share `captureEventUsage`, which also reads `message_start`'s nested `message.usage` — the only wire shape carrying `input_tokens`, so the Prompt column was 0 even through the backward-compat loop. |
+| 3 | **#351 Logs page poll-row flood** | `GET /v1/models` and `POST /api/v1/shell/manifests` are polled several times per second across keys; those blank rows filled the 10k request-log ring until the most-recent Logs rows were almost all noise. Request logging (memory ring + persist sink) is now skipped for those endpoints — the handlers still run. |
+| 4 | **#351 Insights Latency chart** | Non-stream requests stamp `ttft_ms` as the full response duration (by design), and the Latency percentile aggregation did not split by stream mode, so a multi-minute non-stream generation stretched the chart y-axis past 200,000 ms. TTFT percentiles now filter to streaming rows (`FILTER (WHERE is_stream)`); requests/errors/avg-duration still count all generation rows. |
+| 5 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.75. |
+
 ### v0.9.74 — start.sh service lifecycle + local-model fallthrough fix + fusion-mlx tool proxy
 
 | # | Item | Details |

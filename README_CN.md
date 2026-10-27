@@ -1747,6 +1747,16 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.75 — 配置文件保护 + 管理控制台数据修复
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#349 配置文件保护** | last-good 备份 + 自愈式加载/重载：每次管理端覆写前、每次成功加载后，`config.yaml` 快照到 `config.yaml.lastgood`；文件损坏（如外部编辑造成的 YAML 块重复）时，坏文件隔离为 `config.yaml.corrupt-<ts>` 并从 last-good 恢复，覆盖启动、fsnotify 热重载与 `/admin/config/reload` 三条路径 —— 网关直接拉起而不是崩溃循环。无法恢复时进程退出 78（`EX_CONFIG`），`--check-config` 以同一契约校验配置文件；`start.sh` 启动前做配置预检（上游诉求：fusion-supervisor#47）。 |
+| 2 | **#351 Logs 页 token 计数** | `/v1/messages` hardened 流转发循环（启用 keepalive 的生产路径）丢弃 usage 事件，导致每条流式请求的 prompt/completion/total 全记 0。两个转发循环统一走 `captureEventUsage`，同时读取 `message_start` 嵌套的 `message.usage` —— input_tokens 只出现在该形态，所以连 backward-compat 循环的 Prompt 列此前也是 0。 |
+| 3 | **#351 Logs 页轮询行刷屏** | `GET /v1/models` 与 `POST /api/v1/shell/manifests` 以每秒多次跨 key 轮询，空白行灌满 1 万条请求日志环形缓冲，Logs 页最新行几乎全是噪声。这些端点现在跳过请求日志（内存 ring + 持久化 sink），handler 照常执行。 |
+| 4 | **#351 Insights Latency 图** | 非流式请求按设计将 `ttft_ms` 记为完整响应时长，Latency 百分位聚合此前不区分流式/非流式，一条数分钟的非流式生成就把图表 y 轴撑到 20 万 ms 以上。TTFT 百分位现在只聚合流式行（`FILTER (WHERE is_stream)`）；requests/errors/平均时长仍统计全部生成行。 |
+| 5 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.75。 |
+
 ### v0.9.74 — start.sh 服务生命周期 + 本地模型 fallthrough 修复 + fusion-mlx 工具面透传
 
 | # | 条目 | 详情 |
