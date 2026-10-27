@@ -46,6 +46,23 @@ func hasAnyRole(roles []string, want string) bool {
     return false
 }
 
+// validateShellRoles returns the role names that do not resolve in the role
+// store (built-in or custom). A phantom role is invisible in the roles admin
+// surface and unmanageable (#359) — mirrors the menu-permissions Put gate in
+// internal/shell/roles.go.
+func (s *Server) validateShellRoles(roles []string) []string {
+    if s.shellRoles == nil {
+        return nil
+    }
+    var unknown []string
+    for _, r := range roles {
+        if !s.shellRoles.Exists(r) {
+            unknown = append(unknown, r)
+        }
+    }
+    return unknown
+}
+
 // shellAdminRow is the AdminUserRow wire shape the shell host admin page
 // consumes (never exposes password material).
 type shellAdminRow struct {
@@ -102,6 +119,14 @@ func (s *Server) handleShellUserCreate(w http.ResponseWriter, r *http.Request) {
         shell.WriteEnvelope(w, http.StatusBadRequest, "invalid_request", "password must be at least 8 characters", "", false)
         return
     }
+    // The account is created with the default role set — validate it against
+    // the role store so the default never drifts out of the resolvable set.
+    roles := []string{"user"}
+    if unknown := s.validateShellRoles(roles); len(unknown) > 0 {
+        slog.Warn("shell user create rejected unknown roles", "username", req.Username, "roles", unknown)
+        shell.WriteEnvelope(w, http.StatusBadRequest, "role_rejected", fmt.Sprintf("unknown roles: %s", strings.Join(unknown, ", ")), "", false)
+        return
+    }
     if _, exists := s.shellUsers.Get(req.Username); exists {
         shell.WriteEnvelope(w, http.StatusConflict, "user_exists", fmt.Sprintf("user %q already exists", req.Username), "", false)
         return
@@ -120,7 +145,7 @@ func (s *Server) handleShellUserCreate(w http.ResponseWriter, r *http.Request) {
         Username:     req.Username,
         DisplayName:  displayName,
         PasswordHash: hash,
-        Roles:        []string{"user"},
+        Roles:        roles,
         Permissions:  req.Permissions,
     }
     if err := s.shellUsers.Create(account); err != nil {
@@ -157,6 +182,13 @@ func (s *Server) handleShellUserUpdate(w http.ResponseWriter, r *http.Request) {
         return
     }
     if req.Roles != nil {
+        // Roles land verbatim on the account — reject names that do not
+        // resolve in the role store before the last-admin guard (#359).
+        if unknown := s.validateShellRoles(*req.Roles); len(unknown) > 0 {
+            slog.Warn("shell user update rejected unknown roles", "id", id, "roles", unknown)
+            shell.WriteEnvelope(w, http.StatusBadRequest, "role_rejected", fmt.Sprintf("unknown roles: %s", strings.Join(unknown, ", ")), "", false)
+            return
+        }
         if !hasAnyRole(*req.Roles, "admin") && hasAnyRole(account.Roles, "admin") && !account.Disabled && s.shellUsers.EnabledAdminCount() <= 1 {
             shell.WriteEnvelope(w, http.StatusConflict, "last_admin", "cannot demote the last enabled admin", "", false)
             return
