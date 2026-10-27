@@ -9,6 +9,24 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (config file protection, 2026-10-27) — #349
+
+- **Config guard: last-good backup + self-healing load/reload** — closes the
+  2026-10-27 production outage class where an external textual edit
+  duplicated a YAML block in `config.yaml` and the gateway fatal-looped on
+  start. `config.BackupFile` snapshots `config.yaml` → `config.yaml.lastgood`
+  before every overwrite (admin writes) and after every successful load.
+  `LoadWithRecovery` / `ReloadWithRecovery` (startup, fsnotify, and
+  `/admin/config/reload`) quarantine the broken file as
+  `config.yaml.corrupt-<ts>` and restore from the last-good copy, logging the
+  recovery loudly — the gateway comes up instead of crash-looping.
+- **Config-fatal exit code 78 (`EX_CONFIG`)** — when recovery is impossible
+  (no backup or the backup is broken too), the process exits 78 instead of
+  the generic 1, and the new `--check-config` flag validates a config file
+  with the same contract. `start.sh` preflights the config before launch so
+  fusion-supervisor sees a fast, distinct config failure rather than a
+  start/die crash loop (upstream ask: fusion-supervisor#47).
+
 ### Added (manifest schema v2 grouping, 2026-10-24) — #297
 
 - **Shell manifests gain optional `group` / `group_title` / `group_title_en` /

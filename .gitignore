@@ -24,6 +24,8 @@ Thumbs.db
 
 # Config with secrets
 config.yaml
+config.yaml.lastgood
+config.yaml.corrupt-*
 .env
 
 # Test/build artifacts

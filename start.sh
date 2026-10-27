@@ -76,6 +76,19 @@ ensure_binary() {
     fi
 }
 
+# Preflight: validate the config before launching. The binary self-heals a
+# corrupt config.yaml from config.yaml.lastgood (--check-config runs the same
+# recovery), so this fails only when recovery is impossible too. Exit 78
+# (EX_CONFIG) so fusion-supervisor can distinguish config-fatal from a crash.
+check_config() {
+    if ! "$BINARY" --check-config "$CONFIG"; then
+        echo "ERROR: config check failed for $CONFIG" >&2
+        echo "       The gateway auto-restores from $CONFIG.lastgood when possible." >&2
+        echo "       Fix the config (see config.yaml.corrupt-* quarantined copies) and retry." >&2
+        exit 78
+    fi
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
@@ -83,6 +96,7 @@ start() {
     fi
     check_persistence_dsn
     ensure_binary
+    check_config
     echo "Starting Fusion-Gateway (config: $CONFIG)..."
     nohup "$BINARY" --config "$CONFIG" >> "$STDOUT_LOG" 2>&1 &
     echo $! > "$PID_FILE"

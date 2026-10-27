@@ -165,6 +165,42 @@ See `config.example.yaml` for full reference. Key settings:
 | `mcp.node_port` | 11445 | Remote node port for forwarding |
 | `mcp.local_port` | 9000 | Local plugin server port |
 
+### Config file protection (防错 + 纠错)
+
+Production incident (2026-10-27): an external textual edit duplicated a YAML
+block in `config.yaml`, the gateway exited fatally on start, and the
+supervisor restart-looped a process that could never come up. Two layers now
+protect the config:
+
+**Error prevention (防错)** — a bad config never lands on disk:
+
+- All admin API writes go through one path: read into a map → mutate →
+  `ProbeValidate` dry-run → atomic write (tmp + fsync + rename). A Go map
+  cannot marshal duplicate YAML keys, and any mutation that fails validation
+  is rejected before touching the file.
+- Before every overwrite, the current file is snapshotted to
+  `config.yaml.lastgood` (atomic, skipped when unchanged).
+
+**Error correction (纠错)** — a broken config never stays fatal:
+
+- On startup, a config that fails to parse or validate is quarantined as
+  `config.yaml.corrupt-<timestamp>` and restored from `config.yaml.lastgood`;
+  the gateway comes up and logs the recovery loudly. The same recovery runs
+  on hot-reload, so an external edit that breaks the file mid-flight is
+  healed without a restart.
+- When recovery is impossible (no backup, or the backup is broken too), the
+  process exits with **78** (`EX_CONFIG`) instead of the generic 1, and
+  `start.sh` preflights with `--check-config` (same exit code) so
+  fusion-supervisor can distinguish config-fatal from a crash and back off —
+  see [fusion-supervisor#47](https://github.com/dahai80/fusion-supervisor/issues/47).
+
+```bash
+./fusion-gateway --check-config config.yaml   # exit 0 = ok, 78 = config-fatal
+```
+
+`config.yaml.lastgood` and `config.yaml.corrupt-*` are gitignored; inspect
+the quarantined copies to find what wrote the bad bytes.
+
 ## Model Identity & Simplified Backends
 
 Same model served by several providers is explicitly distinguishable, and a new backend needs minimal config (`config.simple.yaml` is a complete working example).

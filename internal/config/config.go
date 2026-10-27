@@ -1532,7 +1532,10 @@ func WatchAndReload(path string) {
 
     v.OnConfigChange(func(e fsnotify.Event) {
         slog.Info("config file changed, reloading", "path", watchPath)
-        if _, err := Reload(watchPath); err != nil {
+        // ReloadWithRecovery: an external textual edit that breaks the file
+        // is quarantined + restored from the last-good copy instead of
+        // leaving a broken file on disk for the next restart.
+        if _, err := ReloadWithRecovery(watchPath); err != nil {
             slog.Error("fsnotify reload failed", "error", err)
         }
     })
