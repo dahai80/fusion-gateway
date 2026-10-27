@@ -1747,6 +1747,14 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.78 — shell RBAC 用户角色校验
+
+| # | 条目 | 详情 |
+|---|-----|---------|
+| 1 | **#359 幻影 shell 用户角色被接受** | `PATCH /api/v1/shell/users/{id}` 把 `req.Roles` 原样落库、无存在性检查，拼写错误或已删除的角色名直接挂到账户上 —— 角色管理页不可见、无法管理，与角色页已防护的菜单权限幻影同源。创建（默认 `user` 角色）与更新现在都通过 `validateShellRoles` 对 RoleStore（内置 admin/user/auditor + 自定义）逐名校验，未知名返回 400 `role_rejected` 并列出名字；校验先于 last-admin 守卫执行，被拒的 patch 不会碰账户。由 `TestShellUsers_RoleValidation` 钉死（幻影 400 + 列名 + 账户未被污染、混合列表只列未知名、内置与自定义角色仍可正常授予）。 |
+| 2 | **补交丢失的 e2e spec** | `tests/e2e/tests/08-latency-render.spec.js`（v0.9.77 的 latency 渲染钉子）在 PR #361 中漏交，随 PR #364 补齐。 |
+| 3 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.78。 |
+
 ### v0.9.77 — Latency 页面渲染修复 + replay 契约
 
 | # | 条目 | 详情 |
