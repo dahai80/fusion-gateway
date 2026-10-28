@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.82 — #377 无效密钥日志洪泛
+
+| # | 条目 | 说明 |
+|---|-----|---------|
+| 1 | **#377 无效密钥日志节流** | 轮询方（agent-studio 守护、plugin-console）每 ~30s 重放一个未注册密钥，每次产生一对 ERROR+WARN（约 5.8k 行/天）。两层根因修复：(1) memory 与 redis 的 `GetKeyByHash` 对普通哈希未命中返回 error，导致认证中间件 AH5 ERROR 分支（保留给真实存储故障）在每个无效密钥轮询上触发；未命中现返回 `(nil, nil)`（安静 401），redis 区分 `redis.Nil` 与真实错误。(2) `invalid api key` WARN 按 `hash_prefix` 经 `logthrottle` 节流（首条放行，之后每 5 分钟至多一条并附 `suppressed` 计数）。fail-closed 行为不变：每个请求仍返回带 `key_hash_prefix` 的 401，`fusion_gateway_auth_invalid_key_total{hash_prefix}` 仍逐次计数。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.82。 |
+
 ### v0.9.81 — 本地媒体代理 + shell 自愈 + memory 代理
 
 | # | 条目 | 说明 |

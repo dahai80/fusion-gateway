@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.82 — #377 invalid-key log flood
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#377 invalid-key log throttle** | Pollers (agent-studio daemon, plugin-console) re-present an unregistered key every ~30s, producing an ERROR+WARN pair per poll (~5.8k lines/day). Root causes fixed at both layers: (1) memory and redis `GetKeyByHash` returned an error for an ordinary hash miss, so the auth middleware's AH5 ERROR branch — reserved for real store outages — fired on every invalid-key poll; a miss is now `(nil, nil)` (quiet 401), redis distinguishes `redis.Nil` from real errors. (2) The `invalid api key` WARN is throttled per `hash_prefix` via `logthrottle` (first occurrence passes, then at most once per 5 minutes with a `suppressed` count). Fail-closed behavior unchanged: every request still 401s with the `key_hash_prefix` body and `fusion_gateway_auth_invalid_key_total{hash_prefix}` still counts every occurrence. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.82. |
+
 ### v0.9.81 — local media proxy + shell self-heal + memory proxy
 
 | # | Item | Details |
