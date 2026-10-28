@@ -1747,6 +1747,17 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.80 — #363 桥接 fail-loud 闭环
+
+| # | 条目 | 说明 |
+|---|-----|---------|
+| 1 | **环境变量密钥覆盖 fail-loud（F1）** | `FUSION_MLX_API_KEY` 通过 BindEnv 优先级静默覆盖 `backends.fusion-mlx.api_key`。`Load`/`Reload` 现在执行 `checkFusionMLXKeySource`：两处同时设置且值不同则硬错误；相同或单侧设置输出 INFO/DEBUG。5 个密钥来源守卫测试锁定契约。 |
+| 2 | **空内容消息守卫（F2）** | 零内容块的 200 completion（流式 finalize 与非流式转换器）会生成合法的空 Anthropic 消息——Claude Code 将 `content:[] end_turn` 视为回合已完成并等待用户输入 "continue"。流式现在发出 `event: error`（api_error）；非流式返回错误信封 502。 |
+| 3 | **[DONE] 哨兵结束标签（F3）** | `parseSSEStream` 将终止 `[DONE]` 作为裸 Raw 哨兵 chunk 转发；`handleStreamChat` 收到哨兵后将 `ch_closed_no_done` 重标为 `done`，健康流不再误触 incomplete/熔断路径。 |
+| 4 | **客户端断连的建立错误（F4）** | 父请求 ctx 已死时，流建立错误跳过 `RecordFailure`（避免污染熔断器）与云溢出（避免无主消费）——这是取消症状而非后端故障。 |
+| 5 | **本地模型名未映射直发云端（F5）** | `resolveCloudProvider` 在模型驻留于 fusion-mlx 模型集但无 `routing.fallback.model_mapping` 条目直达云后端时告警——云端无法服务该请求，白白花钱。 |
+| 6 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.80。 |
+
 ### v0.9.79 — PRD 1015 G5 网关侧切片
 
 | # | 条目 | 详情 |

@@ -2044,6 +2044,17 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.80 — #363 bridge fail-loud closure
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **Env key override fail-loud (F1)** | `FUSION_MLX_API_KEY` silently overrode `backends.fusion-mlx.api_key` via BindEnv precedence. `Load`/`Reload` now run `checkFusionMLXKeySource`: both set with DIFFERENT values is a hard error; identical or single-source logs INFO/DEBUG. Pinned by 5 key-source guards. |
+| 2 | **Empty-content message guard (F2)** | A 200 completion with zero content blocks (stream finalize and non-stream converter) produced a valid empty Anthropic message — Claude Code reads `content:[] end_turn` as a finished turn and waits for "continue". Streaming now emits an `event: error` (api_error); non-stream returns the error envelope with 502. |
+| 3 | **[DONE] sentinel end label (F3)** | `parseSSEStream` forwards the terminal `[DONE]` as a bare Raw sentinel chunk; `handleStreamChat` relabels `ch_closed_no_done` to `done` when the sentinel arrived, so healthy streams stop tripping the incomplete/breaker path. |
+| 4 | **Client-gone establish error (F4)** | When the parent request ctx is already dead, a stream-establish error skips `RecordFailure` (breaker pollution) and cloud overflow (wasted spend) — it is a cancel symptom, not a provider failure. |
+| 5 | **Unmapped local model to cloud (F5)** | `resolveCloudProvider` warns when a model resident in fusion-mlx's model set reaches a cloud backend with no `routing.fallback.model_mapping` entry — the cloud cannot serve it and the request is wasted money. |
+| 6 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.80. |
+
 ### v0.9.79 — PRD 1015 G5 gateway-side slice
 
 | # | Item | Details |
