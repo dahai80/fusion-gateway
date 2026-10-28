@@ -68,6 +68,34 @@ func TestFusionModelHubProvider_ListModelsNotSupported(t *testing.T) {
 	}
 }
 
+// TestFusionModelHubProvider_HealthCheckProbesPublicPath (#381): the hub's
+// bare /health is auth-gated (401 without X-API-Key) while
+// /api/v1/system/health is the public, auth-exempt probe surface. The
+// provider must probe the public path — a healthy hub was reported degraded.
+func TestFusionModelHubProvider_HealthCheckProbesPublicPath(t *testing.T) {
+	var probedPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probedPath = r.URL.Path
+		if r.URL.Path == "/api/v1/system/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy"}`))
+			return
+		}
+		// Auth-gated surface, mirroring the real hub (issue #381).
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	cfg := config.BackendConfig{Type: "fusion-model-hub", BaseURL: ts.URL, Enabled: true}
+	p := NewFusionModelHubProvider("model-hub", cfg)
+	if err := p.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("health check should probe the public path and succeed: %v", err)
+	}
+	if probedPath != "/api/v1/system/health" {
+		t.Fatalf("probed path = %q, want /api/v1/system/health", probedPath)
+	}
+}
+
 func TestFusionModelHubProvider_HealthCheck(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
