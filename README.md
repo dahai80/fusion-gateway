@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.85 — #386 HTTP/2 connection wedge
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#386 wedged HTTP/2 pooled connections** | A pooled HTTP/2 connection to a cloud upstream behind an LB wedged (half-dead node) and every subsequent request multiplexed onto the dead conn, waiting out the full 30s `ResponseHeaderTimeout` per request for 17+ minutes; only a gateway restart recovered it, while fresh connections landed on healthy nodes. The factory-built transport now configures its internal HTTP/2 transport with `ReadIdleTimeout=30s` + `PingTimeout=15s` so an idle pooled conn is PING-checked and a dead conn is closed and re-dialed within one header-timeout window. New per-backend escape hatch `backends.*.force_http1` pins a flaky upstream to HTTP/1.1 (`ForceAttemptHTTP2=false` + empty `TLSNextProto` + TLS `NextProtos` pinned to `["http/1.1"]` — the empty map alone still advertises h2 via ALPN and an h2-negotiated conn with no h2 handler dies with `malformed HTTP response`). |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.85. |
+
 ### v0.9.84 — #381 model-hub health probe cycle
 
 | # | Item | Details |
