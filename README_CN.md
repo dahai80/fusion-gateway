@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.85 — #386 HTTP/2 连接卡死
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#386 HTTP/2 连接池连接卡死** | LB 后云上游的池化 HTTP/2 连接卡死（半死节点）后，后续所有请求都被多路复用到死连接上，每个请求都等满 30s `ResponseHeaderTimeout`，持续 17 分钟以上；只有重启网关才能恢复，而新建连接正常落在健康节点。现工厂构建的 transport 对内部 HTTP/2 transport 配置 `ReadIdleTimeout=30s` + `PingTimeout=15s`，空闲池化连接 30s 后 PING 健康检查，死连接 15s 内判定并关闭重拨。新增按后端逃生开关 `backends.*.force_http1` 将不稳定上游钉死在 HTTP/1.1（`ForceAttemptHTTP2=false` + 空 `TLSNextProto` + TLS `NextProtos` 钉为 `["http/1.1"]`——仅空 map 仍会经 ALPN 广播 h2，协商出 h2 却无 h2 handler 的连接会以 `malformed HTTP response` 报错死亡）。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 同步至 0.9.85。 |
+
 ### v0.9.84 — #381 model-hub 健康探测循环
 
 | # | 条目 | 说明 |
