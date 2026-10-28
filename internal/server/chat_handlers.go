@@ -442,7 +442,23 @@ func (s *Server) resolveCloudProvider(decision *router.RouteDecision, req *adapt
     }
 
     if req != nil {
+        originalModel := req.Model
         req.Model = s.applyCloudModelMapping(req.Model, cloudBackend)
+        // #363 F5: a local-only model name reaching a cloud backend unmapped
+        // (no routing.fallback.model_mapping entry) cannot be served — the
+        // cloud responds with an error/empty stream and the request is wasted
+        // money. Warn loudly so the operator adds the mapping. Deterministic
+        // signal: the model is resident in fusion-mlx's model set (keyed by
+        // the /v1/models id, e.g. mlx-community--Qwen3.5-4B-MLX-4bit).
+        if req.Model == originalModel {
+            if mlx := s.pool.GetFusionMLX(); mlx != nil {
+                if modelSet := mlx.ModelSet(); modelSet[originalModel] {
+                    slog.Warn("local model name routed to cloud unmapped, cloud backend cannot serve it",
+                        "model", originalModel, "cloud_backend", cloudBackend,
+                        "fix", "add routing.fallback.model_mapping entry")
+                }
+            }
+        }
     }
 
     p, ok := s.pool.Get(cloudBackend)
@@ -581,6 +597,18 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     defer wdCancel()
     ch, err := provider.StreamChat(wdCtx, req)
     if err != nil {
+        // #363 F4: if the PARENT request ctx is already dead, the client is
+        // gone (CC abort / disconnect) — the establish error is a cancel
+        // symptom, not a provider failure. Do not RecordFailure (pollutes the
+        // breaker for a healthy backend) and do not overflow to cloud (spends
+        // money for work nobody is waiting on). Mirrors the parent-ctx check
+        // in anthropic_messages.go nonStreamClientCanceled; checked before the
+        // slot-full divert for the same reason.
+        if ctx.Err() != nil {
+            slog.Info("stream chat establish aborted by client disconnect, skipping failure record and overflow",
+                "provider", provider.Name(), "model", req.Model, "error", err, "ctx_err", ctx.Err())
+            return
+        }
         // RR4: ErrLocalSlotFull is an expected diversion (local hard cap
         // reached), not a backend failure. Resolve a cloud provider, map the
         // model, and recurse into this same stream handler so the client gets
@@ -741,6 +769,13 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 goto streamDone
             default:
             }
+            // #363 F3: explicit [DONE] sentinel forwarded by parseSSEStream —
+            // a terminal marker. Do not forward (the handler appends its own
+            // [DONE] after the usage chunk) and do not count as a chunk.
+            if string(chunk.Raw) == "[DONE]" {
+                sawFinishReason = true
+                goto streamDone
+            }
             if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                 outputTokens += chunk.Usage.CompletionTokens
             }
@@ -779,6 +814,12 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 if !ok {
                     done = true
                     break
+                }
+                // #363 F3: explicit [DONE] sentinel from parseSSEStream —
+                // terminal marker, not forwarded or counted (see above).
+                if string(chunk.Raw) == "[DONE]" {
+                    sawFinishReason = true
+                    goto streamDone
                 }
                 if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                     outputTokens += chunk.Usage.CompletionTokens
@@ -846,6 +887,15 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
     }
 
 streamDone:
+    // #363 F3: the channel closed. A stream that completed with a finish_reason
+    // chunk (or an explicit [DONE] sentinel from parseSSEStream) is a clean
+    // end — label it "done" so summaries no longer show the misleading
+    // "ch_closed_no_done" for healthy streams (617 log lines conflated clean
+    // completion with truncation). Only a close with neither sentinel keeps
+    // "ch_closed_no_done" and is relabeled "incomplete" below.
+    if endReason == "ch_closed_no_done" && sawFinishReason {
+        endReason = "done"
+    }
     // F4 timing summary (mirrors /v1/messages #81): one INFO per stream so a
     // "response stopped arriving" recurrence is diagnosable as upstream stall
     // (watchdog_tripped / long last_chunk_idle) vs client cancel (H-A vs H-B).
@@ -861,6 +911,7 @@ streamDone:
         }
         slog.Info("stream chat summary",
             "model", req.Model,
+            "backend", string(decision.Backend),
             "provider", provider.Name(),
             "duration", dur,
             "chunks", chunkCount,

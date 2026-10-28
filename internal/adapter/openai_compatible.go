@@ -358,6 +358,12 @@ func parseSSEStream(ctx context.Context, body io.Reader, ch chan<- StreamChunk) 
             }
             data := strings.TrimPrefix(line, "data: ")
             if data == "[DONE]" {
+                // #363 F3: forward an explicit terminal sentinel so the
+                // stream handler can distinguish "closed after [DONE]"
+                // (clean) from "closed without any terminal" (truncated).
+                // Handlers must NOT re-emit this frame — the handler appends
+                // its own [DONE] after the usage chunk.
+                ch <- StreamChunk{Raw: json.RawMessage("[DONE]")}
                 return
             }
             var chunk StreamChunk

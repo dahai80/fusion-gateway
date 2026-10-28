@@ -26,8 +26,13 @@ func TestE1_ParseSSEStream_SetsRaw(t *testing.T) {
     for c := range ch {
         got = append(got, c)
     }
-    if len(got) != 1 {
-        t.Fatalf("expected 1 chunk (before [DONE]), got %d", len(got))
+    // #363 F3: [DONE] now forwards a terminal sentinel chunk after the data
+    // chunk — the handler uses it to label the close as a clean "done".
+    if len(got) != 2 {
+        t.Fatalf("expected 2 chunks (data + [DONE] sentinel), got %d", len(got))
+    }
+    if string(got[1].Raw) != "[DONE]" {
+        t.Fatalf("expected trailing [DONE] sentinel chunk, got %q", string(got[1].Raw))
     }
     // Raw must carry the verbatim upstream data line (after the "data: " prefix).
     if string(got[0].Raw) != frame {
