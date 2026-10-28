@@ -14,6 +14,7 @@ package httpx
 
 import (
     "context"
+    "crypto/tls"
     "fmt"
     "io"
     "log/slog"
@@ -21,6 +22,8 @@ import (
     "net/http"
     "net/url"
     "time"
+
+    "golang.org/x/net/http2"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -132,6 +135,29 @@ const defaultLocalResponseHeaderTimeout = 300 * time.Second
 // cross-package test assertions (httpx transport_test.go, #208).
 const DefaultLocalResponseHeaderTimeout = defaultLocalResponseHeaderTimeout
 
+// defaultHTTP2ReadIdleTimeout (#386): how long a pooled HTTP/2 connection may
+// sit idle before the transport sends a PING health check. Without it the Go
+// h2 transport multiplexes every new request onto a wedged conn and waits out
+// the full ResponseHeaderTimeout — a half-dead upstream node behind an LB
+// poisoned every subsequent request for 17+ minutes until a gateway restart
+// dropped the pooled conn, while fresh connections landed on healthy nodes.
+// 30s detects the wedge within one header-timeout window; the PING is
+// invisible to a healthy peer.
+const defaultHTTP2ReadIdleTimeout = 30 * time.Second
+
+// DefaultHTTP2ReadIdleTimeout re-exports defaultHTTP2ReadIdleTimeout for
+// cross-package test assertions (httpx transport_h2_test.go, #386).
+const DefaultHTTP2ReadIdleTimeout = defaultHTTP2ReadIdleTimeout
+
+// defaultHTTP2PingTimeout (#386): how long the transport waits for the PING
+// reply before declaring the h2 connection dead and closing it. 15s is well
+// under ResponseHeaderTimeout and generous for any healthy WAN round trip.
+const defaultHTTP2PingTimeout = 15 * time.Second
+
+// DefaultHTTP2PingTimeout re-exports defaultHTTP2PingTimeout for cross-package
+// test assertions (httpx transport_h2_test.go, #386).
+const DefaultHTTP2PingTimeout = defaultHTTP2PingTimeout
+
 // IsLocalBackendConfig reports whether a backend is local: a UDS dial
 // (SocketPath), the fusion-mlx provider type, or a loopback base_url host.
 // Type alone is insufficient — a fusion-mlx instance may be registered as
@@ -226,6 +252,17 @@ func resolveMaxIdleConnsPerHost(cfg config.BackendConfig) int {
 // route its *http.Client through this factory; bare &http.Client{Timeout} is
 // forbidden (it inherits http.DefaultTransport which has no MaxConnsPerHost).
 func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
+    rt, _ := transportForBackend(cfg)
+    return rt
+}
+
+// transportForBackend is TransportForBackend plus the internal HTTP/2
+// transport when one was configured (nil for force_http1 backends and UDS).
+// x/net ConfigureTransports errors on a second call for the same transport
+// ("protocol https already registered"), so tests cannot read the h2 settings
+// back through the returned RoundTripper — the factory hands them out here
+// instead. Same-package tests only.
+func transportForBackend(cfg config.BackendConfig) (http.RoundTripper, *http2.Transport) {
     maxConns := resolveMaxConnsPerHost(cfg)
     maxIdle := resolveMaxIdleConnsPerHost(cfg)
     respHeaderTimeout := resolveResponseHeaderTimeout(cfg)
@@ -248,6 +285,38 @@ func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
         cloned.ResponseHeaderTimeout = respHeaderTimeout
         cloned.DialContext = (&net.Dialer{Timeout: defaultDialTimeout}).DialContext
         cloned.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
+        // #386: pin to HTTP/1.1 on operator request — an empty (non-nil)
+        // TLSNextProto map makes the transport refuse the h2 ALPN upgrade, so
+        // a wedged pooled conn fails fast and re-dials instead of
+        // multiplexing every request onto a dead h2 conn.
+        var h2t *http2.Transport
+        if cfg.ForceHTTP1 {
+            cloned.ForceAttemptHTTP2 = false
+            // Empty (non-nil) TLSNextProto drops the h2 conn handler, but the
+            // TLS client still advertises h2 via ALPN unless the protocol list
+            // is pinned — an h2-negotiated conn with no h2 handler dies with
+            // "malformed HTTP response". Offer only http/1.1 so the upstream
+            // negotiates HTTP/1.1 from the handshake on.
+            cloned.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+            var tlsCfg *tls.Config
+            if cloned.TLSClientConfig == nil {
+                tlsCfg = &tls.Config{}
+            } else {
+                tlsCfg = cloned.TLSClientConfig.Clone()
+            }
+            tlsCfg.NextProtos = []string{"http/1.1"}
+            cloned.TLSClientConfig = tlsCfg
+            slog.Info("transport: HTTP/2 disabled for backend (force_http1)", "backend", cfg.BaseURL)
+        } else if t2, err := http2.ConfigureTransports(cloned); err != nil {
+            // Not fatal: the transport still works over whatever protocol
+            // negotiates; only the wedged-conn health check is lost.
+            slog.Warn("transport: failed to configure HTTP/2 health check for backend",
+                "backend", cfg.BaseURL, "error", err)
+        } else {
+            t2.ReadIdleTimeout = defaultHTTP2ReadIdleTimeout
+            t2.PingTimeout = defaultHTTP2PingTimeout
+            h2t = t2
+        }
         slog.Info("transport: TCP backend timeouts applied",
             "backend", cfg.BaseURL,
             "response_header_timeout", respHeaderTimeout.String(),
@@ -255,8 +324,9 @@ func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
             "tls_handshake_timeout", defaultTLSHandshakeTimeout.String(),
             "max_conns_per_host", maxConns,
             "max_idle_conns_per_host", maxIdle,
+            "force_http1", cfg.ForceHTTP1,
         )
-        return cloned
+        return cloned, h2t
     }
 
     slog.Info("building UDS transport for backend",
@@ -278,5 +348,5 @@ func TransportForBackend(cfg config.BackendConfig) http.RoundTripper {
         ResponseHeaderTimeout: respHeaderTimeout,
         TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
         ExpectContinueTimeout: 1 * time.Second,
-    }
+    }, nil
 }
