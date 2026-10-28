@@ -1747,6 +1747,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.83 — #381 model-hub 健康探测路径
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#381 model-hub 健康探测路径** | 网关对 fusion-model-hub 的后端健康探测原本拨的是 hub 的裸 `/health` 路径——hub 默认开启鉴权后该路径无 `X-API-Key` 返回 401，导致健康的 hub 被网关后端状态误报为 `degraded`。`FusionModelHubProvider.HealthCheck` 改为探测 hub 公开免鉴权的 `/api/v1/system/health`，健康状态不再受 hub 密钥轮换影响。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 同步至 0.9.83。 |
+
+
+
 ### v0.9.82 — #377 无效密钥日志洪泛
 
 | # | 条目 | 说明 |
