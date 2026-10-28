@@ -20,7 +20,13 @@ import (
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
     ctx := adapter.WithFusionHeaders(r.Context(), r)
-    results := s.pool.HealthCheckAll(ctx)
+    // #381: the hub's /api/v1/system/health subcalls the gateway /health
+    // (its mlx_url defaults to the gateway). Probing the hub from a request
+    // that IS the hub's probe re-enters this handler — a probe cycle that
+    // truncates only on timeouts (hub health took 13-20s live). Skip the
+    // hub backends on the hub's own probe; the skip is reported, not hidden.
+    hubSkip := modelHubSkip(s.pool, r)
+    results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
     allHealthy := true
     for _, err := range results {
         if err != nil {
@@ -36,6 +42,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
         } else {
             backends[name] = map[string]interface{}{"healthy": true}
         }
+    }
+    for name := range hubSkip {
+        backends[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
     }
 
     // Fusion-mlx gets an authoritative model_loaded block from its /health
@@ -201,7 +210,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
         // deployed artifact. Defaults to "dev"/"unknown" on a plain go build.
         "version":        s.version,
         "commit":         s.commit,
-        "backends":       s.buildBackendStatus(r.Context()),
+        "backends":       s.buildBackendStatus(r.Context(), r.Header.Get("X-Fusion-Source") == "model-hub"),
         "hardware":       s.buildHardwareStatus(hwMetrics),
         "circuit_breakers": map[string]string{
             "local":  s.router.CircuitBreakerState("local").String(),
@@ -322,8 +331,19 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
     })
 }
 
-func (s *Server) buildBackendStatus(ctx context.Context) map[string]interface{} {
-    results := s.pool.HealthCheckAll(ctx)
+func (s *Server) buildBackendStatus(ctx context.Context, skipModelHub ...bool) map[string]interface{} {
+    // #381: variadic so existing callers/tests stay unchanged; true = the
+    // caller is the hub's own probe, skip hub backends to break the cycle.
+    var hubSkip map[string]bool
+    if len(skipModelHub) > 0 && skipModelHub[0] {
+        for _, n := range s.pool.ModelHubNames() {
+            if hubSkip == nil {
+                hubSkip = make(map[string]bool)
+            }
+            hubSkip[n] = true
+        }
+    }
+    results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
     status := make(map[string]interface{})
 
     for name, err := range results {
@@ -342,8 +362,30 @@ func (s *Server) buildBackendStatus(ctx context.Context) map[string]interface{} 
         }
         status[name] = entry
     }
+    for name := range hubSkip {
+        status[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
+    }
 
     return status
+}
+
+// modelHubSkip returns the hub backend names to skip when the request is the
+// hub's own health probe (X-Fusion-Source: model-hub, the signature the hub
+// sends on its mlx_url subcall). nil = probe everything.
+func modelHubSkip(pool *adapter.Pool, r *http.Request) map[string]bool {
+    if r.Header.Get("X-Fusion-Source") != "model-hub" {
+        return nil
+    }
+    names := pool.ModelHubNames()
+    if len(names) == 0 {
+        return nil
+    }
+    slog.Debug("breaking model-hub health probe cycle: skipping hub backend probe on reentrant /health")
+    skip := make(map[string]bool, len(names))
+    for _, n := range names {
+        skip[n] = true
+    }
+    return skip
 }
 
 func (s *Server) buildHardwareStatus(m hardware.HardwareMetrics) map[string]interface{} {

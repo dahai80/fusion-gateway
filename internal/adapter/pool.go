@@ -142,14 +142,41 @@ func (p *Pool) GetModelHub() *FusionModelHubProvider {
 }
 
 func (p *Pool) HealthCheckAll(ctx context.Context) map[string]error {
+    return p.HealthCheckAllSkipping(ctx, nil)
+}
+
+// HealthCheckAllSkipping probes every backend except the named ones. #381:
+// the model-hub health endpoint subcalls the gateway's mlx_url (which
+// defaults to the gateway itself), so probing the hub from /health re-enters
+// the gateway health surface — an unbounded probe cycle truncated only by
+// timeouts. Callers detect the hub's own probe (X-Fusion-Source: model-hub)
+// and skip the hub backends to break the cycle.
+func (p *Pool) HealthCheckAllSkipping(ctx context.Context, skip map[string]bool) map[string]error {
     p.mu.RLock()
     defer p.mu.RUnlock()
 
     results := make(map[string]error)
     for name, provider := range p.providers {
+        if skip[name] {
+            continue
+        }
         results[name] = provider.HealthCheck(ctx)
     }
     return results
+}
+
+// ModelHubNames returns the backend names backed by FusionModelHubProvider —
+// the probes that must be skipped when the /health caller is the hub itself.
+func (p *Pool) ModelHubNames() []string {
+    p.mu.RLock()
+    defer p.mu.RUnlock()
+    var names []string
+    for name, provider := range p.providers {
+        if _, ok := provider.(*FusionModelHubProvider); ok {
+            names = append(names, name)
+        }
+    }
+    return names
 }
 
 func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
