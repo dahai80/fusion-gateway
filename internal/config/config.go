@@ -1338,6 +1338,52 @@ func bindSecretEnv(v *viper.Viper) {
     v.BindEnv("managed_settings.private_key", "FG_MANAGED_SETTINGS_PRIVATE_KEY")
 }
 
+// fileValueForKey (#363 F1) reads a key's value straight from the config file
+// with a fresh viper instance that has NO env bindings. The main Load/Reload
+// viper has backends.fusion-mlx.api_key bound to FUSION_MLX_API_KEY, so a Get
+// through it can never reveal what the file actually says — this helper can.
+func fileValueForKey(path, key string) (string, bool) {
+    fv := viper.New()
+    fv.SetConfigFile(path)
+    fv.SetConfigType("yaml")
+    if err := fv.ReadInConfig(); err != nil {
+        slog.Warn("cannot read config file for key source check", "path", path, "error", err)
+        return "", false
+    }
+    if !fv.InConfig(key) {
+        return "", false
+    }
+    val, ok := fv.Get(key).(string)
+    if !ok || val == "" {
+        return "", false
+    }
+    return val, true
+}
+
+// checkFusionMLXKeySource (#363 F1) makes the FUSION_MLX_API_KEY env override
+// fail-loud instead of silent. Before this check, an env value different from
+// the config.yaml value silently won (BindEnv precedence), so an operator who
+// rotated the key in one place only got the other, stale key at runtime with
+// no trace in the logs. Now: both set + different → hard error (startup fails,
+// reload is rejected); both set + identical → INFO; env-only → INFO. The
+// identical case is the production baseline (config.yaml and env both carry
+// the ecosystem default), so it must not block.
+func checkFusionMLXKeySource(path string) error {
+    envKey := os.Getenv("FUSION_MLX_API_KEY")
+    fileKey, fileSet := fileValueForKey(path, "backends.fusion-mlx.api_key")
+    switch {
+    case envKey != "" && fileSet && fileKey != envKey:
+        return fmt.Errorf("backends.fusion-mlx.api_key is set in both config.yaml and FUSION_MLX_API_KEY with DIFFERENT values; before #363 the env value silently overrode the file value — resolve to one source (unset FUSION_MLX_API_KEY, or align both to the same key)")
+    case envKey != "" && fileSet:
+        slog.Info("backends.fusion-mlx.api_key set in both config.yaml and FUSION_MLX_API_KEY with identical values")
+    case envKey != "":
+        slog.Info("backends.fusion-mlx.api_key sourced from FUSION_MLX_API_KEY env, no file value")
+    case fileSet:
+        slog.Debug("backends.fusion-mlx.api_key sourced from config file")
+    }
+    return nil
+}
+
 func Load(path string) (*ConfigSnapshot, error) {
     v := viper.New()
     v.SetConfigFile(path)
@@ -1349,6 +1395,12 @@ func Load(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("read config: %w", err)
     }
     warnUnknownKeys(v.AllSettings())
+
+    // #363 F1: fail loud when FUSION_MLX_API_KEY disagrees with the file value
+    // (the env binding above would otherwise silently win).
+    if err := checkFusionMLXKeySource(path); err != nil {
+        return nil, err
+    }
 
     // Seed with DefaultConfig so fields a YAML omits land on sane defaults, not
     // zero values that validate() then rejects (e.g. circuit_breaker thresholds
@@ -1458,6 +1510,13 @@ func Reload(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("read config: %w", err)
     }
     warnUnknownKeys(v.AllSettings())
+
+    // #363 F1: same fail-loud key-source check as Load; a rejected reload keeps
+    // the previous snapshot serving.
+    if err := checkFusionMLXKeySource(path); err != nil {
+        slog.Error("reload: rejected config, fusion-mlx api_key source conflict", "error", err)
+        return nil, err
+    }
 
     // Seed with DefaultConfig (same as Load) so omitted YAML keys keep sane
     // defaults, not zero values that validate() rejects. EI8 made validate()

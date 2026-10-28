@@ -157,6 +157,17 @@ func openAICompletionToAnthropicMessage(raw []byte, status int) ([]byte, int) {
             OutputTokens: cc.Usage.CompletionTokens,
         }
     }
+    // #363 F2: a 200 completion with zero content blocks (no reasoning, text,
+    // or tool calls) is a failed upstream — never surface it as a valid empty
+    // Anthropic message (Claude Code reads content:[] end_turn as a completed
+    // turn and waits for the user to type "continue").
+    if len(resp.Content) == 0 {
+        slog.Warn("bridge: upstream completion produced empty content, converting to error envelope",
+            "model", cc.Model, "status", status)
+        return anthropicErrorEnvelope(
+            []byte(`{"error":{"type":"api_error","message":"upstream produced no content (thinking, text, or tool_use); the backend request failed"}}`),
+            http.StatusBadGateway), http.StatusBadGateway
+    }
     out, err := json.Marshal(resp)
     if err != nil {
         return anthropicErrorEnvelope(raw, status), status
@@ -267,6 +278,14 @@ type anthropicSSEBridge struct {
     inTok      int
     outTok     int
     stopped    bool
+    // #363 F2: errEmitted tracks whether an error event was forwarded (the
+    // stream is then already terminal — no empty message may follow); sawContent
+    // tracks whether any real content block (thinking/text/tool_use) was ever
+    // emitted. A stream ending with neither is a failed upstream, not a
+    // "completed empty turn" — Claude Code treats content:[] end_turn as a
+    // finished turn and waits for the user to type "continue".
+    errEmitted bool
+    sawContent bool
 }
 
 func newAnthropicSSEBridge(w http.ResponseWriter) *anthropicSSEBridge {
@@ -439,6 +458,7 @@ func (b *anthropicSSEBridge) ensureMessageStart(id, model string) {
 // (always the first block — reasoning streams before content) and replay as
 // thinking_delta events.
 func (b *anthropicSSEBridge) emitThinkingDelta(text string) {
+    b.sawContent = true
     if !b.thinkOpen {
         b.thinkOpen = true
         b.thinkIdx = b.nextIndex
@@ -479,6 +499,7 @@ func (b *anthropicSSEBridge) closeThinkingBlock() {
 }
 
 func (b *anthropicSSEBridge) emitTextDelta(text string) {
+    b.sawContent = true
     b.closeThinkingBlock()
     if !b.textOpen {
         b.textOpen = true
@@ -500,6 +521,7 @@ func (b *anthropicSSEBridge) emitTextDelta(text string) {
 }
 
 func (b *anthropicSSEBridge) emitToolDelta(tc bridgeToolCall) {
+    b.sawContent = true
     b.closeThinkingBlock()
     blockIdx, seen := b.toolBlocks[tc.Index]
     if !seen {
@@ -550,17 +572,32 @@ func (b *anthropicSSEBridge) closeOpenBlocks() {
 // finalizeMessage emits the message_delta + message_stop terminal pair once.
 // Called on data: [DONE]; Finalize() calls it again defensively for a
 // handler that ended without [DONE] (synth terminal, issue #71/#75 pattern).
+// #363 F2: a stream that produced no content block (no thinking, text, or
+// tool_use deltas) is a failed upstream, not a completed empty turn — the
+// old "minimal empty message" (content:[] + end_turn + message_stop, 200)
+// made Claude Code treat the turn as finished and stall waiting for the
+// user to type "continue". Such streams now surface an error event
+// instead. A stream that already emitted an error event is terminal too —
+// never append an empty message after it.
 func (b *anthropicSSEBridge) finalizeMessage() {
     if b.stopped {
         return
     }
     b.stopped = true
-    b.closeOpenBlocks()
-    if b.msgID == "" {
-        // No chunk ever arrived: emit a minimal empty message so the client
-        // gets a protocol-valid terminal instead of hanging.
-        b.ensureMessageStart("", "")
+    if b.errEmitted {
+        slog.Warn("anthropic bridge: upstream error event already terminal, skipping empty message terminal")
+        return
     }
+    if !b.sawContent {
+        slog.Warn("anthropic bridge: upstream produced no content, emitting error event instead of empty message",
+            "chunks_seen", b.nextIndex)
+        b.emitError(&bridgeErrorBody{
+            Type:    "api_error",
+            Message: "upstream stream closed without producing any content (thinking, text, or tool_use); the backend request failed",
+        })
+        return
+    }
+    b.closeOpenBlocks()
     outTok := b.outTok
     stop := b.stopReason
     if stop == "" {
@@ -588,6 +625,7 @@ func (b *anthropicSSEBridge) UsageTotals() (inputTokens, outputTokens int) {
 }
 
 func (b *anthropicSSEBridge) emitError(e *bridgeErrorBody) {
+    b.errEmitted = true
     typ := e.Type
     if typ == "" {
         typ = "api_error"

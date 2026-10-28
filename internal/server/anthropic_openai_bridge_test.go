@@ -267,15 +267,19 @@ func TestSSEBridge_FinalizeSynth(t *testing.T) {
     }
 }
 
-// TestSSEBridge_EmptyStream: zero upstream chunks still yields a minimal
-// valid message so the client never hangs.
+// TestSSEBridge_EmptyStream: zero upstream chunks no longer yields a valid
+// empty message (#363 F2 — Claude Code reads content:[] end_turn as a finished
+// turn and waits for "continue"); finalize emits an api_error event instead.
 func TestSSEBridge_EmptyStream(t *testing.T) {
     inner := httptest.NewRecorder()
     b := newAnthropicSSEBridge(inner)
     b.Finalize()
     raw := inner.Body.String()
-    if !strings.Contains(raw, "event: message_start") || !strings.Contains(raw, "event: message_stop") {
-        t.Fatalf("empty stream output = %s", raw)
+    if !strings.Contains(raw, "event: error") || !strings.Contains(raw, "upstream stream closed without producing any content") {
+        t.Fatalf("empty stream must emit error event, got: %s", raw)
+    }
+    if strings.Contains(raw, "event: message_stop") {
+        t.Fatalf("empty stream must not terminate with a valid message_stop, got: %s", raw)
     }
 }
 
@@ -345,5 +349,32 @@ func TestSSEBridge_UsageTotals(t *testing.T) {
     in, out := b.UsageTotals()
     if in != 30 || out != 3 {
         t.Fatalf("bridge usage = %d/%d, want 30/3", in, out)
+    }
+}
+
+// TestOpenAICompletionToMessage_EmptyContentErrors (#363 F2): a 200 completion
+// with zero content blocks (no reasoning, text, or tool calls) is a failed
+// upstream — converts to the error envelope with 502 instead of a valid empty
+// Anthropic message that Claude Code reads as a finished turn.
+func TestOpenAICompletionToMessage_EmptyContentErrors(t *testing.T) {
+    raw := []byte(`{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`)
+    out, status := openAICompletionToAnthropicMessage(raw, 200)
+    if status != 502 {
+        t.Fatalf("status = %d, want 502", status)
+    }
+    if !strings.Contains(string(out), `"type":"api_error"`) || !strings.Contains(string(out), "upstream produced no content") {
+        t.Fatalf("envelope = %s", out)
+    }
+}
+
+// Positive control: a completion with text content still converts normally.
+func TestOpenAICompletionToMessage_WithContentStillValid(t *testing.T) {
+    raw := []byte(`{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+    out, status := openAICompletionToAnthropicMessage(raw, 200)
+    if status != 200 {
+        t.Fatalf("status = %d", status)
+    }
+    if !strings.Contains(string(out), `"text":"ok"`) {
+        t.Fatalf("body = %s", out)
     }
 }

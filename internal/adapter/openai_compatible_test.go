@@ -133,8 +133,9 @@ func TestOpenAICompatibleProvider_StreamChat(t *testing.T) {
     for range ch {
         count++
     }
-    if count != 1 {
-        t.Fatalf("expected 1 chunk, got %d", count)
+    // +1: #363 F3 forwards an explicit [DONE] sentinel chunk after the data.
+    if count != 2 {
+        t.Fatalf("expected 2 chunks (data + [DONE] sentinel), got %d", count)
     }
 }
 

@@ -100,6 +100,11 @@ func TestAzureOpenAIProvider_StreamStampsModelVersion(t *testing.T) {
     }
     var n int
     for chunk := range ch {
+        // #363 F3: the terminal [DONE] sentinel is a bare Raw frame with no
+        // model fields — skip it, only real data chunks carry the stamp.
+        if string(chunk.Raw) == "[DONE]" {
+            continue
+        }
         n++
         if chunk.ModelVersion != "gpt-4o-2024-08-06" {
             t.Errorf("chunk %d model_version = %q, want gpt-4o-2024-08-06", n, chunk.ModelVersion)
