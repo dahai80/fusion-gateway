@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.83 — #381 model-hub health probe path
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#381 model-hub health probe path** | The gateway's backend health probe for fusion-model-hub dialed the hub's bare `/health`, which is auth-gated (401 without `X-API-Key`) since the hub enabled auth by default — a healthy hub was reported as `degraded` in the gateway backends status. `FusionModelHubProvider.HealthCheck` now probes the hub's public, auth-exempt surface `/api/v1/system/health`, so health status survives hub key rotations. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.83. |
+
 ### v0.9.82 — #377 invalid-key log flood
 
 | # | Item | Details |
