@@ -537,6 +537,12 @@ type BackendConfig struct {
     // stalled ALL requests to that backend. 0 = use the factory default (30s);
     // set lower for latency-sensitive backends, higher for slow first-token LLMs.
     ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
+    // ForceHTTP1 (#386): pin this backend to HTTP/1.1, refusing the h2 TLS
+    // upgrade even when the upstream offers it. Escape hatch for a cloud
+    // host whose pooled HTTP/2 connection wedges (half-dead node behind an
+    // LB): on h2 every subsequent request multiplexes onto the dead conn
+    // until the header timeout, while HTTP/1.1 fails fast and re-dials.
+    ForceHTTP1 bool `mapstructure:"force_http1"`
     // APIVersion (#324): Azure OpenAI api-version query parameter for the
     // azure-openai backend type. Default "2024-10-21" when empty.
     APIVersion string `mapstructure:"api_version"`
