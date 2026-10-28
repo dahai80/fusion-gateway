@@ -104,7 +104,10 @@ func (p *FusionModelHubProvider) HealthCheck(ctx context.Context) error {
 		Timeout:   5 * time.Second,
 		Transport: TransportForBackend(p.backendCfg),
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL.String()+"/health", nil)
+	// #381: the hub's bare /health is auth-gated (401 without X-API-Key),
+	// so probing it reported a healthy hub as degraded. The public,
+	// auth-exempt probe surface is /api/v1/system/health.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL.String()+"/api/v1/system/health", nil)
 	if err != nil {
 		return fmt.Errorf("model-hub health check: %w", err)
 	}
