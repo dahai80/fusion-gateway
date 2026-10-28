@@ -1,6 +1,8 @@
 package server
 
 import (
+    "bytes"
+    "io"
     "log/slog"
     "net/http"
 )
@@ -62,6 +64,25 @@ func (s *Server) proxyToFusionMLX(w http.ResponseWriter, r *http.Request, surfac
     slog.Debug("fusion-mlx proxy forwarding", "surface", surface, "method", r.Method, "path", r.URL.Path)
     // E5 (audit): cap the proxied body — tool/management paths accept job
     // definitions, and an unbounded body OOMs fusion-mlx's single process.
+    r = s.wrapProxyBody(w, r)
+    mlx.ReverseProxy().ServeHTTP(w, r)
+}
+
+// proxyLocalWithBody re-arms the buffered request body and forwards it to the
+// local fusion-mlx backend verbatim (#366): handlers that already read the
+// body to extract the model field (speech, images) rebuild it here so the
+// ReverseProxy hop sees the original JSON. The upstream path is identical to
+// the inbound path (/v1/audio/speech, /v1/images/generations).
+func (s *Server) proxyLocalWithBody(w http.ResponseWriter, r *http.Request, body []byte, surface string) {
+    mlx := s.pool.GetFusionMLX()
+    if mlx == nil {
+        slog.Error("local media proxy: fusion-mlx backend not configured", "surface", surface, "path", r.URL.Path)
+        http.Error(w, `{"error":{"message":"Local backend not available","type":"server_error"}}`, http.StatusServiceUnavailable)
+        return
+    }
+    r.Body = io.NopCloser(bytes.NewReader(body))
+    r.ContentLength = int64(len(body))
+    slog.Info("forwarding request to local fusion-mlx backend", "surface", surface, "method", r.Method, "path", r.URL.Path)
     r = s.wrapProxyBody(w, r)
     mlx.ReverseProxy().ServeHTTP(w, r)
 }

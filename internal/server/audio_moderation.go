@@ -112,6 +112,16 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // #366: resolveCloudProvider only resolves cloud backends — a local
+    // decision fell through to CloudDefault and 400'd "Provider does not
+    // support speech". When the router picks the local backend, forward the
+    // buffered body verbatim to fusion-mlx /v1/audio/speech.
+    if decision.Backend == router.LocalBackend {
+        slog.Info("speech routed to local fusion-mlx backend", "model", req.Model, "reason", decision.Reason)
+        s.proxyLocalWithBody(w, r, body, "speech")
+        return
+    }
+
     provider := s.resolveCloudProvider(decision, nil, w)
     if provider == nil { return }
 

@@ -15,6 +15,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/router"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
@@ -226,6 +227,22 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 
     if req.N <= 0 {
         req.N = 1
+    }
+
+    // #366: handleImages previously ignored the router entirely and always
+    // resolved Routing.Fallback.CloudDefault — a local image model (FLUX/SD on
+    // fusion-mlx) 400'd "Selected backend does not support image generation".
+    // Decide first; when the router picks the local backend, forward the
+    // buffered body verbatim to fusion-mlx /v1/images/generations.
+    ctx := adapter.WithFusionHeaders(r.Context(), r)
+    decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+    if !s.checkBackendAccess(w, r, string(decision.Backend)) {
+        return
+    }
+    if decision.Backend == router.LocalBackend {
+        slog.Info("image request routed to local fusion-mlx backend", "model", req.Model, "reason", decision.Reason)
+        s.proxyLocalWithBody(w, r, body, "images")
+        return
     }
 
     cloudBackend := s.cfg.Config.Routing.Fallback.CloudDefault

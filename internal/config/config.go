@@ -968,6 +968,12 @@ type Config struct {
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
     Shell           ShellConfig             `mapstructure:"web_shell"`
+    // ServiceRoutes wires the /svc/<name>/ platform-service proxy
+    // (config-conventions §1/§5): business apps call platform services
+    // (rag/identity/drawing-parser…) exclusively through the gateway with
+    // FUSION_CLIENT_KEY, never sibling ports directly. Default off — no
+    // routes registered until service_routes is configured (fail-closed).
+    ServiceRoutes map[string]ServiceRouteConfig `mapstructure:"service_routes"`
     // Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
     // for request logs + payloads. Default off — zero behavior change.
     Persistence     PersistenceConfig       `mapstructure:"persistence"`
@@ -977,6 +983,25 @@ type Config struct {
     // per-(app, scenario, model) cost threshold checks with webhook
     // notification. Default off.
     UsageAlerts     UsageAlertsConfig       `mapstructure:"usage_alerts"`
+}
+
+// ServiceRouteConfig is one /svc/<name>/ upstream: where to dial and how to
+// authenticate toward the platform service.
+//
+// UpstreamAuth semantics (TASK-CONFIG-2026-10-28):
+//   - "user"    — forward the caller's user identity: the gateway swaps the
+//     upstream Authorization to the X-Fusion-User-Token header (verified
+//     session/user JWT), so services enforcing identity JWTs (drawing-parser)
+//     see the real caller. Falls back to the incoming Authorization when the
+//     header is absent.
+//   - "inject"  — replace upstream Authorization with upstream_token (gateway-
+//     held secret, e.g. the identity service token). Business processes never
+//     hold these credentials.
+//   - "" (default) — passthrough: forward the incoming Authorization.
+type ServiceRouteConfig struct {
+    URL           string `mapstructure:"url"`
+    UpstreamAuth  string `mapstructure:"upstream_auth"`
+    UpstreamToken string `mapstructure:"upstream_token"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
