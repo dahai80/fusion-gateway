@@ -3,6 +3,7 @@ package redis
 import (
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "log/slog"
     "sort"
@@ -293,8 +294,13 @@ func (r *RedisStore) GetKeyByHash(hash string) (*store.APIKeyEntry, error) {
     ctx, cancel := r.withTimeout(redisOpTimeout)
     defer cancel()
     name, err := r.client.Get(ctx, apiKeyHashPrefix+hash).Result()
+    if errors.Is(err, redis.Nil) {
+        // #377: a hash miss is an ordinary invalid-key 401, not a store
+        // failure — (nil, nil) keeps the auth ERROR branch for real outages.
+        return nil, nil
+    }
     if err != nil {
-        return nil, fmt.Errorf("key not found by hash")
+        return nil, fmt.Errorf("key hash lookup: %w", err)
     }
     return r.GetKey(name)
 }

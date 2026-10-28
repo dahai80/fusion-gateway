@@ -12,6 +12,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -31,6 +32,13 @@ type keyLookupStore interface {
 // (e.g. fusion-mlx's fg-admin-key) when auth.accept_backend_keys is enabled —
 // the operator opts in because a backend key then grants full gateway access.
 type BackendKeyMatcher func(key string) *config.AuthKeyConfig
+
+// #377: pollers (agent-studio daemon, plugin-console) re-present an
+// unregistered key every ~30s; an unthrottled WARN per poll floods the log
+// (~5.8k lines/day). Emit at most once per hash_prefix per 5 minutes with the
+// suppressed count; the RecordAuthInvalidKey metric still fires per request so
+// the signal is never lost.
+var invalidKeyLogThrottle = logthrottle.New(5 * time.Minute)
 
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
     return APIKeyAuthWithStore(cfg, nil)
@@ -120,7 +128,13 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...
                 // secret: it identifies the key family, never the key.
                 sum := sha256.Sum256([]byte(key))
                 prefix := hex.EncodeToString(sum[:])[:8]
-                slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr, "hash_prefix", prefix)
+                if allowed, suppressed := invalidKeyLogThrottle.AllowWithSuppressed(prefix); allowed {
+                    if suppressed > 0 {
+                        slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr, "hash_prefix", prefix, "suppressed", suppressed)
+                    } else {
+                        slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr, "hash_prefix", prefix)
+                    }
+                }
                 observability.RecordAuthInvalidKey(prefix)
                 http.Error(w, fmt.Sprintf(`{"error":{"message":"Invalid API key","type":"auth_error","key_hash_prefix":%q}}`, prefix), http.StatusUnauthorized)
                 return

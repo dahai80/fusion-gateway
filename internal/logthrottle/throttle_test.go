@@ -63,3 +63,37 @@ func TestThrottle_KeyOverflowResetsTable(t *testing.T) {
         t.Fatal("post-overflow key must be allowed")
     }
 }
+
+func TestThrottle_AllowWithSuppressedCountsRepeats(t *testing.T) {
+    th := New(time.Minute)
+    if ok, n := th.AllowWithSuppressed("k"); !ok || n != 0 {
+        t.Fatalf("first occurrence: allowed=%v suppressed=%d, want true/0", ok, n)
+    }
+    for i := 1; i <= 5; i++ {
+        ok, n := th.AllowWithSuppressed("k")
+        if ok {
+            t.Fatalf("repeat %d must be suppressed", i)
+        }
+        if n != int64(i) {
+            t.Fatalf("repeat %d suppressed count = %d, want %d", i, n, i)
+        }
+    }
+}
+
+func TestThrottle_AllowWithSuppressedReportsCountOnNextEmit(t *testing.T) {
+    th := New(10 * time.Millisecond)
+    th.AllowWithSuppressed("k")
+    for i := 0; i < 7; i++ {
+        th.AllowWithSuppressed("k")
+    }
+    time.Sleep(15 * time.Millisecond)
+    ok, n := th.AllowWithSuppressed("k")
+    if !ok || n != 7 {
+        t.Fatalf("post-interval emit: allowed=%v suppressed=%d, want true/7", ok, n)
+    }
+    // Counter resets after an emit.
+    ok, n = th.AllowWithSuppressed("k")
+    if ok || n != 1 {
+        t.Fatalf("post-emit repeat: allowed=%v suppressed=%d, want false/1", ok, n)
+    }
+}

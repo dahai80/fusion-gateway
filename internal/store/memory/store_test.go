@@ -329,3 +329,15 @@ func TestCSVSanitize(t *testing.T) {
         }
     }
 }
+
+// TestKeyStore_GetByHashMissReturnsNilNil (#377): a hash miss is an ordinary
+// invalid-key 401, not a store failure — the auth middleware's AH5 ERROR
+// branch must stay reserved for real outages, so the store returns (nil, nil)
+// for unknown hashes exactly as for the byName-miss contract.
+func TestKeyStore_GetByHashMissReturnsNilNil(t *testing.T) {
+    s := NewKeyStore()
+    entry, err := s.GetByHash("deadbeefdeadbeef")
+    if entry != nil || err != nil {
+        t.Fatalf("GetByHash miss = (%v, %v), want (nil, nil)", entry, err)
+    }
+}
