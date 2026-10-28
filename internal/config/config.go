@@ -1002,6 +1002,20 @@ type ServiceRouteConfig struct {
     URL           string `mapstructure:"url"`
     UpstreamAuth  string `mapstructure:"upstream_auth"`
     UpstreamToken string `mapstructure:"upstream_token"`
+    // UpstreamTokenFile is a 0600 secret-file alternative to upstream_token
+    // (#370): when upstream_token is empty the file (tilde-expanded) is read
+    // once at registration and its first line becomes the injected credential
+    // — the same secret convention fm-server itself uses
+    // (~/.fusion-memory/api_key). Mutually exclusive in practice: the inline
+    // token wins when both are set.
+    UpstreamTokenFile string `mapstructure:"upstream_token_file"`
+    // Prefix optionally mounts the route at an alias path instead of
+    // /svc/<name>/ (#370): e.g. prefix "/v1/memory" serves the fusion-memory
+    // fm-server surface at the path business clients already migrated to.
+    // Unlike /svc/<name>/ the prefix is NOT stripped — the upstream receives
+    // the caller's path verbatim (fm-server serves the same /v1/memory/*
+    // routes). Must start with "/" or the route is skipped at registration.
+    Prefix string `mapstructure:"prefix"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the

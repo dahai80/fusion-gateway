@@ -619,3 +619,21 @@ web_shell:
     #     fusion-security:
     #         upstream: http://127.0.0.1:11454
     #         api_key: "<fusion-security tenant-assigned key>"
+
+# /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
+# apps reach platform services exclusively through the gateway with their
+# FUSION_CLIENT_KEY; the gateway holds the per-service upstream credentials.
+# upstream_auth: "user" (forward X-Fusion-User-Token JWT), "inject" (replace
+# Authorization with the gateway-held credential), "" (passthrough).
+# upstream_token: inline secret; upstream_token_file: 0600 secret file
+# (tilde-expanded) read once at registration — preferred, keeps secrets out
+# of this file. prefix: optional alias mount WITHOUT path stripping, e.g.
+# fusion-memory fm-server serves the same /v1/memory/* surface the business
+# clients migrated to (#370); without it the route mounts at /svc/<name>/
+# with the prefix stripped.
+service_routes:
+  memory:
+    url: http://127.0.0.1:11435
+    upstream_auth: inject
+    upstream_token_file: ~/.fusion-memory/api_key
+    prefix: /v1/memory
