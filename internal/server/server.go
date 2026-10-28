@@ -835,6 +835,11 @@ func (s *Server) Start() error {
         s.registerShellRoutes(mux)
     }
 
+    // /svc/<name>/ platform-service routes (config-conventions §1/§5): the
+    // single entry business apps use to reach identity/rag/drawing-parser
+    // with FUSION_CLIENT_KEY. No-op when service_routes is unset.
+    s.registerServiceRoutes(mux)
+
     // #262 K2: user API key CRUD — master-gated credential issuance surface.
     // Always registered (the control plane is not feature-flagged); auth is
     // the master key itself via withMasterKey inside registerUserKeyRoutes.
