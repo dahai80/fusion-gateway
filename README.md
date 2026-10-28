@@ -2044,6 +2044,15 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.81 — local media proxy + shell self-heal + memory proxy
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#366 local speech/image routing** | Local TTS (Kokoro) and image-generation (FLUX/SD) models on fusion-mlx 400'd at the gateway: `handleSpeech` fell through `resolveCloudProvider` ("Provider does not support speech") and `handleImages` ignored the router entirely, always resolving `Fallback.CloudDefault` ("Selected backend does not support image generation"). Both surfaces now run `Decide` first and, on a local decision, forward the buffered body verbatim to fusion-mlx via the #340 `ReverseProxy` hop (`proxyLocalWithBody` re-arms body + ContentLength) — credential injection, E5 body cap, and upstream-path-equals-inbound-path preserved. Cloud paths unchanged. |
+| 2 | **#369 programmable heartbeat denials + fm- self-heal** | Shell heartbeat denials were one ambiguous 403 — a module could not tell "registration gone" (re-register) from "key revoked" (admin rotate) from "wrong credential" (fix config). Now: 404 `manifest_unknown` (reason=unknown, re-register), 403 `heartbeat_key_revoked` (reason=revoked, admin must rotate), 403 `heartbeat_forbidden` (credential mismatch). Self-heal: `POST /api/v1/shell/manifests` accepts the module's own still-valid fm- service key for the SAME id (body buffered, id probed, re-armed) — no admin credential needed for re-registration; a key cannot register a different id; rotate/revoke/delete stay admin-only. #281 log throttling + denial metrics preserved per condition. |
+| 3 | **#370 /v1/memory/* proxy route** | Business clients migrated to `POST /v1/memory/{commit,retrieve,delete_scope}` with `FUSION_CLIENT_KEY`, but the gateway had no route (404) and fm-server (:11435) 401s without its private key. The `/svc/<name>/` platform-service proxy gained: `prefix` alias mount WITHOUT path stripping (fm-server serves the caller's path verbatim), `upstream_token_file` (0600 secret file, tilde-expanded, read once at registration — unreadable file fails closed), and the A5 degradation envelope on upstream outage (503 `upstream_unavailable`, retryable — never a bare 502). The gateway injects the memory credential upstream; the caller's own token is never forwarded. |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.81. |
+
 ### v0.9.80 — #363 bridge fail-loud closure
 
 | # | Item | Details |

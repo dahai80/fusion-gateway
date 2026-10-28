@@ -1747,6 +1747,15 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.81 — 本地媒体代理 + shell 自愈 + memory 代理
+
+| # | 条目 | 说明 |
+|---|-----|---------|
+| 1 | **#366 本地语音/图像路由** | fusion-mlx 上的本地 TTS（Kokoro）与图像生成（FLUX/SD）模型在网关 400：`handleSpeech` 落入 `resolveCloudProvider`（"Provider does not support speech"），`handleImages` 完全绕过路由器、恒定解析 `Fallback.CloudDefault`（"Selected backend does not support image generation"）。两个面现在先跑 `Decide`，本地决策时经 #340 `ReverseProxy` 通道将缓冲 body 原样转发到 fusion-mlx（`proxyLocalWithBody` 重建 body + ContentLength）——凭据注入、E5 body 上限、上游路径=入站路径全部保留。云路径不变。 |
+| 2 | **#369 可编程 heartbeat 拒绝码 + fm- 自愈** | Shell heartbeat 拒绝原本只有一个歧义 403——模块分不清"注册没了"（应重注册）、"密钥被吊销"（等管理员轮换）还是"凭据错误"（修配置）。现在：404 `manifest_unknown`（reason=unknown，重注册）、403 `heartbeat_key_revoked`（reason=revoked，管理员轮换）、403 `heartbeat_forbidden`（凭据不匹配）。自愈：`POST /api/v1/shell/manifests` 接受模块自己仍有效的 fm- service key 重注册同 id（body 缓冲、探测 id、重建）——重注册无需管理员凭据；同一密钥不能注册别的 id；rotate/revoke/delete 仍仅限管理员。#281 日志节流 + 拒绝指标按条件各自保留。 |
+| 3 | **#370 /v1/memory/* 代理路由** | 业务端已迁移到 `POST /v1/memory/{commit,retrieve,delete_scope}` + `FUSION_CLIENT_KEY`，但网关无此路由（404），fm-server（:11435）无私钥直连 401。`/svc/<name>/` 平台服务代理新增：`prefix` 别名挂载且**不**剥前缀（fm-server 原样服务调用方路径）、`upstream_token_file`（0600 密钥文件，波浪号展开，注册时读一次——不可读即 fail-closed）、上游故障时的 A5 降级信封（503 `upstream_unavailable`，可重试——绝不裸 502）。网关向上游注入 memory 凭据；调用方自己的 token 永不透传。 |
+| 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.81。 |
+
 ### v0.9.80 — #363 桥接 fail-loud 闭环
 
 | # | 条目 | 说明 |
