@@ -59,11 +59,14 @@ func (s *KeyStore) GetByHash(hash string) (*store.APIKeyEntry, error) {
     defer s.mu.RUnlock()
     name, ok := s.byHash[hash]
     if !ok {
-        return nil, fmt.Errorf("key not found by hash")
+        // #377: a hash miss is an ordinary invalid-key 401, not a store
+        // failure. Returning (nil, nil) keeps the auth middleware's AH5
+        // ERROR branch (real store outages) quiet against poller noise.
+        return nil, nil
     }
     k, ok := s.keys[name]
     if !ok {
-        return nil, fmt.Errorf("key not found by hash")
+        return nil, nil
     }
     return copyEntry(k), nil
 }

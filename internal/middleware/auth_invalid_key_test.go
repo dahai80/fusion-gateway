@@ -80,3 +80,38 @@ func TestAPIKeyAuthWithStore_MissingKeyNoPrefix(t *testing.T) {
         t.Fatalf("missing-key 401 must not carry key_hash_prefix, body=%s", rec.Body.String())
     }
 }
+
+// TestAPIKeyAuthWithStore_InvalidKeyThrottleKeeps401 (#377): repeated
+// invalid-key polls get their WARN log line throttled per hash_prefix (5 min),
+// but the fail-closed 401 response — with the self-diagnosis hash prefix —
+// must fire identically on every request, and the metric must keep counting.
+func TestAPIKeyAuthWithStore_InvalidKeyThrottleKeeps401(t *testing.T) {
+    staleKey := "fg-stale-key-throttle-probe-377"
+    sum := sha256.Sum256([]byte(staleKey))
+    wantPrefix := hex.EncodeToString(sum[:])[:8]
+
+    cfg := &config.AuthConfig{Enabled: true}
+    handler := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        t.Fatal("invalid key must not reach downstream handler")
+    }))
+    for i := 0; i < 3; i++ {
+        req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+        req.Header.Set("Authorization", "Bearer "+staleKey)
+        rec := httptest.NewRecorder()
+        handler.ServeHTTP(rec, req)
+        if rec.Code != http.StatusUnauthorized {
+            t.Fatalf("poll %d: status = %d, want 401", i, rec.Code)
+        }
+        if !strings.Contains(rec.Body.String(), `"key_hash_prefix":"`+wantPrefix+`"`) {
+            t.Fatalf("poll %d: 401 body missing key_hash_prefix, body=%s", i, rec.Body.String())
+        }
+    }
+    // The metric counts every occurrence even while the log line is throttled.
+    req2 := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+    rec2 := httptest.NewRecorder()
+    observability.Handler().ServeHTTP(rec2, req2)
+    want := `fusion_gateway_auth_invalid_key_total{hash_prefix="` + wantPrefix + `"} 3`
+    if !strings.Contains(rec2.Body.String(), want) {
+        t.Fatalf("metric must count all 3 rejections, want sample %q", want)
+    }
+}
