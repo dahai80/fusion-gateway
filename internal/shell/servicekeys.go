@@ -186,6 +186,17 @@ func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
     return false
 }
 
+// DynamicRegistered reports whether a dynamic registration exists for id
+// (#369): the heartbeat auth path distinguishes "key invalid" (403, the
+// module should fix its credential) from "registration gone" (404, the
+// module should re-register) so modules get a programmable recovery signal.
+func (r *Registry) DynamicRegistered(id string) bool {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    _, ok := r.dynamic[id]
+    return ok
+}
+
 // IsServiceKeyRevoked reports whether the dynamic registration's service key
 // was revoked — the proxy uses this to serve the structured 503 instead of
 // forwarding an unauthenticated request at a module that can no longer

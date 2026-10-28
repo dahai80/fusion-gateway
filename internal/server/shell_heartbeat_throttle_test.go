@@ -45,8 +45,10 @@ func TestShellHeartbeatDenial_LogThrottledMetricNot(t *testing.T) {
     // at the observed 15s cadence).
     metricsBefore := scrapeHeartbeatDeniedMetrics(t)
     for i := 0; i < 6; i++ {
-        if code := beat("fm-" + moduleID + "-wrongkeywrongkeywrongkeyw"); code != http.StatusForbidden {
-            t.Fatalf("invalid-credential beat %d code = %d, want 403", i, code)
+        // #369: an fm- key for an UNREGISTERED id is now the programmable
+        // 404 manifest_unknown (reason="unknown"), not the ambiguous 403.
+        if code := beat("fm-" + moduleID + "-wrongkeywrongkeywrongkeyw"); code != http.StatusNotFound {
+            t.Fatalf("unknown-manifest beat %d code = %d, want 404", i, code)
         }
         if code := beat(""); code != http.StatusUnauthorized {
             t.Fatalf("missing-credential beat %d code = %d, want 401", i, code)
@@ -55,14 +57,14 @@ func TestShellHeartbeatDenial_LogThrottledMetricNot(t *testing.T) {
 
     logged := strings.Count(buf.String(), "shell heartbeat denied")
     if logged != 2 {
-        t.Fatalf("expected exactly 2 throttled WARN lines (1 invalid + 1 missing), got %d", logged)
+        t.Fatalf("expected exactly 2 throttled WARN lines (1 unknown + 1 missing), got %d", logged)
     }
 
     metricsAfter := scrapeHeartbeatDeniedMetrics(t)
-    const invalidKey = `module_id="` + moduleID + `",reason="invalid"`
+    const unknownKey = `module_id="` + moduleID + `",reason="unknown"`
     const missingKey = `module_id="` + moduleID + `",reason="missing"`
-    if d := metricsAfter[invalidKey] - metricsBefore[invalidKey]; d != 6 {
-        t.Fatalf("invalid-credential metric delta = %v, want 6 (metric must NOT be throttled)", d)
+    if d := metricsAfter[unknownKey] - metricsBefore[unknownKey]; d != 6 {
+        t.Fatalf("unknown-manifest metric delta = %v, want 6 (metric must NOT be throttled)", d)
     }
     if d := metricsAfter[missingKey] - metricsBefore[missingKey]; d != 6 {
         t.Fatalf("missing-credential metric delta = %v, want 6 (metric must NOT be throttled)", d)

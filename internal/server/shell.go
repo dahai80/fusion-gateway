@@ -254,7 +254,7 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // entry — same LLM router as /v1/chat/completions, but the credential
     // is the shell session JWT (the shell must not hold a gateway API key).
     mux.HandleFunc("POST /api/v1/shell/chat/completions", s.withShellSession(s.handleChatCompletions))
-    mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestAuth(s.handleShellManifestUpsert)))
+    mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)))
     // #261 K1: heartbeat authenticates with the module's gateway-issued fm-
     // service key (hash-compare against the registry), NOT the standard fg-
     // key chain — an fm- Bearer would be 401'd by APIKeyAuthWithStore before
@@ -582,20 +582,75 @@ func (s *Server) handleShellManifestList(w http.ResponseWriter, r *http.Request)
 // fg-admin-key value modules historically passed is a backend stub the
 // auth chain never accepted anyway (the "dead-on-arrival" registration).
 // Runs INSIDE withMiddleware so the principal is already resolved.
+// shellManifestAdminAllowed reports whether the request carries the master
+// key or the web_shell.admin_key (constant-time) — the admin plane shared by
+// manifest upsert/rotate/revoke/delete.
+func (s *Server) shellManifestAdminAllowed(r *http.Request) bool {
+    adminKey := ""
+    if s.cfg != nil {
+        adminKey = s.cfg.Config.Shell.AdminKey
+    }
+    p := middleware.PrincipalFromContext(r.Context())
+    allowed := p != nil && p.IsMaster
+    if !allowed && adminKey != "" && p != nil && p.KeyConfig != nil {
+        allowed = subtle.ConstantTimeCompare([]byte(p.KeyConfig.Key), []byte(adminKey)) == 1
+    }
+    return allowed
+}
+
+// withShellManifestUpsertAuth (#369): the upsert gate. Admin plane as
+// before, PLUS a module self-heal path — a module may re-register ITS OWN id
+// authenticated by its still-valid gateway-issued fm- service key, so the
+// standard recovery loop after a heartbeat 403/404 is "re-POST the manifest
+// with the fm- key", never "ship the admin key to every module process".
+// The body is buffered to extract the id for the key check, then re-armed.
+func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if s.shellManifestAdminAllowed(r) {
+            next(w, r)
+            return
+        }
+        body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxShellBody))
+        if err != nil {
+            shell.WriteEnvelope(w, http.StatusBadRequest, "invalid_request", "failed to read manifest body", "", false)
+            return
+        }
+        var probe struct {
+            ID string `json:"id"`
+        }
+        token := shellBearerToken(r)
+        if json.Unmarshal(body, &probe) == nil && probe.ID != "" &&
+            shell.IsServiceKeyPlaintext(token) && s.shellRegistry != nil {
+            sum := sha256.Sum256([]byte(token))
+            grace := s.cfg.Config.Shell.KeyRotationGrace
+            if grace <= 0 {
+                grace = 24 * time.Hour
+            }
+            if s.shellRegistry.AuthServiceKey(probe.ID, hex.EncodeToString(sum[:]), grace) {
+                slog.Info("shell manifest re-register authenticated by module service key (#369 self-heal)", "id", probe.ID)
+                r.Body = io.NopCloser(bytes.NewReader(body))
+                r.ContentLength = int64(len(body))
+                next(w, r)
+                return
+            }
+        }
+        keyName := "anonymous"
+        if p := middleware.PrincipalFromContext(r.Context()); p != nil && p.KeyConfig != nil && p.KeyConfig.Name != "" {
+            keyName = p.KeyConfig.Name
+        }
+        slog.Warn("shell manifest write denied: requires admin key or the module's own valid service key",
+            "path", r.URL.Path, "key", keyName)
+        shell.WriteEnvelope(w, http.StatusForbidden, "manifest_forbidden",
+            "manifest registration requires the master key, web_shell.admin_key, or the module's own valid fm- service key (same id)", "", false)
+    }
+}
+
 func (s *Server) withShellManifestAuth(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
-        adminKey := ""
-        if s.cfg != nil {
-            adminKey = s.cfg.Config.Shell.AdminKey
-        }
-        p := middleware.PrincipalFromContext(r.Context())
-        allowed := p != nil && p.IsMaster
-        if !allowed && adminKey != "" && p != nil && p.KeyConfig != nil {
-            allowed = subtle.ConstantTimeCompare([]byte(p.KeyConfig.Key), []byte(adminKey)) == 1
-        }
+        allowed := s.shellManifestAdminAllowed(r)
         if !allowed {
             keyName := "anonymous"
-            if p != nil && p.KeyConfig != nil && p.KeyConfig.Name != "" {
+            if p := middleware.PrincipalFromContext(r.Context()); p != nil && p.KeyConfig != nil && p.KeyConfig.Name != "" {
                 keyName = p.KeyConfig.Name
             }
             slog.Warn("shell manifest write denied: requires master key or web_shell.admin_key",
@@ -711,6 +766,36 @@ func (s *Server) withShellHeartbeatAuth(next http.HandlerFunc) http.HandlerFunc 
             }
             if s.shellRegistry.AuthServiceKey(id, hex.EncodeToString(sum[:]), grace) {
                 next(w, r)
+                return
+            }
+            // #369: a denied fm- key is three different conditions with
+            // three different recovery paths. Give the module a programmable
+            // signal instead of one ambiguous 403:
+            //   404 manifest_unknown     — registration gone (gateway
+            //                             restarted without store.data_dir,
+            //                             or the entry was removed);
+            //                             re-register via POST /manifests
+            //   403 heartbeat_key_revoked — key revoked by an admin; ask an
+            //                             admin to rotate, self-heal cannot
+            //                             recover a revoked key
+            //   403 heartbeat_forbidden   — key mismatch for a live
+            //                             registration; fix the credential
+            if !s.shellRegistry.DynamicRegistered(id) {
+                if heartbeatDenyLog.Allow(id + "|unknown") {
+                    slog.Warn("shell heartbeat denied: registration not found (throttled to 1 per 5m)", "id", id)
+                }
+                observability.RecordShellHeartbeatDenied(id, "unknown")
+                shell.WriteEnvelope(w, http.StatusNotFound, "manifest_unknown",
+                    "no registration for this module id; re-register via POST /api/v1/shell/manifests (admin key, or the module service key while one is still valid)", id, false)
+                return
+            }
+            if s.shellRegistry.IsServiceKeyRevoked(id) {
+                if heartbeatDenyLog.Allow(id + "|revoked") {
+                    slog.Warn("shell heartbeat denied: service key revoked (throttled to 1 per 5m)", "id", id)
+                }
+                observability.RecordShellHeartbeatDenied(id, "revoked")
+                shell.WriteEnvelope(w, http.StatusForbidden, "heartbeat_key_revoked",
+                    "module service key was revoked; an admin must rotate it, then the module re-registers", id, false)
                 return
             }
         }
