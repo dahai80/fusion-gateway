@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.84 — #381 model-hub 健康探测循环
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#381 后续：model-hub 健康探测循环** | 探测路径修复（v0.9.83）上线后 hub 后端仍报 unhealthy（`context deadline exceeded`）——hub 的 `/api/v1/system/health` 会子调 `{mlx_url}/health`，而其 `mlx_url` 默认指向网关自身，于是网关 `/health` 探测 hub 时重新进入网关 `/health` 探测面：无界探测循环，仅被叠加的 5s 超时截断（实测 hub health 13-20s）。现已在第 1 层破环：携带 `X-Fusion-Source: model-hub`（hub 自身探测签名）的 `/health` / `/v1/status` 请求跳过 model-hub 后端探测，条目报告 `{"healthy": true, "skipped": "reentrant_probe"}`。普通请求仍全量探测。hub 侧递归问题已提上游 issue fusion-models-hub#71 跟踪。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 同步至 0.9.84。 |
+
 ### v0.9.83 — #381 model-hub 健康探测路径
 
 | # | 条目 | 说明 |

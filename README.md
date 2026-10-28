@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.84 — #381 model-hub health probe cycle
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#381 follow-up: model-hub health probe cycle** | After the probe-path fix (v0.9.83) the hub backend still reported unhealthy with `context deadline exceeded` — the hub's `/api/v1/system/health` subcalls `{mlx_url}/health`, and its `mlx_url` defaults to the gateway itself, so the gateway `/health` probing the hub re-entered the gateway `/health` surface: an unbounded probe cycle truncated only by stacked 5s timeouts (hub health took 13-20s live). The cycle now breaks at depth 1: a `/health` or `/v1/status` request carrying `X-Fusion-Source: model-hub` (the hub's own probe signature) skips model-hub backend probes and reports the entry as `{"healthy": true, "skipped": "reentrant_probe"}`. Plain requests probe everything as before. Upstream hub-side recursion tracked in fusion-models-hub#71. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.84. |
+
 ### v0.9.83 — #381 model-hub health probe path
 
 | # | Item | Details |
