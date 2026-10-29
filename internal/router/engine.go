@@ -1236,7 +1236,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     budget, ok := tokenizer.BudgetFromContext(ctx)
     if !ok {
         slog.Warn("token budget not found in context, defaulting to cloud")
-        return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "token_budget_missing"})
+        return e.cloudOrLocalLocked(req, snap, &RouteDecision{Backend: CloudBackend, Reason: "token_budget_missing"})
     }
     // L4 fix: zero-token (empty prompt) should route local, not waste cloud quota
     if budget.InputTokens == 0 {
@@ -1257,7 +1257,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                 )
             }
         }
-        return e.cloudOrLocalLocked(req, decision)
+        return e.cloudOrLocalLocked(req, snap, decision)
     }
 
     // P4.5: Output/Input ratio routing
@@ -1288,7 +1288,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                     "input_tokens", budget.InputTokens,
                     "predict_output_tokens", budget.PredictOutputTokens,
                 )
-                return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "ratio_tier_matched", CloudTarget: target})
+                return e.cloudOrLocalLocked(req, snap, &RouteDecision{Backend: CloudBackend, Reason: "ratio_tier_matched", CloudTarget: target})
             }
         }
 
@@ -1301,7 +1301,7 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                 "input_tokens", budget.InputTokens,
                 "predict_output_tokens", budget.PredictOutputTokens,
             )
-            return e.cloudOrLocalLocked(req, &RouteDecision{Backend: CloudBackend, Reason: "output_input_ratio_exceeded"})
+            return e.cloudOrLocalLocked(req, snap, &RouteDecision{Backend: CloudBackend, Reason: "output_input_ratio_exceeded"})
         }
     }
 
@@ -1499,13 +1499,30 @@ func (e *Engine) tryClusterLocked(cfg *config.ConfigSnapshot, model string, snap
 // cluster node is the same memory class as local and cannot relieve an oversized
 // request. reason/CloudTarget from cloudDecision are preserved on the cloud path; the
 // local-fallback path appends a _local_fallback suffix for tracing.
+// #394: the local fallback is only taken when the local provider can actually
+// serve req.Model. A cloud-only model sent local is a guaranteed 404 "Model
+// not found" from fusion-mlx — a wasted round trip, a false ERROR log, and a
+// cloud-overflow rescue on every occurrence. A cloud-only model keeps the
+// cloud decision and fails honestly against cloud instead. An unknown model
+// set (nil — refresh worker not warmed yet) keeps the RC2 fallback.
 // Called inside decideLocked under breakerMu.RLock — uses the lock-free breaker read.
-func (e *Engine) cloudOrLocalLocked(req *RouteRequest, cloudDecision *RouteDecision) *RouteDecision {
+func (e *Engine) cloudOrLocalLocked(req *RouteRequest, snap routeSnapshot, cloudDecision *RouteDecision) *RouteDecision {
     if e.breakers["cloud"].Admit() {
         return cloudDecision
     }
+    // Admit() denies both an OPEN breaker and a busy half-open probe; State()
+    // tells them apart for the log (open = cloud known-down, half_open =
+    // recovery probe in flight).
+    breakerState := e.breakers["cloud"].State().String()
+    if localModels := snap.localModels(); localModels != nil && !localModels[req.Model] {
+        slog.Warn("cloud breaker not admitting but model not servable locally, keeping cloud decision",
+            "original_reason", cloudDecision.Reason, "model", req.Model,
+            "breaker_state", breakerState)
+        return cloudDecision
+    }
     slog.Warn("cloud breaker open, falling back to local",
-        "original_reason", cloudDecision.Reason, "model", req.Model)
+        "original_reason", cloudDecision.Reason, "model", req.Model,
+        "breaker_state", breakerState)
     return &RouteDecision{Backend: LocalBackend, Reason: cloudDecision.Reason + "_local_fallback"}
 }
 
@@ -1518,7 +1535,7 @@ func (e *Engine) cloudOrFallbackLocked(cfg *config.ConfigSnapshot, req *RouteReq
     if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
         return decision
     }
-    return e.cloudOrLocalLocked(req, cloudDecision)
+    return e.cloudOrLocalLocked(req, snap, cloudDecision)
 }
 
 // tryClusterByPlatformLocked attempts to route to a cluster node on a specific
