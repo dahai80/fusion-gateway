@@ -186,6 +186,14 @@ start() {
             child="$(cat "$PID_FILE")"
             listener="$(listener_pid)"
             if [ "$listener" != "$child" ]; then
+                # #401: the preflight adoption ran before the spawn, so a
+                # supervisor relaunch landing between the preflight and the
+                # bind still leaves us with a loser child and no pidfile —
+                # while a healthy gateway serves the port. Adopt it when the
+                # listener is our own binary; a foreign one stays an error.
+                if adopt_listener; then
+                    return 0
+                fi
                 echo "ERROR: $HEALTH_URL answered but the listener is PID ${listener:-?}, not the spawned PID $child." >&2
                 echo "       The child likely failed to bind. Kill ${listener:-the foreign PID} and retry." >&2
                 exit 1

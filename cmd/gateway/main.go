@@ -301,7 +301,17 @@ func main() {
 	}
 
 	if err := run(*configPath); err != nil {
-		slog.Error("fatal error", "error", err)
+		if errors.Is(err, server.ErrInstanceLockHeld) {
+			// #401: the loser of a boot race is an expected outcome now — a
+			// manual restart overlaps fusion-supervisor's relaunch, one process
+			// wins the lock and serves, this one exits without touching state.
+			// Logging it as "fatal error" made every clean restart look like a
+			// crash in the log the operator greps first.
+			slog.Warn("gateway not started: another instance already owns the data dir (expected when fusion-supervisor relaunches mid-restart; the running instance keeps serving)",
+				"error", err, "pid", os.Getpid())
+		} else {
+			slog.Error("fatal error", "error", err)
+		}
 		var cfgErr *config.ConfigFatalError
 		if errors.As(err, &cfgErr) {
 			// ExitCodeConfigFatal lets fusion-supervisor distinguish a
