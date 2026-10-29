@@ -130,6 +130,15 @@ var vendorDefaults = map[string]vendorDefault{
     "openrouter": {"https://openrouter.ai/api/v1", 60 * time.Second},
 }
 
+// legacyEnvAliases (#409) maps canonical api_key_env names to their legacy
+// alias chains (config-conventions §6): a deployment that still exports the
+// legacy name keeps working while the canonical name wins when both are set.
+// The legacy names are migration debt with a 2027-01-01 cleanup deadline
+// (check-env rule 2c escalates them to errors), so every alias hit is logged.
+var legacyEnvAliases = map[string][]string{
+    "FUSION_CLIENT_KEY": {"FUSION_MLX_API_KEY", "FUSION_API_KEY"},
+}
+
 // normalizeBackends applies post-unmarshal normalization to every backend
 // entry: (1) api_key_env resolution — the plaintext api_key never needs to
 // live in config.yaml; (2) vendor base_url/timeout fill for entries that
@@ -140,9 +149,26 @@ var vendorDefaults = map[string]vendorDefault{
 func normalizeBackends(cfg *Config) {
     for name, be := range cfg.Backends {
         if be.APIKeyEnv != "" && strings.TrimSpace(be.APIKey) == "" {
-            if v := strings.TrimSpace(os.Getenv(be.APIKeyEnv)); v != "" {
+            resolvedEnv := be.APIKeyEnv
+            v := strings.TrimSpace(os.Getenv(be.APIKeyEnv))
+            if v == "" {
+                for _, alias := range legacyEnvAliases[be.APIKeyEnv] {
+                    if av := strings.TrimSpace(os.Getenv(alias)); av != "" {
+                        v = av
+                        resolvedEnv = alias
+                        break
+                    }
+                }
+            }
+            if v != "" {
                 be.APIKey = v
-                slog.Info("backend api_key resolved from env", "backend", name, "env", be.APIKeyEnv)
+                if resolvedEnv != be.APIKeyEnv {
+                    slog.Info("backend api_key resolved via legacy env alias",
+                        "backend", name, "canonical_env", be.APIKeyEnv, "legacy_env", resolvedEnv,
+                        "deadline", "2027-01-01")
+                } else {
+                    slog.Info("backend api_key resolved from env", "backend", name, "env", be.APIKeyEnv)
+                }
             } else {
                 slog.Warn("backend api_key_env set but env var is empty", "backend", name, "env", be.APIKeyEnv)
             }

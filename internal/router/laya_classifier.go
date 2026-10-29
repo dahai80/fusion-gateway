@@ -99,11 +99,16 @@ func NewLayaClassifier(cfg config.IntentClassifierConfig) *LayaClassifier {
     // Intent classifier hits the same fusion-mlx endpoint as the local
     // backend. When intent_classifier.api_key is empty (the documented
     // default — the "fg-" prefix trips C1 so the key is injected via env),
-    // fall back to FUSION_MLX_API_KEY so laya auth works out of the box
-    // without a redundant config field.
+    // fall back to the fusion-mlx key env — canonical FUSION_CLIENT_KEY
+    // first, legacy FUSION_MLX_API_KEY second (#409 alias chain) — so laya
+    // auth works out of the box without a redundant config field.
     apiKey := cfg.APIKey
     if apiKey == "" {
-        apiKey = os.Getenv("FUSION_MLX_API_KEY")
+        if v := os.Getenv("FUSION_CLIENT_KEY"); v != "" {
+            apiKey = v
+        } else {
+            apiKey = os.Getenv("FUSION_MLX_API_KEY")
+        }
     }
     return &LayaClassifier{
         httpClient: &http.Client{

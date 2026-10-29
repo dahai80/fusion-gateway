@@ -9,6 +9,27 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (legacy env key cleanup + port-registry self-check, 2026-10-30) — #409
+
+- **Legacy env key names in scanned files tripped `scripts/check-env.py` rule 2c**
+  (2 warns for fusion-gateway, escalating to errors on 2027-01-01) — the
+  canonical fusion-mlx backend key is now **`FUSION_CLIENT_KEY`**
+  (config-conventions §6 alias chain; the pre-#409 names stay accepted as
+  transition aliases in the Go config layer until the 2027-01-01 cleanup,
+  canonical wins when both are set, #363 fail-loud applies through either
+  name), and the union-web shell admin key is now **`FG_SHELL_ADMIN_KEY`**
+  (gateway-native `FG_` namespace, matching `FG_MANAGED_SETTINGS_PRIVATE_KEY`;
+  the legacy name stays bound as a transition alias). `config.simple.yaml`
+  and `config.example.yaml` no longer mention legacy tokens; fusion-gateway
+  is clean in both normal and `--strict` check-env runs.
+- **`start.sh` could launch the gateway on a port belonging to another
+  fusion-* service** — start now self-checks the service's entry in
+  `architecture/port-registry.yaml` (exact own-block extraction, not a grep
+  window that would match a sibling's port) and refuses to start when the
+  port is not registered under `fusion-gateway`. A missing registry file only
+  warns (standalone checkouts still start); `FUSION_REGISTRY` overrides the
+  path and `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests.
+
 ### Fixed (shell RBAC user roles, 2026-10-27) — #359
 
 - **`PATCH /api/v1/shell/users/{id}` persisted role names that do not exist in

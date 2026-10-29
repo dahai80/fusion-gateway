@@ -537,7 +537,10 @@ web_shell:
     enabled: false
     # Module self-registration credential (#243): POST /api/v1/shell/manifests
     # and its heartbeat accept the master_key OR this key. Env override:
-    # FUSION_GATEWAY_ADMIN_KEY (the name downstream modules document). Must
+    # FG_SHELL_ADMIN_KEY (gateway-native canonical per #409); the pre-#409
+    # legacy name documented by downstream modules stays accepted as an env
+    # alias in Go (internal/config bindSecretEnv) until the 2027-01-01
+    # cleanup. Must
     # be one of auth.api_keys (static entries) — a mismatch logs a WARN at
     # load; plain client keys are rejected (privilege inversion fixed).
     admin_key: ""                         # e.g. the "shell-admin" auth key

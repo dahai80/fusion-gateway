@@ -244,6 +244,33 @@ backends:
         api_key_env: DEEPSEEK_API_KEY   # base_url + timeout auto-filled
 ```
 
+### Env key names and legacy aliases (#409)
+
+The fusion-mlx backend key resolves from the **canonical `FUSION_CLIENT_KEY`**
+env (config-conventions §6 alias chain); the legacy `FUSION_MLX_API_KEY` name
+stays accepted as a transition alias until the 2027-01-01 ecosystem cleanup —
+the canonical name wins when both are set, and the #363 fail-loud contract
+(different values in env vs config.yaml → startup error) applies through
+either name. `api_key_env: FUSION_CLIENT_KEY` additionally falls back to the
+legacy alias at load time, so deployments exporting only the old name keep
+working (logged per hit).
+
+The union-web shell admin key (`web_shell.admin_key`) resolves from
+**`FG_SHELL_ADMIN_KEY`** (gateway-native `FG_` namespace, matching
+`FG_MANAGED_SETTINGS_PRIVATE_KEY`); the legacy name documented by downstream
+modules stays bound as a transition alias for the same deadline.
+
+### start.sh port-registry self-check (#409)
+
+`start.sh start` verifies its own entry in
+`architecture/port-registry.yaml` (the single source of truth for service
+ports) before launching: if the port in `FUSION_GW_HEALTH_URL` is not
+registered under `fusion-gateway`, startup is refused with a loud error — a
+hand-edited config can no longer point the gateway at another fusion-*
+service's port. A missing registry file only warns (standalone checkouts
+still start); `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests only.
+`FUSION_REGISTRY` overrides the registry path.
+
 ## API Endpoints
 
 | Endpoint | Method | Description |

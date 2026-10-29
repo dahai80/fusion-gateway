@@ -88,6 +88,28 @@ func TestNormalizeBackends_APIKeyEnv(t *testing.T) {
     }
 }
 
+// #409: a backend whose api_key_env names the canonical FUSION_CLIENT_KEY
+// still resolves when only a legacy alias is exported, and the canonical env
+// wins when both are present.
+func TestNormalizeBackends_LegacyEnvAlias(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
+    t.Setenv("FUSION_MLX_API_KEY", "legacy-mlx-key")
+    cfg := &Config{Backends: map[string]BackendConfig{
+        "fusion-mlx": {Type: "fusion-mlx", APIKeyEnv: "FUSION_CLIENT_KEY"},
+    }}
+    normalizeBackends(cfg)
+    if cfg.Backends["fusion-mlx"].APIKey != "legacy-mlx-key" {
+        t.Fatalf("legacy alias not resolved: %q", cfg.Backends["fusion-mlx"].APIKey)
+    }
+
+    t.Setenv("FUSION_CLIENT_KEY", "canonical-key")
+    cfg.Backends["fusion-mlx"] = BackendConfig{Type: "fusion-mlx", APIKeyEnv: "FUSION_CLIENT_KEY"}
+    normalizeBackends(cfg)
+    if cfg.Backends["fusion-mlx"].APIKey != "canonical-key" {
+        t.Fatalf("canonical env must win over the legacy alias: %q", cfg.Backends["fusion-mlx"].APIKey)
+    }
+}
+
 func TestNormalizeBackends_ExplicitBaseURLWins(t *testing.T) {
     cfg := &Config{Backends: map[string]BackendConfig{
         "proxy-a": {Type: "deepseek", BaseURL: "http://my-litellm:4000/v1"},

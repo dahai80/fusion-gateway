@@ -691,9 +691,14 @@ func TestValidate_ClusterNodeEmptyAddress(t *testing.T) {
 
 func TestLoad_WithBackends(t *testing.T) {
     // Env-injected fusion-mlx backend (bindSecretEnv binds
-    // backends.fusion-mlx.api_key -> FUSION_MLX_API_KEY, #143) pollutes the
-    // backend count when the test runner's shell exports the key. Unset for a
-    // hermetic count assertion; t.Setenv restores the original on cleanup.
+    // backends.fusion-mlx.api_key -> FUSION_CLIENT_KEY with the legacy
+    // FUSION_MLX_API_KEY alias, #143/#409) pollutes the backend count when
+    // the test runner's shell exports either name. Unset both for a hermetic
+    // count assertion; t.Setenv restores the originals on cleanup.
+    if orig, ok := os.LookupEnv("FUSION_CLIENT_KEY"); ok {
+        t.Setenv("FUSION_CLIENT_KEY", orig)
+        os.Unsetenv("FUSION_CLIENT_KEY")
+    }
     if orig, ok := os.LookupEnv("FUSION_MLX_API_KEY"); ok {
         t.Setenv("FUSION_MLX_API_KEY", orig)
         os.Unsetenv("FUSION_MLX_API_KEY")
