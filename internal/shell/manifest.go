@@ -78,6 +78,10 @@ type persistedManifest struct {
 // manifest fields and resets the heartbeat, never duplicates.
 type Registry struct {
     mu              sync.RWMutex
+    // saveMu guards the temp-file-plus-rename write in save(). It is separate
+    // from mu: the write happens outside the state lock (slow I/O must not
+    // block reads), but two writers still cannot share one temp path.
+    saveMu          sync.Mutex
     dynamic         map[string]*entry
     staticFallback  []config.ShellManifest
     heartbeatExpiry time.Duration
@@ -280,6 +284,13 @@ func (r *Registry) validateForStoreLocked(m config.ShellManifest) error {
 // a restart drops at most the last heartbeat interval of liveness, and the
 // next keepalive re-marks the module online.
 func (r *Registry) save() error {
+    // saveMu serialises concurrent save() calls. They share one temp path
+    // (path + ".tmp"), so two interleaved writers made whichever rename lost
+    // the race fail with "no such file or directory" — the winner had already
+    // moved the temp file away. Serialising also keeps each rename ordered
+    // after its own snapshot, so the newest state is the one left on disk.
+    r.saveMu.Lock()
+    defer r.saveMu.Unlock()
     r.mu.RLock()
     path := r.path
     if path == "" {
