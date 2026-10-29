@@ -56,6 +56,21 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
+// defaultShutdownDrainTimeout is the historical hardcoded drain window, kept
+// as the fallback when server.graceful_shutdown_timeout is unset or <= 0.
+const defaultShutdownDrainTimeout = 30 * time.Second
+
+// shutdownDrainTimeout maps the configured graceful_shutdown_timeout (seconds)
+// to the HTTP drain window. Long streaming requests (agent/LLM clients) need a
+// window they can actually finish in; anything non-positive keeps the default
+// so a zeroed config can never drain for 0s and drop every in-flight stream.
+func shutdownDrainTimeout(configuredSeconds int) time.Duration {
+	if configuredSeconds <= 0 {
+		return defaultShutdownDrainTimeout
+	}
+	return time.Duration(configuredSeconds) * time.Second
+}
+
 // supervisorActive reports whether fusion-supervisor (fusion-sv) owns the
 // service lifecycle. When active, it starts fusion-mlx in its core layer on
 // `fusion-sv up` and is authoritative for stop on `fusion-sv down`. Gateway's
@@ -724,8 +739,14 @@ func run(configPath string) error {
 	// (autoStopLocal) and discovery BEFORE srv.Shutdown drained in-flight
 	// traffic, so any local in-flight request lost its upstream mid-drain
 	// and 502'd for up to the 30s drain window on every restart/upgrade.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// #401 follow-up: server.graceful_shutdown_timeout was dead config — the
+	// window was hardcoded at 30s, so the admin/API knob (and config.yaml)
+	// changed nothing while long streams were still cut at 30s. Honor it; a
+	// non-positive value keeps the historical 30s.
+	drainTimeout := shutdownDrainTimeout(snap.Config.Server.GracefulShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
+	slog.Info("draining in-flight requests", "timeout", drainTimeout.String())
 
 	if err := srv.Shutdown(ctx); err != nil {
 		// #208: a drain timeout (in-flight requests not idle within the 30s
@@ -738,7 +759,8 @@ func run(configPath string) error {
 		// and the affected in-flight requests already got their deadline.
 		slog.Error("server shutdown drain timeout, forcing exit",
 			"error", err,
-			"note", "in-flight requests exceeded the 30s drain window; their connections close at process exit")
+			"timeout", drainTimeout.String(),
+			"note", "in-flight requests exceeded the drain window; their connections close at process exit")
 	}
 
 	// Local backend + discovery only stop after in-flight requests have drained.

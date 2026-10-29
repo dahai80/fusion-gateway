@@ -2423,7 +2423,10 @@ func DefaultConfig() Config {
             Host:                   "127.0.0.1", // single-machine: loopback only
             Port:                   11432,
             LogLevel:               "info",
-            GracefulShutdownTimeout: 15,
+            // #401 follow-up: honored by cmd/gateway/main.go since the drain
+            // window stopped being hardcoded. 30s preserves the pre-existing
+            // behavior; raise it when long agent streams must survive restarts.
+            GracefulShutdownTimeout: 30,
             MaxRequestBodySize:     5242880,
             ProxyMaxBodySize:       256 << 20,
         },

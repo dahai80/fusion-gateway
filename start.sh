@@ -107,6 +107,17 @@ listener_pid() {
     lsof -ti ":$(gw_port)" -sTCP:LISTEN 2>/dev/null | head -1
 }
 
+# #401 follow-up: the stop wait must outlast the gateway's own drain window
+# (server.graceful_shutdown_timeout, 30s when unset) plus the ~10s
+# persistence-sink flush that runs after it. A flat 35s SIGKILLed a healthy
+# drain mid-flight and cut exactly the streams the drain exists to save.
+stop_wait_seconds() {
+    local drain
+    drain="$(awk '/^server:/{f=1;next} /^[^ ]/{f=0} f && /graceful_shutdown_timeout:/{gsub(/[^0-9]/,"",$2); print $2; exit}' "$CONFIG" 2>/dev/null)"
+    [ -n "$drain" ] || drain=30
+    echo $((drain + 15))
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
@@ -172,9 +183,11 @@ stop() {
         echo "Fusion-Gateway is not running"
         return 0
     fi
-    echo "Stopping Fusion-Gateway (PID $pid)..."
+    local wait_s
+    wait_s="$(stop_wait_seconds)"
+    echo "Stopping Fusion-Gateway (PID $pid, waiting up to ${wait_s}s for in-flight requests)..."
     kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 35); do
+    for _ in $(seq 1 "$wait_s"); do
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$PID_FILE"
             echo "Stopped (graceful)"

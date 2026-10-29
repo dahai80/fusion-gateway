@@ -46,8 +46,13 @@ func TestAcquireInstanceLock_CreatesDataDir(t *testing.T) {
 	release()
 }
 
-func TestAcquireInstanceLock_EmptyDataDir(t *testing.T) {
-	if _, err := AcquireInstanceLock(""); err == nil {
-		t.Fatal("empty data dir: want error, got nil")
+func TestAcquireInstanceLock_EmptyDataDirIsNoop(t *testing.T) {
+	release, err := AcquireInstanceLock("")
+	if err != nil {
+		t.Fatalf("empty data dir: want no-op, got error %v", err)
 	}
+	if release == nil {
+		t.Fatal("empty data dir: want a callable no-op release, got nil")
+	}
+	release()
 }

@@ -27,7 +27,12 @@ var ErrInstanceLockHeld = fmt.Errorf("another gateway instance is using the data
 func AcquireInstanceLock(dataDir string) (func(), error) {
 	dir := config.ExpandPath(dataDir)
 	if dir == "" {
-		return nil, fmt.Errorf("instance lock: store.data_dir is empty")
+		// Every other DataDir consumer treats empty as "persistence off"
+		// (server.go:557, shell.go:56, shell.go:172): no state is written, so
+		// there is nothing for a second process to corrupt. Failing here would
+		// refuse to boot a stateless gateway — visible warning instead.
+		slog.Warn("instance lock skipped: store.data_dir is unset (no persistent state to guard; set it to serialize multiple processes)")
+		return func() {}, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("instance lock: create %s: %w", dir, err)
