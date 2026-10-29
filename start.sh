@@ -118,9 +118,33 @@ stop_wait_seconds() {
     echo $((drain + 15))
 }
 
+# #401: adopt a gateway that is already serving on the port but was not
+# started by this script (fusion-supervisor relaunch). Writes the pidfile so
+# stop/status keep governing the real process. Only our own binary is adopted:
+# anything else stays a foreign listener and is reported as such.
+adopt_listener() {
+    local pid cmd
+    pid="$(listener_pid 2>/dev/null)" || return 1
+    [ -n "$pid" ] || return 1
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+    case "$cmd" in
+        "$BINARY"*) ;;
+        *) return 1 ;;
+    esac
+    echo "$pid" > "$PID_FILE"
+    echo "Adopted running Fusion-Gateway (PID $pid, relaunched outside start.sh)"
+    return 0
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
+        return 0
+    fi
+    # #401: fusion-supervisor relaunches the gateway the instant it exits, so
+    # `restart` (stop; start) can reach here while the replacement is still
+    # coming up. Adopt it before treating the port as foreign-owned.
+    if adopt_listener; then
         return 0
     fi
     # #356: a foreign process on the port makes the health probe lie — the
@@ -128,17 +152,6 @@ start() {
     # /healthz, so start() used to report "healthy" for a dead PID. Refuse
     # to start instead, naming the PID to kill.
     if foreign="$(listener_pid)" && [ -n "$foreign" ]; then
-        # #401: fusion-supervisor relaunches the gateway immediately after a
-        # manual stop, so `restart` raced a process that was already running
-        # the binary we just built. Adopt it instead of reporting the port as
-        # foreign-owned.
-        case "$(ps -p "$foreign" -o command= 2>/dev/null)" in
-            "$BINARY"*)
-                echo "$foreign" > "$PID_FILE"
-                echo "Adopted running Fusion-Gateway (PID $foreign, relaunched outside start.sh)"
-                return 0
-                ;;
-        esac
         echo "ERROR: port $(gw_port) is already held by PID $foreign (not started via start.sh)." >&2
         echo "       Stop it first: kill $foreign" >&2
         exit 1
@@ -152,6 +165,15 @@ start() {
     # Wait for /healthz up to 60s (auto_start of fusion-mlx can take a while)
     for _ in $(seq 1 60); do
         if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            # #401: our child lost the startup race (fusion-supervisor got
+            # there first and now holds the instance lock, so the loser exits
+            # with EX_TEMPFAIL). The winner is the gateway on the port — adopt
+            # it rather than reporting a failure and leaving no pidfile, which
+            # made `status` claim "not running" for a serving gateway.
+            for _ in $(seq 1 10); do
+                adopt_listener && return 0
+                sleep 1
+            done
             echo "ERROR: process died during startup. Last log lines:" >&2
             tail -10 "$STDOUT_LOG" >&2
             rm -f "$PID_FILE"
@@ -218,6 +240,16 @@ status() {
     local pid
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway running (PID $pid)"
+        if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
+            echo "Health: OK ($HEALTH_URL)"
+        else
+            echo "Health: FAIL ($HEALTH_URL)"
+        fi
+        return 0
+    fi
+    # #401: a serving gateway with no pidfile is "running", not "not running".
+    if adopt_listener > /dev/null; then
+        echo "Fusion-Gateway running (PID $(cat "$PID_FILE"), adopted: not started via start.sh)"
         if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
             echo "Health: OK ($HEALTH_URL)"
         else
