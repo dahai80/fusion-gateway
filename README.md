@@ -122,7 +122,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `cache.ttl` | 5m | Cache entry TTL |
 | `cost.enabled` | true | Enable cost tracking with built-in pricing |
 | `pii.enabled` | false | Enable PII detection on request content |
-| `pii.action` | log | PII action: log, mask, or deny |
+| `pii.action` | log | PII action: log, mask, or deny. `deny` rejects the request with HTTP 400; `log` and `mask` detect and forward the text unchanged (masking is not implemented). Any other value falls back to `log` and warns once at startup |
 | `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, round-robin |
 | `hardware.collect_interval` | 2s | Hardware metrics collection interval |
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
