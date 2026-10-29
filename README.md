@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.86 — #389 multimodal divert sent local vision id to text-only cloud default
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#389 intermittent multimodal 502** | `/v1/chat/completions` multimodal requests failed intermittently with 502. The entry guard rewrites the request model to the local vision id (`multimodal_local_vision`); four downstream divert sites then replaced that decision with a **plain** cloud decision, sending the local vision id to the text-only `routing.fallback.cloud_default` (glm-5) — upstream 400, surfaced as gateway 502. Intermittency source: `routing.fallback.overflow.cooldown` is armed by ANY local failure, so an unrelated text-request failure pre-diverted the NEXT multimodal request at site 1 with no multimodal-specific signal. Fix: shared three-state guard `multimodalDivertDecision` wired at all four divert sites — cooldown pre-divert keeps the local decision when no cloud VLM is configured (cooldown is an optimization), RR4 slot-full returns a clear 503 naming the config gap, stream/non-stream overflow fail closed (surface the local error, same as disabled-overflow policy); with `routing.multimodal.cloud_backend` + `cloud_model` configured every site diverts via the cloud VLM decision (`multimodal_cloud_vlm_divert`) and rewrites `req.Model` so the text-only default never sees a local vision id. Text-only requests are unaffected. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.86. |
+
 ### v0.9.85 — #386 HTTP/2 connection wedge
 
 | # | Item | Details |
