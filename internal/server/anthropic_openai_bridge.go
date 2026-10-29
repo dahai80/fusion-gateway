@@ -637,10 +637,18 @@ func (b *anthropicSSEBridge) emitError(e *bridgeErrorBody) {
     b.forward("event: error\ndata: " + string(raw) + "\n\n")
 }
 
+// forward writes one frame to the client, always terminated by the SSE frame
+// separator "\n\n". Write() strips the separator when it splits inbound
+// frames, so verbatim-forwarded frames arrive here without one; writing them
+// as-is glues the next frame's "event:" line onto this frame's data line and
+// the client fails to parse the stream (#397).
 func (b *anthropicSSEBridge) forward(frame string) {
     if !b.headerSent {
         b.headerSent = true
         b.ResponseWriter.WriteHeader(b.status)
+    }
+    if !strings.HasSuffix(frame, "\n\n") {
+        frame = strings.TrimRight(frame, "\n") + "\n\n"
     }
     _, _ = b.ResponseWriter.Write([]byte(frame))
     b.Flush()
