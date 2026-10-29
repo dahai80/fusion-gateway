@@ -6,6 +6,7 @@ import (
     "log/slog"
     "sort"
     "sync"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
@@ -290,6 +291,20 @@ func (p *Pool) BuildProviders(cfg *config.ConfigSnapshot) error {
         }
     } else {
         slog.Info("local engine role: typed fusion-mlx provider", "name", p.localEngineName)
+    }
+
+    // #389 follow-up (live finding): BuildProviders runs on every config reload
+    // and rebuilds the engine-role provider fresh, so its modelSet starts nil.
+    // The refresh worker re-fetches the role each tick but settles into a 60s
+    // cadence after bootstrap — a reload left localVisionModelLoaded (and the
+    // router's P0.2/P6 model guards) blind for up to 60s, false-negativing the
+    // multimodal entry guard into the multimodal_unconfigured sentinel. Warm
+    // the set eagerly with a short timeout; on failure the next 60s tick
+    // recovers (same keep-last-good contract as #343).
+    warmCtx, warmCancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer warmCancel()
+    if p.localEngine != nil && p.localEngine.RefreshModelSet(warmCtx) {
+        slog.Info("warmed local engine model set on build", "name", p.localEngineName)
     }
 
     return nil
