@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.87 — #389 follow-up: 60s multimodal blind window after config reload
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#389 live-verification follow-up** | Any config reload rebuilt the engine-role provider via `BuildProviders` with a nil modelSet; the refresh worker settles into a 60s cadence after bootstrap, so `localVisionModelLoaded` false-negatived for up to 60s and multimodal requests hit the `multimodal_unconfigured` sentinel (400) despite a healthy loaded vision model. Fix: warm the model set eagerly at build time with a 3s timeout (failure keeps the keep-last-good contract, #343); guarded for cloud-only configs. Live-verified: reload then immediate multimodal request returns 200 via `multimodal_local_vision`. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.87. |
+
 ### v0.9.86 — #389 multimodal divert sent local vision id to text-only cloud default
 
 | # | Item | Details |

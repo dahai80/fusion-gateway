@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.87 — #389 后续修复：config reload 后存在 60 秒多模态盲区
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#389 live-verification follow-up** | Any config reload rebuilt the engine-role provider via `BuildProviders` with a nil modelSet; the refresh worker settles into a 60s cadence after bootstrap, so `localVisionModelLoaded` false-negatived for up to 60s and multimodal requests hit the `multimodal_unconfigured` sentinel (400) despite a healthy loaded vision model. Fix: warm the model set eagerly at build time with a 3s timeout (failure keeps the keep-last-good contract, #343); guarded for cloud-only configs. Live-verified: reload then immediate multimodal request returns 200 via `multimodal_local_vision`. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.87. |
+
 ### v0.9.86 — #389 多模态分流把本地视觉模型 id 发给了纯文本 cloud default
 
 | # | 条目 | 说明 |
