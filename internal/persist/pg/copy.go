@@ -1,6 +1,7 @@
 package pg
 
 import (
+    "bytes"
     "context"
     "encoding/json"
     "fmt"
@@ -286,14 +287,29 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         return fmt.Errorf("copy fg_request_logs: %w", err)
     }
     if len(payloadRows) > 0 {
+        payloadCols := []string{
+            "id", "ts", "req_body", "resp_body", "req_raw", "resp_raw",
+            "resp_truncated", "req_truncated", "resp_raw_mime",
+        }
         if _, err := tx.CopyFrom(ctx,
             pgx.Identifier{"fg_request_payloads"},
-            []string{
-                "id", "ts", "req_body", "resp_body", "req_raw", "resp_raw",
-                "resp_truncated", "req_truncated", "resp_raw_mime",
-            },
+            payloadCols,
             pgx.CopyFromRows(payloadRows)); err != nil {
-            return fmt.Errorf("copy fg_request_payloads: %w", err)
+            // #407: one data-error row fails the whole CopyFrom batch and the
+            // flush loop would retry it forever. Isolate: copy the rows one at
+            // a time inside the same tx, log and drop only the bad ones — the
+            // log rows and the good payloads still commit.
+            slog.Warn("pg persist payload batch copy failed, isolating rows",
+                "error", err, "rows", len(payloadRows))
+            for i := range payloadRows {
+                if _, err := tx.CopyFrom(ctx,
+                    pgx.Identifier{"fg_request_payloads"},
+                    payloadCols,
+                    pgx.CopyFromRows(payloadRows[i : i+1])); err != nil {
+                    slog.Error("pg persist payload row dropped",
+                        "error", err, "row", i)
+                }
+            }
         }
     }
     if len(chunkRows) > 0 {
@@ -319,9 +335,56 @@ func splitBody(b []byte) (jsonVal, rawVal any) {
         return nil, nil
     }
     if json.Valid(b) {
-        return b, nil
+        // #407: json.Valid accepts unpaired UTF-16 surrogate escapes that
+        // PostgreSQL jsonb rejects (SQLSTATE 22P05). Repair before COPY.
+        if cleaned, ok := sanitizeJSON(b); ok {
+            return cleaned, nil
+        }
+        return nil, string(b)
     }
     return nil, string(b)
+}
+
+// sanitizeJSON repairs JSON containing unpaired surrogate \uD800-\uDFFF
+// escapes. json.Valid is a syntax check only — it passes "\ud800" with no low
+// half, which PostgreSQL jsonb rejects with SQLSTATE 22P05, and one such
+// payload failed the whole payloads CopyFrom batch (#407). Go's decoder
+// replaces unpaired surrogates with U+FFFD, so a re-marshal through it is
+// valid everywhere; UseNumber keeps large numbers byte-exact. Bodies without
+// surrogate escapes (the overwhelming majority) return unchanged — the
+// re-marshal only runs when a surrogate escape is present.
+func sanitizeJSON(b []byte) ([]byte, bool) {
+    if !hasSurrogateEscape(b) {
+        return b, true
+    }
+    dec := json.NewDecoder(bytes.NewReader(b))
+    dec.UseNumber()
+    var v any
+    if err := dec.Decode(&v); err != nil {
+        return nil, false
+    }
+    cleaned, err := json.Marshal(v)
+    if err != nil {
+        return nil, false
+    }
+    return cleaned, true
+}
+
+// hasSurrogateEscape reports whether b contains a \u escape in the surrogate
+// range (first hex digit 'd', second in 8-f). Valid surrogate pairs match too
+// — that only costs one unnecessary re-marshal, never a wrong result. A
+// literal "\\u" inside a JSON string also matches for the same reason.
+func hasSurrogateEscape(b []byte) bool {
+    for i := 0; i+5 < len(b); i++ {
+        if b[i] != '\\' || b[i+1] != 'u' {
+            continue
+        }
+        hi, lo := b[i+2] | 0x20, b[i+3] | 0x20
+        if hi == 'd' && lo >= '8' && lo <= 'f' {
+            return true
+        }
+    }
+    return false
 }
 
 // resolveRowID picks the row uuid: Log.ID when it is a UUID (store-agnostic),
