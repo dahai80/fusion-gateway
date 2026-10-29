@@ -243,6 +243,45 @@ func TestSSEBridge_HeartbeatPing(t *testing.T) {
     }
 }
 
+// TestSSEBridge_VerbatimFrameKeepsSeparator (#397): frames that pass through
+// verbatim (gateway keepalive ping, non-chunk JSON) lose the "\n\n" when
+// Write() splits them. Without re-adding it the next frame's "event:" line is
+// glued onto this data line and the client fails with malformed_stream.
+func TestSSEBridge_VerbatimFrameKeepsSeparator(t *testing.T) {
+    inner := httptest.NewRecorder()
+    b := newAnthropicSSEBridge(inner)
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"))
+    b.Write([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n"))
+    b.Write([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n"))
+    b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n"))
+    b.Write([]byte("data: [DONE]\n\n"))
+
+    raw := inner.Body.String()
+    if !strings.Contains(raw, "\"type\":\"ping\"}\n\n") {
+        t.Fatalf("verbatim ping frame not terminated by \\n\\n:\n%q", raw)
+    }
+    for _, f := range bridgeFrames(t, raw) {
+        if f[1] == "" {
+            continue
+        }
+        if !json.Valid([]byte(f[1])) {
+            t.Fatalf("event %q has unparseable data line %q (frame boundary lost)", f[0], f[1])
+        }
+    }
+    var seq []string
+    for _, f := range bridgeFrames(t, raw) {
+        seq = append(seq, f[0])
+    }
+    want := []string{
+        "message_start", "content_block_start", "content_block_delta",
+        "ping", "ping",
+        "content_block_delta", "content_block_stop", "message_delta", "message_stop",
+    }
+    if strings.Join(seq, ",") != strings.Join(want, ",") {
+        t.Fatalf("event seq = %v, want %v", seq, want)
+    }
+}
+
 // TestSSEBridge_FinalizeSynth: a stream cut without [DONE] (watchdog/abort)
 // still produces a protocol-valid terminal, and Finalize is idempotent.
 func TestSSEBridge_FinalizeSynth(t *testing.T) {
