@@ -41,4 +41,5 @@ logs/
 web/admin/node_modules/
 CLAUDE.md
 .gateway.pid
+.fusion-gateway.pid
 gateway.stdout.log

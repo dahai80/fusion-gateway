@@ -67,12 +67,19 @@ check_persistence_dsn() {
 }
 
 ensure_binary() {
+    # #401: also rebuild when the source is newer than the binary. Without
+    # this, `start.sh restart` after a `git pull` kept running the previous
+    # binary while reporting a successful restart.
     if [ ! -x "$BINARY" ]; then
         echo "Binary missing, building..."
-        if ! go build -o "$BINARY" ./cmd/gateway; then
-            echo "ERROR: build failed" >&2
-            exit 1
-        fi
+    elif find "$SCRIPT_DIR" -name '*.go' -newer "$BINARY" -print -quit | grep -q .; then
+        echo "Source newer than binary, rebuilding..."
+    else
+        return 0
+    fi
+    if ! go build -o "$BINARY" ./cmd/gateway; then
+        echo "ERROR: build failed" >&2
+        exit 1
     fi
 }
 
@@ -110,6 +117,17 @@ start() {
     # /healthz, so start() used to report "healthy" for a dead PID. Refuse
     # to start instead, naming the PID to kill.
     if foreign="$(listener_pid)" && [ -n "$foreign" ]; then
+        # #401: fusion-supervisor relaunches the gateway immediately after a
+        # manual stop, so `restart` raced a process that was already running
+        # the binary we just built. Adopt it instead of reporting the port as
+        # foreign-owned.
+        case "$(ps -p "$foreign" -o command= 2>/dev/null)" in
+            "$BINARY"*)
+                echo "$foreign" > "$PID_FILE"
+                echo "Adopted running Fusion-Gateway (PID $foreign, relaunched outside start.sh)"
+                return 0
+                ;;
+        esac
         echo "ERROR: port $(gw_port) is already held by PID $foreign (not started via start.sh)." >&2
         echo "       Stop it first: kill $foreign" >&2
         exit 1
@@ -205,7 +223,9 @@ log() {
 case "${1:-start}" in
     start)   start ;;
     stop)    stop ;;
-    restart) stop; start ;;
+    # Build before stopping: fusion-supervisor relaunches the moment the
+    # process exits, so stopping first would let it resurrect the old binary.
+    restart) ensure_binary; stop; start ;;
     status)  status ;;
     log)     shift; log "$@" ;;
     *)
