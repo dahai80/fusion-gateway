@@ -97,6 +97,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `server.auto_start.stop_cmd` | `~/claude-home/fusion-mlx/start.sh stop` | Shell command to stop local backend on shutdown |
 | `server.auto_start.wait_url` | `http://127.0.0.1:11434/health` | Health URL to poll after start |
 | `server.auto_start.wait_secs` | 120 | Max seconds to wait for health check |
+| `server.graceful_shutdown_timeout` | 30 | Seconds stop/restart waits for in-flight requests (SSE streams included) before forcing exit. Raise it above your longest generation: a window shorter than a live stream cuts it mid-response. `start.sh stop` waits this plus 15s. On timeout the gateway logs every request still running (method, path, trace id, age) |
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `routing.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
