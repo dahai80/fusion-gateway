@@ -2044,6 +2044,13 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.88 — #394 cloud breaker open sent cloud-only models to local fusion-mlx
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#394 cloud-only model 404 loop** | When the cloud circuit breaker was open (or its half-open probe busy), `cloudOrLocalLocked` unconditionally fell back to `LocalBackend` — even for models that only exist in the cloud (e.g. `glm-5`). Fusion-mlx answered `404 Model not found`, the request was rescued by cloud overflow, and a false `ERROR` was logged on every occurrence. Fix: the local fallback now checks the local provider's model set; a cloud-only model keeps the cloud decision so a genuine cloud failure fails (and re-trips the breaker) honestly instead of a guaranteed wrong-backend round trip. An unknown (nil) model set keeps the previous RC2 fallback. Fallback logs now carry `breaker_state` to distinguish an open breaker from a busy half-open probe. |
+| 2 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.88. |
+
 ### v0.9.87 — #389 follow-up: 60s multimodal blind window after config reload
 
 | # | Item | Details |
