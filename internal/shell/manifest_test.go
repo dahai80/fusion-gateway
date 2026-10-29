@@ -9,6 +9,7 @@ import (
     "os"
     "path/filepath"
     "strings"
+    "sync"
     "testing"
     "time"
 
@@ -716,5 +717,53 @@ func TestRegistry_UpsertKeepsIssuedKeyPlaintextOnReregistration(t *testing.T) {
     // Heartbeat must still authenticate with the same fm- key.
     if !r.AuthServiceKey("fusion-trainer", serviceKeyHashOf(plaintext), time.Hour) {
         t.Fatal("issued key no longer authenticates after re-registration")
+    }
+}
+
+// TestRegistry_SaveConcurrent: save() writes a fixed temp path (path + ".tmp")
+// then renames it into place. Two saves interleaving let whichever rename lost
+// the race fail with "no such file or directory", logging "shell manifest
+// registry save failed" while losing that snapshot. Concurrent saves must all
+// succeed and leave a parseable store.
+func TestRegistry_SaveConcurrent(t *testing.T) {
+    dir := t.TempDir()
+    path := filepath.Join(dir, "shell_manifests.json")
+    r := NewRegistry(nil, []string{"http://127.0.0.1:11432"}, 30*time.Second)
+    r.SetPersistence(path)
+    if err := r.Upsert(validManifest("fusion-agent-studio")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+
+    const writers = 16
+    errs := make(chan error, writers)
+    var wg sync.WaitGroup
+    for i := 0; i < writers; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            errs <- r.save()
+        }()
+    }
+    wg.Wait()
+    close(errs)
+    for err := range errs {
+        if err != nil {
+            t.Fatalf("concurrent save failed: %v", err)
+        }
+    }
+
+    raw, err := os.ReadFile(path)
+    if err != nil {
+        t.Fatalf("store file missing: %v", err)
+    }
+    var got []persistedManifest
+    if err := json.Unmarshal(raw, &got); err != nil {
+        t.Fatalf("store file unparseable after concurrent saves: %v", err)
+    }
+    if len(got) != 1 || got[0].ID != "fusion-agent-studio" {
+        t.Fatalf("store contents = %+v, want the single upserted manifest", got)
+    }
+    if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+        t.Fatalf("temp file left behind after save: err=%v", err)
     }
 }
