@@ -67,12 +67,19 @@ check_persistence_dsn() {
 }
 
 ensure_binary() {
+    # #401: also rebuild when the source is newer than the binary. Without
+    # this, `start.sh restart` after a `git pull` kept running the previous
+    # binary while reporting a successful restart.
     if [ ! -x "$BINARY" ]; then
         echo "Binary missing, building..."
-        if ! go build -o "$BINARY" ./cmd/gateway; then
-            echo "ERROR: build failed" >&2
-            exit 1
-        fi
+    elif find "$SCRIPT_DIR" -name '*.go' -newer "$BINARY" -print -quit | grep -q .; then
+        echo "Source newer than binary, rebuilding..."
+    else
+        return 0
+    fi
+    if ! go build -o "$BINARY" ./cmd/gateway; then
+        echo "ERROR: build failed" >&2
+        exit 1
     fi
 }
 
@@ -100,9 +107,44 @@ listener_pid() {
     lsof -ti ":$(gw_port)" -sTCP:LISTEN 2>/dev/null | head -1
 }
 
+# #401 follow-up: the stop wait must outlast the gateway's own drain window
+# (server.graceful_shutdown_timeout, 30s when unset) plus the ~10s
+# persistence-sink flush that runs after it. A flat 35s SIGKILLed a healthy
+# drain mid-flight and cut exactly the streams the drain exists to save.
+stop_wait_seconds() {
+    local drain
+    drain="$(awk '/^server:/{f=1;next} /^[^ ]/{f=0} f && /graceful_shutdown_timeout:/{gsub(/[^0-9]/,"",$2); print $2; exit}' "$CONFIG" 2>/dev/null)"
+    [ -n "$drain" ] || drain=30
+    echo $((drain + 15))
+}
+
+# #401: adopt a gateway that is already serving on the port but was not
+# started by this script (fusion-supervisor relaunch). Writes the pidfile so
+# stop/status keep governing the real process. Only our own binary is adopted:
+# anything else stays a foreign listener and is reported as such.
+adopt_listener() {
+    local pid cmd
+    pid="$(listener_pid 2>/dev/null)" || return 1
+    [ -n "$pid" ] || return 1
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+    case "$cmd" in
+        "$BINARY"*) ;;
+        *) return 1 ;;
+    esac
+    echo "$pid" > "$PID_FILE"
+    echo "Adopted running Fusion-Gateway (PID $pid, relaunched outside start.sh)"
+    return 0
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
+        return 0
+    fi
+    # #401: fusion-supervisor relaunches the gateway the instant it exits, so
+    # `restart` (stop; start) can reach here while the replacement is still
+    # coming up. Adopt it before treating the port as foreign-owned.
+    if adopt_listener; then
         return 0
     fi
     # #356: a foreign process on the port makes the health probe lie — the
@@ -123,6 +165,15 @@ start() {
     # Wait for /healthz up to 60s (auto_start of fusion-mlx can take a while)
     for _ in $(seq 1 60); do
         if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            # #401: our child lost the startup race (fusion-supervisor got
+            # there first and now holds the instance lock, so the loser exits
+            # with EX_TEMPFAIL). The winner is the gateway on the port — adopt
+            # it rather than reporting a failure and leaving no pidfile, which
+            # made `status` claim "not running" for a serving gateway.
+            for _ in $(seq 1 10); do
+                adopt_listener && return 0
+                sleep 1
+            done
             echo "ERROR: process died during startup. Last log lines:" >&2
             tail -10 "$STDOUT_LOG" >&2
             rm -f "$PID_FILE"
@@ -135,6 +186,14 @@ start() {
             child="$(cat "$PID_FILE")"
             listener="$(listener_pid)"
             if [ "$listener" != "$child" ]; then
+                # #401: the preflight adoption ran before the spawn, so a
+                # supervisor relaunch landing between the preflight and the
+                # bind still leaves us with a loser child and no pidfile —
+                # while a healthy gateway serves the port. Adopt it when the
+                # listener is our own binary; a foreign one stays an error.
+                if adopt_listener; then
+                    return 0
+                fi
                 echo "ERROR: $HEALTH_URL answered but the listener is PID ${listener:-?}, not the spawned PID $child." >&2
                 echo "       The child likely failed to bind. Kill ${listener:-the foreign PID} and retry." >&2
                 exit 1
@@ -154,9 +213,11 @@ stop() {
         echo "Fusion-Gateway is not running"
         return 0
     fi
-    echo "Stopping Fusion-Gateway (PID $pid)..."
+    local wait_s
+    wait_s="$(stop_wait_seconds)"
+    echo "Stopping Fusion-Gateway (PID $pid, waiting up to ${wait_s}s for in-flight requests)..."
     kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 35); do
+    for _ in $(seq 1 "$wait_s"); do
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$PID_FILE"
             echo "Stopped (graceful)"
@@ -194,6 +255,16 @@ status() {
         fi
         return 0
     fi
+    # #401: a serving gateway with no pidfile is "running", not "not running".
+    if adopt_listener > /dev/null; then
+        echo "Fusion-Gateway running (PID $(cat "$PID_FILE"), adopted: not started via start.sh)"
+        if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
+            echo "Health: OK ($HEALTH_URL)"
+        else
+            echo "Health: FAIL ($HEALTH_URL)"
+        fi
+        return 0
+    fi
     echo "Fusion-Gateway is not running"
     return 1
 }
@@ -205,7 +276,9 @@ log() {
 case "${1:-start}" in
     start)   start ;;
     stop)    stop ;;
-    restart) stop; start ;;
+    # Build before stopping: fusion-supervisor relaunches the moment the
+    # process exits, so stopping first would let it resurrect the old binary.
+    restart) ensure_binary; stop; start ;;
     status)  status ;;
     log)     shift; log "$@" ;;
     *)

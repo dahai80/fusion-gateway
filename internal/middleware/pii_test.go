@@ -41,6 +41,32 @@ func TestNewPIIChecker_CustomAction(t *testing.T) {
     }
 }
 
+// An unrecognized action must not silently pretend to enforce. The live
+// config carried "block", which matched no case in ScanText's switch: every
+// request was forwarded while the WARN claimed action=block.
+func TestPIIChecker_UnknownActionFallsBackToLog(t *testing.T) {
+    slog.Info("test PIIChecker_UnknownActionFallsBackToLog")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: true, Action: "block"})
+    if checker.action != "log" {
+        t.Errorf("unknown action should fall back to log, got %q", checker.action)
+    }
+    deny, detected := NewPIIMiddleware(config.PIIConfig{Enabled: true, Action: "block"}).ScanText("user@example.com")
+    if deny {
+        t.Error("unknown action must never deny the request")
+    }
+    if len(detected) == 0 {
+        t.Error("detection must still be reported for log-only fallback")
+    }
+}
+
+func TestPIIChecker_ActionIsNormalized(t *testing.T) {
+    slog.Info("test PIIChecker_ActionIsNormalized")
+    checker := NewPIIChecker(config.PIIConfig{Enabled: true, Action: "  DENY "})
+    if checker.action != "deny" {
+        t.Errorf("action should be trimmed and lowercased, got %q", checker.action)
+    }
+}
+
 func TestNewPIIChecker_CustomPatterns(t *testing.T) {
     slog.Info("test NewPIIChecker_CustomPatterns")
     checker := NewPIIChecker(config.PIIConfig{

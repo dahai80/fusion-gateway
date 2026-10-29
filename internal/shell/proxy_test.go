@@ -125,6 +125,45 @@ func TestHealthPoller_MarksDown(t *testing.T) {
     }
 }
 
+// A manifest whose health field is a bare path ("/healthz") cannot be probed:
+// http.Get fails with "unsupported protocol scheme" on every pass, so the
+// module was flipped offline for a defect in the manifest, not the module.
+func TestHealthPoller_SkipsRelativeHealthURL(t *testing.T) {
+    m := validManifest("fusion-admin")
+    m.Health = "/healthz"
+    r := NewRegistry(nil, nil, 30*time.Second)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    poller := NewHealthPoller(r, 10*time.Millisecond)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    go poller.Run(ctx)
+    time.Sleep(60 * time.Millisecond)
+    views := r.List()
+    if len(views) != 1 {
+        t.Fatalf("want one registration, got %d", len(views))
+    }
+    if views[0].Status != StatusOnline {
+        t.Fatalf("relative health URL must be skipped, not probed into offline; got %s", views[0].Status)
+    }
+}
+
+func TestAbsoluteHealthURL(t *testing.T) {
+    cases := map[string]bool{
+        "":                             false,
+        "/healthz":                     false,
+        "127.0.0.1:11434/health":       false,
+        "http://127.0.0.1:11434/health": true,
+        "https://example.com/health":   true,
+    }
+    for raw, want := range cases {
+        if got := absoluteHealthURL(raw); got != want {
+            t.Errorf("absoluteHealthURL(%q) = %v, want %v", raw, got, want)
+        }
+    }
+}
+
 func TestProxy_UpstreamCredentialInjection(t *testing.T) {
     var gotAuth, gotCookie string
     upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

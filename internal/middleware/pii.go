@@ -6,6 +6,7 @@ import (
     "regexp"
     "strings"
     "sync"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -26,10 +27,7 @@ func NewPIIChecker(cfg config.PIIConfig) *PIIChecker {
         return nil
     }
 
-    action := cfg.Action
-    if action == "" {
-        action = "log"
-    }
+    action := normalizePIIAction(cfg.Action)
 
     // #128: load the 15 vendored guard SSOT patterns (priority order) as the
     // base set, replacing the prior 6 hardcoded builtins that had drifted from
@@ -54,6 +52,72 @@ func NewPIIChecker(cfg config.PIIConfig) *PIIChecker {
     }
 
     return &PIIChecker{patterns: patterns, action: action}
+}
+
+// normalizePIIAction maps a configured action onto the three the checker can
+// actually carry out. Previously an unrecognized value (the live config used
+// "block") fell through ScanText's switch to log-only while the per-request
+// WARN still printed action=block — the operator believed requests were being
+// blocked when nothing was. Unknown values now say so once, at boot.
+func normalizePIIAction(raw string) string {
+    action := strings.ToLower(strings.TrimSpace(raw))
+    switch action {
+    case "":
+        return "log"
+    case "log", "deny":
+        return action
+    case "mask":
+        slog.Warn("pii.action=mask is accepted but masking is not implemented — detections are logged only and request text is forwarded unchanged")
+        return action
+    default:
+        slog.Warn("pii.action is not a recognized value, falling back to log-only (no request will be blocked)",
+            "configured", raw,
+            "valid", "log, deny, mask",
+        )
+        return "log"
+    }
+}
+
+// Detection is logged at most once per piiLogInterval. With the guard SSOT
+// patterns active almost every coding request carries an email or an IPv4
+// literal, so an unthrottled WARN fired on every single turn of a Claude Code
+// session and buried the lines that matter.
+const piiLogInterval = 60 * time.Second
+
+var (
+    piiLogMu       sync.Mutex
+    piiLogLast     time.Time
+    piiLogSuppress int
+)
+
+func logPIIDetection(action string, detected []string) {
+    piiLogMu.Lock()
+    now := time.Now()
+    if now.Sub(piiLogLast) < piiLogInterval {
+        piiLogSuppress++
+        piiLogMu.Unlock()
+        return
+    }
+    suppressed := piiLogSuppress
+    piiLogSuppress = 0
+    piiLogLast = now
+    piiLogMu.Unlock()
+
+    // Message states what the code does with the request, not just the config
+    // token: log and mask both forward the text unchanged.
+    if action == "deny" {
+        slog.Warn("PII detected in request, request rejected",
+            "types", strings.Join(detected, ","),
+            "action", action,
+            "suppressed_since_last", suppressed,
+        )
+        return
+    }
+    slog.Warn("PII detected in request, forwarded unchanged",
+        "types", strings.Join(detected, ","),
+        "action", action,
+        "suppressed_since_last", suppressed,
+    )
 }
 
 type PIIMiddleware struct {
@@ -112,10 +176,7 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
     }
 
     if len(detected) > 0 {
-        slog.Warn("PII detected in request",
-            "types", strings.Join(detected, ","),
-            "action", pm.checker.action,
-        )
+        logPIIDetection(pm.checker.action, detected)
         switch pm.checker.action {
         case "deny":
             return true, detected

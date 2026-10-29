@@ -97,6 +97,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `server.auto_start.stop_cmd` | `~/claude-home/fusion-mlx/start.sh stop` | Shell command to stop local backend on shutdown |
 | `server.auto_start.wait_url` | `http://127.0.0.1:11434/health` | Health URL to poll after start |
 | `server.auto_start.wait_secs` | 120 | Max seconds to wait for health check |
+| `server.graceful_shutdown_timeout` | 30 | Seconds stop/restart waits for in-flight requests (SSE streams included) before forcing exit. Raise it above your longest generation: a window shorter than a live stream cuts it mid-response. `start.sh stop` waits this plus 15s. On timeout the gateway logs every request still running (method, path, trace id, age) |
 | `auth.enabled` | true | Enable API key authentication |
 | `auth.master_key` | "" | Master key bypasses rate limits and model allowlists |
 | `routing.token_threshold` | 8000 | Token count threshold: below = local, above = cloud |
@@ -122,7 +123,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `cache.ttl` | 5m | Cache entry TTL |
 | `cost.enabled` | true | Enable cost tracking with built-in pricing |
 | `pii.enabled` | false | Enable PII detection on request content |
-| `pii.action` | log | PII action: log, mask, or deny |
+| `pii.action` | log | PII action: log, mask, or deny. `deny` rejects the request with HTTP 400; `log` and `mask` detect and forward the text unchanged (masking is not implemented). Any other value falls back to `log` and warns once at startup |
 | `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, round-robin |
 | `hardware.collect_interval` | 2s | Hardware metrics collection interval |
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
@@ -1089,10 +1090,13 @@ KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
 **fusion-mlx**, not the gateway — the gateway is non-invasive (no inference
 computation). The gateway provides two caching layers:
 
-1. **Semantic cache** (`routing.semantic_cache`, cosine similarity ≥ threshold,
-   default 0.95) — serves repeated / near-identical prompts without hitting
-   fusion-mlx. An exact repeat (similarity 1.0) is the gateway equivalent of a
-   prefix-cache hit.
+1. **Semantic cache** (`semantic_cache`, cosine similarity ≥ threshold, default
+   0.95) — designed to serve repeated / near-identical prompts without hitting
+   fusion-mlx, with an exact repeat (similarity 1.0) acting as the gateway
+   equivalent of a prefix-cache hit. **Not active yet (#400):** no request path
+   queries the cache and no embedding function is wired, so
+   `semantic_cache.enabled: true` currently logs a WARN at boot and caches
+   nothing.
 2. **AC9 trivial short-circuit** (laya_classifier.go) — exact-match fast path
    for trivial queries ("hi" / "thanks" / "ok") with no HTTP round-trip.
 

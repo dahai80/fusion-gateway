@@ -30,6 +30,31 @@ func nextTestPort() int {
 	return 18200 + int(testPortCounter.Add(1))
 }
 
+// awaitHealthz waits for /healthz to answer and fails as soon as run() exits
+// instead. These tests stop the gateway by SIGTERMing the whole test process,
+// which only reaches run()'s handler once run() has installed it; killing
+// before that takes the default disposition and the binary dies with
+// "signal: terminated" — hiding whatever error run() actually returned.
+func awaitHealthz(t *testing.T, port int, runDone <-chan error) {
+	t.Helper()
+	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-runDone:
+			t.Fatalf("run() exited before serving %s: %v", addr, err)
+		default:
+		}
+		resp, err := http.Get(addr)
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("gateway never answered %s within 5s", addr)
+}
+
 func makeTestConfigYAML(port int, clusterEnabled bool) string {
 	clusterSection := `
 cluster:
@@ -475,16 +500,7 @@ func TestRun_SuccessWithSignal(t *testing.T) {
 	}()
 
 	// Wait for server to start by polling the health endpoint
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	// Send SIGTERM to trigger graceful shutdown
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -516,16 +532,7 @@ func TestRun_WithFusionMLX(t *testing.T) {
 		runDone <- run(cfgPath)
 	}()
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
@@ -556,16 +563,7 @@ func TestRun_WithCluster(t *testing.T) {
 		runDone <- run(cfgPath)
 	}()
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
@@ -1027,16 +1025,7 @@ func TestRun_OnReloadCallback(t *testing.T) {
 		runDone <- run(cfgPath)
 	}()
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	oldSnap := config.GetSnapshot()
 	newSnap := &config.ConfigSnapshot{
@@ -1090,16 +1079,7 @@ func TestRun_OnReloadWithFusionMLX(t *testing.T) {
 		runDone <- run(cfgPath)
 	}()
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	oldSnap := config.GetSnapshot()
 	newSnap := &config.ConfigSnapshot{
@@ -1228,16 +1208,7 @@ admin:
 		runDone <- run(cfgPath)
 	}()
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(addr)
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	awaitHealthz(t, port, runDone)
 
 	oldSnap := config.GetSnapshot()
 	newSnap := &config.ConfigSnapshot{

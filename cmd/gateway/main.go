@@ -56,6 +56,21 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
+// defaultShutdownDrainTimeout is the historical hardcoded drain window, kept
+// as the fallback when server.graceful_shutdown_timeout is unset or <= 0.
+const defaultShutdownDrainTimeout = 30 * time.Second
+
+// shutdownDrainTimeout maps the configured graceful_shutdown_timeout (seconds)
+// to the HTTP drain window. Long streaming requests (agent/LLM clients) need a
+// window they can actually finish in; anything non-positive keeps the default
+// so a zeroed config can never drain for 0s and drop every in-flight stream.
+func shutdownDrainTimeout(configuredSeconds int) time.Duration {
+	if configuredSeconds <= 0 {
+		return defaultShutdownDrainTimeout
+	}
+	return time.Duration(configuredSeconds) * time.Second
+}
+
 // supervisorActive reports whether fusion-supervisor (fusion-sv) owns the
 // service lifecycle. When active, it starts fusion-mlx in its core layer on
 // `fusion-sv up` and is authoritative for stop on `fusion-sv down`. Gateway's
@@ -286,13 +301,29 @@ func main() {
 	}
 
 	if err := run(*configPath); err != nil {
-		slog.Error("fatal error", "error", err)
+		if errors.Is(err, server.ErrInstanceLockHeld) {
+			// #401: the loser of a boot race is an expected outcome now — a
+			// manual restart overlaps fusion-supervisor's relaunch, one process
+			// wins the lock and serves, this one exits without touching state.
+			// Logging it as "fatal error" made every clean restart look like a
+			// crash in the log the operator greps first.
+			slog.Warn("gateway not started: another instance already owns the data dir (expected when fusion-supervisor relaunches mid-restart; the running instance keeps serving)",
+				"error", err, "pid", os.Getpid())
+		} else {
+			slog.Error("fatal error", "error", err)
+		}
 		var cfgErr *config.ConfigFatalError
 		if errors.As(err, &cfgErr) {
 			// ExitCodeConfigFatal lets fusion-supervisor distinguish a
 			// config-fatal start from a crash and back off instead of
 			// restart-looping a process that can never come up.
 			os.Exit(config.ExitCodeConfigFatal)
+		}
+		if errors.Is(err, server.ErrInstanceLockHeld) {
+			// #401: a healthy gateway already owns this data dir and port.
+			// Distinct exit code so the supervisor backs off instead of
+			// treating the loser process as a crash.
+			os.Exit(config.ExitCodeAlreadyRunning)
 		}
 		os.Exit(1)
 	}
@@ -325,6 +356,17 @@ func run(configPath string) error {
 	// slot wait-queue. No-op in hybrid/cloud (cloud fallback exists). Advisory
 	// only — never blocks startup.
 	config.WarnSharedPortSafety(&snap.Config)
+
+	// #401: exactly one process per data dir. fusion-supervisor relaunches the
+	// gateway the instant a manual stop reaps it, so a restart can overlap two
+	// boots; both then write store.data_dir/shell_manifests.json through the
+	// same .tmp path (rename ENOENT) and one loses the port bind. Lock before
+	// any subsystem — auto_start included — does work.
+	releaseLock, err := server.AcquireInstanceLock(snap.Config.Store.DataDir)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 
 	// Auto-start local inference backend (fusion-mlx) if configured. #141:
 	// skipped when fusion-supervisor is active (it owns the mlx lifecycle);
@@ -707,8 +749,14 @@ func run(configPath string) error {
 	// (autoStopLocal) and discovery BEFORE srv.Shutdown drained in-flight
 	// traffic, so any local in-flight request lost its upstream mid-drain
 	// and 502'd for up to the 30s drain window on every restart/upgrade.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// #401 follow-up: server.graceful_shutdown_timeout was dead config — the
+	// window was hardcoded at 30s, so the admin/API knob (and config.yaml)
+	// changed nothing while long streams were still cut at 30s. Honor it; a
+	// non-positive value keeps the historical 30s.
+	drainTimeout := shutdownDrainTimeout(snap.Config.Server.GracefulShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
+	slog.Info("draining in-flight requests", "timeout", drainTimeout.String())
 
 	if err := srv.Shutdown(ctx); err != nil {
 		// #208: a drain timeout (in-flight requests not idle within the 30s
@@ -721,7 +769,12 @@ func run(configPath string) error {
 		// and the affected in-flight requests already got their deadline.
 		slog.Error("server shutdown drain timeout, forcing exit",
 			"error", err,
-			"note", "in-flight requests exceeded the 30s drain window; their connections close at process exit")
+			"timeout", drainTimeout.String(),
+			"note", "in-flight requests exceeded the drain window; their connections close at process exit")
+		// Name what exceeded the window: without this the operator only learns
+		// that a stream died, never which route (or whether any handler at all)
+		// was responsible.
+		srv.LogActiveRequests("shutdown drain timeout")
 	}
 
 	// Local backend + discovery only stop after in-flight requests have drained.
