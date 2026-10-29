@@ -165,13 +165,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     if decision.Backend == router.LocalBackend || decision.Backend == router.ClusterBackend {
         ov := s.overflowConfig(ctx)
         if ov.Enabled && ov.Cooldown > 0 && s.overflow.cooldownActive(time.Now()) {
-            decision = &router.RouteDecision{
-                Backend:     router.CloudBackend,
-                Reason:      "overflow_cooldown",
-                CloudTarget: s.snapshot().Config.Routing.Fallback.CloudDefault,
+            // #389: a multimodal request carries the LOCAL vision model id at
+            // this point (entry guard rewrite). The plain cooldown divert
+            // pointed it at the text-only cloud_default → upstream 400 → 502.
+            // Retarget to the configured cloud VLM when present; without one
+            // the cooldown is an optimization the multimodal path cannot use —
+            // keep the local decision.
+            mmDivert, mmOK := s.multimodalDivertDecision(&req)
+            if !mmOK {
+                slog.Info("overflow cooldown active but multimodal request has no cloud VLM, keeping local decision",
+                    "model", req.Model, "cooldown", ov.Cooldown.String())
+            } else if mmDivert != nil {
+                decision = mmDivert
+                slog.Info("overflow cooldown active, multimodal request diverted to cloud VLM",
+                    "model", req.Model, "cloud_target", mmDivert.CloudTarget, "cooldown", ov.Cooldown.String())
+            } else {
+                decision = &router.RouteDecision{
+                    Backend:     router.CloudBackend,
+                    Reason:      "overflow_cooldown",
+                    CloudTarget: s.snapshot().Config.Routing.Fallback.CloudDefault,
+                }
+                slog.Info("overflow cooldown active, routing straight to cloud",
+                    "model", req.Model, "cooldown", ov.Cooldown.String())
             }
-            slog.Info("overflow cooldown active, routing straight to cloud",
-                "model", req.Model, "cooldown", ov.Cooldown.String())
         }
     }
 
@@ -617,7 +633,22 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         if errors.Is(err, adapter.ErrLocalSlotFull) && decision.Backend == router.LocalBackend {
             slog.Info("RR4 local slot full, diverting stream chat to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #389: a multimodal request must not divert to the text-only
+            // cloud_default — the local VLM id would be rejected upstream
+            // (400 → 502). No cloud VLM configured → clear 503 instead.
+            mmDivert, mmOK := s.multimodalDivertDecision(req)
+            if !mmOK {
+                slog.Warn("RR4 local slot full but multimodal request has no cloud VLM, refusing text-only cloud divert",
+                    "model", req.Model,
+                    "hint", "configure routing.multimodal.cloud_backend + cloud_model or raise routing.local_priority.max_concurrent")
+                s.stampRouteInfo(ctx, req, decision, provider.Name())
+                http.Error(w, `{"error":{"message":"local slot cap reached and the multimodal request cannot be diverted to the text-only cloud default (routing.fallback.cloud_default); configure routing.multimodal.cloud_backend + cloud_model or raise routing.local_priority.max_concurrent","type":"server_error"}}`, http.StatusServiceUnavailable)
+                return
+            }
             cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "rr4_slot_full_redirect"}
+            if mmDivert != nil {
+                cloudDecision = mmDivert
+            }
             cloudProvider := s.resolveCloudProvider(cloudDecision, req, nil)
             if cloudProvider != nil {
                 s.handleStreamChat(ctx, w, cloudProvider, req, cloudDecision, budget, start)
@@ -653,22 +684,35 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 http.Error(w, `{"error":{"message":"cloud overflow daily cost ceiling reached (routing.fallback.overflow.cost_ceiling) and the local backend also failed","type":"server_error"}}`, http.StatusServiceUnavailable)
                 return
             } else {
-                cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "overflow_stream"}
-                cloudProvider := s.resolveCloudProvider(cloudDecision, req, nil)
-                if cloudProvider != nil {
-                    overflowReason := "local_failure"
-                    if decision.Backend == router.ClusterBackend {
-                        overflowReason = "cluster_failure"
+                // #389: multimodal + no cloud VLM configured → diverting would
+                // send the local VLM id to the text-only cloud_default; the
+                // local error surfaces instead (same policy as fail-closed).
+                mmDivert, mmOK := s.multimodalDivertDecision(req)
+                if !mmOK {
+                    slog.Warn("cloud overflow refused for multimodal request: no cloud VLM configured (fail-closed), surfacing local stream error",
+                        "backend", decision.Backend, "model", req.Model, "error", err,
+                        "hint", "configure routing.multimodal.cloud_backend + cloud_model")
+                } else {
+                    cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "overflow_stream"}
+                    if mmDivert != nil {
+                        cloudDecision = mmDivert
                     }
-                    costDelta := cost.CalculateCost(req.Model, budget.InputTokens, 0)
-                    s.overflow.chargeOverflow(now, costDelta)
-                    s.overflow.armCooldown(now, ov.Cooldown)
-                    s.recordCloudOverflowEvent(overflowReason, string(decision.Backend), cloudProvider.Name(), req.Model, costDelta)
-                    w.Header().Set("X-Fusion-Routed", "cloud")
-                    s.handleStreamChat(ctx, w, cloudProvider, req, cloudDecision, budget, start)
-                    return
+                    cloudProvider := s.resolveCloudProvider(cloudDecision, req, nil)
+                    if cloudProvider != nil {
+                        overflowReason := "local_failure"
+                        if decision.Backend == router.ClusterBackend {
+                            overflowReason = "cluster_failure"
+                        }
+                        costDelta := cost.CalculateCost(req.Model, budget.InputTokens, 0)
+                        s.overflow.chargeOverflow(now, costDelta)
+                        s.overflow.armCooldown(now, ov.Cooldown)
+                        s.recordCloudOverflowEvent(overflowReason, string(decision.Backend), cloudProvider.Name(), req.Model, costDelta)
+                        w.Header().Set("X-Fusion-Routed", "cloud")
+                        s.handleStreamChat(ctx, w, cloudProvider, req, cloudDecision, budget, start)
+                        return
+                    }
+                    slog.Error("stream overflow failed: no cloud provider available", "model", req.Model)
                 }
-                slog.Error("stream overflow failed: no cloud provider available", "model", req.Model)
             }
         }
         // Stream failure previously left the log entry blank (model/backend/
@@ -1150,75 +1194,85 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                 http.Error(w, `{"error":{"message":"cloud overflow daily cost ceiling reached (routing.fallback.overflow.cost_ceiling) and the local backend also failed","type":"server_error"}}`, http.StatusServiceUnavailable)
                 return
             } else {
-                fallbackProvider := s.resolveCloudProvider(nil, req, nil)
-                if fallbackProvider != nil {
-                    slog.Info("A4 fallback: switching to cloud after local/cluster failure",
-                        "original_backend", string(decision.Backend),
-                        "fallback_provider", fallbackProvider.Name(),
-                    )
-                    fallbackResp, fallbackErr := fallbackProvider.Chat(ctx, req)
-                    if fallbackErr == nil {
-                        duration := time.Since(start)
-                        observability.RecordRequest("cloud", req.Model, "success")
-                        observability.RecordDuration("cloud", req.Model, duration.Seconds())
-                        observability.RecordTokens("input", "cloud", budget.InputTokens)
-                        if fallbackResp.Usage.CompletionTokens > 0 {
-                            observability.RecordTokens("output", "cloud", fallbackResp.Usage.CompletionTokens)
-                        }
-                        s.router.RecordSuccess("cloud")
-
-                        // #301: account + audit the overflow. Cost uses base
-                        // pricing (markup is a billing concern, not a policy
-                        // one), charged after the response succeeded so the
-                        // crossing request completes — the ceiling stops the
-                        // NEXT overflow, never an in-flight response.
-                        overflowReason := "local_failure"
-                        if slotFull {
-                            overflowReason = "local_slot_full"
-                        } else if decision.Backend == router.ClusterBackend {
-                            overflowReason = "cluster_failure"
-                        }
-                        costDelta := cost.CalculateCost(req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
-                        s.overflow.chargeOverflow(now, costDelta)
-                        s.overflow.armCooldown(now, ov.Cooldown)
-                        s.recordCloudOverflowEvent(overflowReason, string(decision.Backend), fallbackProvider.Name(), req.Model, costDelta)
-
-                        if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
-                            logEntry.Model = req.Model
-                            logEntry.ChannelName = fallbackProvider.Name()
-                            logEntry.ChannelType = "cloud"
-                            logEntry.InputTokens = budget.InputTokens
-                            logEntry.OutputTokens = fallbackResp.Usage.CompletionTokens
-                            logEntry.TotalTokens = budget.InputTokens + fallbackResp.Usage.CompletionTokens
-                            // Plan §5.2: the fallback generation is the one the
-                            // client experienced — stamp its TTFT (full wait).
-                            stampTimingMetrics(logEntry, nil, fallbackResp.Usage.CompletionTokens,
-                                float64(duration)/float64(time.Millisecond))
-                        }
-                        observability.RecordLatencyMetrics("cloud", req.Model, duration.Seconds(), 0)
-                        if s.latencyTracker != nil {
-                            s.latencyTracker.Record(fallbackProvider.Name(), duration)
-                        }
-                        s.recordAndCharge(ctx, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
-                        if s.cache != nil && cacheKey != "" {
-                            if respData, marshalErr := json.Marshal(fallbackResp); marshalErr == nil {
-                                s.cache.Set(cacheKey, respData)
+                // #389: multimodal + no cloud VLM configured → same fail-closed
+                // policy as the disabled-overflow path; an allowed divert must
+                // retarget req.Model to the cloud VLM id, not the text default.
+                mmDivert, mmOK := s.multimodalDivertDecision(req)
+                if !mmOK {
+                    slog.Warn("multimodal request cannot overflow to text-only cloud default (no cloud VLM configured), surfacing local error",
+                        "backend", decision.Backend, "model", req.Model, "error", err,
+                        "hint", "configure routing.multimodal.cloud_backend + cloud_model")
+                } else {
+                    fallbackProvider := s.resolveCloudProvider(mmDivert, req, nil)
+                    if fallbackProvider != nil {
+                        slog.Info("A4 fallback: switching to cloud after local/cluster failure",
+                            "original_backend", string(decision.Backend),
+                            "fallback_provider", fallbackProvider.Name(),
+                        )
+                        fallbackResp, fallbackErr := fallbackProvider.Chat(ctx, req)
+                        if fallbackErr == nil {
+                            duration := time.Since(start)
+                            observability.RecordRequest("cloud", req.Model, "success")
+                            observability.RecordDuration("cloud", req.Model, duration.Seconds())
+                            observability.RecordTokens("input", "cloud", budget.InputTokens)
+                            if fallbackResp.Usage.CompletionTokens > 0 {
+                                observability.RecordTokens("output", "cloud", fallbackResp.Usage.CompletionTokens)
                             }
+                            s.router.RecordSuccess("cloud")
+
+                            // #301: account + audit the overflow. Cost uses base
+                            // pricing (markup is a billing concern, not a policy
+                            // one), charged after the response succeeded so the
+                            // crossing request completes — the ceiling stops the
+                            // NEXT overflow, never an in-flight response.
+                            overflowReason := "local_failure"
+                            if slotFull {
+                                overflowReason = "local_slot_full"
+                            } else if decision.Backend == router.ClusterBackend {
+                                overflowReason = "cluster_failure"
+                            }
+                            costDelta := cost.CalculateCost(req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
+                            s.overflow.chargeOverflow(now, costDelta)
+                            s.overflow.armCooldown(now, ov.Cooldown)
+                            s.recordCloudOverflowEvent(overflowReason, string(decision.Backend), fallbackProvider.Name(), req.Model, costDelta)
+
+                            if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                                logEntry.Model = req.Model
+                                logEntry.ChannelName = fallbackProvider.Name()
+                                logEntry.ChannelType = "cloud"
+                                logEntry.InputTokens = budget.InputTokens
+                                logEntry.OutputTokens = fallbackResp.Usage.CompletionTokens
+                                logEntry.TotalTokens = budget.InputTokens + fallbackResp.Usage.CompletionTokens
+                                // Plan §5.2: the fallback generation is the one the
+                                // client experienced — stamp its TTFT (full wait).
+                                stampTimingMetrics(logEntry, nil, fallbackResp.Usage.CompletionTokens,
+                                    float64(duration)/float64(time.Millisecond))
+                            }
+                            observability.RecordLatencyMetrics("cloud", req.Model, duration.Seconds(), 0)
+                            if s.latencyTracker != nil {
+                                s.latencyTracker.Record(fallbackProvider.Name(), duration)
+                            }
+                            s.recordAndCharge(ctx, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
+                            if s.cache != nil && cacheKey != "" {
+                                if respData, marshalErr := json.Marshal(fallbackResp); marshalErr == nil {
+                                    s.cache.Set(cacheKey, respData)
+                                }
+                            }
+                            w.Header().Set("Content-Type", "application/json")
+                            w.Header().Set("X-Route-Decision", fmt.Sprintf("cloud:fallback_from_%s", decision.Backend))
+                            // #301: machine-readable routed=cloud marker for
+                            // callers and audit (issue requirement 1).
+                            w.Header().Set("X-Fusion-Routed", "cloud")
+                            w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+                            if s.cache != nil {
+                                w.Header().Set("X-Cache", "MISS")
+                            }
+                            _ = json.NewEncoder(w).Encode(fallbackResp)
+                            return
                         }
-                        w.Header().Set("Content-Type", "application/json")
-                        w.Header().Set("X-Route-Decision", fmt.Sprintf("cloud:fallback_from_%s", decision.Backend))
-                        // #301: machine-readable routed=cloud marker for
-                        // callers and audit (issue requirement 1).
-                        w.Header().Set("X-Fusion-Routed", "cloud")
-                        w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
-                        if s.cache != nil {
-                            w.Header().Set("X-Cache", "MISS")
-                        }
-                        _ = json.NewEncoder(w).Encode(fallbackResp)
-                        return
+                        slog.Error("A4 fallback: cloud also failed", "error", fallbackErr)
+                        failErr = fallbackErr
                     }
-                    slog.Error("A4 fallback: cloud also failed", "error", fallbackErr)
-                    failErr = fallbackErr
                 }
             }
         }

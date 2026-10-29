@@ -74,3 +74,49 @@ func (s *Server) localVisionModelLoaded(model string) bool {
 func multimodalUnconfigured(d *router.RouteDecision) bool {
     return d != nil && d.Reason == "multimodal_unconfigured"
 }
+
+// multimodalDivertDecision is the shared guard for every downstream divert of
+// an already-decided local/cluster route (#389). The entry guard rewrites a
+// multimodal request's Model to the LOCAL vision id; every later divert site
+// (overflow cooldown pre-divert, RR4 slot-full, stream/non-stream cloud
+// overflow) that replaced that decision with a plain cloud decision sent the
+// local VLM id to the text-only cloud_default — which rejects it with 400
+// (glm-5 is text-only) and the gateway surfaces 502. Intermittency came from
+// routing.fallback.overflow.cooldown: an UNRELATED local failure arms the
+// cooldown window, so the NEXT multimodal request is pre-diverted at site 1
+// without any multimodal-specific signal.
+//
+// Three states:
+//   - (nil, true)  — text-only request: divert rules unchanged.
+//   - (d, true)    — multimodal request and routing.multimodal.cloud_backend +
+//     cloud_model are configured: the caller may divert, but MUST use d
+//     (CloudBackend target, multimodal_cloud_vlm_divert reason); req.Model is
+//     rewritten to the cloud VLM id so the text-only default never sees a
+//     local vision id.
+//   - (nil, false) — multimodal request with no cloud VLM configured: the
+//     divert is REFUSED (fail-closed). Site semantics differ: the cooldown
+//     pre-divert simply keeps the local decision (cooldown is an
+//     optimization), slot-full returns a clear 503, and the overflow paths
+//     surface the local error exactly like the disabled-overflow policy.
+func (s *Server) multimodalDivertDecision(req *adapter.ChatRequest) (*router.RouteDecision, bool) {
+    if !chatRequestHasImage(req) {
+        return nil, true
+    }
+    mm := s.cfg.Config.Routing.Multimodal
+    cloudBackend := strings.TrimSpace(mm.CloudBackend)
+    cloudModel := strings.TrimSpace(mm.CloudModel)
+    if cloudBackend == "" || cloudModel == "" {
+        slog.Info("multimodal divert refused: no cloud VLM configured",
+            "model", req.Model,
+            "hint", "set routing.multimodal.cloud_backend + cloud_model to allow cloud diversion of multimodal requests")
+        return nil, false
+    }
+    slog.Info("multimodal divert retargeted to cloud VLM",
+        "model", req.Model, "cloud_backend", cloudBackend, "cloud_model", cloudModel)
+    req.Model = cloudModel
+    return &router.RouteDecision{
+        Backend:     router.CloudBackend,
+        Reason:      "multimodal_cloud_vlm_divert",
+        CloudTarget: cloudBackend,
+    }, true
+}
