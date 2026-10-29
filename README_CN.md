@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.88 — #394 cloud 熔断开启时把纯云模型发给本地 fusion-mlx
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#394 纯云模型 404 循环** | cloud 熔断器开启（或 half-open 探测忙）时，`cloudOrLocalLocked` 无条件回退 `LocalBackend` —— 即使模型只存在于云端（如 `glm-5`）。fusion-mlx 返回 `404 Model not found`，请求再由 cloud overflow 兜底救回，且每次都记录一条假 `ERROR`。修复：本地回退前检查本地 provider 的模型集；纯云模型保持 cloud 决策，真实云失败会诚实地失败（并再次触发熔断），不再产生必然失败的错误后端往返。模型集未知（nil）时维持原 RC2 回退。回退日志新增 `breaker_state` 字段，区分熔断开启与 half-open 探测忙。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.88。 |
+
 ### v0.9.87 — #389 后续修复：config reload 后存在 60 秒多模态盲区
 
 | # | Item | Details |
