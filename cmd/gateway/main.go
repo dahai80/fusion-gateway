@@ -761,6 +761,10 @@ func run(configPath string) error {
 			"error", err,
 			"timeout", drainTimeout.String(),
 			"note", "in-flight requests exceeded the drain window; their connections close at process exit")
+		// Name what exceeded the window: without this the operator only learns
+		// that a stream died, never which route (or whether any handler at all)
+		// was responsible.
+		srv.LogActiveRequests("shutdown drain timeout")
 	}
 
 	// Local backend + discovery only stop after in-flight requests have drained.

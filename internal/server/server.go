@@ -135,6 +135,10 @@ type Server struct {
     // to a running stream's ctx (#102 ADR-001 sub-task 4). Slot release stays
     // on the stream goroutine's defer — registry only holds the cancel func.
     taskRegistry *TaskRegistry
+    // activeReqs tracks handlers currently inside withMiddleware so a drain
+    // timeout can name the requests it cut instead of just logging the
+    // deadline. nil-safe (tests build &Server{} literals).
+    activeReqs *activeRequests
     // streamBuffers holds resumable SSE event windows keyed by stream_id
     // (issue #116) for the local MLX path only. Populated when
     // routing.stream.resume_enabled; the /v1/messages/{stream_id}/events
@@ -632,6 +636,7 @@ func New(
         oauth2States:      make(map[string]oauth2StateEntry),
         mcpHandler:        initMCPHandler(cfg),
         taskRegistry:      NewTaskRegistry(),
+        activeReqs:        newActiveRequests(),
         shutdownCtx:       shutdownCtx,
         shutdownCancel:    shutdownCancel,
         browserHandler:    browserHandler,
@@ -1311,6 +1316,10 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 
         start := time.Now()
         entry := middleware.InitRequestLog(r)
+        // Drain diagnostics: record the handler for as long as it runs so a
+        // shutdown drain timeout can name the requests it is about to cut.
+        slot := s.activeReqs.Begin(r.Method, r.URL.Path, entry.TraceID)
+        defer s.activeReqs.End(slot)
         r = middleware.WithRequestLogContext(r, entry)
         rec := middleware.NewResponseRecorder(w)
         // #325: echo the resolved business trace id back so the caller can
