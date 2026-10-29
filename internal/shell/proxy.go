@@ -13,6 +13,7 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/httpx"
+    "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
 )
 
 // upstreamFn resolves a module id to its proxy upstream base URL and its
@@ -229,9 +230,35 @@ func (h *HealthPoller) Run(ctx context.Context) {
     }
 }
 
+// relativeHealthWarn throttles the "health URL is not absolute" warning per
+// module: a manifest re-registers every 15s and every poll pass would repeat it.
+var relativeHealthWarn = logthrottle.New(5 * time.Minute)
+
+// absoluteHealthURL reports whether the manifest health field can be probed.
+// Several persisted manifests carry a path ("/healthz") instead of a URL; the
+// poller used to hand that straight to http.Get, which fails every pass with
+// "unsupported protocol scheme" at DEBUG, so those modules were permanently
+// marked unreachable with nothing but debug noise to explain it.
+func absoluteHealthURL(raw string) bool {
+    u, err := url.Parse(strings.TrimSpace(raw))
+    if err != nil {
+        return false
+    }
+    return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
 func (h *HealthPoller) pollAll(ctx context.Context) {
     for _, view := range h.registry.List() {
         if view.Health == "" {
+            continue
+        }
+        if !absoluteHealthURL(view.Health) {
+            if relativeHealthWarn.Allow(view.ID) {
+                slog.Warn("shell module health URL is not absolute, probe skipped (manifest health must be an http(s) URL)",
+                    "module", view.ID,
+                    "health", view.Health,
+                )
+            }
             continue
         }
         reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
