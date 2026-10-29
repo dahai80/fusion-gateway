@@ -1757,6 +1757,20 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.89 — 生命周期竞态、语义缓存接线、PG 落库投毒、legacy 环境变量密钥清理
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#397 转发 SSE 帧粘连** | `anthropicSSEBridge.Write` 拆分入站 chunk 时会剥掉 `\n\n` 帧分隔符，导致原样透传给 `forward()` 的帧（无 OpenAI 语义的 JSON、无法解析的 JSON、网关自身的 keepalive ping —— 生产中每 15 秒触发一次的路径）没有终止符。下一帧的 `event:` 行粘在上一帧的 data 行上，客户端以 `malformed_stream` 解析失败（用户看到 "Part of the response never arrived"）。`forward()` 现在在帧不以分隔符结尾时补回分隔符。 |
+| 2 | **#399 shell manifest 存储改名竞态** | 并发 `save()`（同一次心跳 tick 上多个模块同时注册）写同一个固定 `.tmp` 路径：第一个 rename 把文件移走，第二个以 `rename ... no such file or directory` 失败并丢失快照。新增 `saveMu` 串行化每次写入且不持状态锁，慢 I/O 不阻塞读方。 |
+| 3 | **#401/#402 生命周期竞态** | `start-gateway.sh` 曾是第二个漂移的生命周期管理器（pidfile 不同、健康路径错误、stop 中止 restart、从不重建）—— 现在是 exec `./start.sh` 的薄包装。`start.sh` 在任一 `*.go` 比二进制新时重建、先构建再 stop（fusion-supervisor 的即时 relaunch 再也无法复活旧二进制）、并收养 supervisor 重新拉起的 listener 而不是报启动失败。`<data_dir>/gateway.lock` 单实例 `flock` 让竞争失败方以 `EX_TEMPFAIL`（75，WARN 日志 —— 退出码已告知 supervisor 退避）退出，而不是两个网关写坏一个 store。`server.graceful_shutdown_timeout` 原是死配置 —— 现已生效，且 `Shutdown` 超时时导出在途 handler 快照用于诊断；`stop` 等待 drain+15s，SIGKILL 不再打断落库 flush。无状态网关（空 `data_dir`）跳过锁。 |
+| 4 | **#403 `pii.action` 校验** | 线上配置曾携带 `pii.action: block`，`ScanText` 的 switch 静默落空 —— 请求原样放行，而每请求 WARN 仍回显配置的动作值，运维无从得知实际什么都没拦截。取值现在归一化为 `log`/`deny`/`mask`，非法值回退 `log` 并在启动时 WARN 列出合法集合（`mask` 警告未实现）；检测日志记录实际处置结果，且限流为每 60 秒一行带抑制计数。 |
+| 5 | **#404 shell 健康探测跳过非绝对 URL** | manifest 携带裸路径（`/healthz`）时被直接交给 `http.Get`，每次都以 `unsupported protocol scheme` 失败，`RecordHealth(id, false)` 因 manifest 自身缺陷把模块永久标记离线。非绝对 URL 现在跳过探测（保留心跳推导的状态，每 5 分钟一条 WARN 指出待修字段）。 |
+| 6 | **#400 语义缓存端到端接线** | `NewSemanticCache` 一直收到 nil `EmbedFunc`，`semantic_cache.enabled` 永远无法激活 —— 每次启动 WARN、每个请求走完整往返。`buildSemanticEmbedFn` 从 adapter pool 派生 embedder（`semantic_cache.provider`，默认 fusion-mlx，+ `semantic_cache.model`）；非流式 chat 在精确 key 缓存之后、上游请求之前执行 Search，成功响应在所有服务路径上 Store。 |
+| 7 | **#407 PG 落库批次投毒** | `json.Valid` 接受 PostgreSQL jsonb 拒绝的未配对 UTF-16 代理对转义（SQLSTATE 22P05），一个这样的请求体让整个 `CopyFrom` payloads 批次失败，flush 循环反复重试同一投毒批次，直到 shutdown drain 丢掉全部排队条目。`splitBody` 现在通过重打 JSON 把未配对代理替换为 U+FFFD（UseNumber 保持数字字节精确；干净 body 原样透传），批次失败时按行隔离：好行照常提交，仅记录并丢弃肇事行。 |
+| 8 | **#409 legacy 环境变量密钥清理 + start.sh 端口注册表自检** | 规范环境变量密钥名现为 `FUSION_CLIENT_KEY`（fusion-mlx 后端密钥，config-conventions §6 别名链）与 `FG_SHELL_ADMIN_KEY`（`web_shell.admin_key`，网关自有 `FG_` 命名空间）；legacy 名作为显式、记日志的过渡别名继续接受至 2027-01-01 —— 两者同设时规范名优先，#363 fail-loud 契约对任一名字生效。`config.simple.yaml`/`config.example.yaml` 不再出现 legacy token：fusion-gateway 在 `check-env.py` normal 与 `--strict` 两种模式下均零告警。`start.sh start` 启动前自检 `architecture/port-registry.yaml` 中的 `fusion-gateway` 条目（awk 精确自有块提取 —— 平铺 grep 窗口会匹配到兄弟服务的 port 行），端口未注册拒绝启动；注册表缺失仅告警，`FUSION_REGISTRY` 覆盖路径，`FUSION_SKIP_REGISTRY_CHECK=1` 供本地测试旁路。 |
+| 9 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.89。 |
+
 ### v0.9.88 — #394 cloud 熔断开启时把纯云模型发给本地 fusion-mlx
 
 | # | 条目 | 说明 |
