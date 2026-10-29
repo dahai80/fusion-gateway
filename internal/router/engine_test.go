@@ -2495,6 +2495,91 @@ func TestRC2_CloudBreakerOpenFallsBackToLocal(t *testing.T) {
     }
 }
 
+// Test394_CloudBreakerOpenCloudOnlyModelKeepsCloud verifies the #394 fix: when
+// the cloud breaker is open, the local fallback must only be taken for models
+// the local provider can actually serve. A cloud-only model sent local is a
+// guaranteed 404 "Model not found" from fusion-mlx plus a false ERROR log and
+// a cloud-overflow recovery — so it must keep the cloud decision and fail
+// honestly against cloud instead.
+func Test394_CloudBreakerOpenCloudOnlyModelKeepsCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"qwen-local": true}
+    })
+    e.Trip("cloud", "cloud unreachable")
+
+    budget := tokenizer.TokenBudget{InputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "glm-5", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != CloudBackend {
+        t.Fatalf("expected cloud decision kept for cloud-only model when cloud breaker open, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "token_budget_exceeded" {
+        t.Errorf("expected unsuffixed cloud reason, got %s", dec.Reason)
+    }
+}
+
+// Test394_CloudBreakerOpenLocalModelStillFallsBack is the complement: a model
+// present in the local model set keeps the RC2 local fallback unchanged.
+func Test394_CloudBreakerOpenLocalModelStillFallsBack(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    // map the model so P0.2 local-exclusive does not pre-empt the P4
+    // cloud-forcing rule — this test targets cloudOrLocalLocked itself.
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{"qwen-local": "glm-5"}
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"qwen-local": true}
+    })
+    e.Trip("cloud", "cloud unreachable")
+
+    budget := tokenizer.TokenBudget{InputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "qwen-local", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Fatalf("expected local fallback for local-servable model when cloud breaker open, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "token_budget_exceeded_local_fallback" {
+        t.Errorf("expected _local_fallback suffix, got %s", dec.Reason)
+    }
+}
+
+// Test394_CloudBreakerOpenUnknownModelSetFallsBackLocal verifies the
+// conservative default: when the local model set is unavailable (nil), the
+// engine cannot prove the model is cloud-only, so the RC2 local fallback
+// keeps its original behavior.
+func Test394_CloudBreakerOpenUnknownModelSetFallsBackLocal(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.TokenThreshold = 100
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.Trip("cloud", "cloud unreachable")
+
+    budget := tokenizer.TokenBudget{InputTokens: 200, TotalBudget: 300}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "glm-5", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Backend != LocalBackend {
+        t.Fatalf("expected local fallback when model set unknown, got %s: %s", dec.Backend, dec.Reason)
+    }
+}
+
 // TestRC2_CloudBreakerOpenFallsBackToCluster verifies that when the cloud breaker is
 // OPEN, a local-health cloud-forcing rule (P3 local_not_ready) prefers a healthy
 // cluster node over local (cluster is a peer local-class node).
