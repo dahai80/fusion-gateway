@@ -294,6 +294,12 @@ func main() {
 			// restart-looping a process that can never come up.
 			os.Exit(config.ExitCodeConfigFatal)
 		}
+		if errors.Is(err, server.ErrInstanceLockHeld) {
+			// #401: a healthy gateway already owns this data dir and port.
+			// Distinct exit code so the supervisor backs off instead of
+			// treating the loser process as a crash.
+			os.Exit(config.ExitCodeAlreadyRunning)
+		}
 		os.Exit(1)
 	}
 }
@@ -325,6 +331,17 @@ func run(configPath string) error {
 	// slot wait-queue. No-op in hybrid/cloud (cloud fallback exists). Advisory
 	// only — never blocks startup.
 	config.WarnSharedPortSafety(&snap.Config)
+
+	// #401: exactly one process per data dir. fusion-supervisor relaunches the
+	// gateway the instant a manual stop reaps it, so a restart can overlap two
+	// boots; both then write store.data_dir/shell_manifests.json through the
+	// same .tmp path (rename ENOENT) and one loses the port bind. Lock before
+	// any subsystem — auto_start included — does work.
+	releaseLock, err := server.AcquireInstanceLock(snap.Config.Store.DataDir)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 
 	// Auto-start local inference backend (fusion-mlx) if configured. #141:
 	// skipped when fusion-supervisor is active (it owns the mlx lifecycle);

@@ -23,6 +23,11 @@ import (
 
 const ExitCodeConfigFatal = 78 // sysexits.h EX_CONFIG
 
+// ExitCodeAlreadyRunning is the exit code when another gateway process already
+// owns the data dir lock (#401). Distinct from a crash so a supervisor can back
+// off rather than restart-loop two processes fighting for one port.
+const ExitCodeAlreadyRunning = 75 // sysexits.h EX_TEMPFAIL
+
 // ConfigFatalError marks an error as config-fatal so main() can exit with
 // ExitCodeConfigFatal instead of the generic 1.
 type ConfigFatalError struct{ Err error }

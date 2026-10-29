@@ -1089,10 +1089,13 @@ KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
 **fusion-mlx**, not the gateway — the gateway is non-invasive (no inference
 computation). The gateway provides two caching layers:
 
-1. **Semantic cache** (`routing.semantic_cache`, cosine similarity ≥ threshold,
-   default 0.95) — serves repeated / near-identical prompts without hitting
-   fusion-mlx. An exact repeat (similarity 1.0) is the gateway equivalent of a
-   prefix-cache hit.
+1. **Semantic cache** (`semantic_cache`, cosine similarity ≥ threshold, default
+   0.95) — designed to serve repeated / near-identical prompts without hitting
+   fusion-mlx, with an exact repeat (similarity 1.0) acting as the gateway
+   equivalent of a prefix-cache hit. **Not active yet (#400):** no request path
+   queries the cache and no embedding function is wired, so
+   `semantic_cache.enabled: true` currently logs a WARN at boot and caches
+   nothing.
 2. **AC9 trivial short-circuit** (laya_classifier.go) — exact-match fast path
    for trivial queries ("hi" / "thanks" / "ok") with no HTTP round-trip.
 
