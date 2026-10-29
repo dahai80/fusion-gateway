@@ -1747,6 +1747,13 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.86 — #389 多模态分流把本地视觉模型 id 发给了纯文本 cloud default
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#389 多模态请求间歇性 502** | `/v1/chat/completions` 多模态请求间歇性 502。入口守卫把请求模型改写为本地视觉模型 id（`multimodal_local_vision`），下游 4 个分流点随后用普通 cloud decision 替换该 decision，把本地视觉模型 id 发给了纯文本 `routing.fallback.cloud_default`（glm-5）——上游 400，网关透出 502。间歇性来源：`routing.fallback.overflow.cooldown` 被任意本地失败触发，无关文本请求失败后 2 分钟冷却窗口内的下一个多模态请求在站点 ① 被预分流，无任何多模态特征信号。修复：共享三态守卫 `multimodalDivertDecision` 接线全部 4 个分流点——冷却预分流在未配置云 VLM 时保留本地 decision（冷却只是优化），RR4 槽满返回明确 503 指出配置缺口，流式/非流式溢出 fail-closed（透出本地错误，同禁用溢出策略）；配置 `routing.multimodal.cloud_backend` + `cloud_model` 后所有站点经云 VLM decision（`multimodal_cloud_vlm_divert`）分流并改写 `req.Model`，纯文本 default 永远不会收到本地视觉模型 id。纯文本请求不受影响。 |
+| 2 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 提升至 0.9.86。 |
+
 ### v0.9.85 — #386 HTTP/2 连接卡死
 
 | # | 条目 | 说明 |
