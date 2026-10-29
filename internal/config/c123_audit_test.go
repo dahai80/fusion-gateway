@@ -209,6 +209,7 @@ func TestC1_BackendAPIKeyPlaceholderRejected(t *testing.T) {
 // "fg-" key NOT matching the env is still refused (the guard stays intact
 // for config.yaml stubs and for other backends).
 func TestC1_FusionMLXAPIKeyEnvSkip(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "fg-admin-key")
     cfg := DefaultConfig()
     cfg.Backends = map[string]BackendConfig{
@@ -239,6 +240,30 @@ func TestC1_FusionMLXAPIKeyEnvSkip(t *testing.T) {
     }
     if err := validate(&cfg); err == nil {
         t.Fatal("C1: expected non-fusion-mlx backend with fg- stub to be rejected even with env, got nil")
+    }
+}
+
+// #409: the C1 env escape hatch works identically through the canonical
+// FUSION_CLIENT_KEY name (legacy alias above, canonical here).
+func TestC1_FusionMLXClientKeyEnvSkip(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "fg-admin-key")
+    t.Setenv("FUSION_MLX_API_KEY", "")
+    cfg := DefaultConfig()
+    cfg.Backends = map[string]BackendConfig{
+        "fusion-mlx": {
+            Type:    "fusion-mlx",
+            BaseURL: "http://127.0.0.1:11434",
+            APIKey:  "fg-admin-key",
+            Enabled: true,
+        },
+    }
+    if err := validate(&cfg); err != nil {
+        t.Fatalf("C1: expected fusion-mlx api_key injected via FUSION_CLIENT_KEY to pass, got: %v", err)
+    }
+    // Canonical set but the config key differs from it: still refused.
+    t.Setenv("FUSION_CLIENT_KEY", "fg-other-key")
+    if err := validate(&cfg); err == nil {
+        t.Fatal("C1: expected fg- key not matching the env value to be rejected, got nil")
     }
 }
 

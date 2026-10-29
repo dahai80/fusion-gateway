@@ -576,7 +576,8 @@ func (s *Server) handleShellManifestList(w http.ResponseWriter, r *http.Request)
 
 // withShellManifestAuth (#243): manifest writes are an admin-plane
 // operation — require the master key or the designated web_shell.admin_key
-// (env FUSION_GATEWAY_ADMIN_KEY, the credential downstream modules
+// (env FG_SHELL_ADMIN_KEY canonical per #409; legacy FUSION_GATEWAY_ADMIN_KEY
+// bound as a transition alias for the credential downstream modules
 // document). Plain client keys are rejected: letting any consumer key
 // register or heartbeat manifests was a privilege inversion, and the
 // fg-admin-key value modules historically passed is a backend stub the

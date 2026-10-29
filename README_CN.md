@@ -56,6 +56,16 @@ fusion-supervisor 通过 `bash <repo>/start.sh <cmd>` 统一管理 fusion-* 服�
 
 **`FUSION_GW_PG_DSN`** (bindSecretEnv 模式):`persistence.enabled: true` 时启动必需的 PostgreSQL DSN —— 缺失时启动直接致命退出(显式失败,而不是静默不落库)。`start.sh` 启动前会做预检:缺 DSN 时大声报错拒绝启动,而不是陷入 启动即死 的崩溃循环。注意持久化 sink 只在启动时构建一次:热加载把 `persistence.enabled` 打开后只会记录一次 ERROR 日志,重启前不会真正落库。
 
+### start.sh 端口注册表自检 (#409)
+
+`start.sh start` 在拉起进程前会验证自身在 `architecture/port-registry.yaml`(服务端口的唯一事实来源)中的条目:`FUSION_GW_HEALTH_URL` 中的端口若未注册在 `fusion-gateway` 名下,启动直接拒绝并大声报错 —— 手改配置再也无法把网关指到其他 fusion-* 服务的端口上。注册表文件缺失只告警(独立 checkout 仍可启动);`FUSION_SKIP_REGISTRY_CHECK=1` 仅用于本地测试的旁路;`FUSION_REGISTRY` 可覆盖注册表路径。
+
+### 环境变量密钥名与 legacy 别名 (#409)
+
+fusion-mlx 后端密钥从**规范名 `FUSION_CLIENT_KEY`** 解析(config-conventions §6 别名链);#409 之前的旧名作为过渡别名继续接受,直到 2027-01-01 生态清理 —— 两个名字同时设置时规范名优先,#363 fail-loud 契约(env 与 config.yaml 值不同 → 启动报错)对任一名字都生效。`api_key_env: FUSION_CLIENT_KEY` 在加载时还会回退到旧别名,因此只导出旧名的部署继续工作(每次命中记录日志)。
+
+Union web shell 的管理密钥(`web_shell.admin_key`)从 **`FG_SHELL_ADMIN_KEY`** 解析(网关自有 `FG_` 命名空间,与 `FG_MANAGED_SETTINGS_PRIVATE_KEY` 一致);下游模块文档中的旧名绑定为同一截止日的过渡别名。
+
 ## 配置
 
 完整参考见 `config.example.yaml`;`config.simple.yaml` 是一份可直接运行的极简完整示例。关键配置项:

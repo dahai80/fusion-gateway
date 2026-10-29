@@ -14,6 +14,10 @@ import (
 //   - both set + identical → loads (production baseline: both carry the
 //     ecosystem default key)
 //   - env-only / file-only → loads
+//
+// #409: FUSION_CLIENT_KEY is the canonical key env; the legacy name stays a
+// transition alias. The legacy-name tests blank the canonical env so an
+// ambient FUSION_CLIENT_KEY on the dev machine cannot skew the result.
 
 const keySourceYAMLTemplate = `
 server:
@@ -53,6 +57,7 @@ server:
 }
 
 func TestFusionMLXKeySource_MismatchFailsLoad(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "env-rotated-key")
     f := writeKeySourceConfig(t, "file-stale-key")
     _, err := Load(f)
@@ -65,6 +70,7 @@ func TestFusionMLXKeySource_MismatchFailsLoad(t *testing.T) {
 }
 
 func TestFusionMLXKeySource_IdenticalLoads(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "same-key")
     f := writeKeySourceConfig(t, "same-key")
     if _, err := Load(f); err != nil {
@@ -73,6 +79,7 @@ func TestFusionMLXKeySource_IdenticalLoads(t *testing.T) {
 }
 
 func TestFusionMLXKeySource_EnvOnlyLoads(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "env-only-key")
     f := writeKeySourceConfig(t, "")
     if _, err := Load(f); err != nil {
@@ -80,7 +87,43 @@ func TestFusionMLXKeySource_EnvOnlyLoads(t *testing.T) {
     }
 }
 
+// #409: the canonical FUSION_CLIENT_KEY wins over the legacy alias, and the
+// fail-loud contract holds identically through the canonical name.
+func TestFusionMLXKeySource_CanonicalWinsOverLegacy(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "canonical-key")
+    t.Setenv("FUSION_MLX_API_KEY", "legacy-key")
+    f := writeKeySourceConfig(t, "legacy-key") // file matches the LEGACY env
+    _, err := Load(f)
+    if err == nil {
+        t.Fatal("expected Load to fail: canonical env differs from the file value even though the legacy alias matches")
+    }
+    if !strings.Contains(err.Error(), "DIFFERENT values") {
+        t.Fatalf("expected mismatch error, got: %v", err)
+    }
+}
+
+func TestFusionMLXKeySource_CanonicalMismatchNamesEnv(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "canonical-rotated-key")
+    f := writeKeySourceConfig(t, "file-stale-key")
+    _, err := Load(f)
+    if err == nil {
+        t.Fatal("expected Load to fail when FUSION_CLIENT_KEY differs from the config.yaml value")
+    }
+    if !strings.Contains(err.Error(), "DIFFERENT values") || !strings.Contains(err.Error(), "FUSION_CLIENT_KEY") {
+        t.Fatalf("expected mismatch error naming FUSION_CLIENT_KEY, got: %v", err)
+    }
+}
+
+func TestFusionMLXKeySource_CanonicalIdenticalLoads(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "same-canonical-key")
+    f := writeKeySourceConfig(t, "same-canonical-key")
+    if _, err := Load(f); err != nil {
+        t.Fatalf("expected identical file+canonical-env keys to load, got: %v", err)
+    }
+}
+
 func TestFusionMLXKeySource_FileOnlyLoads(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     if orig, ok := os.LookupEnv("FUSION_MLX_API_KEY"); ok {
         t.Setenv("FUSION_MLX_API_KEY", orig)
         os.Unsetenv("FUSION_MLX_API_KEY")
@@ -93,6 +136,7 @@ func TestFusionMLXKeySource_FileOnlyLoads(t *testing.T) {
 }
 
 func TestFusionMLXKeySource_MismatchFailsReload(t *testing.T) {
+    t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "env-rotated-key")
     f := writeKeySourceConfig(t, "file-stale-key")
     _, err := Reload(f)

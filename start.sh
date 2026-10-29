@@ -136,6 +136,39 @@ adopt_listener() {
     return 0
 }
 
+# #409: registry self-check. architecture/port-registry.yaml is the single
+# source of truth for service ports (CI enforces it via check-ports.py, but a
+# hand-edited config bypassing CI could point the gateway at a port that
+# belongs to another fusion-* service). Refuse to start unless this service's
+# port is registered under its own name. A missing registry file only warns —
+# a standalone checkout (not the monorepo) must still start.
+check_port_registry() {
+    local service registry
+    service="fusion-gateway"
+    registry="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [ ! -f "$registry" ]; then
+        echo "WARNING: port-registry.yaml not found at $registry — registry self-check skipped" >&2
+        return 0
+    fi
+    # Extract the service's own block (2-space service key until the next
+    # 2-space key) — a flat grep -A window would also see the NEXT service's
+    # port line and accept a port that belongs to a sibling.
+    if ! awk -v svc="  ${service}:" -v port="$(gw_port)" '
+        $0 == svc { inblk = 1; next }
+        inblk && /^  [^ ]/ { inblk = 0 }
+        inblk && $0 ~ "^    port: " port "$" { found = 1; exit }
+        END { exit found ? 0 : 1 }
+    ' "$registry"; then
+        if [ "${FUSION_SKIP_REGISTRY_CHECK:-}" != "1" ]; then
+            echo "ERROR: port $(gw_port) is not registered for ${service} in $registry." >&2
+            echo "       Fix the HEALTH_URL port or register it in port-registry.yaml" >&2
+            echo "       (FUSION_SKIP_REGISTRY_CHECK=1 bypasses — use only for local tests)." >&2
+            exit 1
+        fi
+        echo "WARNING: registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1)" >&2
+    fi
+}
+
 start() {
     if pid="$(get_pid)"; then
         echo "Fusion-Gateway already running (PID $pid)"
@@ -156,6 +189,7 @@ start() {
         echo "       Stop it first: kill $foreign" >&2
         exit 1
     fi
+    check_port_registry
     check_persistence_dsn
     ensure_binary
     check_config
