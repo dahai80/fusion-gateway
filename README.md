@@ -148,6 +148,8 @@ See `config.example.yaml` for full reference. Key settings:
 | `semantic_cache.enabled` | false | Enable semantic cache (similarity-based hit) |
 | `semantic_cache.similarity_threshold` | 0.92 | Cosine similarity threshold for cache hit |
 | `semantic_cache.max_entries` | 5000 | Max entries in semantic cache |
+| `semantic_cache.model` | — | Embedding model id sent to the provider's `/v1/embeddings` (e.g. `BAAI--bge-m3` on fusion-mlx). **Required** when enabled — the cache stays disabled with a WARN without it |
+| `semantic_cache.provider` | fusion-mlx | `backends:` entry name whose embedding call supplies prompt vectors |
 | `prompt_injection.enabled` | false | Enable prompt injection detection |
 | `prompt_injection.action` | log | Action on detection: log or block |
 | `cost_markup.enabled` | false | Enable cost markup (billing margin) |
@@ -1091,12 +1093,15 @@ KV prefix caching (prompt-prefix reuse inside the inference engine) lives in
 computation). The gateway provides two caching layers:
 
 1. **Semantic cache** (`semantic_cache`, cosine similarity ≥ threshold, default
-   0.95) — designed to serve repeated / near-identical prompts without hitting
+   0.95) — serves repeated / near-identical prompts without hitting
    fusion-mlx, with an exact repeat (similarity 1.0) acting as the gateway
-   equivalent of a prefix-cache hit. **Not active yet (#400):** no request path
-   queries the cache and no embedding function is wired, so
-   `semantic_cache.enabled: true` currently logs a WARN at boot and caches
-   nothing.
+   equivalent of a prefix-cache hit. Prompt embeddings come from
+   `semantic_cache.provider` (a `backends:` entry, default `fusion-mlx`) using
+   `semantic_cache.model` — both must name a served embedding model or the
+   cache stays disabled with a WARN naming the fix. Non-stream text-only chat
+   only: tool-calling and multimodal requests skip it (a semantically-similar
+   prompt must not replay a stored tool_calls payload or an answer to a
+   different image), and hits return `X-Semantic-Cache: HIT`.
 2. **AC9 trivial short-circuit** (laya_classifier.go) — exact-match fast path
    for trivial queries ("hi" / "thanks" / "ok") with no HTTP round-trip.
 
@@ -1447,9 +1452,12 @@ semantic_cache:
     enabled: true
     similarity_threshold: 0.92   # cosine similarity for cache hit
     max_entries: 5000
+    model: BAAI--bge-m3          # embedding model served by the provider
+    provider: fusion-mlx         # backends entry supplying the embeddings
 ```
 
-- Requires `EmbedFunc` to be set — disabled when no embedding function provided (no pseudo-embedding fallback)
+- `model` is required when enabled; the cache stays disabled with a WARN without it (no pseudo-embedding fallback)
+- Applies at boot — toggling via hot-reload requires a restart
 - Pluggable `EmbedFunc` — swap to any embedding API for similarity
 - 30-minute TTL, automatic expiry eviction
 

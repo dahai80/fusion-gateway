@@ -1090,6 +1090,33 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         }
     }
 
+    // #400: semantic cache — a near-identical prompt (cosine similarity ≥
+    // semantic_cache.similarity_threshold) serves the stored response without
+    // hitting the engine. Runs after the exact-key cache (free) and before the
+    // upstream fetch (one embedding round trip on the miss path, deduped by
+    // the cache's embed cache). Skipped for tool-calling and multimodal
+    // requests: a semantically-similar prompt must not surface a stored
+    // tool_calls payload or an answer to a different image. Streaming is not
+    // semantically cached (each stream is unique).
+    semanticPrompt := s.semanticCachePrompt(req)
+    if semanticPrompt != "" {
+        if cached, ok := s.semanticCache.Search(semanticPrompt, req.Model); ok {
+            slog.Info("semantic cache hit", "model", req.Model)
+            s.stampRouteInfo(ctx, req, decision, provider.Name())
+            stampCachedUsage(ctx, cached)
+            if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+                stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
+                    float64(time.Since(start))/float64(time.Millisecond))
+            }
+            w.Header().Set("Content-Type", "application/json")
+            w.Header().Set("X-Semantic-Cache", "HIT")
+            w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
+            w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
+            _, _ = w.Write(cached)
+            return
+        }
+    }
+
     // Retry wrapper
     chatFn := func(ctx context.Context, r *adapter.ChatRequest) (*adapter.ChatResponse, error) {
         return provider.Chat(ctx, r)
@@ -1122,6 +1149,17 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             if s.cache != nil && cacheKey != "" {
                 if respData, marshalErr := json.Marshal(r); marshalErr == nil {
                     s.cache.Set(cacheKey, respData)
+                }
+            }
+            // #400: the leader ALSO publishes to the semantic cache here —
+            // the coalesced-hit serve path below returns before the final
+            // Cache store section, so without this the semantic cache never
+            // fills while the exact cache + coalescer are active (the default
+            // config). embeddingFor dedupes the second embed of the same
+            // prompt (the Search above already cached it).
+            if s.semanticCache != nil && semanticPrompt != "" {
+                if respData, marshalErr := json.Marshal(r); marshalErr == nil {
+                    s.semanticCache.Store(semanticPrompt, req.Model, respData)
                 }
             }
         })
@@ -1315,11 +1353,15 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     // Cost tracking (#159: record + charge quota in one sink)
     s.recordAndCharge(ctx, string(decision.Backend), req.Model, budget.InputTokens, resp.Usage.CompletionTokens)
 
-    // Cache store
-    if s.cache != nil && cacheKey != "" {
-        if respData, marshalErr := json.Marshal(resp); marshalErr == nil {
-            s.cache.Set(cacheKey, respData)
-        }
+    // Cache store. #400: the successful response also lands in the semantic
+    // cache keyed by prompt embedding (miss path already embedded the prompt;
+    // the cache's embed cache dedupes the second lookup).
+    respData, marshalErr := json.Marshal(resp)
+    if s.cache != nil && cacheKey != "" && marshalErr == nil {
+        s.cache.Set(cacheKey, respData)
+    }
+    if s.semanticCache != nil && semanticPrompt != "" && marshalErr == nil {
+        s.semanticCache.Store(semanticPrompt, req.Model, respData)
     }
 
     w.Header().Set("Content-Type", "application/json")

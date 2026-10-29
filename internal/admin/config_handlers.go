@@ -1358,6 +1358,7 @@ type semanticCacheConfigResponse struct {
     MaxEntries          int     `json:"max_entries"`
     Provider            string  `json:"provider"`
     Endpoint            string  `json:"endpoint"`
+    Model               string  `json:"model"`
 }
 
 type semanticCacheConfigUpdate struct {
@@ -1366,6 +1367,7 @@ type semanticCacheConfigUpdate struct {
     MaxEntries          *int     `json:"max_entries,omitempty"`
     Provider            *string  `json:"provider,omitempty"`
     Endpoint            *string  `json:"endpoint,omitempty"`
+    Model               *string  `json:"model,omitempty"`
 }
 
 func (h *Handler) handleSemanticCacheConfig(w http.ResponseWriter, r *http.Request) {
@@ -1375,6 +1377,7 @@ func (h *Handler) handleSemanticCacheConfig(w http.ResponseWriter, r *http.Reque
         writeJSON(w, http.StatusOK, semanticCacheConfigResponse{
             Enabled: sc.Enabled, SimilarityThreshold: sc.SimilarityThreshold,
             MaxEntries: sc.MaxEntries, Provider: sc.Provider, Endpoint: sc.Endpoint,
+            Model: sc.Model,
         })
     case http.MethodPut:
         var req semanticCacheConfigUpdate
@@ -1391,6 +1394,7 @@ func (h *Handler) handleSemanticCacheConfig(w http.ResponseWriter, r *http.Reque
             applyInt(sec, "max_entries", req.MaxEntries)
             applyString(sec, "provider", req.Provider)
             applyString(sec, "endpoint", req.Endpoint)
+            applyString(sec, "model", req.Model)
             return nil
         }); if err != nil {
             writeYAMLError(w, err)
@@ -1401,6 +1405,7 @@ func (h *Handler) handleSemanticCacheConfig(w http.ResponseWriter, r *http.Reque
         writeJSON(w, http.StatusOK, semanticCacheConfigResponse{
             Enabled: getBool(sec, "enabled"), SimilarityThreshold: getFloat64(sec, "similarity_threshold"),
             MaxEntries: getInt(sec, "max_entries"), Provider: getString(sec, "provider"), Endpoint: getString(sec, "endpoint"),
+            Model: getString(sec, "model"),
         })
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")

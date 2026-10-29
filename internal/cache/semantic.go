@@ -1,9 +1,11 @@
 package cache
 
 // Semantic cache for v0.5.0 Task #70.
-// Current importers: internal/server/server.go constructs and closes the cache
-// but no request path calls Search/Store yet (#400), so enabling it in config
-// is a no-op — see the WARN in NewSemanticCache.
+// #400 wiring: internal/server/semantic_cache.go derives the EmbedFunc from
+// the adapter pool (semantic_cache.provider + semantic_cache.model), and the
+// non-stream chat path calls Search before the upstream fetch and Store after
+// a successful response. A nil EmbedFunc (incomplete config) disables the
+// cache with a WARN — see buildSemanticEmbedFn.
 // User instruction: "按照0.3.0, 0.4.0, 0.5.0顺序全面实施" — PLAN.md: "semantic cache, similarity threshold, local vector store".
 // Schema: SemanticEntry(embedding/response/model/timestamp), SemanticCache with cosine similarity search.
 // API: NewSemanticCache, Search, Store, Stats.
@@ -102,12 +104,11 @@ func NewSemanticCache(cfg config.SemanticCacheConfig, embedFn EmbedFunc) *Semant
         maxEntries = 5000
     }
     if embedFn == nil {
-        // #400: server.go always passes nil here, so this fires on every boot
-        // for anyone with semantic_cache.enabled: true. It is a config the
-        // operator deliberately set, not a runtime error — WARN keeps it
-        // visible (and still says the cache is off) without an ERROR line per
-        // boot that reads like a failure.
-        slog.Warn("semantic cache disabled: no embedding function is wired in this build; set semantic_cache.enabled: false to silence (see #400)")
+        // #400: a nil EmbedFunc means the provider/model config is incomplete
+        // (buildSemanticEmbedFn already logged the specific reason). The cache
+        // stays off — a config the operator deliberately set, not a runtime
+        // error, so WARN not ERROR.
+        slog.Warn("semantic cache disabled: no embedding function wired")
         return nil
     }
     sc := &SemanticCache{
