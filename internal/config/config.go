@@ -787,6 +787,9 @@ type SemanticCacheConfig struct {
     MaxEntries        int     `mapstructure:"max_entries"`
     Provider          string  `mapstructure:"provider"`
     Endpoint          string  `mapstructure:"endpoint"`
+    // #400: embedding model id sent to the provider's /v1/embeddings.
+    // Required when enabled — the semantic cache cannot embed without it.
+    Model             string  `mapstructure:"model"`
 }
 
 type PromptInjectionConfig struct {

@@ -628,7 +628,10 @@ func New(
         cloudStrategy:     cs,
         latencyTracker:    lt,
         store:             s,
-        semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, nil),
+        // #400: wire the embedding function from the adapter pool so an
+        // enabled semantic cache actually caches. nil (disabled) when the
+        // provider/model config is incomplete — NewSemanticCache WARNs.
+        semanticCache:     cache.NewSemanticCache(cfg.Config.SemanticCache, buildSemanticEmbedFn(cfg.Config.SemanticCache, pool)),
         otelShutdown:      otelShutdown,
         oidcAuth:          oidcAuth,
         adminAuth:         adminAuthObj,
