@@ -840,6 +840,18 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
             }
         }
     }
+    // Post-loop reclassification: on client cancel the ctx-watcher closes
+    // resp.Body and the upstream reader then closes ch. The hardened select
+    // may take the closed-channel case before <-ctx.Done() fires (Go picks
+    // randomly among ready cases), and the backward-compat loop has no
+    // ctx.Done() case at all — either way endReason is left at its default
+    // even though the stream ended because the client gave up. Reclassify so
+    // summaries report client_canceled. Only the default value is upgraded:
+    // write_failed (issue #79: cancel is a downstream consequence of a dead
+    // pipe) and watchdog_tripped (child-ctx cancel only) keep their labels.
+    if ctx.Err() != nil && endReason == "ch_closed_no_stop" {
+        endReason = "client_canceled"
+    }
     // Client cancelled mid-stream (context canceled): the upstream goroutine
     // closed the channel early, possibly with content blocks still open.
     // Emitting a terminal message_stop now would hand the SDK an unmatched
