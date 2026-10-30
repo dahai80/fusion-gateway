@@ -1757,6 +1757,14 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.91 — #419 废弃旧版 Dashboard/Logs/Analytics 管理页面
+
+| # | 条目 | 详情 |
+|---|------|------|
+| 1 | **移除旧版管理页面,路由重定向到 Insights** | Dashboard / Logs / Analytics 只读内存环形缓冲(重启即空,Redis store 下全部为空桩)且与 PG 持久化的 Insights 页面重复;Analytics 伪造百分位(`p50=avg`、`p95=avg*1.5`、`p99=avg*2`)且所有 trend 数组硬编码为空。页面与菜单项已移除;`/admin/` 与 `/admin/logs` 重定向到 `/admin/insights/explorer`,`/admin/analytics` 重定向到 `/admin/insights/latency`。`/admin/api/dashboard`、`/admin/api/logs*`、`/admin/api/analytics*` 接口保留可用。 |
+| 2 | **`handleAnalyticsOverview` 真实百分位** | 用最近秩法从采样延迟计算 p50/p95/p99(保证 `p50 <= p95 <= p99` 单调),替换伪造值;e2e spec 04 重写为断言重定向、侧边栏状态与旧接口可用性。 |
+| 3 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.91。 |
+
 ### v0.9.90 — #412 FUSION_CLIENT_KEY 后端密钥冲突、取消流 end_reason 竞态
 
 | # | 条目 | 说明 |

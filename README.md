@@ -2086,6 +2086,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.91 — #419 Legacy Dashboard/Logs/Analytics admin pages deprecated
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **Legacy admin pages removed, routes redirect to Insights** | Dashboard / Logs / Analytics read only the in-memory ring buffer (empty after restart, fully stubbed under the Redis store) and duplicated the PG-backed Insights pages; Analytics fabricated percentiles (`p50=avg`, `p95=avg*1.5`, `p99=avg*2`) and hardcoded every trend array empty. The pages and menu entries are gone; `/admin/` and `/admin/logs` redirect to `/admin/insights/explorer`, `/admin/analytics` to `/admin/insights/latency`. The `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*` endpoints remain available for API consumers. |
+| 2 | **Real percentiles in `handleAnalyticsOverview`** | Nearest-rank p50/p95/p99 computed from the sampled latencies (monotonic `p50 <= p95 <= p99`), replacing the fabricated values; e2e spec 04 rewritten to assert redirects, sidebar state and legacy API availability. |
+| 3 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.91. |
+
 ### v0.9.90 — #412 FUSION_CLIENT_KEY backend collision, canceled-stream end_reason race
 
 | # | Item | Details |
