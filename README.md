@@ -93,8 +93,8 @@ See `config.example.yaml` for full reference. Key settings:
 |-----|---------|-------------|
 | `server.port` | 11432 | Gateway listen port |
 | `server.auto_start.enabled` | true | Auto-start fusion-mlx on gateway startup |
-| `server.auto_start.command` | `~/claude-home/fusion-mlx/start.sh start` | Shell command to start local backend |
-| `server.auto_start.stop_cmd` | `~/claude-home/fusion-mlx/start.sh stop` | Shell command to stop local backend on shutdown |
+| `server.auto_start.command` | `~/fusion/fusion-mlx/start.sh start` | Shell command to start local backend |
+| `server.auto_start.stop_cmd` | `~/fusion/fusion-mlx/start.sh stop` | Shell command to stop local backend on shutdown |
 | `server.auto_start.wait_url` | `http://127.0.0.1:11434/health` | Health URL to poll after start |
 | `server.auto_start.wait_secs` | 120 | Max seconds to wait for health check |
 | `server.graceful_shutdown_timeout` | 30 | Seconds stop/restart waits for in-flight requests (SSE streams included) before forcing exit. Raise it above your longest generation: a window shorter than a live stream cuts it mid-response. `start.sh stop` waits this plus 15s. On timeout the gateway logs every request still running (method, path, trace id, age) |
@@ -1490,6 +1490,8 @@ semantic_cache:
 - Applies at boot — toggling via hot-reload requires a restart
 - Pluggable `EmbedFunc` — swap to any embedding API for similarity
 - 30-minute TTL, automatic expiry eviction
+- **Content-sensitive keying (#423)**: the cosine similarity runs on the USER payload embedding only; the system prompt (task instructions, JSON schema — identical across structured-output agent calls) is SHA-256-hashed and matched EXACTLY as a hit precondition. A near-identical payload under different task instructions is a miss, not a collision.
+- **Opt-out (#423)**: `X-Cache: no-store` (or `Cache-Control: no-store`) skips both lookup and store for that request — for clients whose correctness cannot tolerate a near-match replay.
 
 ## Prompt Injection Detection
 
@@ -2086,6 +2088,16 @@ config.example.yaml   Example configuration
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.9.93 — #423 Semantic cache content-sensitive keying + no-store opt-out
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **Content-sensitive keying** | The semantic cache embedded the full message text, so a structured-output agent's system prompt (task instructions + JSON schema, identical across calls) dominated the embedding: two different payloads under the same agent prompt scored 0.96 similarity and the second request replayed the first request's answer. The similarity check now runs on the USER payload embedding only (`system`/`developer` messages excluded); the system-prompt text is SHA-256-hashed and matched EXACTLY as a hit precondition (`SemanticEntry.SystemHash`). A near-identical payload under different task instructions is a miss. System-only requests skip the cache (nothing content-sensitive to key on). |
+| 2 | **Per-request opt-out** | `X-Cache: no-store` or `Cache-Control: no-store` on `/v1/chat/completions`, `/v1/completions` and `/v1/messages` bypasses the semantic cache for both lookup and store — for structured-output clients whose correctness cannot tolerate a near-match replay. Header parsing is case-insensitive; the decision is propagated to the non-stream handler via context. |
+| 3 | **Structured-output awareness** | Covered by item 1: the schema-bearing system prompt can no longer collide two different payloads — the hash precondition is exactly the structured-output-agent fix requested in the issue. |
+| 4 | **Stale `server.auto_start` paths** | `config.example.yaml`, README tables, runbook and config comments pointed at the removed `~/claude-home/fusion-mlx/start.sh`; updated to `~/fusion/fusion-mlx/start.sh`. |
+| 5 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.93. |
 
 ### v0.9.92 — #421 Persistent Dashboard (PG-backed) + upstream cached-token capture
 

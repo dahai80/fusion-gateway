@@ -250,6 +250,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         ctx = streamCtx
     }
 
+    // #423: propagate the no-store opt-out (X-Cache / Cache-Control) to the
+    // non-stream semantic-cache path, mirroring /v1/chat/completions.
+    if optsOutOfSemanticCache(r) {
+        ctx = withSemanticCacheOptOut(ctx)
+    }
+
     // H2 fix: the cloud provider may be wrapped by cloudTrackingProvider
     // (decorator that does NOT redeclare MessagesProvider). Resolve the
     // MessagesProvider assertion through the Unwrap chain so bedrock/vertex/

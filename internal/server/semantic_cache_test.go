@@ -168,7 +168,7 @@ func TestNonStreamChatSemanticMissServesEngine(t *testing.T) {
     // Orthogonal prompt (cosine 0 vs the stored (1,0,0)) must fall through to
     // the engine, not replay the stored entry.
     s, provider := newSemanticTestServer(t, testEmbedFn)
-    s.semanticCache.Store("different prompt", "test-model", mustMarshal(t, provider.chatResp))
+    s.semanticCache.Store("different prompt", "", "test-model", mustMarshal(t, provider.chatResp))
     rec := runNonStreamChat(t, s, provider, semanticChatRequest())
     if rec.Code != http.StatusOK {
         t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -194,29 +194,164 @@ func TestNonStreamChatSemanticSkipsTools(t *testing.T) {
 
 func TestSemanticCachePromptGates(t *testing.T) {
     s, _ := newSemanticTestServer(t, testEmbedFn)
-    if got := s.semanticCachePrompt(nil); got != "" {
-        t.Fatalf("nil request must skip, got %q", got)
+    if got := s.semanticCachePrompt(nil); got != (semanticCacheKey{}) {
+        t.Fatalf("nil request must skip, got %+v", got)
     }
-    if got := s.semanticCachePrompt(semanticChatRequest()); got == "" {
-        t.Fatal("plain text request must produce a prompt")
+    key := s.semanticCachePrompt(semanticChatRequest())
+    if key.Payload == "" {
+        t.Fatal("plain text request must produce a payload")
+    }
+    if key.SystemHash == "" {
+        t.Fatal("system-less request must still carry the empty-prompt hash")
     }
     toolReq := semanticChatRequest()
     toolReq.Tools = []any{map[string]any{"type": "function"}}
-    if got := s.semanticCachePrompt(toolReq); got != "" {
-        t.Fatalf("tool request must skip, got %q", got)
+    if got := s.semanticCachePrompt(toolReq); got != (semanticCacheKey{}) {
+        t.Fatalf("tool request must skip, got %+v", got)
     }
     imgReq := semanticChatRequest()
     imgReq.Messages[0].Content = []any{map[string]any{"type": "image_url", "image_url": map[string]any{"url": "x"}}}
-    if got := s.semanticCachePrompt(imgReq); got != "" {
-        t.Fatalf("image request must skip, got %q", got)
+    if got := s.semanticCachePrompt(imgReq); got != (semanticCacheKey{}) {
+        t.Fatalf("image request must skip, got %+v", got)
     }
     emptyReq := &adapter.ChatRequest{Model: "test-model"}
-    if got := s.semanticCachePrompt(emptyReq); got != "" {
-        t.Fatalf("empty text must skip, got %q", got)
+    if got := s.semanticCachePrompt(emptyReq); got != (semanticCacheKey{}) {
+        t.Fatalf("empty text must skip, got %+v", got)
     }
     s.semanticCache = nil
-    if got := s.semanticCachePrompt(semanticChatRequest()); got != "" {
+    if got := s.semanticCachePrompt(semanticChatRequest()); got != (semanticCacheKey{}) {
         t.Fatal("disabled cache must skip")
+    }
+}
+
+// TestSemanticCachePromptSystemExcluded (#423): the system/developer text
+// must land in SystemHash and NOT in the embedded payload — the original bug
+// had the (identical across agent calls) system prompt dominating the
+// embedding, so two different payloads under one agent prompt collided at
+// 0.96 similarity.
+func TestSemanticCachePromptSystemExcluded(t *testing.T) {
+    s, _ := newSemanticTestServer(t, testEmbedFn)
+    mkReq := func(system, payload string) *adapter.ChatRequest {
+        msgs := []adapter.ChatMessage{{Role: "user", Content: payload}}
+        if system != "" {
+            msgs = append([]adapter.ChatMessage{{Role: "system", Content: system}}, msgs...)
+        }
+        return &adapter.ChatRequest{Model: "test-model", Messages: msgs}
+    }
+    req := mkReq("You are a storyboard agent. Output strict JSON.", "hello essence serum storyboard")
+    key := s.semanticCachePrompt(req)
+    if key.Payload != "hello essence serum storyboard " {
+        t.Fatalf("payload must contain only the user text, got %q", key.Payload)
+    }
+    if key.SystemHash == "" {
+        t.Fatal("system text must produce a SystemHash")
+    }
+    // Same system, different payload: identical SystemHash, different payload.
+    key2 := s.semanticCachePrompt(mkReq("You are a storyboard agent. Output strict JSON.", "hello thermos cup storyboard"))
+    if key2.SystemHash != key.SystemHash {
+        t.Fatal("identical system prompts must hash identically")
+    }
+    if key2.Payload == key.Payload {
+        t.Fatal("different user payloads must not collide")
+    }
+    // Different system: different SystemHash, same payload.
+    key3 := s.semanticCachePrompt(mkReq("You are a translation agent.", "hello essence serum storyboard"))
+    if key3.SystemHash == key.SystemHash {
+        t.Fatal("different system prompts must hash differently")
+    }
+    if key3.Payload != key.Payload {
+        t.Fatal("same user payload must stay identical")
+    }
+}
+
+// TestOptsOutOfSemanticCache (#423 ask 2): X-Cache: no-store and
+// Cache-Control: no-store (case-insensitive) both opt out.
+func TestOptsOutOfSemanticCache(t *testing.T) {
+    if optsOutOfSemanticCache(nil) {
+        t.Fatal("nil request must not opt out")
+    }
+    plain := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    if optsOutOfSemanticCache(plain) {
+        t.Fatal("request without headers must not opt out")
+    }
+    xCache := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    xCache.Header.Set("X-Cache", "  no-store ")
+    if !optsOutOfSemanticCache(xCache) {
+        t.Fatal("X-Cache: no-store must opt out")
+    }
+    cc := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    cc.Header.Set("Cache-Control", "max-age=0, NO-STORE")
+    if !optsOutOfSemanticCache(cc) {
+        t.Fatal("Cache-Control containing no-store must opt out")
+    }
+    other := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+    other.Header.Set("X-Cache", "no-cache")
+    if optsOutOfSemanticCache(other) {
+        t.Fatal("X-Cache: no-cache must not opt out")
+    }
+}
+
+// TestNonStreamChatSemanticNoStoreBypass (#423 ask 2): an opted-out context
+// skips both Search and Store.
+func TestNonStreamChatSemanticNoStoreBypass(t *testing.T) {
+    s, provider := newSemanticTestServer(t, testEmbedFn)
+    ctx := withSemanticCacheOptOut(context.Background())
+    decision := &router.RouteDecision{Backend: router.LocalBackend, Reason: "mode_local"}
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 1000}
+    for i := 0; i < 2; i++ {
+        rec := httptest.NewRecorder()
+        s.handleNonStreamChat(ctx, rec, provider, semanticChatRequest(), decision, budget, time.Now(), "test")
+        if rec.Code != http.StatusOK {
+            t.Fatalf("call %d: expected 200, got %d: %s", i+1, rec.Code, rec.Body.String())
+        }
+        if got := rec.Header().Get("X-Semantic-Cache"); got != "" {
+            t.Fatalf("call %d: no-store request must never hit the semantic cache, got %q", i+1, got)
+        }
+    }
+    _, _, size := s.semanticCache.Stats()
+    if size != 0 {
+        t.Fatalf("no-store request must not be stored, size=%d", size)
+    }
+}
+
+// TestNonStreamChatSemanticSystemHashPrecondition (#423 ask 1): a stored
+// entry under system prompt A must NOT serve a near-identical payload sent
+// under system prompt B — the hash is an exact-match precondition.
+func TestNonStreamChatSemanticSystemHashPrecondition(t *testing.T) {
+    s, provider := newSemanticTestServer(t, testEmbedFn)
+    sysA := &adapter.ChatRequest{
+        Model: "test-model",
+        Messages: []adapter.ChatMessage{
+            {Role: "system", Content: "storyboard agent"},
+            {Role: "user", Content: "hello alpha"},
+        },
+    }
+    sysB := &adapter.ChatRequest{
+        Model: "test-model",
+        Messages: []adapter.ChatMessage{
+            {Role: "system", Content: "translation agent"},
+            {Role: "user", Content: "hello alpha"},
+        },
+    }
+    // Seed under system A (both prompts embed to (1,0,0): cosine 1.0).
+    rec := runNonStreamChat(t, s, provider, sysA)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("seed call: expected 200, got %d: %s", rec.Code, rec.Body.String())
+    }
+    // Same payload under system B: cosine would be 1.0, but the system hash
+    // must block the hit and serve from the engine instead.
+    rec = runNonStreamChat(t, s, provider, sysB)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("cross-system call: expected 200, got %d: %s", rec.Code, rec.Body.String())
+    }
+    if got := rec.Header().Get("X-Semantic-Cache"); got != "" {
+        t.Fatalf("different system prompt must not hit, got %q", got)
+    }
+    // Same payload under system A again: hit — the precondition is a filter,
+    // not a disabling.
+    rec = runNonStreamChat(t, s, provider, sysA)
+    if got := rec.Header().Get("X-Semantic-Cache"); got != "HIT" {
+        t.Fatalf("same system + same payload must hit, got %q", got)
     }
 }
 

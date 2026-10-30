@@ -17,8 +17,8 @@ func TestSemanticCache_EvictExpired_ManualRemoval(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("prompt1", "gpt-4", resp)
-    sc.Store("prompt2", "gpt-4", resp)
+    sc.Store("prompt1", "", "gpt-4", resp)
+    sc.Store("prompt2", "", "gpt-4", resp)
 
     sc.mu.Lock()
     now := time.Now()
@@ -53,7 +53,7 @@ func TestSemanticCache_EvictExpired_ExpiredEntries(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("old_prompt", "gpt-4", resp)
+    sc.Store("old_prompt", "", "gpt-4", resp)
 
     sc.mu.Lock()
     for el := sc.entries.Front(); el != nil; el = el.Next() {
@@ -94,7 +94,7 @@ func TestSemanticCache_Search_ExpiredEntry(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("expire_me", "gpt-4", resp)
+    sc.Store("expire_me", "", "gpt-4", resp)
 
     sc.mu.Lock()
     for el := sc.entries.Front(); el != nil; el = el.Next() {
@@ -102,7 +102,7 @@ func TestSemanticCache_Search_ExpiredEntry(t *testing.T) {
     }
     sc.mu.Unlock()
 
-    _, ok := sc.Search("expire_me", "gpt-4")
+    _, ok := sc.Search("expire_me", "", "gpt-4")
     if ok {
         t.Fatal("expected miss for expired semantic entry")
     }
@@ -122,9 +122,9 @@ func TestSemanticCache_Search_BelowThreshold(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("unique prompt text", "gpt-4", resp)
+    sc.Store("unique prompt text", "", "gpt-4", resp)
 
-    _, ok := sc.Search("completely different prompt", "gpt-4")
+    _, ok := sc.Search("completely different prompt", "", "gpt-4")
     if ok {
         t.Log("high threshold may still match identical-ish prompts")
     }
@@ -140,7 +140,7 @@ func TestSemanticCache_Store_EmbeddingError(t *testing.T) {
         MaxEntries:        100,
     }
     sc := NewSemanticCache(cfg, errFn)
-    sc.Store("test", "gpt-4", json.RawMessage(`{}`))
+    sc.Store("test", "", "gpt-4", json.RawMessage(`{}`))
 
     _, _, size := sc.Stats()
     if size != 0 {
@@ -157,9 +157,9 @@ func TestSemanticCache_MaxEntriesEviction_Order(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
     resp, _ := json.Marshal(map[string]string{"content": "r"})
 
-    sc.Store("first", "gpt-4", resp)
-    sc.Store("second", "gpt-4", resp)
-    sc.Store("third", "gpt-4", resp)
+    sc.Store("first", "", "gpt-4", resp)
+    sc.Store("second", "", "gpt-4", resp)
+    sc.Store("third", "", "gpt-4", resp)
 
     _, _, size := sc.Stats()
     if size != 2 {

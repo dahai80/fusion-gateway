@@ -40,9 +40,16 @@ type SemanticEntry struct {
     ID        string          `json:"id"`
     Embedding []float64       `json:"embedding"`
     Prompt    string          `json:"prompt"`
-    Response  json.RawMessage `json:"response"`
-    Model     string          `json:"model"`
-    Timestamp time.Time       `json:"timestamp"`
+    // SystemHash is the SHA-256 of the request's system-prompt text (#423).
+    // The similarity check runs on the USER payload embedding only; the
+    // system prompt (task instructions, JSON schema — identical across
+    // agent calls) is an exact-match precondition, not embedded. This stops
+    // the system prompt from dominating the embedding and letting two
+    // different payloads under the same agent prompt collide.
+    SystemHash string          `json:"system_hash"`
+    Response   json.RawMessage `json:"response"`
+    Model      string          `json:"model"`
+    Timestamp  time.Time       `json:"timestamp"`
 }
 
 type SemanticCache struct {
@@ -184,7 +191,7 @@ func (sc *SemanticCache) embeddingFor(prompt string) ([]float64, error) {
     return vec, nil
 }
 
-func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, bool) {
+func (sc *SemanticCache) Search(prompt string, systemHash string, model string) (json.RawMessage, bool) {
     if sc == nil {
         return nil, false
     }
@@ -201,9 +208,13 @@ func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, b
     // N7: scan the linked list front-to-back. O(n) is inherent to cosine
     // similarity (no ANN index); the list change only removes the O(n)
     // eviction copy, not the scan. Element.Value is *SemanticEntry.
+    // #423: the system-prompt hash is an exact-match precondition — the
+    // stored response was produced under those exact task instructions, so
+    // a hit under different instructions (even a similar payload) would
+    // answer the wrong task.
     for el := sc.entries.Front(); el != nil; el = el.Next() {
         e := el.Value.(*SemanticEntry)
-        if e.Model != model {
+        if e.Model != model || e.SystemHash != systemHash {
             continue
         }
         sim := cosineSimilarity(embedding, e.Embedding)
@@ -226,7 +237,7 @@ func (sc *SemanticCache) Search(prompt string, model string) (json.RawMessage, b
     return nil, false
 }
 
-func (sc *SemanticCache) Store(prompt string, model string, response json.RawMessage) {
+func (sc *SemanticCache) Store(prompt string, systemHash string, model string, response json.RawMessage) {
     if sc == nil {
         return
     }
@@ -249,12 +260,13 @@ func (sc *SemanticCache) Store(prompt string, model string, response json.RawMes
         }
     }
     entry := &SemanticEntry{
-        ID:        ComputeCacheKey(model, prompt, nil, nil, nil),
-        Embedding: embedding,
-        Prompt:    prompt,
-        Response:  response,
-        Model:     model,
-        Timestamp: time.Now(),
+        ID:         ComputeCacheKey(model, prompt, nil, nil, nil),
+        Embedding:  embedding,
+        Prompt:     prompt,
+        SystemHash: systemHash,
+        Response:   response,
+        Model:      model,
+        Timestamp:  time.Now(),
     }
     sc.entries.PushFront(entry)
     slog.Debug("semantic cache stored", "model", model, "prompt_len", len(prompt))

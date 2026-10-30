@@ -11,8 +11,8 @@ server:
                                           # /tmp/fusion-sv.sock present. Keep enabled for non-supervisor
                                           # hosts; the supervisor is authoritative on managed hosts.
         enabled: true
-        command: "~/claude-home/fusion-mlx/start.sh start"
-        stop_cmd: "~/claude-home/fusion-mlx/start.sh stop"
+        command: "~/fusion/fusion-mlx/start.sh start"
+        stop_cmd: "~/fusion/fusion-mlx/start.sh stop"
         wait_url: "http://127.0.0.1:11434/health"
         wait_secs: 120                    # Max seconds to wait for local backend health
 

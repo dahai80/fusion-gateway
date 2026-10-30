@@ -17,7 +17,7 @@ func TestSemanticCache_EvictExpired_KeepsFresh(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("fresh", "gpt-4", resp)
+    sc.Store("fresh", "", "gpt-4", resp)
 
     time.Sleep(100 * time.Millisecond)
 
@@ -55,7 +55,7 @@ func TestSemanticCache_EvictExpired_BackgroundTick(t *testing.T) {
     sc := NewSemanticCache(cfg, testEmbedFn)
 
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("prompt1", "gpt-4", resp)
+    sc.Store("prompt1", "", "gpt-4", resp)
 
     sc.mu.Lock()
     for el := sc.entries.Front(); el != nil; el = el.Next() {
