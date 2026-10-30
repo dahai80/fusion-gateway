@@ -244,16 +244,19 @@ backends:
         api_key_env: DEEPSEEK_API_KEY   # base_url + timeout auto-filled
 ```
 
-### Env key names and legacy aliases (#409)
+### Env key names and the mlx backend key (#412)
 
-The fusion-mlx backend key resolves from the **canonical `FUSION_CLIENT_KEY`**
-env (config-conventions §6 alias chain); the legacy `FUSION_MLX_API_KEY` name
-stays accepted as a transition alias until the 2027-01-01 ecosystem cleanup —
-the canonical name wins when both are set, and the #363 fail-loud contract
-(different values in env vs config.yaml → startup error) applies through
-either name. `api_key_env: FUSION_CLIENT_KEY` additionally falls back to the
-legacy alias at load time, so deployments exporting only the old name keep
-working (logged per hit).
+`FUSION_CLIENT_KEY` is the ecosystem **client** credential for calling the
+gateway (config-conventions §1) — it is ambient in every client shell and is
+**not** the gateway→fusion-mlx backend key. Only `FUSION_MLX_API_KEY` is
+viper-bound to `backends.fusion-mlx.api_key` and participates in the #363
+fail-loud contract (env value differing from config.yaml → startup error).
+An ambient `FUSION_CLIENT_KEY` never blocks startup and never overrides the
+config value; when it differs from the file key the gateway logs a WARN
+(prefix-only) and the file value wins. An explicit
+`api_key_env: FUSION_CLIENT_KEY` reference still resolves from that env
+(#409 acceptance); the legacy alias chain (`FUSION_API_KEY`, `MLX_API_KEY`)
+stays until the 2027-01-01 ecosystem cleanup.
 
 The union-web shell admin key (`web_shell.admin_key`) resolves from
 **`FG_SHELL_ADMIN_KEY`** (gateway-native `FG_` namespace, matching
@@ -2094,7 +2097,7 @@ config.example.yaml   Example configuration
 | 5 | **#404 shell health probes skip non-absolute URLs** | Manifests with a bare path (`/healthz`) were handed to `http.Get`, failed every pass with `unsupported protocol scheme`, and `RecordHealth(id, false)` marked the module offline forever for a defect in its manifest. Non-absolute URLs now skip the probe (heartbeat-derived status kept, one WARN per 5 minutes naming the field to fix). |
 | 6 | **#400 semantic cache wired end to end** | `NewSemanticCache` was always called with a nil `EmbedFunc`, so `semantic_cache.enabled` could never activate — every boot WARNed and every request took the full round trip. `buildSemanticEmbedFn` derives the embedder from the adapter pool (`semantic_cache.provider`, default fusion-mlx, + `semantic_cache.model`); non-stream chat Search runs after the exact-key cache and before the upstream fetch, and successful responses are Stored from every serve path. |
 | 7 | **#407 poisoned PG persist batches** | `json.Valid` accepts unpaired UTF-16 surrogate escapes that PostgreSQL jsonb rejects (SQLSTATE 22P05), so one such request body failed the whole `CopyFrom` payloads batch and the flush loop retried the same poisoned batch until the shutdown drain dropped every queued entry. `splitBody` now repairs surrogate-bearing JSON via a re-marshal that replaces unpaired surrogates with U+FFFD (UseNumber keeps numbers byte-exact; clean bodies pass through untouched), and a batch failure isolates per row: good rows commit, only the offending row is logged and dropped. |
-| 8 | **#409 legacy env key cleanup + start.sh port-registry self-check** | Canonical env keys are now `FUSION_CLIENT_KEY` (fusion-mlx backend key, config-conventions §6 alias chain) and `FG_SHELL_ADMIN_KEY` (`web_shell.admin_key`, gateway-native `FG_` namespace); the legacy names stay accepted as explicit, logged transition aliases until the 2027-01-01 cleanup — canonical wins when both are set and the #363 fail-loud contract applies through either name. `config.simple.yaml`/`config.example.yaml` no longer mention legacy tokens: fusion-gateway is clean in `check-env.py` normal and `--strict` runs. `start.sh start` self-checks the `fusion-gateway` entry in `architecture/port-registry.yaml` (exact own-block awk extraction — a flat grep window would match a sibling service's port line) and refuses to start on an unregistered port; missing registry file only warns, `FUSION_REGISTRY` overrides the path, `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests. |
+| 8 | **#409 legacy env key cleanup + start.sh port-registry self-check** | Canonical env keys are now `FG_SHELL_ADMIN_KEY` (`web_shell.admin_key`, gateway-native `FG_` namespace) with the legacy name bound as a logged transition alias until the 2027-01-01 cleanup. The #409 claim that `FUSION_CLIENT_KEY` is the canonical fusion-mlx backend key was wrong — it is the ecosystem client credential (config-conventions §1) — and was reverted by #412 in v0.9.90: only `FUSION_MLX_API_KEY` binds the mlx backend key. `config.simple.yaml`/`config.example.yaml` no longer mention legacy tokens: fusion-gateway is clean in `check-env.py` normal and `--strict` runs. `start.sh start` self-checks the `fusion-gateway` entry in `architecture/port-registry.yaml` (exact own-block awk extraction — a flat grep window would match a sibling service's port line) and refuses to start on an unregistered port; missing registry file only warns, `FUSION_REGISTRY` overrides the path, `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests. |
 | 9 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.89. |
 
 ### v0.9.88 — #394 cloud breaker open sent cloud-only models to local fusion-mlx

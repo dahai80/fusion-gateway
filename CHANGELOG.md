@@ -9,17 +9,36 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (FUSION_CLIENT_KEY is the client credential, not the mlx backend key, 2026-10-30) — #412
+
+- **`start.sh start` failed on every convention-compliant machine after
+  v0.9.89** — PR #410 had viper-bound the ambient ecosystem client key
+  (exported by every client shell per config-conventions §1) as the canonical
+  gateway→fusion-mlx backend key, so its value differing from
+  `backends.fusion-mlx.api_key` tripped the #363 fail-loud check and
+  `--check-config` exited non-zero (start.sh exit 78). The binding is now
+  **`FUSION_MLX_API_KEY` only** (the deliberate injection name carried by
+  `.env`); an ambient `FUSION_CLIENT_KEY` never blocks startup and never
+  overrides the file value — a mismatch logs a prefix-only WARN and the file
+  key wins. An explicit `api_key_env: FUSION_CLIENT_KEY` reference still
+  resolves from that env (#409 acceptance), the C1 placeholder exemption
+  covers both names (MLX name preferred), and the laya intent classifier no
+  longer falls back to `FUSION_CLIENT_KEY` as the mlx Bearer (it would have
+  sent the caller's gateway key to fusion-mlx). `config.simple.yaml` drops
+  the stale `api_key_env` reference. Live-verified: user-equivalent ambient
+  env boots clean with the WARN, chat 200, `/v1/models` lists local models.
+
 ### Fixed (legacy env key cleanup + port-registry self-check, 2026-10-30) — #409
 
 - **Legacy env key names in scanned files tripped `scripts/check-env.py` rule 2c**
   (2 warns for fusion-gateway, escalating to errors on 2027-01-01) — the
-  canonical fusion-mlx backend key is now **`FUSION_CLIENT_KEY`**
-  (config-conventions §6 alias chain; the pre-#409 names stay accepted as
-  transition aliases in the Go config layer until the 2027-01-01 cleanup,
-  canonical wins when both are set, #363 fail-loud applies through either
-  name), and the union-web shell admin key is now **`FG_SHELL_ADMIN_KEY`**
+  union-web shell admin key is now **`FG_SHELL_ADMIN_KEY`**
   (gateway-native `FG_` namespace, matching `FG_MANAGED_SETTINGS_PRIVATE_KEY`;
-  the legacy name stays bound as a transition alias). `config.simple.yaml`
+  the legacy name stays bound as a transition alias). The #409 claim that
+  `FUSION_CLIENT_KEY` is the canonical fusion-mlx backend key was wrong and
+  is superseded by #412 above; the pre-#409 mlx names stay accepted as
+  transition aliases in the Go config layer until the 2027-01-01 cleanup.
+  `config.simple.yaml`
   and `config.example.yaml` no longer mention legacy tokens; fusion-gateway
   is clean in both normal and `--strict` check-env runs.
 - **`start.sh` could launch the gateway on a port belonging to another
