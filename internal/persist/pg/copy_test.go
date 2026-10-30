@@ -203,3 +203,68 @@ func TestResolveRowID(t *testing.T) {
         t.Fatal("both non-UUID must mint a fresh uuid, not zero")
     }
 }
+
+// 2026-10-31: PostgreSQL jsonb also rejects the \u0000 escape with SQLSTATE
+// 22P05 "unsupported Unicode escape sequence" — the #407 surrogate repair did
+// not cover it (raw NUL bytes were handled, the escaped form was not), so
+// payload rows were still being dropped in production. splitBody must repair
+// the escape before COPY.
+func TestSplitBodyNulEscapeRepaired(t *testing.T) {
+    cases := []struct {
+        name string
+        body string
+    }{
+        {"nul escape in string", `{"content":"be\u0000fore"}`},
+        {"nul escape in key", `{"k\u0000ey":"v"}`},
+        {"nul escape nested", `{"nested":{"deep":["a\u0000b"],"n":1}}`},
+        {"nul escape plus surrogate", `{"a":"\ud800","b":"x\u0000y"}`},
+    }
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            j, r := splitBody([]byte(tc.body))
+            if j == nil || r != nil {
+                t.Fatalf("repairable JSON must stay on the jsonb path: j=%v r=%v", j, r)
+            }
+            cleaned, ok := j.([]byte)
+            if !ok {
+                t.Fatalf("jsonb value must be []byte, got %T", j)
+            }
+            if hasNulEscape(cleaned) {
+                t.Fatalf("repaired JSON still contains a \\u0000 escape: %s", cleaned)
+            }
+            if bytes.IndexByte(cleaned, 0x00) >= 0 {
+                t.Fatalf("repaired JSON must have no NUL bytes: %q", cleaned)
+            }
+            if !json.Valid(cleaned) {
+                t.Fatalf("repaired JSON is not valid: %s", cleaned)
+            }
+        })
+    }
+}
+
+func TestSplitBodyEscapedBackslashBeforeU0000Untouched(t *testing.T) {
+    // "\\u0000" is a literal backslash + "u0000" characters — valid JSON
+    // PostgreSQL accepts as-is. The repair (re-marshal) must preserve it.
+    body := []byte(`{"content":"literal \\u0000 stays"}`)
+    j, r := splitBody(body)
+    if j == nil || r != nil {
+        t.Fatalf("must stay on the jsonb path: j=%v r=%v", j, r)
+    }
+    cleaned := j.([]byte)
+    var v map[string]any
+    if err := json.Unmarshal(cleaned, &v); err != nil {
+        t.Fatalf("must unmarshal: %v", err)
+    }
+    if v["content"] != `literal \u0000 stays` {
+        t.Fatalf("literal backslash form must be preserved, got %q", v["content"])
+    }
+}
+
+func TestSanitizeJSONFastPathKeepsNulFreeBytes(t *testing.T) {
+    // No surrogate or NUL escape: bytes must pass through untouched.
+    body := []byte(`{"model":"m","u":"unit A test"}`)
+    cleaned, ok := sanitizeJSON(body)
+    if !ok || &cleaned[0] != &body[0] {
+        t.Fatalf("escape-free JSON must return the original slice: ok=%v", ok)
+    }
+}
