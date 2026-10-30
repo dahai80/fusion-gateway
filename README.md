@@ -2075,12 +2075,12 @@ config.example.yaml   Example configuration
 
 | Page | Description |
 |------|-------------|
-| Dashboard | Real-time overview: QPS, token usage, cost, local hit rate, route distribution |
 | API Keys | CRUD + quota management + budget limits + per-key usage analytics |
 | Channels | Backend provider management + health check + connectivity test |
-| Request Logs | Full request logs with routing reason, token counts, cost, latency |
-| Analytics | Token usage trends, cost tracking, model distribution, latency/error stats |
+| Insights | Seven PG-backed analytics pages: Latency (real percentiles + TTFT/TPOT), Compare, Explorer (request log search + payload view), Optimize, Anomalies, Reports, Capacity — sourced from the persisted `fg_*` tables, survives restarts |
 | Configuration | 24 config pages for all gateway settings (Server, Auth, Rate Limit, Retry, Cache, Cost, PII, Cloud Routing, Hardware, Tokenizer, Observability, CORS, Hot Reload, Cluster, Realtime, Admin, OIDC, RBAC, Semantic Cache, Prompt Injection, Batch, Store, Validation, Cost Markup, Negotiation) |
+
+> **Deprecated (v0.9.91)**: the legacy Dashboard / Logs / Analytics pages were removed — they read only the in-memory ring buffer (empty after restart) and duplicated Insights. Their routes redirect to Insights (`/admin/` and `/admin/logs` → `/admin/insights/explorer`, `/admin/analytics` → `/admin/insights/latency`); the `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*` endpoints remain available.
 
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
