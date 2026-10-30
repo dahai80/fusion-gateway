@@ -47,6 +47,17 @@ type bridgeToolCall struct {
 type bridgeUsage struct {
     PromptTokens     int `json:"prompt_tokens"`
     CompletionTokens int `json:"completion_tokens"`
+    // #421: OpenAI-style upstream prompt-cache hit tokens.
+    PromptTokensDetails *struct {
+        CachedTokens int `json:"cached_tokens"`
+    } `json:"prompt_tokens_details,omitempty"`
+}
+
+func (u *bridgeUsage) CachedTokenCount() int {
+    if u == nil || u.PromptTokensDetails == nil {
+        return 0
+    }
+    return u.PromptTokensDetails.CachedTokens
 }
 
 type bridgeChatChoice struct {
@@ -153,8 +164,9 @@ func openAICompletionToAnthropicMessage(raw []byte, status int) ([]byte, int) {
     }
     if cc.Usage != nil {
         resp.Usage = adapter.AnthropicUsage{
-            InputTokens:  cc.Usage.PromptTokens,
-            OutputTokens: cc.Usage.CompletionTokens,
+            InputTokens:          cc.Usage.PromptTokens,
+            OutputTokens:         cc.Usage.CompletionTokens,
+            CacheReadInputTokens: cc.Usage.CachedTokenCount(),
         }
     }
     // #363 F2: a 200 completion with zero content blocks (no reasoning, text,
@@ -277,6 +289,7 @@ type anthropicSSEBridge struct {
     stopReason string
     inTok      int
     outTok     int
+    cachedTok  int
     stopped    bool
     // #363 F2: errEmitted tracks whether an error event was forwarded (the
     // stream is then already terminal — no empty message may follow); sawContent
@@ -397,6 +410,9 @@ func (b *anthropicSSEBridge) handleFrame(frame string) {
     if cc.Usage != nil {
         b.inTok = cc.Usage.PromptTokens
         b.outTok = cc.Usage.CompletionTokens
+        if c := cc.Usage.CachedTokenCount(); c > b.cachedTok {
+            b.cachedTok = c
+        }
     }
     emitted := false
     for _, ch := range cc.Choices {
@@ -608,7 +624,7 @@ func (b *anthropicSSEBridge) finalizeMessage() {
         Type:         "message_delta",
         Delta:        delta,
         StopReason:   stop,
-        Usage:        &adapter.AnthropicUsage{InputTokens: b.inTok, OutputTokens: outTok},
+        Usage:        &adapter.AnthropicUsage{InputTokens: b.inTok, OutputTokens: outTok, CacheReadInputTokens: b.cachedTok},
         StopSequence: nil,
     })
     b.forward("event: message_delta\ndata: " + string(raw) + "\n\n")
@@ -620,8 +636,8 @@ func (b *anthropicSSEBridge) finalizeMessage() {
 // while converting frames (#351 follow-up): the caller stamps them onto the
 // request log after Finalize so bridge-path rows carry real prompt/completion
 // counts instead of the tokenizer estimate.
-func (b *anthropicSSEBridge) UsageTotals() (inputTokens, outputTokens int) {
-    return b.inTok, b.outTok
+func (b *anthropicSSEBridge) UsageTotals() (inputTokens, outputTokens, cachedTokens int) {
+    return b.inTok, b.outTok, b.cachedTok
 }
 
 func (b *anthropicSSEBridge) emitError(e *bridgeErrorBody) {

@@ -60,6 +60,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     // §15.2: four-track timeline overlay. Strict role — same cross-project
     // traffic aggregation as the other insights endpoints.
     mux.HandleFunc("/admin/api/insights/timeline", h.requireAdminRoleStrict(h.handleInsightsTimeline))
+    // #421: persistent Dashboard rollup (totals, cache hit rates, latency
+    // percentiles, top models/backends, trend). Same strict role + reasoning
+    // as the other insights endpoints.
+    mux.HandleFunc("/admin/api/insights/overview", h.requireAdminRoleStrict(h.handleInsightsOverview))
     mux.HandleFunc("/admin/api/insights/logs/search", h.requireAdminRoleStrict(h.handleInsightsLogSearch))
     mux.HandleFunc("/admin/api/insights/logs/", h.requireAdminRoleStrict(h.handleInsightsLogPayload))
     mux.HandleFunc("/admin/api/persistence/test", h.requireAdminRoleStrict(h.handlePersistenceTest))

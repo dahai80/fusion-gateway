@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Layout, Menu, Button, Typography, theme } from "antd";
 import client from "../api/client";
 import {
+    DashboardOutlined,
     KeyOutlined,
     CloudServerOutlined,
     FileTextOutlined,
@@ -38,11 +39,11 @@ import {
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
-// Legacy Dashboard/Logs/Analytics pages are deprecated — they read only the
-// in-memory ring (empty after restart) and duplicated PG-backed Insights.
-// Routes redirect: / -> insights/explorer, /logs -> insights/explorer,
-// /analytics -> insights/latency.
+// Legacy in-memory Logs/Analytics pages are deprecated — they read only the
+// in-memory ring (empty after restart). Their routes redirect into Insights.
+// The top-level Dashboard (#421) is the PG-backed persistent landing page.
 const menuItems = [
+    { key: "/admin/", icon: <DashboardOutlined />, label: "Dashboard" },
     { key: "/admin/keys", icon: <KeyOutlined />, label: "API Keys" },
     { key: "/admin/channels", icon: <CloudServerOutlined />, label: "Channels" },
     {

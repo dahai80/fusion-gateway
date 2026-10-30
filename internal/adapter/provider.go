@@ -301,6 +301,23 @@ type UsageResponse struct {
     PromptTokens     int `json:"prompt_tokens"`
     CompletionTokens int `json:"completion_tokens"`
     TotalTokens      int `json:"total_tokens"`
+    // PromptTokensDetails captures OpenAI-style usage.prompt_tokens_details,
+    // most importantly cached_tokens — upstream KV/prompt cache hits (#421).
+    PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type PromptTokensDetails struct {
+    CachedTokens int `json:"cached_tokens"`
+}
+
+// CachedTokenCount returns upstream prompt-cache hit tokens across both
+// wire conventions: OpenAI prompt_tokens_details.cached_tokens and (via the
+// Anthropic adapter mapping) cache_read_input_tokens.
+func (u *UsageResponse) CachedTokenCount() int {
+    if u == nil || u.PromptTokensDetails == nil {
+        return 0
+    }
+    return u.PromptTokensDetails.CachedTokens
 }
 
 type EmbeddingRequest struct {

@@ -384,6 +384,10 @@ func (s *Server) Cache() *cache.Cache {
     return s.cache
 }
 
+func (s *Server) SemanticCache() *cache.SemanticCache {
+    return s.semanticCache
+}
+
 func (s *Server) checkBackendAccess(w http.ResponseWriter, r *http.Request, backend string) bool {
     if !middleware.CheckBackendAccess(r, backend) {
         slog.Warn("backend access denied", "backend", backend)

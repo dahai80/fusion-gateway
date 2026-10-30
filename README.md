@@ -2075,16 +2075,26 @@ config.example.yaml   Example configuration
 
 | Page | Description |
 |------|-------------|
+| Dashboard | PG-backed persistent landing page (#421): request volume + success rate, input/output/cached tokens, prompt-cache and gateway-cache hit rates, cost + local savings, duration/TTFT percentiles, top models/backends, trend chart — reads `/admin/api/insights/overview`, survives restarts |
 | API Keys | CRUD + quota management + budget limits + per-key usage analytics |
 | Channels | Backend provider management + health check + connectivity test |
 | Insights | Seven PG-backed analytics pages: Latency (real percentiles + TTFT/TPOT), Compare, Explorer (request log search + payload view), Optimize, Anomalies, Reports, Capacity — sourced from the persisted `fg_*` tables, survives restarts |
 | Configuration | 24 config pages for all gateway settings (Server, Auth, Rate Limit, Retry, Cache, Cost, PII, Cloud Routing, Hardware, Tokenizer, Observability, CORS, Hot Reload, Cluster, Realtime, Admin, OIDC, RBAC, Semantic Cache, Prompt Injection, Batch, Store, Validation, Cost Markup, Negotiation) |
 
-> **Deprecated (v0.9.91)**: the legacy Dashboard / Logs / Analytics pages were removed — they read only the in-memory ring buffer (empty after restart) and duplicated Insights. Their routes redirect to Insights (`/admin/` and `/admin/logs` → `/admin/insights/explorer`, `/admin/analytics` → `/admin/insights/latency`); the `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*` endpoints remain available.
+> **Deprecated (v0.9.91)**: the legacy Dashboard / Logs / Analytics pages were removed — they read only the in-memory ring buffer (empty after restart) and duplicated Insights. `/admin/logs` redirects to `/admin/insights/explorer` and `/admin/analytics` to `/admin/insights/latency`; `/admin/` itself is now the persistent Dashboard (#421). The `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*` endpoints remain available.
 
 **Differentiator**: The only AI gateway with **hardware-aware routing visualization** and **local inference savings tracking**.
 
 ## Audit Fixes
+
+### v0.9.92 — #421 Persistent Dashboard (PG-backed) + upstream cached-token capture
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **Persistent Dashboard with a top-level menu entry** | The admin console regains a "Dashboard" landing page — but backed by PostgreSQL instead of the removed in-memory ring. `/admin/api/insights/overview` (strict admin role) rolls up a time window (24h/3d/7d/30d, minute/hour/day granularity): request volume + success rate, input/output/cached/total tokens, cost + local savings, duration and TTFT p50/p95/p99 (`percentile_cont`), top-10 models and backends, and a requests/tokens trend series. The page is the `/admin/` index route and a top-level sidebar entry. |
+| 2 | **Upstream prompt-cache tokens captured end-to-end** | OpenAI `usage.prompt_tokens_details.cached_tokens` and Anthropic `usage.cache_read_input_tokens` now flow through the adapters into `RequestLog.CachedTokens` and a new `fg_request_logs.cached_tokens` column (additive `ALTER TABLE ... IF NOT EXISTS`). Streaming paths track the max reported cumulative value (providers report running totals, not deltas), and the OpenAI→Anthropic response bridge carries cached tokens through `UsageTotals`. The Dashboard shows the prompt-cache hit rate as cached ÷ input tokens. |
+| 3 | **Gateway cache hit rates persisted** | A new `fg_cache_stats` table (PK `(ts, cache)`) receives 30s cumulative-counter snapshots of the response and semantic caches via a `lifecycle.Worker` sampler (joined by `Sink.Close`, best-effort WARN-on-fail like the hw sampler). The overview derives per-window deltas from the first/last sample; a counter wrap (gateway restart mid-window) falls back to the last sample as baseline so only the pre-restart part of the window is lost. |
+| 4 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.92. |
 
 ### v0.9.91 — #419 Legacy Dashboard/Logs/Analytics admin pages deprecated
 

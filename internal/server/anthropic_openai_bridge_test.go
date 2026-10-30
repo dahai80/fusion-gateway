@@ -378,16 +378,22 @@ func TestNonStreamBridgeWriter_CapturesAndConverts(t *testing.T) {
 func TestSSEBridge_UsageTotals(t *testing.T) {
     inner := httptest.NewRecorder()
     b := newAnthropicSSEBridge(inner)
-    if in, out := b.UsageTotals(); in != 0 || out != 0 {
-        t.Fatalf("fresh bridge usage = %d/%d, want 0/0", in, out)
+    if in, out, cached := b.UsageTotals(); in != 0 || out != 0 || cached != 0 {
+        t.Fatalf("fresh bridge usage = %d/%d/%d, want 0/0/0", in, out, cached)
     }
     b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
     b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
     b.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":3}}\n\n"))
     b.Write([]byte("data: [DONE]\n\n"))
-    in, out := b.UsageTotals()
+    in, out, _ := b.UsageTotals()
     if in != 30 || out != 3 {
         t.Fatalf("bridge usage = %d/%d, want 30/3", in, out)
+    }
+    // #421: upstream cached prompt tokens surface via the third return value.
+    b2 := newAnthropicSSEBridge(httptest.NewRecorder())
+    b2.Write([]byte("data: {\"id\":\"c2\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":12}}}\n\n"))
+    if _, _, c2 := b2.UsageTotals(); c2 != 12 {
+        t.Fatalf("bridge cached tokens = %d, want 12", c2)
     }
 }
 

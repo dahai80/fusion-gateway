@@ -41,6 +41,10 @@ type RequestLog struct {
     InputTokens  int `json:"input_tokens"`
     OutputTokens int `json:"output_tokens"`
     TotalTokens  int `json:"total_tokens"`
+    // CachedTokens (#421) carries upstream prompt-cache hit tokens
+    // (OpenAI prompt_tokens_details.cached_tokens / Anthropic
+    // cache_read_input_tokens). Zero when the backend reports none.
+    CachedTokens int `json:"cached_tokens,omitempty"`
 
     Cost         float64 `json:"cost"`
     CostUSD      float64 `json:"cost_usd"`

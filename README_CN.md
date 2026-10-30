@@ -1746,16 +1746,26 @@ config.example.yaml   示例配置
 
 | 页面 | 说明 |
 |------|-------------|
+| Dashboard | PG 持久化落地页 (#421):请求量 + 成功率、输入/输出/缓存 token、prompt-cache 与网关缓存命中率、成本 + 本地节省、duration/TTFT 百分位、Top 模型/后端、趋势图 — 读 `/admin/api/insights/overview`,重启不丢 |
 | API Keys | CRUD + 配额管理 + 预算上限 + 按 key 用量分析 |
 | Channels | 后端 provider 管理 + 健康检查 + 连通性测试 |
 | Insights | 七个 PG 持久化分析页面:Latency(真实百分位 + TTFT/TPOT)、Compare、Explorer(请求日志检索 + payload 查看)、Optimize、Anomalies、Reports、Capacity — 数据来自持久化的 `fg_*` 表,重启不丢 |
 | Configuration | 全部网关设置的 24 个配置页面 (Server、Auth、Rate Limit、Retry、Cache、Cost、PII、Cloud Routing、Hardware、Tokenizer、Observability、CORS、Hot Reload、Cluster、Realtime、Admin、OIDC、RBAC、Semantic Cache、Prompt Injection、Batch、Store、Validation、Cost Markup、Negotiation) |
 
-> **已废弃 (v0.9.91)**:旧版 Dashboard / Logs / Analytics 页面已移除 — 它们只读内存环形缓冲(重启即空)且与 Insights 重复。路由重定向到 Insights(`/admin/` 与 `/admin/logs` → `/admin/insights/explorer`,`/admin/analytics` → `/admin/insights/latency`);`/admin/api/dashboard`、`/admin/api/logs*`、`/admin/api/analytics*` 接口保留可用。
+> **已废弃 (v0.9.91)**:旧版 Dashboard / Logs / Analytics 页面已移除 — 它们只读内存环形缓冲(重启即空)且与 Insights 重复。`/admin/logs` 重定向到 `/admin/insights/explorer`,`/admin/analytics` 重定向到 `/admin/insights/latency`;`/admin/` 本身现在是持久化 Dashboard (#421)。`/admin/api/dashboard`、`/admin/api/logs*`、`/admin/api/analytics*` 接口保留可用。
 
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 
 ## 审计修复记录
+
+### v0.9.92 — #421 持久化 Dashboard(PG 后端)+ 上游缓存 token 捕获
+
+| # | 条目 | 详情 |
+|---|------|------|
+| 1 | **持久化 Dashboard 恢复顶级菜单项** | 管理后台重新拥有 "Dashboard" 落地页 — 但数据来自 PostgreSQL 而非已移除的内存环形缓冲。`/admin/api/insights/overview`(严格 admin 角色)聚合时间窗口(24h/3d/7d/30d,minute/hour/day 粒度):请求量 + 成功率、输入/输出/缓存/总 token、成本 + 本地节省、duration 与 TTFT p50/p95/p99(`percentile_cont`)、Top-10 模型与后端、请求/token 趋势序列。该页面是 `/admin/` index 路由 + 顶级侧边栏菜单项。 |
+| 2 | **上游 prompt-cache token 端到端捕获** | OpenAI `usage.prompt_tokens_details.cached_tokens` 与 Anthropic `usage.cache_read_input_tokens` 现在经适配器流入 `RequestLog.CachedTokens` 与新列 `fg_request_logs.cached_tokens`(增量式 `ALTER TABLE ... IF NOT EXISTS`)。流式路径按上报累计值取 max(provider 上报的是累计值而非增量),OpenAI→Anthropic 响应桥经 `UsageTotals` 透传缓存 token。Dashboard 以 缓存 ÷ 输入 token 展示 prompt-cache 命中率。 |
+| 3 | **网关缓存命中率持久化** | 新表 `fg_cache_stats`(主键 `(ts, cache)`)每 30s 接收 response 与 semantic 缓存的累计计数快照,由 `lifecycle.Worker` 采样器写入(`Sink.Close` join,失败 WARN 尽力而为,同 hw 采样器)。overview 从窗口内首/末样本推导窗口增量;计数回绕(窗口内网关重启)以末样本为基线,只丢重启前那段窗口。 |
+| 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.92。 |
 
 ### v0.9.91 — #419 废弃旧版 Dashboard/Logs/Analytics 管理页面
 

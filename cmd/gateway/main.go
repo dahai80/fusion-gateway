@@ -56,6 +56,21 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
+// cacheCounterSources projects the server's live caches into #421 sampler
+// sources. A disabled cache yields a nil snapshot and is skipped per tick.
+func cacheCounterSources(srv *server.Server) []func() *pg.CacheCounterSnapshot {
+	return []func() *pg.CacheCounterSnapshot{
+		func() *pg.CacheCounterSnapshot {
+			hits, misses, size := srv.Cache().Stats()
+			return &pg.CacheCounterSnapshot{Name: "response", Hits: hits, Misses: misses, Size: int64(size)}
+		},
+		func() *pg.CacheCounterSnapshot {
+			hits, misses, size := srv.SemanticCache().Stats()
+			return &pg.CacheCounterSnapshot{Name: "semantic", Hits: hits, Misses: misses, Size: int64(size)}
+		},
+	}
+}
+
 // defaultShutdownDrainTimeout is the historical hardcoded drain window, kept
 // as the fallback when server.graceful_shutdown_timeout is unset or <= 0.
 const defaultShutdownDrainTimeout = 30 * time.Second
@@ -501,6 +516,10 @@ func run(configPath string) error {
 		// P3b (plan §15.4): 30s hardware snapshots into fg_hw_samples, and
 		// the gateway lifecycle stamp into fg_gateway_events.
 		sink.StartHWSampler(context.Background(), hwCollector.Latest)
+		// #421: 30s cumulative-counter snapshots of the gateway caches
+		// (response + semantic) into fg_cache_stats — the Dashboard derives
+		// hit rates that survive restarts from them.
+		sink.StartCacheSampler(context.Background(), cacheCounterSources(srv))
 		sink.RecordEvent("info", "gateway_started", map[string]any{
 			"version": version, "commit": commit,
 		})
