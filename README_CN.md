@@ -1746,12 +1746,12 @@ config.example.yaml   示例配置
 
 | 页面 | 说明 |
 |------|-------------|
-| Dashboard | 实时概览:QPS、token 用量、成本、本地命中率、路由分布 |
 | API Keys | CRUD + 配额管理 + 预算上限 + 按 key 用量分析 |
 | Channels | 后端 provider 管理 + 健康检查 + 连通性测试 |
-| Request Logs | 完整请求日志,含路由原因、token 数、成本、延迟 |
-| Analytics | token 用量趋势、成本跟踪、模型分布、延迟/错误统计 |
+| Insights | 七个 PG 持久化分析页面:Latency(真实百分位 + TTFT/TPOT)、Compare、Explorer(请求日志检索 + payload 查看)、Optimize、Anomalies、Reports、Capacity — 数据来自持久化的 `fg_*` 表,重启不丢 |
 | Configuration | 全部网关设置的 24 个配置页面 (Server、Auth、Rate Limit、Retry、Cache、Cost、PII、Cloud Routing、Hardware、Tokenizer、Observability、CORS、Hot Reload、Cluster、Realtime、Admin、OIDC、RBAC、Semantic Cache、Prompt Injection、Batch、Store、Validation、Cost Markup、Negotiation) |
+
+> **已废弃 (v0.9.91)**:旧版 Dashboard / Logs / Analytics 页面已移除 — 它们只读内存环形缓冲(重启即空)且与 Insights 重复。路由重定向到 Insights(`/admin/` 与 `/admin/logs` → `/admin/insights/explorer`,`/admin/analytics` → `/admin/insights/latency`);`/admin/api/dashboard`、`/admin/api/logs*`、`/admin/api/analytics*` 接口保留可用。
 
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 

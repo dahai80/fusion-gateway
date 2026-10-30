@@ -2,11 +2,8 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ConfigProvider } from "antd";
 import AppLayout from "./components/AppLayout";
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
 import Keys from "./pages/Keys";
 import Channels from "./pages/Channels";
-import Logs from "./pages/Logs";
-import Analytics from "./pages/Analytics";
 import ServerConfig from "./pages/config/ServerConfig";
 import AuthConfig from "./pages/config/AuthConfig";
 import RateLimitConfig from "./pages/config/RateLimitConfig";
@@ -68,11 +65,13 @@ export default function App() {
                             </PrivateRoute>
                         }
                     >
-                        <Route index element={<Dashboard />} />
+                        {/* Legacy Dashboard/Logs/Analytics deprecated in favor of
+                            PG-backed Insights; routes kept as redirects. */}
+                        <Route index element={<Navigate to="/admin/insights/explorer" replace />} />
                         <Route path="keys" element={<Keys />} />
                         <Route path="channels" element={<Channels />} />
-                        <Route path="logs" element={<Logs />} />
-                        <Route path="analytics" element={<Analytics />} />
+                        <Route path="logs" element={<Navigate to="/admin/insights/explorer" replace />} />
+                        <Route path="analytics" element={<Navigate to="/admin/insights/latency" replace />} />
                         <Route path="insights/latency" element={<Latency />} />
                         <Route path="insights/compare" element={<Compare />} />
                         <Route path="insights/explorer" element={<Explorer />} />

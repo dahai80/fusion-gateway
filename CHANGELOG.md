@@ -9,6 +9,22 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Changed (deprecate legacy Dashboard/Logs/Analytics admin pages) — #419
+
+- **Removed the legacy Dashboard / Logs / Analytics admin pages** — they read
+  only the in-memory ring buffer (empty after restart, fully stubbed under the
+  Redis store) and duplicated the PG-backed Insights pages. Legacy routes now
+  redirect: `/admin/` and `/admin/logs` → `/admin/insights/explorer`,
+  `/admin/analytics` → `/admin/insights/latency`. The
+  `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*`
+  endpoints remain available for API consumers.
+- **`handleAnalyticsOverview` no longer fabricates percentiles** —
+  `p50_ms` was `avg`, `p95_ms` was `avg*1.5` and `p99_ms` was `avg*2`;
+  they are now real nearest-rank percentiles computed from the sampled
+  latencies (monotonic `p50 <= p95 <= p99`).
+- e2e spec `04-dashboard-analytics.spec.js` rewritten to assert the
+  redirects and that the legacy APIs keep answering.
+
 ### Fixed (FUSION_CLIENT_KEY is the client credential, not the mlx backend key, 2026-10-30) — #412
 
 - **`start.sh start` failed on every convention-compliant machine after

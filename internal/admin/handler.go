@@ -9,6 +9,7 @@ import (
     "log/slog"
     "net/http"
     "os"
+    "sort"
     "strconv"
     "strings"
     "sync"
@@ -669,6 +670,7 @@ func (h *Handler) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request
     var errorCount int
     modelCounts := make(map[string]int)
     errCodes := make(map[int]int)
+    latencies := make([]float64, 0, len(logs))
 
     for _, l := range logs {
         totalPrompt += int64(l.InputTokens)
@@ -684,11 +686,13 @@ func (h *Handler) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request
             modelCounts[l.Model]++
         }
         totalLatencyMs += l.Latency
+        latencies = append(latencies, l.Latency)
         if l.StatusCode >= 400 {
             errorCount++
             errCodes[l.StatusCode]++
         }
     }
+    slog.Info("analytics overview computed", "samples", len(logs), "errors", errorCount)
 
     var avgTokens float64
     if len(logs) > 0 {
@@ -749,9 +753,9 @@ func (h *Handler) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request
         "latency": map[string]interface{}{
             "summary": map[string]interface{}{
                 "avg_ms": avgLatency,
-                "p50_ms": avgLatency,
-                "p95_ms": avgLatency * 1.5,
-                "p99_ms": avgLatency * 2,
+                "p50_ms": percentile(latencies, 50),
+                "p95_ms": percentile(latencies, 95),
+                "p99_ms": percentile(latencies, 99),
             },
             "trend": []interface{}{},
         },
@@ -765,6 +769,25 @@ func (h *Handler) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request
         },
     }
     writeJSON(w, http.StatusOK, result)
+}
+
+// percentile returns the nearest-rank percentile of samples, or 0 when empty.
+// Replaces the pre-v0.9.91 fabricated avg*1.5/avg*2 values in the analytics
+// latency summary.
+func percentile(samples []float64, pct float64) float64 {
+    if len(samples) == 0 {
+        return 0
+    }
+    sorted := append([]float64(nil), samples...)
+    sort.Float64s(sorted)
+    rank := int(float64(len(sorted))*pct/100 + 0.5)
+    if rank < 1 {
+        rank = 1
+    }
+    if rank > len(sorted) {
+        rank = len(sorted)
+    }
+    return sorted[rank-1]
 }
 
 func (h *Handler) handleTokenStats(w http.ResponseWriter, r *http.Request) {

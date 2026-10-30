@@ -1781,6 +1781,28 @@ func TestAnalyticsOverview_TimeRangeParams(t *testing.T) {
     }
 }
 
+func TestPercentile(t *testing.T) {
+    t.Parallel()
+
+    if got := percentile(nil, 95); got != 0 {
+        t.Fatalf("empty samples: expected 0, got %v", got)
+    }
+    samples := []float64{100, 10, 40, 20, 30}
+    if got := percentile(samples, 50); got != 30 {
+        t.Fatalf("p50: expected 30, got %v", got)
+    }
+    if got := percentile(samples, 95); got != 100 {
+        t.Fatalf("p95: expected 100, got %v", got)
+    }
+    if got := percentile(samples, 99); got != 100 {
+        t.Fatalf("p99: expected 100, got %v", got)
+    }
+    // monotonic: p50 <= p95 <= p99 for any input
+    if p50, p95, p99 := percentile(samples, 50), percentile(samples, 95), percentile(samples, 99); !(p50 <= p95 && p95 <= p99) {
+        t.Fatalf("expected p50<=p95<=p99, got %v/%v/%v", p50, p95, p99)
+    }
+}
+
 func TestHandleTokenStats(t *testing.T) {
     t.Parallel()
 
