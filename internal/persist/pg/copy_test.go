@@ -153,6 +153,44 @@ func TestSplitBodyInvalidUTF8Repaired(t *testing.T) {
     }
 }
 
+// 2026-10-30 follow-up: NUL (0x00) is valid UTF-8, so the ToValidUTF8 repair
+// leaves it alone — but PostgreSQL text/jsonb columns still reject embedded
+// NUL with the same SQLSTATE 22021. splitBody must replace it too.
+func TestSplitBodyNULReplaced(t *testing.T) {
+    // raw text path: SSE frame with embedded NUL bytes
+    raw := []byte("data: {\"delta\":\"au\x00di\x00o\"}\n\n")
+    j, r := splitBody(raw)
+    if j != nil || r == nil {
+        t.Fatalf("NUL-bearing raw must stay on the raw path: j=%v r=%v", j, r)
+    }
+    s, ok := r.(string)
+    if !ok {
+        t.Fatalf("raw value must be string, got %T", r)
+    }
+    if bytes.IndexByte([]byte(s), 0x00) >= 0 {
+        t.Fatalf("raw value must have no NUL bytes, got %q", s)
+    }
+    if !bytes.HasPrefix([]byte(s), []byte("data: {\"delta\":\"au")) {
+        t.Fatalf("repair must preserve surrounding content, got %q", s)
+    }
+
+    // json path: raw NUL inside a JSON string fails json.Valid, but the NUL
+    // repair runs first — the replaced body is valid JSON and takes the
+    // jsonb path, with no NUL byte surviving.
+    jsonBody := []byte("{\"content\":\"ok\x00done\"}")
+    j, r = splitBody(jsonBody)
+    if j == nil || r != nil {
+        t.Fatalf("NUL-repaired body must land on the jsonb path: j=%v r=%v", j, r)
+    }
+    cleaned, ok := j.([]byte)
+    if !ok {
+        t.Fatalf("jsonb value must be []byte, got %T", j)
+    }
+    if bytes.IndexByte(cleaned, 0x00) >= 0 {
+        t.Fatalf("repaired JSON must have no NUL bytes, got %q", cleaned)
+    }
+}
+
 func TestResolveRowID(t *testing.T) {
     e := &persist.Entry{Log: store.RequestLog{ID: "log-42"}}
     e.Log.RequestID = "0f0e0d0c-1a2b-3c4d-5e6f-7a8b9c0d1e2f"
