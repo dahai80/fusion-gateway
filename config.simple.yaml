@@ -20,13 +20,13 @@ auth:
 
 backends:
     # Local engine. base_url explicit because it is deployment-specific.
-    # api_key_env uses the canonical ecosystem key name (config-conventions
-    # §6); the pre-#409 legacy name stays accepted as an env alias in Go
-    # (internal/config/models_config.go) until the 2027-01-01 cleanup.
+    # The key arrives via the mlx backend key env binding (bindSecretEnv).
+    # FUSION_CLIENT_KEY is the ecosystem CLIENT credential for calling the
+    # gateway, not the gateway->mlx key (#412). Set api_key: or
+    # api_key_env: <NAME> here to use an explicit source instead.
     fusion-mlx:
         type: openai
         base_url: http://127.0.0.1:11434
-        api_key_env: FUSION_CLIENT_KEY
     # Cloud example: base_url + timeout come from the vendor table.
     deepseek:
         type: deepseek

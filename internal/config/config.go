@@ -1372,10 +1372,15 @@ func bindSecretEnv(v *viper.Viper) {
     // explicit env lets an operator inject the real upstream key without
     // writing it into config.yaml, and the validate C1 check skips the
     // placeholder refusal for a key that arrived via this env (env = operator
-    // explicitly provided, not a shipped template stub). FUSION_CLIENT_KEY is
-    // the canonical name (config-conventions §6); FUSION_MLX_API_KEY stays as
-    // a transition alias until 2027-01-01 (viper checks names in order).
-    v.BindEnv("backends.fusion-mlx.api_key", "FUSION_CLIENT_KEY", "FUSION_MLX_API_KEY")
+    // explicitly provided, not a shipped template stub). #412: only the
+    // deliberate injection name FUSION_MLX_API_KEY is bound. FUSION_CLIENT_KEY
+    // is the ecosystem gateway CLIENT credential (config-conventions §1),
+    // ambient in every client shell — binding it here let an ambient client
+    // key clobber the mlx backend key or, through the #363 check, hard-fail
+    // start.sh on convention-compliant machines. FUSION_CLIENT_KEY still
+    // reaches the backend key only via an explicit api_key_env reference
+    // (normalizeBackends), which is what the shipped configs use.
+    v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
     // web_shell.admin_key (#243) — the module self-registration credential.
     // Env precedence keeps the admin-plane secret out of config.yaml.
     // FG_SHELL_ADMIN_KEY is the gateway-native canonical name; the legacy
@@ -1392,9 +1397,9 @@ func bindSecretEnv(v *viper.Viper) {
 
 // fileValueForKey (#363 F1) reads a key's value straight from the config file
 // with a fresh viper instance that has NO env bindings. The main Load/Reload
-// viper has backends.fusion-mlx.api_key bound to the key env (canonical
-// FUSION_CLIENT_KEY, legacy alias per #409), so a Get
-// through it can never reveal what the file actually says — this helper can.
+// viper has backends.fusion-mlx.api_key bound to FUSION_MLX_API_KEY (#412:
+// the deliberate injection name only), so a Get through it can never reveal
+// what the file actually says — this helper can.
 func fileValueForKey(path, key string) (string, bool) {
     fv := viper.New()
     fv.SetConfigFile(path)
@@ -1413,41 +1418,52 @@ func fileValueForKey(path, key string) (string, bool) {
     return val, true
 }
 
-// fusionMLXEnvKey (#409) resolves the fusion-mlx backend key env canonically:
-// FUSION_CLIENT_KEY first, legacy FUSION_MLX_API_KEY as the transition alias
-// (config-conventions §6 alias chain — check-env rule 2c escalates the legacy
-// name to an error on 2027-01-01). Returns the value and the env name it came
-// from ("" when both are unset).
-func fusionMLXEnvKey() (string, string) {
-    if v := os.Getenv("FUSION_CLIENT_KEY"); v != "" {
-        return v, "FUSION_CLIENT_KEY"
-    }
-    if v := os.Getenv("FUSION_MLX_API_KEY"); v != "" {
-        return v, "FUSION_MLX_API_KEY"
-    }
-    return "", ""
+// fusionMLXKeyEnvs (#412) returns the two env values relevant to the
+// fusion-mlx backend credential. FUSION_MLX_API_KEY is the deliberate
+// operator-injection name (the only one viper binds — see bindSecretEnv).
+// FUSION_CLIENT_KEY is the ecosystem gateway CLIENT credential
+// (config-conventions §1), ambient in every client shell: it never overrides
+// the backend key at runtime and is surfaced only for the C1 placeholder
+// exemption (a key that arrived via api_key_env: FUSION_CLIENT_KEY) and the
+// checkFusionMLXKeySource mismatch WARN.
+func fusionMLXKeyEnvs() (mlxEnv, clientEnv string) {
+    return strings.TrimSpace(os.Getenv("FUSION_MLX_API_KEY")), strings.TrimSpace(os.Getenv("FUSION_CLIENT_KEY"))
 }
 
 // checkFusionMLXKeySource (#363 F1) makes the fusion-mlx api_key env override
 // fail-loud instead of silent. Before this check, an env value different from
 // the config.yaml value silently won (BindEnv precedence), so an operator who
 // rotated the key in one place only got the other, stale key at runtime with
-// no trace in the logs. Now: both set + different → hard error (startup fails,
-// reload is rejected); both set + identical → INFO; env-only → INFO. The
-// identical case is the production baseline (config.yaml and env both carry
-// the ecosystem default), so it must not block.
+// no trace in the logs. For the deliberate injection name FUSION_MLX_API_KEY:
+// both set + different → hard error (startup fails, reload is rejected); both
+// set + identical → INFO; env-only → INFO. The identical case is the
+// production baseline (config.yaml and env both carry the ecosystem default),
+// so it must not block.
+//
+// #412: FUSION_CLIENT_KEY is deliberately NOT part of the hard check. It is
+// the ecosystem gateway CLIENT credential (config-conventions §1), exported
+// by every client shell with the gateway-issued key. The gateway is not a
+// client of itself, so an ambient client key that differs from the file value
+// is shell noise, not an operator override — v0.9.89 hard-failed here and
+// bricked start.sh on every convention-compliant machine. The file value wins
+// with a WARN instead.
 func checkFusionMLXKeySource(path string) error {
-    envKey, envName := fusionMLXEnvKey()
+    mlxEnv, clientEnv := fusionMLXKeyEnvs()
     fileKey, fileSet := fileValueForKey(path, "backends.fusion-mlx.api_key")
     switch {
-    case envKey != "" && fileSet && fileKey != envKey:
-        return fmt.Errorf("backends.fusion-mlx.api_key is set in both config.yaml and %s with DIFFERENT values; before #363 the env value silently overrode the file value — resolve to one source (unset %s, or align both to the same key)", envName, envName)
-    case envKey != "" && fileSet:
-        slog.Info("backends.fusion-mlx.api_key set in both config.yaml and env with identical values", "env", envName)
-    case envKey != "":
-        slog.Info("backends.fusion-mlx.api_key sourced from env, no file value", "env", envName)
+    case mlxEnv != "" && fileSet && fileKey != mlxEnv:
+        return fmt.Errorf("backends.fusion-mlx.api_key is set in both config.yaml and FUSION_MLX_API_KEY with DIFFERENT values; before #363 the env value silently overrode the file value — resolve to one source (unset FUSION_MLX_API_KEY, or align both to the same key)")
+    case mlxEnv != "" && fileSet:
+        slog.Info("backends.fusion-mlx.api_key set in both config.yaml and env with identical values", "env", "FUSION_MLX_API_KEY")
+    case mlxEnv != "":
+        slog.Info("backends.fusion-mlx.api_key sourced from env, no file value", "env", "FUSION_MLX_API_KEY")
     case fileSet:
         slog.Debug("backends.fusion-mlx.api_key sourced from config file")
+    }
+    if clientEnv != "" && fileSet && fileKey != clientEnv {
+        slog.Warn("FUSION_CLIENT_KEY (gateway client credential, config-conventions §1) differs from backends.fusion-mlx.api_key — it does not override the mlx backend key; inject the backend key via FUSION_MLX_API_KEY or api_key_env instead",
+            "client_key_prefix", clientEnv[:min(6, len(clientEnv))]+"***",
+            "file_key_prefix", fileKey[:min(6, len(fileKey))]+"***")
     }
     return nil
 }
@@ -1903,15 +1919,24 @@ func validate(cfg *Config) error {
             // the upstream provider credentials — a separate credential surface
             // the prior R7 blacklist never touched.
             //
-            // Exception: a key injected via the fusion-mlx key env (canonical
-            // FUSION_CLIENT_KEY, legacy alias — fusionMLXEnvKey, #409) is
+            // Exception: a key injected via the fusion-mlx key env is
             // operator-provided at runtime (not a shipped template stub), so
             // the placeholder refusal is skipped for it. The ecosystem default
             // mlx key ("fg-admin-key", set by fusion-cli) starts with the "fg-"
             // prefix the guard treats as a stub marker; routing it through env
             // is the documented way to supply it without weakening the guard
             // for cloud providers in config.yaml.
-            envKey, envName := fusionMLXEnvKey()
+            //
+            // #412: two names reach here. FUSION_MLX_API_KEY is the deliberate
+            // backend injection name; FUSION_CLIENT_KEY is the ecosystem CLIENT
+            // credential, honored only when config.yaml opts in via
+            // api_key_env: FUSION_CLIENT_KEY (normalizeBackends resolved it
+            // into APIKey). The MLX name wins when both are set.
+            mlxEnv, clientEnv := fusionMLXKeyEnvs()
+            envKey, envName := mlxEnv, "FUSION_MLX_API_KEY"
+            if envKey == "" {
+                envKey, envName = clientEnv, "FUSION_CLIENT_KEY"
+            }
             if backend.APIKey != "" && isKnownInsecureSecret(backend.APIKey) {
                 if name == "fusion-mlx" && backend.APIKey == envKey && envKey != "" {
                     slog.Info("fusion-mlx api_key injected via env, skipping C1 placeholder check",

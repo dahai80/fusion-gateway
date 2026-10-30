@@ -60,9 +60,9 @@ fusion-supervisor 通过 `bash <repo>/start.sh <cmd>` 统一管理 fusion-* 服�
 
 `start.sh start` 在拉起进程前会验证自身在 `architecture/port-registry.yaml`(服务端口的唯一事实来源)中的条目:`FUSION_GW_HEALTH_URL` 中的端口若未注册在 `fusion-gateway` 名下,启动直接拒绝并大声报错 —— 手改配置再也无法把网关指到其他 fusion-* 服务的端口上。注册表文件缺失只告警(独立 checkout 仍可启动);`FUSION_SKIP_REGISTRY_CHECK=1` 仅用于本地测试的旁路;`FUSION_REGISTRY` 可覆盖注册表路径。
 
-### 环境变量密钥名与 legacy 别名 (#409)
+### 环境变量密钥名与 mlx 后端密钥 (#412)
 
-fusion-mlx 后端密钥从**规范名 `FUSION_CLIENT_KEY`** 解析(config-conventions §6 别名链);#409 之前的旧名作为过渡别名继续接受,直到 2027-01-01 生态清理 —— 两个名字同时设置时规范名优先,#363 fail-loud 契约(env 与 config.yaml 值不同 → 启动报错)对任一名字都生效。`api_key_env: FUSION_CLIENT_KEY` 在加载时还会回退到旧别名,因此只导出旧名的部署继续工作(每次命中记录日志)。
+`FUSION_CLIENT_KEY` 是生态**客户端**凭据,用于调用网关本身(config-conventions §1)—— 它在每个客户端 shell 中都是环境存在(ambient)的,**不是** gateway→fusion-mlx 的后端密钥。只有 `FUSION_MLX_API_KEY` 被 viper 绑定到 `backends.fusion-mlx.api_key`,并参与 #363 fail-loud 契约(env 值与 config.yaml 不同 → 启动报错)。ambient 的 `FUSION_CLIENT_KEY` 既不会阻断启动,也不会覆盖配置值;与文件值不一致时网关记一条 WARN(仅前缀)且文件值优先。显式写 `api_key_env: FUSION_CLIENT_KEY` 仍从该 env 解析(#409 验收);legacy 别名链(`FUSION_API_KEY`、`MLX_API_KEY`)保留至 2027-01-01 生态清理。
 
 Union web shell 的管理密钥(`web_shell.admin_key`)从 **`FG_SHELL_ADMIN_KEY`** 解析(网关自有 `FG_` 命名空间,与 `FG_MANAGED_SETTINGS_PRIVATE_KEY` 一致);下游模块文档中的旧名绑定为同一截止日的过渡别名。
 
@@ -1768,7 +1768,7 @@ config.example.yaml   示例配置
 | 5 | **#404 shell 健康探测跳过非绝对 URL** | manifest 携带裸路径（`/healthz`）时被直接交给 `http.Get`，每次都以 `unsupported protocol scheme` 失败，`RecordHealth(id, false)` 因 manifest 自身缺陷把模块永久标记离线。非绝对 URL 现在跳过探测（保留心跳推导的状态，每 5 分钟一条 WARN 指出待修字段）。 |
 | 6 | **#400 语义缓存端到端接线** | `NewSemanticCache` 一直收到 nil `EmbedFunc`，`semantic_cache.enabled` 永远无法激活 —— 每次启动 WARN、每个请求走完整往返。`buildSemanticEmbedFn` 从 adapter pool 派生 embedder（`semantic_cache.provider`，默认 fusion-mlx，+ `semantic_cache.model`）；非流式 chat 在精确 key 缓存之后、上游请求之前执行 Search，成功响应在所有服务路径上 Store。 |
 | 7 | **#407 PG 落库批次投毒** | `json.Valid` 接受 PostgreSQL jsonb 拒绝的未配对 UTF-16 代理对转义（SQLSTATE 22P05），一个这样的请求体让整个 `CopyFrom` payloads 批次失败，flush 循环反复重试同一投毒批次，直到 shutdown drain 丢掉全部排队条目。`splitBody` 现在通过重打 JSON 把未配对代理替换为 U+FFFD（UseNumber 保持数字字节精确；干净 body 原样透传），批次失败时按行隔离：好行照常提交，仅记录并丢弃肇事行。 |
-| 8 | **#409 legacy 环境变量密钥清理 + start.sh 端口注册表自检** | 规范环境变量密钥名现为 `FUSION_CLIENT_KEY`（fusion-mlx 后端密钥，config-conventions §6 别名链）与 `FG_SHELL_ADMIN_KEY`（`web_shell.admin_key`，网关自有 `FG_` 命名空间）；legacy 名作为显式、记日志的过渡别名继续接受至 2027-01-01 —— 两者同设时规范名优先，#363 fail-loud 契约对任一名字生效。`config.simple.yaml`/`config.example.yaml` 不再出现 legacy token：fusion-gateway 在 `check-env.py` normal 与 `--strict` 两种模式下均零告警。`start.sh start` 启动前自检 `architecture/port-registry.yaml` 中的 `fusion-gateway` 条目（awk 精确自有块提取 —— 平铺 grep 窗口会匹配到兄弟服务的 port 行），端口未注册拒绝启动；注册表缺失仅告警，`FUSION_REGISTRY` 覆盖路径，`FUSION_SKIP_REGISTRY_CHECK=1` 供本地测试旁路。 |
+| 8 | **#409 legacy 环境变量密钥清理 + start.sh 端口注册表自检** | 规范环境变量密钥名现为 `FG_SHELL_ADMIN_KEY`（`web_shell.admin_key`，网关自有 `FG_` 命名空间），legacy 名绑定为记日志的过渡别名至 2027-01-01。#409 声称 `FUSION_CLIENT_KEY` 是 fusion-mlx 后端密钥规范名是错误的 —— 它是生态客户端凭据（config-conventions §1），v0.9.90 的 #412 已回退：仅 `FUSION_MLX_API_KEY` 绑定 mlx 后端密钥。`config.simple.yaml`/`config.example.yaml` 不再出现 legacy token：fusion-gateway 在 `check-env.py` normal 与 `--strict` 两种模式下均零告警。`start.sh start` 启动前自检 `architecture/port-registry.yaml` 中的 `fusion-gateway` 条目（awk 精确自有块提取 —— 平铺 grep 窗口会匹配到兄弟服务的 port 行），端口未注册拒绝启动；注册表缺失仅告警，`FUSION_REGISTRY` 覆盖路径，`FUSION_SKIP_REGISTRY_CHECK=1` 供本地测试旁路。 |
 | 9 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.89。 |
 
 ### v0.9.88 — #394 cloud 熔断开启时把纯云模型发给本地 fusion-mlx

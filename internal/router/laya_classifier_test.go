@@ -259,21 +259,22 @@ func TestNewLayaClassifierDefaults(t *testing.T) {
 // to FUSION_MLX_API_KEY env so laya auth works without a redundant config
 // field (same pattern as the fusion-mlx backend).
 func TestNewLayaClassifierApiKeyEnvFallback(t *testing.T) {
-    // #409: blank the canonical key env so the legacy-name fallback below is
-    // what the test exercises (an ambient FUSION_CLIENT_KEY would win).
     t.Setenv("FUSION_CLIENT_KEY", "")
     t.Setenv("FUSION_MLX_API_KEY", "fg-test-key-123")
     c := NewLayaClassifier(config.IntentClassifierConfig{})
     if c.apiKey != "fg-test-key-123" {
         t.Fatalf("expected apiKey from FUSION_MLX_API_KEY env, got %q", c.apiKey)
     }
-    // Canonical name wins over the legacy alias.
-    t.Setenv("FUSION_CLIENT_KEY", "fg-canonical-key")
-    if c2 := NewLayaClassifier(config.IntentClassifierConfig{}); c2.apiKey != "fg-canonical-key" {
-        t.Fatalf("expected apiKey from FUSION_CLIENT_KEY env, got %q", c2.apiKey)
+    // #412: an ambient FUSION_CLIENT_KEY (gateway CLIENT credential) must NOT
+    // become the laya Bearer — it belongs to the client→gateway hop, never
+    // gateway→mlx.
+    t.Setenv("FUSION_CLIENT_KEY", "fg-client-gateway-key")
+    t.Setenv("FUSION_MLX_API_KEY", "")
+    if c2 := NewLayaClassifier(config.IntentClassifierConfig{}); c2.apiKey != "" {
+        t.Fatalf("expected ambient FUSION_CLIENT_KEY to be ignored, got %q", c2.apiKey)
     }
-    t.Setenv("FUSION_CLIENT_KEY", "")
     // Explicit config api_key wins over env.
+    t.Setenv("FUSION_MLX_API_KEY", "fg-test-key-123")
     c2 := NewLayaClassifier(config.IntentClassifierConfig{APIKey: "explicit-key"})
     if c2.apiKey != "explicit-key" {
         t.Fatalf("explicit config api_key should win, got %q", c2.apiKey)
