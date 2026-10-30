@@ -1757,6 +1757,14 @@ config.example.yaml   示例配置
 
 ## 审计修复记录
 
+### v0.9.90 — #412 FUSION_CLIENT_KEY 后端密钥冲突、取消流 end_reason 竞态
+
+| # | 条目 | 说明 |
+|---|------|------|
+| 1 | **#412 `start.sh start` 在规范机器上启动失败（v0.9.89 引入的回归）** | PR #410 曾把环境里的生态 client 凭据 `FUSION_CLIENT_KEY`（按 config-conventions §1 每个客户端 shell 都导出）viper 绑定为 gateway→fusion-mlx 的规范后端密钥，凡该值与 `backends.fusion-mlx.api_key` 不同的机器都会触发 #363 fail-loud 检查，start.sh 退出 78。现在仅绑定 **`FUSION_MLX_API_KEY`**（`.env` 携带的刻意注入名）；环境里的 `FUSION_CLIENT_KEY` 不阻断启动、不覆盖文件值 —— 不匹配时记录仅含前缀的 WARN，文件密钥获胜。显式 `api_key_env: FUSION_CLIENT_KEY` 引用仍会解析（#409 验收），C1 占位符豁免覆盖两个名字，laya 意图分类器不再把 client key 回退当 mlx Bearer。 |
+| 2 | **取消流 `end_reason` select 竞态（CI 偶发）** | 客户端取消时 ctx-watcher 关闭上游 body、reader 关闭事件 channel；加固版流 select 可能在 `<-ctx.Done()` 触发前先命中 channel 关闭分支（Go 在就绪 case 中随机选择），而向后兼容循环根本没有 `ctx.Done()` 分支 —— 两种情况 summary 都记成 `end_reason=ch_closed_no_stop` 而非 `client_canceled`。循环后重分类在父 ctx 已取消时把默认原因升级为 `client_canceled`；`write_failed`（#79）与 `watchdog_tripped` 标签保持不变。 |
+| 3 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.90。 |
+
 ### v0.9.89 — 生命周期竞态、语义缓存接线、PG 落库投毒、legacy 环境变量密钥清理
 
 | # | 条目 | 说明 |

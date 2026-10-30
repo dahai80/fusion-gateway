@@ -2086,6 +2086,14 @@ config.example.yaml   Example configuration
 
 ## Audit Fixes
 
+### v0.9.90 — #412 FUSION_CLIENT_KEY backend collision, canceled-stream end_reason race
+
+| # | Item | Details |
+|---|-----|---------|
+| 1 | **#412 `start.sh start` failed on convention-compliant machines (regression from v0.9.89)** | PR #410 had viper-bound the ambient ecosystem client credential `FUSION_CLIENT_KEY` (exported by every client shell per config-conventions §1) as the canonical gateway→fusion-mlx backend key, so any machine where it differs from `backends.fusion-mlx.api_key` tripped the #363 fail-loud check and start.sh exited 78. The binding is now **`FUSION_MLX_API_KEY` only** (the deliberate injection name carried by `.env`); an ambient `FUSION_CLIENT_KEY` never blocks startup and never overrides the file value — a mismatch logs a prefix-only WARN and the file key wins. An explicit `api_key_env: FUSION_CLIENT_KEY` reference still resolves (#409 acceptance), the C1 placeholder exemption covers both names, and the laya intent classifier no longer falls back to the client key as the mlx Bearer. |
+| 2 | **canceled-stream `end_reason` select race (CI flake)** | On client cancel the ctx-watcher closes the upstream body and the reader closes the event channel; the hardened stream select may then take the closed-channel case before `<-ctx.Done()` fires (Go picks randomly among ready cases), and the backward-compat loop has no `ctx.Done()` case at all — either way the summary logged `end_reason=ch_closed_no_stop` instead of `client_canceled`. Post-loop reclassification upgrades the default reason when the parent ctx is canceled; `write_failed` (#79) and `watchdog_tripped` keep their labels. |
+| 3 | **Helm chart sync** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion bumped to 0.9.90. |
+
 ### v0.9.89 — lifecycle races, semantic cache wiring, PG persist poisoning, legacy env key cleanup
 
 | # | Item | Details |
