@@ -14,6 +14,12 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# fusion-supervisor invokes this script from launchd, whose PATH has no
+# homebrew — `go build` in ensure_binary died with "go: command not found"
+# and crash recovery looped on RestartFailed while the gateway stayed down
+# (2026-10-30 incident, same class as fusion-supervisor #77 pg_dump_bin).
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
 PID_FILE="$SCRIPT_DIR/.fusion-gateway.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
 STDOUT_LOG="$LOG_DIR/gateway.stdout.log"
