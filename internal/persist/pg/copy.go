@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
     "log/slog"
+    "strings"
     "time"
     "unicode/utf8"
 
@@ -380,16 +381,19 @@ func splitBody(b []byte) (jsonVal, rawVal any) {
     return nil, string(b)
 }
 
-// sanitizeJSON repairs JSON containing unpaired surrogate \uD800-\uDFFF
-// escapes. json.Valid is a syntax check only — it passes "\ud800" with no low
-// half, which PostgreSQL jsonb rejects with SQLSTATE 22P05, and one such
-// payload failed the whole payloads CopyFrom batch (#407). Go's decoder
-// replaces unpaired surrogates with U+FFFD, so a re-marshal through it is
-// valid everywhere; UseNumber keeps large numbers byte-exact. Bodies without
-// surrogate escapes (the overwhelming majority) return unchanged — the
-// re-marshal only runs when a surrogate escape is present.
+// sanitizeJSON repairs JSON containing escapes PostgreSQL jsonb rejects with
+// SQLSTATE 22P05 "unsupported Unicode escape sequence" (#407 and its 2026-10-31
+// recurrence): unpaired surrogate \uD800-\uDFFF escapes, and the \u0000 escape
+// (raw NUL bytes are already handled above, but the escaped form passes
+// json.Valid untouched and decodes to a U+0000 rune that jsonb cannot store).
+// json.Valid is a syntax check only — it passes all of these. Go's decoder
+// replaces unpaired surrogates with U+FFFD; scrubNul does the same for U+0000
+// before the re-marshal, which would otherwise re-emit `\u0000` verbatim.
+// UseNumber keeps large numbers byte-exact. Bodies without offending escapes
+// (the overwhelming majority) return unchanged — the re-marshal only runs when
+// one is present.
 func sanitizeJSON(b []byte) ([]byte, bool) {
-    if !hasSurrogateEscape(b) {
+    if !hasSurrogateEscape(b) && !hasNulEscape(b) {
         return b, true
     }
     dec := json.NewDecoder(bytes.NewReader(b))
@@ -398,11 +402,63 @@ func sanitizeJSON(b []byte) ([]byte, bool) {
     if err := dec.Decode(&v); err != nil {
         return nil, false
     }
+    v = scrubNul(v)
     cleaned, err := json.Marshal(v)
     if err != nil {
         return nil, false
     }
     return cleaned, true
+}
+
+// hasNulEscape reports whether b contains a \u0000 escape. A literal "\\u0000"
+// (escaped backslash) matches too — that only costs one unnecessary
+// re-marshal, never a wrong result.
+func hasNulEscape(b []byte) bool {
+    for i := 0; i+5 < len(b); i++ {
+        if b[i] == '\\' && b[i+1] == 'u' &&
+            b[i+2] == '0' && b[i+3] == '0' && b[i+4] == '0' && b[i+5] == '0' {
+            return true
+        }
+    }
+    return false
+}
+
+// scrubNul replaces U+0000 runes in decoded strings (values and object keys)
+// with U+FFFD. PostgreSQL jsonb cannot represent U+0000 in text, and
+// json.Marshal would re-escape the rune as `\u0000`, so the replacement must
+// happen on the decoded tree, not on the serialized bytes.
+func scrubNul(v any) any {
+    switch t := v.(type) {
+    case map[string]any:
+        for k, val := range t {
+            nk := replaceNulRunes(k)
+            if nk != k {
+                delete(t, k)
+                t[nk] = scrubNul(val)
+            } else {
+                t[k] = scrubNul(val)
+            }
+        }
+        return t
+    case []any:
+        for i, val := range t {
+            t[i] = scrubNul(val)
+        }
+        return t
+    case string:
+        return replaceNulRunes(t)
+    default:
+        return v
+    }
+}
+
+func replaceNulRunes(s string) string {
+    for i := 0; i < len(s); i++ {
+        if s[i] == 0x00 {
+            return strings.ReplaceAll(s, "\x00", "�")
+        }
+    }
+    return s
 }
 
 // hasSurrogateEscape reports whether b contains a \u escape in the surrogate
