@@ -4,6 +4,7 @@ import (
     "bytes"
     "encoding/json"
     "testing"
+    "unicode/utf8"
 
     "github.com/google/uuid"
 
@@ -110,6 +111,45 @@ func TestSanitizeJSONKeepsBigNumbersExact(t *testing.T) {
     }
     if n, _ := v["big"].(json.Number); n.String() != "12345678901234567890" {
         t.Fatalf("big number must stay byte-exact, got %v", v["big"])
+    }
+}
+
+// 2026-10-30: PostgreSQL text/jsonb reject invalid UTF-8 byte sequences with
+// SQLSTATE 22021 — splitBody must repair them (U+FFFD replacement) so the row
+// survives instead of failing the whole payloads CopyFrom batch.
+func TestSplitBodyInvalidUTF8Repaired(t *testing.T) {
+    // raw text path: SSE frame with a stray 0xa4 byte
+    raw := []byte("data: {\"delta\":\"caf\xe9\xa4\"}\n\n")
+    j, r := splitBody(raw)
+    if j != nil || r == nil {
+        t.Fatalf("invalid-UTF8 raw must stay on the raw path: j=%v r=%v", j, r)
+    }
+    s, ok := r.(string)
+    if !ok {
+        t.Fatalf("raw value must be string, got %T", r)
+    }
+    if !utf8.ValidString(s) || bytes.ContainsRune([]byte(s), 0xa4) {
+        t.Fatalf("raw value must be valid UTF-8 with the bad byte replaced, got %q", s)
+    }
+    if !bytes.HasPrefix([]byte(s), []byte("data: {\"delta\":\"caf")) {
+        t.Fatalf("repair must preserve surrounding content, got %q", s)
+    }
+
+    // json path: otherwise-valid JSON with a stray 0xa4 byte inside a string
+    jsonBody := []byte("{\"content\":\"ok\xa4done\"}")
+    j, r = splitBody(jsonBody)
+    if j == nil || r != nil {
+        t.Fatalf("repaired JSON must land on the jsonb path: j=%v r=%v", j, r)
+    }
+    cleaned, ok := j.([]byte)
+    if !ok {
+        t.Fatalf("jsonb value must be []byte, got %T", j)
+    }
+    if !utf8.Valid(cleaned) {
+        t.Fatalf("repaired JSON must be valid UTF-8, got %q", cleaned)
+    }
+    if !bytes.Contains(cleaned, []byte("ok")) || !bytes.Contains(cleaned, []byte("done")) {
+        t.Fatalf("repair must keep the surrounding string content, got %q", cleaned)
     }
 }
 

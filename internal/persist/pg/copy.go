@@ -7,6 +7,7 @@ import (
     "fmt"
     "log/slog"
     "time"
+    "unicode/utf8"
 
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
@@ -269,6 +270,53 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         }
     }
 
+    // Payloads copy first: a payload data error triggers the #407 isolation
+    // path below, which rolls the tx back and continues in a fresh one — at
+    // that point nothing else has been copied yet, so the log rows still land
+    // in the fresh tx and the batch is not retried forever.
+    if len(payloadRows) > 0 {
+        payloadCols := []string{
+            "id", "ts", "req_body", "resp_body", "req_raw", "resp_raw",
+            "resp_truncated", "req_truncated", "resp_raw_mime",
+        }
+        if _, err := tx.CopyFrom(ctx,
+            pgx.Identifier{"fg_request_payloads"},
+            payloadCols,
+            pgx.CopyFromRows(payloadRows)); err != nil {
+            // #407: one data-error row fails the whole CopyFrom batch and the
+            // flush loop would retry it forever. Isolate: copy the rows one at
+            // a time, log and drop only the bad ones — the log rows and the
+            // good payloads still commit.
+            //
+            // The failed CopyFrom leaves this tx in an aborted state: every
+            // later command on it fails with 25P02 and the final Commit turns
+            // into a rollback. Roll back and isolate in a fresh tx.
+            _ = tx.Rollback(ctx)
+            slog.Warn("pg persist payload batch copy failed, isolating rows",
+                "error", err, "rows", len(payloadRows))
+            tx, err = w.pool.Begin(ctx)
+            if err != nil {
+                return fmt.Errorf("begin isolation: %w", err)
+            }
+            for i := range payloadRows {
+                if _, err := tx.CopyFrom(ctx,
+                    pgx.Identifier{"fg_request_payloads"},
+                    payloadCols,
+                    pgx.CopyFromRows(payloadRows[i : i+1])); err != nil {
+                    // A row-level data error aborts this tx as well — roll
+                    // back and re-begin before the next row so one bad row
+                    // never poisons the rest.
+                    _ = tx.Rollback(ctx)
+                    slog.Error("pg persist payload row dropped",
+                        "error", err, "row", i)
+                    tx, err = w.pool.Begin(ctx)
+                    if err != nil {
+                        return fmt.Errorf("begin isolation: %w", err)
+                    }
+                }
+            }
+        }
+    }
     if _, err := tx.CopyFrom(ctx,
         pgx.Identifier{"fg_request_logs"},
         []string{
@@ -285,32 +333,6 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         },
         pgx.CopyFromRows(logRows)); err != nil {
         return fmt.Errorf("copy fg_request_logs: %w", err)
-    }
-    if len(payloadRows) > 0 {
-        payloadCols := []string{
-            "id", "ts", "req_body", "resp_body", "req_raw", "resp_raw",
-            "resp_truncated", "req_truncated", "resp_raw_mime",
-        }
-        if _, err := tx.CopyFrom(ctx,
-            pgx.Identifier{"fg_request_payloads"},
-            payloadCols,
-            pgx.CopyFromRows(payloadRows)); err != nil {
-            // #407: one data-error row fails the whole CopyFrom batch and the
-            // flush loop would retry it forever. Isolate: copy the rows one at
-            // a time inside the same tx, log and drop only the bad ones — the
-            // log rows and the good payloads still commit.
-            slog.Warn("pg persist payload batch copy failed, isolating rows",
-                "error", err, "rows", len(payloadRows))
-            for i := range payloadRows {
-                if _, err := tx.CopyFrom(ctx,
-                    pgx.Identifier{"fg_request_payloads"},
-                    payloadCols,
-                    pgx.CopyFromRows(payloadRows[i : i+1])); err != nil {
-                    slog.Error("pg persist payload row dropped",
-                        "error", err, "row", i)
-                }
-            }
-        }
     }
     if len(chunkRows) > 0 {
         if _, err := tx.CopyFrom(ctx,
@@ -333,6 +355,13 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
 func splitBody(b []byte) (jsonVal, rawVal any) {
     if len(b) == 0 {
         return nil, nil
+    }
+    // PostgreSQL text/jsonb columns reject invalid UTF-8 byte sequences with
+    // SQLSTATE 22021, and one such payload failed the whole payloads CopyFrom
+    // batch. Replace invalid bytes with U+FFFD so the row survives with
+    // repaired content instead of dropping the batch.
+    if !utf8.Valid(b) {
+        b = bytes.ToValidUTF8(b, []byte{0xEF, 0xBF, 0xBD})
     }
     if json.Valid(b) {
         // #407: json.Valid accepts unpaired UTF-16 surrogate escapes that
