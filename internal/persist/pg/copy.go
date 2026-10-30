@@ -363,6 +363,12 @@ func splitBody(b []byte) (jsonVal, rawVal any) {
     if !utf8.Valid(b) {
         b = bytes.ToValidUTF8(b, []byte{0xEF, 0xBF, 0xBD})
     }
+    // NUL is valid UTF-8, so the repair above leaves it alone — but
+    // PostgreSQL text/jsonb columns still reject embedded 0x00 with the
+    // same SQLSTATE 22021. Replace it too so the row survives.
+    if bytes.IndexByte(b, 0x00) >= 0 {
+        b = bytes.ReplaceAll(b, []byte{0x00}, []byte{0xEF, 0xBF, 0xBD})
+    }
     if json.Valid(b) {
         // #407: json.Valid accepts unpaired UTF-16 surrogate escapes that
         // PostgreSQL jsonb rejects (SQLSTATE 22P05). Repair before COPY.
