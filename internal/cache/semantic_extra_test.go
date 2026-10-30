@@ -18,7 +18,7 @@ func TestSemanticCache_NilEmbedFn(t *testing.T) {
 
 func TestSemanticCache_NilReceiver_Search(t *testing.T) {
     var sc *SemanticCache
-    _, ok := sc.Search("test", "model")
+    _, ok := sc.Search("test", "", "model")
     if ok {
         t.Fatal("nil cache should miss")
     }
@@ -26,7 +26,7 @@ func TestSemanticCache_NilReceiver_Search(t *testing.T) {
 
 func TestSemanticCache_NilReceiver_Store(t *testing.T) {
     var sc *SemanticCache
-    sc.Store("test", "model", json.RawMessage(`{}`))
+    sc.Store("test", "", "model", json.RawMessage(`{}`))
 }
 
 func TestSemanticCache_NilReceiver_Stats(t *testing.T) {
@@ -44,20 +44,20 @@ func TestSemanticCache_EmbeddingError(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.9}
     sc := NewSemanticCache(cfg, errFn)
 
-    _, ok := sc.Search("hello", "gpt-4")
+    _, ok := sc.Search("hello", "", "gpt-4")
     if ok {
         t.Fatal("should miss on embedding error")
     }
 
-    sc.Store("hello", "gpt-4", json.RawMessage(`{}`))
+    sc.Store("hello", "", "gpt-4", json.RawMessage(`{}`))
 }
 
 func TestSemanticCache_DifferentModel(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.5}
     sc := NewSemanticCache(cfg, testEmbedFn)
     resp, _ := json.Marshal(map[string]string{"content": "test"})
-    sc.Store("hello", "gpt-4", resp)
-    _, ok := sc.Search("hello", "claude-3")
+    sc.Store("hello", "", "gpt-4", resp)
+    _, ok := sc.Search("hello", "", "claude-3")
     if ok {
         t.Fatal("should miss on different model")
     }
@@ -67,9 +67,9 @@ func TestSemanticCache_MaxEntriesEviction(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.0, MaxEntries: 2}
     sc := NewSemanticCache(cfg, testEmbedFn)
     resp, _ := json.Marshal(map[string]string{"content": "r"})
-    sc.Store("p1", "gpt-4", resp)
-    sc.Store("p2", "gpt-4", resp)
-    sc.Store("p3", "gpt-4", resp)
+    sc.Store("p1", "", "gpt-4", resp)
+    sc.Store("p2", "", "gpt-4", resp)
+    sc.Store("p3", "", "gpt-4", resp)
     _, _, size := sc.Stats()
     if size != 2 {
         t.Fatalf("expected max 2 entries, got %d", size)

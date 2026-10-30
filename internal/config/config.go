@@ -76,8 +76,8 @@ type UnixSocketConfig struct {
 // non-supervisor environments (bare gateway, single-binary, CI).
 type AutoStartConfig struct {
     Enabled  bool   `mapstructure:"enabled"`
-    Command  string `mapstructure:"command"`  // e.g. "~/claude-home/fusion-mlx/start.sh start"
-    StopCmd  string `mapstructure:"stop_cmd"` // e.g. "~/claude-home/fusion-mlx/start.sh stop"
+    Command  string `mapstructure:"command"`  // e.g. "~/fusion/fusion-mlx/start.sh start"
+    StopCmd  string `mapstructure:"stop_cmd"` // e.g. "~/fusion/fusion-mlx/start.sh stop"
     WaitURL  string `mapstructure:"wait_url"` // e.g. "http://127.0.0.1:11434/health"
     WaitSecs int    `mapstructure:"wait_secs"` // max seconds to wait for health check
 }

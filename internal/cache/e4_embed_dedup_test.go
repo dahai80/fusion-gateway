@@ -34,12 +34,12 @@ func TestE4_SearchThenStoreEmbedsOnce(t *testing.T) {
     }
 
     // Search misses (empty cache) — first embedFn call.
-    if _, ok := sc.Search("what is Go?", "gpt-4"); ok {
+    if _, ok := sc.Search("what is Go?", "", "gpt-4"); ok {
         t.Fatal("expected miss on empty cache")
     }
     // Store the response for the same prompt — must NOT embed again.
     resp, _ := json.Marshal(map[string]string{"content": "Go is a language"})
-    sc.Store("what is Go?", "gpt-4", resp)
+    sc.Store("what is Go?", "", "gpt-4", resp)
 
     got := atomic.LoadInt64(&calls)
     if got != 1 {
@@ -47,7 +47,7 @@ func TestE4_SearchThenStoreEmbedsOnce(t *testing.T) {
     }
 
     // A second Search of the same prompt (now a hit) must NOT embed again.
-    if _, ok := sc.Search("what is Go?", "gpt-4"); !ok {
+    if _, ok := sc.Search("what is Go?", "", "gpt-4"); !ok {
         t.Fatal("expected hit after Store")
     }
     got = atomic.LoadInt64(&calls)
@@ -65,8 +65,8 @@ func TestE4_DistinctPromptsEmbedSeparately(t *testing.T) {
     var calls int64
     sc := NewSemanticCache(cfg, countingEmbedFn(&calls))
 
-    sc.Search("what is Go?", "gpt-4")
-    sc.Search("how does Rust handle borrows?", "gpt-4")
+    sc.Search("what is Go?", "", "gpt-4")
+    sc.Search("how does Rust handle borrows?", "", "gpt-4")
 
     got := atomic.LoadInt64(&calls)
     if got != 2 {
@@ -87,7 +87,7 @@ func TestE4_EmbedCacheBounded(t *testing.T) {
     // Flood 3x maxEntries distinct prompts.
     for i := 0; i < 30; i++ {
         prompt := "distinct prompt number " + string(rune('A'+i%26)) + string(rune('a'+i))
-        sc.Search(prompt, "gpt-4")
+        sc.Search(prompt, "", "gpt-4")
     }
 
     sc.embedCacheMu.Lock()

@@ -31,7 +31,7 @@ counters, and (when the OAuth2 connector is enabled) connection tokens.
 ```bash
 # Stop the gateway so the debounced persister flushes its final state, then
 # snapshot the whole data_dir. A tarball preserves file modes + relative paths.
-~/claude-home/fusion-mlx/start.sh stop    # stop the LOCAL backend (optional)
+~/fusion/fusion-mlx/start.sh stop    # stop the LOCAL backend (optional)
 tar -czf data-backup-$(date +%Y%m%d).tar.gz -C ./data .
 ```
 
@@ -193,7 +193,7 @@ relies on network policy instead).
 
 `FusionGatewayHighErrorRate` (critical): a backend 5xx rate > 2% over 5m.
 1. Confirm the backend: `sum(rate(fusion_gateway_requests_total{status=~"5.."}[5m])) by (backend)`.
-2. If `backend=local`: check fusion-mlx health (`~/claude-home/fusion-mlx/start.sh status` + `/health`); a model OOM or crash is the usual cause. Restart fusion-mlx if down.
+2. If `backend=local`: check fusion-mlx health (`~/fusion/fusion-mlx/start.sh status` + `/health`); a model OOM or crash is the usual cause. Restart fusion-mlx if down.
 3. If `backend=cloud`: check the cloud vendor status page + the gateway log for upstream error bodies (capped 512 bytes, surfaced via `writeChatFailedError`).
 4. If the circuit breaker is also open (see below), the diversion is working as designed — the error rate alert is then expected; resolve the upstream first.
 

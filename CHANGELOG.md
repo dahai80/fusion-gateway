@@ -9,6 +9,33 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Fixed (semantic cache content-sensitive keying + no-store opt-out) — #423
+
+- **Root cause**: the semantic cache embedded the full message text, so a
+  structured-output agent's system prompt (task instructions + JSON schema,
+  identical across calls) dominated the embedding — two different payloads
+  under the same agent prompt scored 0.96 cosine similarity and the second
+  request replayed the first request's answer (~70 ms, cache-hit latency).
+- **Content-sensitive keying**: the similarity check now runs on the USER
+  payload embedding only (`system`/`developer` messages excluded); the
+  system-prompt text is SHA-256-hashed and matched EXACTLY as a hit
+  precondition (`SemanticEntry.SystemHash`). A near-identical payload under
+  different task instructions is a miss. System-only requests skip the
+  cache (nothing content-sensitive to key on).
+- **Per-request opt-out**: `X-Cache: no-store` or `Cache-Control: no-store`
+  on `/v1/chat/completions`, `/v1/completions` and `/v1/messages` bypasses
+  the semantic cache for both lookup and store. Case-insensitive parsing;
+  the decision reaches the non-stream handler via context.
+- **Stale `server.auto_start` paths**: `config.example.yaml`, README
+  tables, runbook and config comments pointed at the removed
+  `~/claude-home/fusion-mlx/start.sh`; updated to
+  `~/fusion/fusion-mlx/start.sh`.
+- Tests: cache-level systemHash mismatch/store tests, server-level prompt
+  keying (system excluded from payload), header opt-out, cross-system
+  no-hit + same-system hit end-to-end; all existing Search/Store call
+  sites updated to the new signature.
+- Helm chart version/appVersion bumped to 0.9.93.
+
 ### Added (persistent PG-backed admin Dashboard) — #421
 
 - **Restored a top-level "Dashboard" admin page** — this time PG-backed,

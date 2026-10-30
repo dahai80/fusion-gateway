@@ -323,6 +323,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         tenant = kc.Name
     }
 
+    // #423: propagate the no-store opt-out to the non-stream handler (which
+    // has no *http.Request of its own).
+    if optsOutOfSemanticCache(r) {
+        ctx = withSemanticCacheOptOut(ctx)
+    }
+
     if req.Stream {
         // R10 (audit): global concurrent-stream cap. Reject with 429 when the
         // pool is full so a request burst cannot exhaust goroutines/FDs against
@@ -1108,9 +1114,19 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     // requests: a semantically-similar prompt must not surface a stored
     // tool_calls payload or an answer to a different image. Streaming is not
     // semantically cached (each stream is unique).
-    semanticPrompt := s.semanticCachePrompt(req)
-    if semanticPrompt != "" {
-        if cached, ok := s.semanticCache.Search(semanticPrompt, req.Model); ok {
+    // #423: the similarity runs on the USER payload embedding only; the
+    // system prompt is hash-matched exactly as a precondition. X-Cache:
+    // no-store / Cache-Control: no-store bypasses the semantic cache for
+    // both Search and Store.
+    semanticSkip := semanticCacheOptedOut(ctx)
+    semanticKey := semanticCacheKey{}
+    if !semanticSkip {
+        semanticKey = s.semanticCachePrompt(req)
+    } else {
+        slog.Debug("semantic cache bypassed: client requested no-store", "model", req.Model)
+    }
+    if semanticKey.Payload != "" {
+        if cached, ok := s.semanticCache.Search(semanticKey.Payload, semanticKey.SystemHash, req.Model); ok {
             slog.Info("semantic cache hit", "model", req.Model)
             s.stampRouteInfo(ctx, req, decision, provider.Name())
             stampCachedUsage(ctx, cached)
@@ -1167,9 +1183,9 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             // fills while the exact cache + coalescer are active (the default
             // config). embeddingFor dedupes the second embed of the same
             // prompt (the Search above already cached it).
-            if s.semanticCache != nil && semanticPrompt != "" {
+            if s.semanticCache != nil && semanticKey.Payload != "" {
                 if respData, marshalErr := json.Marshal(r); marshalErr == nil {
-                    s.semanticCache.Store(semanticPrompt, req.Model, respData)
+                    s.semanticCache.Store(semanticKey.Payload, semanticKey.SystemHash, req.Model, respData)
                 }
             }
         })
@@ -1372,8 +1388,8 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     if s.cache != nil && cacheKey != "" && marshalErr == nil {
         s.cache.Set(cacheKey, respData)
     }
-    if s.semanticCache != nil && semanticPrompt != "" && marshalErr == nil {
-        s.semanticCache.Store(semanticPrompt, req.Model, respData)
+    if s.semanticCache != nil && semanticKey.Payload != "" && marshalErr == nil {
+        s.semanticCache.Store(semanticKey.Payload, semanticKey.SystemHash, req.Model, respData)
     }
 
     w.Header().Set("Content-Type", "application/json")
@@ -1523,6 +1539,10 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
     if chatReq.Stream {
         s.handleStreamChat(ctx, w, provider, &chatReq, decision, budget, start)
     } else {
+        // #423: propagate the no-store opt-out to the non-stream handler.
+        if optsOutOfSemanticCache(r) {
+            ctx = withSemanticCacheOptOut(ctx)
+        }
         s.handleNonStreamChat(ctx, w, provider, &chatReq, decision, budget, start, tenant)
     }
 }

@@ -46,7 +46,7 @@ func TestSemanticCache_Disabled(t *testing.T) {
 func TestSemanticCache_SearchMiss(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.92}
     sc := NewSemanticCache(cfg, testEmbedFn)
-    _, ok := sc.Search("hello world", "gpt-4")
+    _, ok := sc.Search("hello world", "", "gpt-4")
     if ok {
         t.Fatal("should miss on empty cache")
     }
@@ -56,8 +56,8 @@ func TestSemanticCache_StoreAndSearch(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.5}
     sc := NewSemanticCache(cfg, testEmbedFn)
     resp, _ := json.Marshal(map[string]string{"content": "test response"})
-    sc.Store("what is Go?", "gpt-4", resp)
-    result, ok := sc.Search("what is Go?", "gpt-4")
+    sc.Store("what is Go?", "", "gpt-4", resp)
+    result, ok := sc.Search("what is Go?", "", "gpt-4")
     if !ok {
         t.Fatal("should hit on same prompt")
     }
@@ -69,7 +69,7 @@ func TestSemanticCache_StoreAndSearch(t *testing.T) {
 func TestSemanticCache_Stats(t *testing.T) {
     cfg := config.SemanticCacheConfig{Enabled: true, SimilarityThreshold: 0.92}
     sc := NewSemanticCache(cfg, testEmbedFn)
-    sc.Search("test", "gpt-4")
+    sc.Search("test", "", "gpt-4")
     hits, misses, size := sc.Stats()
     if hits != 0 || misses != 1 || size != 0 {
         t.Fatalf("expected 0/1/0 got %d/%d/%d", hits, misses, size)
@@ -115,7 +115,7 @@ func TestEI2_SearchConcurrentCountersRaceFree(t *testing.T) {
     // Pre-store one entry so half the searches hit (hits.Add) and half miss
     // (misses.Add) — exercises both atomic counters concurrently.
     resp, _ := json.Marshal(map[string]string{"content": "cached"})
-    sc.Store("what is Go?", "gpt-4", resp)
+    sc.Store("what is Go?", "", "gpt-4", resp)
 
     const goroutines = 64
     const iters = 200
@@ -130,7 +130,7 @@ func TestEI2_SearchConcurrentCountersRaceFree(t *testing.T) {
                 if (g+i)%2 == 0 {
                     prompt = "completely different prompt " + testEmbedFnKey(g, i)
                 }
-                sc.Search(prompt, "gpt-4")
+                sc.Search(prompt, "", "gpt-4")
             }
         }(g)
     }

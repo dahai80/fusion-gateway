@@ -74,8 +74,8 @@ Union web shell 的管理密钥(`web_shell.admin_key`)从 **`FG_SHELL_ADMIN_KEY`
 |-----|---------|-------------|
 | `server.port` | 11432 | 网关监听端口 |
 | `server.auto_start.enabled` | true | 网关启动时自动拉起 fusion-mlx |
-| `server.auto_start.command` | `~/claude-home/fusion-mlx/start.sh start` | 启动本地后端的 shell 命令 |
-| `server.auto_start.stop_cmd` | `~/claude-home/fusion-mlx/start.sh stop` | 关闭时停止本地后端的 shell 命令 |
+| `server.auto_start.command` | `~/fusion/fusion-mlx/start.sh start` | 启动本地后端的 shell 命令 |
+| `server.auto_start.stop_cmd` | `~/fusion/fusion-mlx/start.sh stop` | 关闭时停止本地后端的 shell 命令 |
 | `server.auto_start.wait_url` | `http://127.0.0.1:11434/health` | 启动后轮询的健康检查 URL |
 | `server.auto_start.wait_secs` | 120 | 健康检查最长等待秒数 |
 | `auth.enabled` | true | 启用 API key 鉴权 |
@@ -1022,6 +1022,8 @@ semantic_cache:
 - 需设置 `EmbedFunc` — 未提供 embedding 函数时禁用 (无伪 embedding 回退)
 - 可插拔 `EmbedFunc` — 替换为任意 embedding API 做相似度
 - 30 分钟 TTL,自动过期淘汰
+- **内容敏感键控 (#423)**: 余弦相似度只跑用户 payload embedding;system prompt (任务指令、JSON schema — 结构化输出 agent 各次调用相同) 做 SHA-256 哈希并作为命中前置条件精确匹配。不同任务指令下的近似 payload 是 miss,不再碰撞。
+- **逐请求退出 (#423)**: 请求带 `X-Cache: no-store` (或 `Cache-Control: no-store`) 时跳过语义缓存的查找与写入 — 供正确性不容忍近似重放的客户端使用。
 
 ## Prompt 注入检测
 
@@ -1757,6 +1759,16 @@ config.example.yaml   示例配置
 **差异点**:唯一具备**硬件感知路由可视化**与**本地推理节省跟踪**的 AI 网关。
 
 ## 审计修复记录
+
+### v0.9.93 — #423 语义缓存内容敏感键控 + no-store 逐请求退出
+
+| # | 条目 | 详情 |
+|---|------|------|
+| 1 | **内容敏感键控** | 语义缓存原先 embed 全部消息文本,结构化输出 agent 的 system prompt (任务指令 + JSON schema,各次调用相同) 主导 embedding:同一 agent prompt 下两个不同 payload 相似度 0.96,第二个请求直接重放了第一个请求的答案。现在余弦相似度只跑用户 payload embedding(`system`/`developer` 消息排除);system prompt 文本做 SHA-256 哈希并作为命中前置条件精确匹配(`SemanticEntry.SystemHash`)。不同任务指令下的近似 payload 是 miss。仅 system 的请求跳过缓存(没有内容敏感的键可依)。 |
+| 2 | **逐请求退出** | `/v1/chat/completions`、`/v1/completions`、`/v1/messages` 请求带 `X-Cache: no-store` 或 `Cache-Control: no-store` 时,语义缓存的查找与写入均跳过 — 供正确性不容忍近似重放的结构化输出客户端使用。Header 解析大小写不敏感;判定经 context 传播到非流式 handler。 |
+| 3 | **结构化输出感知** | 由条目 1 覆盖:携带 schema 的 system prompt 不再让两个不同 payload 碰撞 — 哈希前置条件正是 issue 要求的结构化输出 agent 修复。 |
+| 4 | **过期的 `server.auto_start` 路径** | `config.example.yaml`、README 表格、runbook 与 config 注释指向已删除的 `~/claude-home/fusion-mlx/start.sh`;更新为 `~/fusion/fusion-mlx/start.sh`。 |
+| 5 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.93。 |
 
 ### v0.9.92 — #421 持久化 Dashboard(PG 后端)+ 上游缓存 token 捕获
 
