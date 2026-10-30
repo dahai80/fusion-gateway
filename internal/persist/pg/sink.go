@@ -39,6 +39,8 @@ type Sink struct {
     flusher  *lifecycle.Worker
     sweeper  *lifecycle.Worker
     sampler  *lifecycle.Worker
+    // cacheSampler (#421) persists gateway cache counters every 30s.
+    cacheSampler *lifecycle.Worker
     stopCh   chan struct{}
     stopOnce atomic.Bool
 }
@@ -260,6 +262,9 @@ func (s *Sink) Close(ctx context.Context) error {
     }
     if s.sampler != nil {
         s.sampler.Stop()
+    }
+    if s.cacheSampler != nil {
+        s.cacheSampler.Stop()
     }
     s.writer.Close()
     return nil

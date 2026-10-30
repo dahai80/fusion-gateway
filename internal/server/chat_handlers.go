@@ -732,6 +732,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
 
     flusher, canFlush := w.(http.Flusher)
     var outputTokens int
+    // #421: max upstream prompt-cache hit tokens seen in any usage chunk —
+    // providers report cached_tokens cumulatively per chunk, so max (not sum).
+    var cachedTokens int
     includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
     var lastChunkID string
     var lastChunkModel string
@@ -823,6 +826,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
             if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                 outputTokens += chunk.Usage.CompletionTokens
             }
+            if c := chunk.Usage.CachedTokenCount(); c > cachedTokens {
+                cachedTokens = c
+            }
             if !sawFinishReason {
                 for _, c := range chunk.Choices {
                     if c.FinishReason != nil {
@@ -867,6 +873,9 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 }
                 if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
                     outputTokens += chunk.Usage.CompletionTokens
+                }
+                if c := chunk.Usage.CachedTokenCount(); c > cachedTokens {
+                    cachedTokens = c
                 }
                 if !sawFinishReason {
                     for _, c := range chunk.Choices {
@@ -1049,6 +1058,7 @@ streamDone:
         logEntry.InputTokens = budget.InputTokens
         logEntry.OutputTokens = outputTokens
         logEntry.TotalTokens = budget.InputTokens + outputTokens
+        logEntry.CachedTokens = cachedTokens
     }
 
     // Latency tracking for stream
@@ -1281,6 +1291,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                                 logEntry.InputTokens = budget.InputTokens
                                 logEntry.OutputTokens = fallbackResp.Usage.CompletionTokens
                                 logEntry.TotalTokens = budget.InputTokens + fallbackResp.Usage.CompletionTokens
+                                logEntry.CachedTokens = fallbackResp.Usage.CachedTokenCount()
                                 // Plan §5.2: the fallback generation is the one the
                                 // client experienced — stamp its TTFT (full wait).
                                 stampTimingMetrics(logEntry, nil, fallbackResp.Usage.CompletionTokens,
@@ -1339,6 +1350,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         logEntry.InputTokens = budget.InputTokens
         logEntry.OutputTokens = resp.Usage.CompletionTokens
         logEntry.TotalTokens = budget.InputTokens + resp.Usage.CompletionTokens
+        logEntry.CachedTokens = resp.Usage.CachedTokenCount()
         // Plan §5.2 non-stream: the whole wait IS the first token; TPOT has no
         // meaning without a chunk stream, so only TTFT lands.
         stampTimingMetrics(logEntry, nil, resp.Usage.CompletionTokens, float64(duration)/float64(time.Millisecond))
@@ -1540,6 +1552,7 @@ func stampCachedUsage(ctx context.Context, cached []byte) {
     logEntry.InputTokens = resp.Usage.PromptTokens
     logEntry.OutputTokens = resp.Usage.CompletionTokens
     logEntry.TotalTokens = resp.Usage.TotalTokens
+    logEntry.CachedTokens = resp.Usage.CachedTokenCount()
 }
 
 // stampRouteInfo records route context (model, channel, backend) on the

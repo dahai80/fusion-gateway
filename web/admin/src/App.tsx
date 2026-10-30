@@ -36,6 +36,7 @@ import Optimize from "./pages/insights/Optimize";
 import Anomalies from "./pages/insights/Anomalies";
 import Reports from "./pages/insights/Reports";
 import Capacity from "./pages/insights/Capacity";
+import Dashboard from "./pages/insights/Dashboard";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const loggedIn = localStorage.getItem("admin_logged_in");
@@ -65,9 +66,10 @@ export default function App() {
                             </PrivateRoute>
                         }
                     >
-                        {/* Legacy Dashboard/Logs/Analytics deprecated in favor of
-                            PG-backed Insights; routes kept as redirects. */}
-                        <Route index element={<Navigate to="/admin/insights/explorer" replace />} />
+                        {/* #421: persistent PG-backed Dashboard is the landing
+                            page. Legacy Logs/Analytics pages are deprecated —
+                            their routes redirect into Insights. */}
+                        <Route index element={<Dashboard />} />
                         <Route path="keys" element={<Keys />} />
                         <Route path="channels" element={<Channels />} />
                         <Route path="logs" element={<Navigate to="/admin/insights/explorer" replace />} />

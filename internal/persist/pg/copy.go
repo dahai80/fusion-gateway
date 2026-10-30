@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS fg_request_logs (
     input_tokens   int,
     output_tokens  int,
     total_tokens   int,
+    cached_tokens  int,
     cost           numeric(12,6),
     cost_usd       numeric(12,6),
     local_savings  numeric(12,6),
@@ -109,6 +110,19 @@ CREATE TABLE IF NOT EXISTS fg_hw_samples (
     gpu_util         real,
     loaded_models    int,
     collection_error boolean
+);
+
+-- #421: gateway cache counters (semantic/response/embedding caches), 30s
+-- cadence. Values are monotonic cumulative counters; the insights overview
+-- derives per-window deltas between adjacent samples so a restart only loses
+-- one sampling window. Counter wrap (last < first) resets the baseline.
+CREATE TABLE IF NOT EXISTS fg_cache_stats (
+    ts     timestamptz NOT NULL,
+    cache  text NOT NULL,
+    hits   bigint NOT NULL,
+    misses bigint NOT NULL,
+    size   bigint NOT NULL,
+    PRIMARY KEY (ts, cache)
 );
 
 CREATE TABLE IF NOT EXISTS fg_gateway_events (
@@ -170,6 +184,11 @@ ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS trace_id text;
 -- #326: X-Fusion-Scenario business label for per-(app, scenario, model) cost
 -- aggregation. Same nullable-migration pattern as contains_pii above.
 ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS scenario text;
+
+-- #421: upstream prompt-cache hit tokens (OpenAI prompt_tokens_details.
+-- cached_tokens / Anthropic cache_read_input_tokens). Nullable for rows
+-- written by older binaries.
+ALTER TABLE fg_request_logs ADD COLUMN IF NOT EXISTS cached_tokens int;
 `
 
 // newCopyWriter connects the pool and provisions the schema.
@@ -243,6 +262,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             backend, backendType, e.Log.RouteReason,
             e.Log.StatusCode, e.Log.IsSuccess, e.Log.ErrorMessage,
             e.Log.InputTokens, e.Log.OutputTokens, e.Log.TotalTokens,
+            e.Log.CachedTokens,
             e.Log.Cost, e.Log.CostUSD, e.Log.LocalSavings,
             // RequestLog.Latency stores seconds despite its latency_ms JSON
             // tag — convert at this boundary, the column is duration_ms.
@@ -325,7 +345,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             "endpoint", "request_type", "is_stream",
             "model", "model_mapped", "backend", "backend_type", "route_reason",
             "status_code", "is_success", "error_message",
-            "input_tokens", "output_tokens", "total_tokens",
+            "input_tokens", "output_tokens", "total_tokens", "cached_tokens",
             "cost", "cost_usd", "local_savings",
             "duration_ms", "ttft_ms", "tpot_ms", "tpot_p95_ms",
             "chunk_count", "tokens_per_sec",

@@ -9,6 +9,38 @@ on tag push; this file is the maintained, human-curated counterpart.
 
 ## [Unreleased]
 
+### Added (persistent PG-backed admin Dashboard) — #421
+
+- **Restored a top-level "Dashboard" admin page** — this time PG-backed,
+  not the removed in-memory ring buffer. `/admin/api/insights/overview`
+  (strict admin role) aggregates a window (24h/3d/7d/30d at
+  minute/hour/day granularity): request volume + success rate,
+  input/output/cached/total tokens, cost + local savings, duration and
+  TTFT p50/p95/p99 (`percentile_cont`), top-10 models and backends, and a
+  requests/token trend series. The page is the `/admin/` index route and a
+  top-level sidebar menu entry.
+- **Upstream prompt-cache tokens are captured end-to-end**: OpenAI
+  `usage.prompt_tokens_details.cached_tokens` and Anthropic
+  `usage.cache_read_input_tokens` now flow through the adapters into
+  `RequestLog.CachedTokens` and the new `fg_request_logs.cached_tokens`
+  column (incremental `ALTER TABLE ... IF NOT EXISTS`). The streaming path
+  tracks the max of reported cumulative values; the OpenAI→Anthropic
+  response bridge propagates cached tokens via `UsageTotals`. Dashboard
+  shows prompt-cache hit rate as cached ÷ input tokens.
+- **Gateway cache hit rates are persisted**: the new `fg_cache_stats`
+  table (PK `(ts, cache)`) receives 30-second snapshots of the response
+  and semantic cache cumulative counters from a `lifecycle.Worker`
+  sampler (joined on `Sink.Close`, failures WARN best-effort, same as the
+  hw sampler). Overview derives window deltas from the first/last samples
+  in the window; counter wraps (gateway restart mid-window) fall back to
+  the last sample as baseline, losing only the pre-restart part of the
+  window.
+- Helm chart version/appVersion bumped to 0.9.92.
+- e2e spec `04-dashboard-analytics.spec.js` rewritten: persistent
+  Dashboard renders, sidebar has no legacy Logs/Analytics, overview API
+  returns the #421 shape with an ascending series; legacy redirects and
+  legacy admin APIs stay covered.
+
 ### Changed (deprecate legacy Dashboard/Logs/Analytics admin pages) — #419
 
 - **Removed the legacy Dashboard / Logs / Analytics admin pages** — they read

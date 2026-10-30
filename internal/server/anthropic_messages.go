@@ -326,7 +326,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
             // (include_usage) as it converts frames — stamp it over the
             // estimate so the request log carries real prompt/completion
             // counts on the bridge path too, matching the native loop.
-            if inTok, outTok := bridge.UsageTotals(); inTok > 0 || outTok > 0 {
+            if inTok, outTok, cachedTok := bridge.UsageTotals(); inTok > 0 || outTok > 0 {
                 if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
                     if inTok > 0 {
                         logEntry.InputTokens = inTok
@@ -335,8 +335,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
                         logEntry.OutputTokens = outTok
                     }
                     logEntry.TotalTokens = logEntry.InputTokens + logEntry.OutputTokens
+                    if cachedTok > 0 {
+                        logEntry.CachedTokens = cachedTok
+                    }
                     slog.Debug("anthropic bridge path stamped stream usage",
-                        "input_tokens", logEntry.InputTokens, "output_tokens", logEntry.OutputTokens)
+                        "input_tokens", logEntry.InputTokens, "output_tokens", logEntry.OutputTokens,
+                        "cached_tokens", cachedTok)
                 }
             }
         } else {
@@ -503,6 +507,8 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
         logEntry.InputTokens = resp.Usage.InputTokens
         logEntry.OutputTokens = resp.Usage.OutputTokens
         logEntry.TotalTokens = resp.Usage.InputTokens + resp.Usage.OutputTokens
+        // #421: upstream prompt-cache hits (cache_read_input_tokens).
+        logEntry.CachedTokens = resp.Usage.CacheReadInputTokens
         // Plan §5.2 non-stream: the aggregated wait IS the first token.
         durationMS := float64(time.Since(start)) / float64(time.Millisecond)
         stampTimingMetrics(logEntry, nil, resp.Usage.OutputTokens, durationMS)
@@ -605,7 +611,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // payloads so the request log gets real prompt/completion/total counts.
     // Claude Code traffic flows almost entirely through this stream path; the
     // log previously showed 0/0/0 for all of it.
-    usageInput, usageOutput := 0, 0
+    usageInput, usageOutput, usageCached := 0, 0, 0
     captureUsage := func(u *adapter.AnthropicUsage) {
         if u == nil {
             return
@@ -616,6 +622,9 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         if u.OutputTokens > 0 {
             usageOutput = u.OutputTokens
         }
+        if u.CacheReadInputTokens > usageCached {
+            usageCached = u.CacheReadInputTokens
+        }
     }
     stampStreamUsage := func() {
         logEntry := middleware.GetRequestLog(ctx)
@@ -625,6 +634,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         logEntry.InputTokens = usageInput
         logEntry.OutputTokens = usageOutput
         logEntry.TotalTokens = usageInput + usageOutput
+        logEntry.CachedTokens = usageCached
     }
     // captureEventUsage reads usage from both shapes the Anthropic wire format
     // uses: top-level "usage" (message_delta carries output_tokens there) and
