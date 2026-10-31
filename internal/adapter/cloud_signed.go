@@ -370,6 +370,13 @@ func AggregateAnthropicStreamEvents(ctx context.Context, evCh <-chan AnthropicSt
 		case "message_delta":
 			if ev.Usage != nil {
 				resp.Usage.OutputTokens = ev.Usage.OutputTokens
+				// Some Anthropic-compatible upstreams (e.g. glm-5 proxy)
+				// report input_tokens=0 in message_start and the real count
+				// only in message_delta — take it when positive so the
+				// non-stream log path records real input (#430 live finding).
+				if ev.Usage.InputTokens > 0 {
+					resp.Usage.InputTokens = ev.Usage.InputTokens
+				}
 				if ev.Usage.CacheCreationInputTokens > 0 {
 					resp.Usage.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
 				}
