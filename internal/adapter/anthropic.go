@@ -678,9 +678,12 @@ func AnthropicToOpenAI(resp *AnthropicResponse) *ChatResponse {
             FinishReason: finishReason,
         }},
         Usage: UsageResponse{
-            PromptTokens:     resp.Usage.InputTokens,
+            // Anthropic input_tokens EXCLUDES cache_creation/cache_read, but
+            // OpenAI prompt_tokens INCLUDES cached tokens — sum all three so
+            // the cached_tokens <= prompt_tokens invariant holds (#430).
+            PromptTokens:     resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
             CompletionTokens: resp.Usage.OutputTokens,
-            TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+            TotalTokens:      resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.OutputTokens,
             // Map Anthropic cache_read_input_tokens onto the OpenAI-style
             // prompt_tokens_details.cached_tokens field (#421).
             PromptTokensDetails: &PromptTokensDetails{CachedTokens: resp.Usage.CacheReadInputTokens},

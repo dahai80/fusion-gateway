@@ -10264,3 +10264,110 @@ func TestWriteRouteRejection_StatusSelection(t *testing.T) {
         t.Errorf("empty detail should fall back to laya body, got %s", rec.Body.String())
     }
 }
+
+// --- #430: /v1/messages log accounting must include cache tokens ---
+
+// usageCacheStreamProvider streams a full Anthropic event sequence whose
+// message_start carries input_tokens=100 + cache_creation=200 + cache_read=300.
+type usageCacheStreamProvider struct{}
+
+func (usageCacheStreamProvider) Messages(ctx context.Context, req *adapter.AnthropicRequest) (*adapter.AnthropicResponse, error) {
+    return nil, fmt.Errorf("usageCacheStreamProvider: Messages not used")
+}
+
+func (usageCacheStreamProvider) StreamMessages(ctx context.Context, req *adapter.AnthropicRequest) (<-chan adapter.AnthropicStreamEvent, error) {
+    ch := make(chan adapter.AnthropicStreamEvent, 8)
+    ch <- adapter.AnthropicStreamEvent{
+        Type: "message_start",
+        Message: &adapter.AnthropicResponse{
+            ID: "msg_c", Role: "assistant", Model: req.Model,
+            Usage: adapter.AnthropicUsage{InputTokens: 100, CacheCreationInputTokens: 200, CacheReadInputTokens: 300},
+        },
+    }
+    ch <- adapter.AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &adapter.AnthropicContentBlock{Type: "text"}}
+    delta, _ := json.Marshal(map[string]any{"type": "text_delta", "text": "hi"})
+    ch <- adapter.AnthropicStreamEvent{Type: "content_block_delta", Index: 0, Delta: delta}
+    ch <- adapter.AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+    ch <- adapter.AnthropicStreamEvent{
+        Type:       "message_delta",
+        Usage:      &adapter.AnthropicUsage{InputTokens: 100, OutputTokens: 5, CacheReadInputTokens: 300},
+        StopReason: "end_turn",
+    }
+    ch <- adapter.AnthropicStreamEvent{Type: "message_stop"}
+    close(ch)
+    return ch, nil
+}
+
+// TestHandleNonStreamAnthropicMessages_UsageLogIncludesCache (#430): the
+// request-log input_tokens must be input + cache_creation + cache_read
+// (Anthropic input_tokens EXCLUDES the cache fields), restoring the
+// cached_tokens <= input_tokens invariant the Dashboard ratio depends on.
+func TestHandleNonStreamAnthropicMessages_UsageLogIncludesCache(t *testing.T) {
+    // Non-stream /v1/messages is aggregated from an internal stream, so the
+    // upstream must speak SSE, not a JSON body.
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        fmt.Fprint(w, `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`+"\n\n")
+        fmt.Fprint(w, `data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}`+"\n\n")
+        fmt.Fprint(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello!"}}`+"\n\n")
+        fmt.Fprint(w, `data: {"type":"content_block_stop","index":0}`+"\n\n")
+        fmt.Fprint(w, `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300}}`+"\n\n")
+        fmt.Fprint(w, `data: {"type":"message_stop"}`+"\n\n")
+    }))
+    defer ts.Close()
+
+    s := newTestServer()
+    p := adapter.NewAnthropicProvider("test-cloud", config.BackendConfig{
+        Type: "anthropic", BaseURL: ts.URL, APIKey: "test-key", Enabled: true,
+    })
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100}
+
+    httpReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+    entry := middleware.InitRequestLog(httpReq)
+    httpReq = middleware.WithRequestLogContext(httpReq, entry)
+
+    rec := httptest.NewRecorder()
+    s.handleNonStreamAnthropicMessages(httpReq.Context(), rec, p, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    if entry.InputTokens != 600 {
+        t.Errorf("InputTokens = %d, want 600 (input+cache_creation+cache_read)", entry.InputTokens)
+    }
+    if entry.CachedTokens != 300 {
+        t.Errorf("CachedTokens = %d, want 300", entry.CachedTokens)
+    }
+    if entry.TotalTokens != 605 {
+        t.Errorf("TotalTokens = %d, want 605", entry.TotalTokens)
+    }
+}
+
+// TestHandleStreamAnthropicMessages_UsageLogIncludesCache (#430): the stream
+// path's stampStreamUsage must sum input + cache_creation + cache_read, same
+// invariant as the non-stream path.
+func TestHandleStreamAnthropicMessages_UsageLogIncludesCache(t *testing.T) {
+    s := newTestServer()
+    p := usageCacheStreamProvider{}
+    req := &adapter.AnthropicRequest{Model: "claude-3", MaxTokens: 100, Stream: true}
+
+    httpReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+    entry := middleware.InitRequestLog(httpReq)
+    httpReq = middleware.WithRequestLogContext(httpReq, entry)
+
+    rec := httptest.NewRecorder()
+    s.handleStreamAnthropicMessages(httpReq.Context(), rec, p, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected 200, got %d", rec.Code)
+    }
+    if entry.InputTokens != 600 {
+        t.Errorf("InputTokens = %d, want 600 (input+cache_creation+cache_read)", entry.InputTokens)
+    }
+    if entry.CachedTokens != 300 {
+        t.Errorf("CachedTokens = %d, want 300", entry.CachedTokens)
+    }
+    if entry.OutputTokens != 5 {
+        t.Errorf("OutputTokens = %d, want 5", entry.OutputTokens)
+    }
+}
