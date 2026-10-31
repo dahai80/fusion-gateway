@@ -254,7 +254,7 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // entry — same LLM router as /v1/chat/completions, but the credential
     // is the shell session JWT (the shell must not hold a gateway API key).
     mux.HandleFunc("POST /api/v1/shell/chat/completions", s.withShellSession(s.handleChatCompletions))
-    mux.HandleFunc("POST /api/v1/shell/manifests", s.withMiddleware(s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)))
+    mux.HandleFunc("POST /api/v1/shell/manifests", s.withShellManifestUpsertAuth(s.handleShellManifestUpsert))
     // #261 K1: heartbeat authenticates with the module's gateway-issued fm-
     // service key (hash-compare against the registry), NOT the standard fg-
     // key chain — an fm- Bearer would be 401'd by APIKeyAuthWithStore before
@@ -605,9 +605,14 @@ func (s *Server) shellManifestAdminAllowed(r *http.Request) bool {
 // standard recovery loop after a heartbeat 403/404 is "re-POST the manifest
 // with the fm- key", never "ship the admin key to every module process".
 // The body is buffered to extract the id for the key check, then re-armed.
+// #436: the route is wired OUTSIDE withMiddleware (same as heartbeat) — the
+// standard fg-key chain 401'd the fm- Bearer before this gate could evaluate
+// it, so the #369 self-heal loop was unreachable. The admin plane is checked
+// from the raw Bearer token here (constant-time, same helper as heartbeat),
+// since no middleware principal is resolved on this path.
 func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
-        if s.shellManifestAdminAllowed(r) {
+        if s.shellHeartbeatAdminToken(shellBearerToken(r)) {
             next(w, r)
             return
         }
