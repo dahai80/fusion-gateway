@@ -497,6 +497,41 @@ func newConnectorRegistry(cfg *config.ConfigSnapshot) *connector.Registry {
         r.SetCipher(cipher)
     }
 
+    // #434: register per-connector OAuth2 client apps from config. Before
+    // this the OAuth2 provider had no config source at all — authorize
+    // always failed with "no oauth2 config" even for builtin connectors.
+    if cfg.Config.Connector != nil {
+        for key, oc := range cfg.Config.Connector.OAuth2 {
+            if oc == nil || oc.ClientID == "" {
+                slog.Warn("connector oauth2 entry missing client_id, skipping", "connector", key)
+                continue
+            }
+            authURL, tokenURL := connector.DefaultOAuth2Endpoints(key)
+            if oc.AuthURL != "" {
+                authURL = oc.AuthURL
+            }
+            if oc.TokenURL != "" {
+                tokenURL = oc.TokenURL
+            }
+            if authURL == "" || tokenURL == "" {
+                slog.Warn("connector oauth2 entry missing auth_url/token_url and no builtin default, skipping", "connector", key)
+                continue
+            }
+            scopes := oc.Scopes
+            if len(scopes) == 0 {
+                scopes = connector.DefaultOAuth2Scopes(key)
+            }
+            r.OAuth2().RegisterConnector(key, &connector.OAuth2Config{
+                ClientID:     oc.ClientID,
+                ClientSecret: oc.ClientSecret,
+                AuthURL:      authURL,
+                TokenURL:     tokenURL,
+                Scopes:       scopes,
+                RedirectURL:  oc.RedirectURL,
+            })
+        }
+    }
+
     // Set up persistence
     persistPath := "data/connections.json"
     if cfg.Config.Connector != nil && cfg.Config.Connector.PersistencePath != "" {

@@ -10,6 +10,7 @@ import (
     "log/slog"
     "net/http"
     "net/url"
+    "strconv"
     "strings"
     "time"
 )
@@ -368,6 +369,169 @@ func (h *HubSpotConnector) ValidateAuth(ctx context.Context, conn *Connection) e
     return nil
 }
 
+// MicrosoftGraphConnector integrates Microsoft 365 mail + calendar via the
+// Graph API (#434). Pilot scope is read-only (Mail.Read / Calendars.Read,
+// delegated /me access); a `userId` param switches to /users/{id} paths for
+// admin-consented tenants. Mail.Send is intentionally NOT exposed.
+type MicrosoftGraphConnector struct {
+    client   *http.Client
+    oauth2   *OAuth2Provider
+    registry *Registry
+    // baseURLForTest overrides microsoftGraphBaseURL (tests only; empty = prod).
+    baseURLForTest string
+}
+
+func (m *MicrosoftGraphConnector) graphBaseURL() string {
+    if m.baseURLForTest != "" {
+        return m.baseURLForTest
+    }
+    return microsoftGraphBaseURL
+}
+
+const microsoftGraphBaseURL = "https://graph.microsoft.com/v1.0"
+
+func NewMicrosoftGraphConnector() *MicrosoftGraphConnector {
+    return &MicrosoftGraphConnector{
+        client: &http.Client{Timeout: 15 * time.Second},
+    }
+}
+
+func (m *MicrosoftGraphConnector) SetOAuth2Provider(o *OAuth2Provider) {
+    m.oauth2 = o
+}
+
+func (m *MicrosoftGraphConnector) Meta() *ConnectorMeta {
+    return &ConnectorMeta{
+        ConnectorKey: "microsoft_graph",
+        DisplayName:  "Microsoft Graph",
+        Icon:         "icon-microsoft",
+        AuthType:     AuthTypeOAuth2,
+        Description:  "Microsoft 365 mail & calendar (read-only pilot: Mail.Read, Calendars.Read)",
+        Actions: []ActionDef{
+            {ActionKey: "get_me", DisplayName: "获取当前用户", Permission: PermissionRead},
+            {ActionKey: "list_messages", DisplayName: "列出邮件", Permission: PermissionRead},
+            {ActionKey: "get_message", DisplayName: "获取邮件详情", Permission: PermissionRead},
+            {ActionKey: "list_calendar_events", DisplayName: "列出日历事件", Permission: PermissionRead},
+            {ActionKey: "list_calendar_instances", DisplayName: "列出日历实例(展开RRULE)", Permission: PermissionRead},
+        },
+    }
+}
+
+// userPathSegment resolves the Graph user path segment: "/me" for delegated
+// pilot access, "/users/{id}" when a userId param is supplied.
+func (m *MicrosoftGraphConnector) userPathSegment(params map[string]interface{}) string {
+    if uid, ok := params["userId"].(string); ok && uid != "" {
+        return "/users/" + url.PathEscape(uid)
+    }
+    return "/me"
+}
+
+func (m *MicrosoftGraphConnector) ExecuteAction(ctx context.Context, conn *Connection, actionKey string, params map[string]interface{}, testMode bool) (*ActionResponse, error) {
+    slog.Info("microsoft_graph action", "action", actionKey, "connection", conn.ID, "test", testMode)
+    if testMode {
+        return &ActionResponse{Success: true, Code: 0, Data: map[string]interface{}{"test": true, "action": actionKey}, Message: "test mode"}, nil
+    }
+
+    token, err := getDecryptedToken(m.registry, conn)
+    if err != nil {
+        return ErrorWithCode(ErrAuth, fmt.Sprintf("decrypt token failed: %v", err)), nil
+    }
+
+    userSeg := m.userPathSegment(params)
+    if params == nil {
+        params = map[string]interface{}{}
+    }
+
+    switch actionKey {
+    case "get_me":
+        return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+"/me", nil)
+    case "list_messages":
+        q := url.Values{}
+        if v, ok := params["top"].(float64); ok && v > 0 {
+            q.Set("$top", strconv.Itoa(int(v)))
+        }
+        if v, ok := params["folder"].(string); ok && v != "" {
+            return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+userSeg+"/mailFolders/"+url.PathEscape(v)+"/messages?"+q.Encode(), nil)
+        }
+        return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+userSeg+"/messages?"+q.Encode(), nil)
+    case "get_message":
+        messageID, _ := params["messageId"].(string)
+        if messageID == "" {
+            return ErrorWithCode(ErrValidation, "messageId is required"), nil
+        }
+        return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+userSeg+"/messages/"+url.PathEscape(messageID), nil)
+    case "list_calendar_events":
+        return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+userSeg+"/events", nil)
+    case "list_calendar_instances":
+        // calendarView expands recurring series (RRULE) into concrete
+        // instances inside the [startDateTime, endDateTime) window — both
+        // bounds are required by Graph.
+        start, _ := params["startDateTime"].(string)
+        end, _ := params["endDateTime"].(string)
+        if start == "" || end == "" {
+            return ErrorWithCode(ErrValidation, "startDateTime and endDateTime are required (ISO 8601)"), nil
+        }
+        q := url.Values{}
+        q.Set("startDateTime", start)
+        q.Set("endDateTime", end)
+        return m.doRequest(ctx, token, conn, "GET", m.graphBaseURL()+userSeg+"/calendarView?"+q.Encode(), nil)
+    default:
+        return ErrorWithCode(ErrNotFound, fmt.Sprintf("action %q not found", actionKey)), nil
+    }
+}
+
+func (m *MicrosoftGraphConnector) doRequest(ctx context.Context, token string, conn *Connection, method, apiURL string, body []byte) (*ActionResponse, error) {
+    resp, err := m.doHTTP(ctx, token, method, apiURL, body)
+    if err != nil {
+        return ErrorWithCode(ErrExternal, err.Error()), nil
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode == http.StatusUnauthorized && m.oauth2 != nil {
+        slog.Info("microsoft_graph got 401, attempting token refresh", "connection", conn.ID)
+        if refreshErr := m.oauth2.RefreshIfNeeded(ctx, conn); refreshErr != nil {
+            slog.Error("microsoft_graph token refresh failed", "error", refreshErr)
+            return ErrorWithCode(ErrAuth, "token expired and refresh failed"), nil
+        }
+        newToken, decErr := getDecryptedToken(m.registry, conn)
+        if decErr != nil {
+            return ErrorWithCode(ErrAuth, "decrypt refreshed token failed"), nil
+        }
+        retryResp, retryErr := m.doHTTP(ctx, newToken, method, apiURL, body)
+        if retryErr != nil {
+            return ErrorWithCode(ErrExternal, retryErr.Error()), nil
+        }
+        defer retryResp.Body.Close()
+        return parseAPIResponse(retryResp)
+    }
+
+    return parseAPIResponse(resp)
+}
+
+func (m *MicrosoftGraphConnector) doHTTP(ctx context.Context, token, method, apiURL string, body []byte) (*http.Response, error) {
+    var req *http.Request
+    if body != nil {
+        req, _ = http.NewRequestWithContext(ctx, method, apiURL, bytes.NewReader(body))
+    } else {
+        req, _ = http.NewRequestWithContext(ctx, method, apiURL, nil)
+    }
+    req.Header.Set("Authorization", "Bearer "+token)
+    req.Header.Set("Content-Type", "application/json")
+    return m.client.Do(req)
+}
+
+func (m *MicrosoftGraphConnector) RefreshAuth(ctx context.Context, conn *Connection) error {
+    if m.oauth2 != nil {
+        return m.oauth2.RefreshIfNeeded(ctx, conn)
+    }
+    return nil
+}
+
+func (m *MicrosoftGraphConnector) ValidateAuth(ctx context.Context, conn *Connection) error {
+    slog.Info("microsoft_graph auth validate", "connection", conn.ID)
+    return nil
+}
+
 func getDecryptedToken(registry *Registry, conn *Connection) (string, error) {
     if conn.EncryptedAccessToken == "" {
         return "", fmt.Errorf("no access token")
@@ -405,6 +569,35 @@ func buildGmailRaw(to, subject, body string) string {
     return base64.URLEncoding.EncodeToString([]byte(msg))
 }
 
+// DefaultOAuth2Endpoints returns well-known authorize/token endpoints for
+// builtin connector keys, so operators only configure client_id/secret/
+// redirect_url in `connector.oauth2.<key>` (#434). Empty strings for keys
+// without well-known endpoints (QuickBooks/HubSpot have per-app URLs).
+func DefaultOAuth2Endpoints(key string) (authURL, tokenURL string) {
+    switch key {
+    case "microsoft_graph":
+        // Entra ID v2 endpoints: `common` tenant accepts work/school +
+        // personal Microsoft accounts (issue #434 requirement).
+        return "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    case "google_workspace":
+        return "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://oauth2.googleapis.com/token"
+    }
+    return "", ""
+}
+
+// DefaultOAuth2Scopes returns the pilot scope set for a connector key when
+// the operator does not override `scopes` in config. offline_access is
+// required by Entra ID v2 to mint refresh tokens.
+func DefaultOAuth2Scopes(key string) []string {
+    switch key {
+    case "microsoft_graph":
+        return []string{"Mail.Read", "Calendars.Read", "offline_access"}
+    }
+    return nil
+}
+
 func RegisterBuiltins(r *Registry) {
     qb := NewQuickBooksConnector()
     qb.registry = r
@@ -419,5 +612,10 @@ func RegisterBuiltins(r *Registry) {
     hs.registry = r
     r.Register(hs)
 
-    slog.Info("builtin connectors registered", "count", 3)
+    mg := NewMicrosoftGraphConnector()
+    mg.SetOAuth2Provider(r.OAuth2())
+    mg.registry = r
+    r.Register(mg)
+
+    slog.Info("builtin connectors registered", "count", 4)
 }
