@@ -167,6 +167,31 @@ func TestAggregateAnthropicStreamEvents_Text(t *testing.T) {
 	}
 }
 
+// TestAggregateAnthropicStreamEvents_InputFromDelta (#430 live finding):
+// some Anthropic-compatible upstreams (glm-5 proxy) report input_tokens=0 in
+// message_start and the real count only in message_delta — the aggregator
+// must take the positive delta value so non-stream usage is not zeroed.
+func TestAggregateAnthropicStreamEvents_InputFromDelta(t *testing.T) {
+	evCh := make(chan AnthropicStreamEvent, 8)
+	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_3", Model: "glm-5", Usage: AnthropicUsage{InputTokens: 0}}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContentBlock{Type: "text"}}
+	evCh <- AnthropicStreamEvent{Type: "content_block_stop", Index: 0}
+	evCh <- AnthropicStreamEvent{Type: "message_delta", StopReason: "end_turn", Usage: &AnthropicUsage{InputTokens: 42, OutputTokens: 7}}
+	evCh <- AnthropicStreamEvent{Type: "message_stop"}
+	close(evCh)
+
+	resp, err := AggregateAnthropicStreamEvents(context.Background(), evCh, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.InputTokens != 42 {
+		t.Fatalf("InputTokens = %d, want 42 from message_delta", resp.Usage.InputTokens)
+	}
+	if resp.Usage.OutputTokens != 7 {
+		t.Fatalf("OutputTokens = %d, want 7", resp.Usage.OutputTokens)
+	}
+}
+
 func TestAggregateAnthropicStreamEvents_ThinkingAndSignature(t *testing.T) {
 	evCh := make(chan AnthropicStreamEvent, 16)
 	evCh <- AnthropicStreamEvent{Type: "message_start", Message: &AnthropicResponse{ID: "msg_2", Model: "glm5.2"}}
