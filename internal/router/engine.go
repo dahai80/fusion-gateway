@@ -2,8 +2,10 @@ package router
 
 import (
     "context"
+    "encoding/json"
     "fmt"
     "log/slog"
+    "net/http"
     "strings"
     "sync"
     "time"
@@ -51,6 +53,12 @@ type RouteDecision struct {
     // fusion-mlx. RejectDetail is a JSON string: {"dimension","score","threshold"}.
     Rejected     bool
     RejectDetail string
+    // RejectStatus overrides the HTTP status the server layer returns for a
+    // Rejected decision. Zero = default 403 (laya guard / qualified lock).
+    // Set to 503 when the rejection is an honest "local-only model, local
+    // breaker open" overloaded condition (issue #429) — retryable, unlike a
+    // permission 403.
+    RejectStatus int
 }
 
 type RouteRequest struct {
@@ -1098,6 +1106,33 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // recovering local backend sees at most one probe at a time instead of
     // the full flood State() used to let through. Divert reason unchanged.
     if !e.breakers["local"].Admit() {
+        // #429: a local-exclusive model has NO cloud backend that can serve
+        // it — diverting it cloud on a tripped breaker produced a misleading
+        // 400 ("Selected backend does not support image generation") in
+        // under a second, hiding the real cause (MLX 507 admission
+        // rejection). Reject with 503 + breaker state instead: honest,
+        // retryable, and Claude Code treats overloaded_error as backoff-
+        // retry rather than hard failure.
+        if localExclusiveDecision(cfg, req, snap) != nil {
+            snapBreaker := e.breakers["local"].Snapshot()
+            detail, _ := json.Marshal(map[string]any{
+                "type":          "overloaded_error",
+                "model":         req.Model,
+                "breaker_state": snapBreaker.State.String(),
+                "trip_reason":   snapBreaker.TripReason,
+            })
+            slog.Warn("local-exclusive model rejected: local breaker open, no cloud fallback can serve it",
+                "model", req.Model,
+                "breaker_state", snapBreaker.State.String(),
+                "trip_reason", snapBreaker.TripReason,
+            )
+            return &RouteDecision{
+                Rejected:     true,
+                RejectStatus: http.StatusServiceUnavailable,
+                Reason:       "local_exclusive_model_breaker_open",
+                RejectDetail: string(detail),
+            }
+        }
         if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
             return decision
         }
@@ -1141,16 +1176,17 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
     // serves it, so diverting it cloud on a hardware-overload heuristic
     // (P1 memory, P1.5 mlx-memory, P2 swap, P2.5 gpu-memory-low) produces a
     // guaranteed 400 ("Invalid model name ...") instead of a local answer.
-    // The P0 breaker-open check stays upstream: when local is genuinely
-    // tripped (recent failures), cloud is still the least-bad fallback even
-    // for local-exclusive models. But the overload heuristics below describe
-    // a BUSY local, not a DOWN one — and on a host whose entire purpose is
-    // local inference (fusion-mlx loaded a 27B model), GPU memory sits at
-    // ~100% by design, so P2.5 gpu_memory_low fired every request and broke
-    // all local-exclusive routing. Hoisting the guard here means a
-    // local-exclusive model is served locally whenever local is not
-    // breaker-tripped, regardless of load. When model_mapping is disabled or
-    // empty, every model in the local set is treated as local-exclusive.
+    // #429: when local is breaker-TRIPPED, the P0 branch above now rejects
+    // local-exclusive requests with 503 + breaker state instead of the old
+    // "least-bad" cloud divert, whose 400 hid the real cause. The overload
+    // heuristics below describe a BUSY local, not a DOWN one — and on a host
+    // whose entire purpose is local inference (fusion-mlx loaded a 27B
+    // model), GPU memory sits at ~100% by design, so P2.5 gpu_memory_low
+    // fired every request and broke all local-exclusive routing. Hoisting
+    // the guard here means a local-exclusive model is served locally
+    // whenever local is not breaker-tripped, regardless of load. When
+    // model_mapping is disabled or empty, every model in the local set is
+    // treated as local-exclusive.
     if decision := localExclusiveDecision(cfg, req, snap); decision != nil {
         return decision
     }

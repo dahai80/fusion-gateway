@@ -236,6 +236,15 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
     // buffered body verbatim to fusion-mlx /v1/images/generations.
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     decision := s.router.Decide(ctx, &router.RouteRequest{Model: req.Model})
+    // #429: a Rejected decision (e.g. local-exclusive image model with the
+    // local breaker open) previously fell through checkBackendAccess with an
+    // empty Backend and onward to the cloud path, producing the misleading
+    // 400 below. Surface the router's 503 + breaker state instead.
+    if decision.Rejected {
+        slog.Warn("image request blocked by route rejection", "model", req.Model, "reason", decision.Reason, "detail", decision.RejectDetail)
+        writeRouteRejection(w, decision)
+        return
+    }
     if !s.checkBackendAccess(w, r, string(decision.Backend)) {
         return
     }

@@ -54,7 +54,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
     if decision.Rejected {
-        http.Error(w, decision.RejectDetail, http.StatusForbidden)
+        writeRouteRejection(w, decision)
         return
     }
 
@@ -208,7 +208,7 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     observability.RecordRouteDecision(string(decision.Backend), decision.Reason)
 
     if decision.Rejected {
-        http.Error(w, decision.RejectDetail, http.StatusForbidden)
+        writeRouteRejection(w, decision)
         return
     }
 

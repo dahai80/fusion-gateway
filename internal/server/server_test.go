@@ -10235,6 +10235,36 @@ func TestIsLogSkippedPoll(t *testing.T) {
     }
 }
 
+// #429: writeRouteRejection keeps 403 for laya-guard/qualified-lock
+// decisions (RejectStatus zero) but honors a router-set 503 for the
+// local-exclusive-model breaker-open overload so clients retry.
+func TestWriteRouteRejection_StatusSelection(t *testing.T) {
+    rec := httptest.NewRecorder()
+    writeRouteRejection(rec, &router.RouteDecision{Rejected: true, RejectDetail: `{"dimension":"pii"}`})
+    if rec.Code != http.StatusForbidden {
+        t.Errorf("default status = %d, want 403", rec.Code)
+    }
+    if strings.TrimSpace(rec.Body.String()) != `{"dimension":"pii"}` {
+        t.Errorf("body = %s, want RejectDetail verbatim", rec.Body.String())
+    }
+
+    rec = httptest.NewRecorder()
+    writeRouteRejection(rec, &router.RouteDecision{
+        Rejected:     true,
+        RejectStatus: http.StatusServiceUnavailable,
+        RejectDetail: `{"type":"overloaded_error"}`,
+    })
+    if rec.Code != http.StatusServiceUnavailable {
+        t.Errorf("override status = %d, want 503", rec.Code)
+    }
+
+    rec = httptest.NewRecorder()
+    writeRouteRejection(rec, &router.RouteDecision{Rejected: true})
+    if !strings.Contains(rec.Body.String(), "dimension") {
+        t.Errorf("empty detail should fall back to laya body, got %s", rec.Body.String())
+    }
+}
+
 // --- #430: /v1/messages log accounting must include cache tokens ---
 
 // usageCacheStreamProvider streams a full Anthropic event sequence whose
