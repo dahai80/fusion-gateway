@@ -7,9 +7,6 @@ import (
     "net/http/httptest"
     "strings"
     "testing"
-
-    "github.com/fusion-gateway/fusion-gateway/internal/config"
-    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
 )
 
 // #369: heartbeat denials must be programmable recovery signals — 404
@@ -25,14 +22,15 @@ func selfHealManifest(id string) map[string]any {
     }
 }
 
-// selfHealRegister registers a manifest with the admin principal and returns
-// the issued raw fm- key.
+// selfHealRegister registers a manifest with the master-key Bearer (the #436
+// route runs outside withMiddleware, so the admin plane is the raw token,
+// not a middleware principal) and returns the issued raw fm- key.
 func selfHealRegister(t *testing.T, s *Server, id string) string {
     t.Helper()
-    admin := &middleware.Principal{IsMaster: true, KeyConfig: &config.AuthKeyConfig{Key: "mk", Name: "master"}}
+    s.cfg.Config.Auth.MasterKey = "mk-selfheal-test-master-key"
     body, _ := json.Marshal(selfHealManifest(id))
     req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
-    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), admin))
+    req.Header.Set("Authorization", "Bearer mk-selfheal-test-master-key")
     w := httptest.NewRecorder()
     s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
     if w.Code != http.StatusOK {
@@ -128,5 +126,39 @@ func TestShellUpsert_ServiceKeySelfHeal(t *testing.T) {
     s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w2, req2)
     if w2.Code != http.StatusForbidden {
         t.Fatalf("cross-id re-register code = %d, want 403", w2.Code)
+    }
+}
+
+// TestShellUpsert_AdminKeyBearerAccepted (#436): with the route outside
+// withMiddleware, the web_shell.admin_key Bearer must still pass the upsert
+// gate (raw-token constant-time compare, same helper as heartbeat).
+func TestShellUpsert_AdminKeyBearerAccepted(t *testing.T) {
+    s := newShellTestServer(t, false)
+    s.cfg.Config.Shell.AdminKey = "shell-admin-key-selfheal"
+    body, _ := json.Marshal(selfHealManifest("fusion-adminkey"))
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer shell-admin-key-selfheal")
+    w := httptest.NewRecorder()
+    s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("admin_key upsert code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+}
+
+// TestShellUpsert_GarbageCredential403 (#436): outside withMiddleware a bad
+// Bearer is no longer 401'd by the fg-key chain — it must land in the
+// upsert gate's 403 envelope (fail-closed, same as heartbeat denials).
+func TestShellUpsert_GarbageCredential403(t *testing.T) {
+    s := newShellTestServer(t, false)
+    body, _ := json.Marshal(selfHealManifest("fusion-ghost"))
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer fg-some-invalid-key")
+    w := httptest.NewRecorder()
+    s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusForbidden {
+        t.Fatalf("garbage credential code = %d, want 403", w.Code)
+    }
+    if !strings.Contains(w.Body.String(), "manifest_forbidden") {
+        t.Fatalf("expected manifest_forbidden, body: %s", w.Body.String())
     }
 }
