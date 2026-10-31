@@ -21,6 +21,13 @@ encryption:
 
 # connector:                            # SaaS connector framework (optional)
 #     persistence_path: "data/connections.json"
+#     oauth2:                           # per-connector OAuth2 client apps (#434)
+#         microsoft_graph:
+#             client_id: "<azure-app-client-id>"
+#             client_secret: "<azure-app-client-secret>"
+#             redirect_url: "https://your-gateway-host/gateway/v1/oauth2/callback"
+#             # auth_url/token_url default to Entra ID v2 common tenant;
+#             # scopes default to [Mail.Read, Calendars.Read, offline_access]
 
 auth:
     enabled: true

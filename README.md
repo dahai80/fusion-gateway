@@ -160,6 +160,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `server.tls.key_file` | "" | TLS private key file |
 | `encryption.master_key` | "" | AES-256 master key for at-rest encryption (≥32 chars) |
 | `connector.persistence_path` | data/connections.json | Connection credentials file path |
+| `connector.oauth2.<key>` | (none) | Per-connector OAuth2 client app (client_id, client_secret, redirect_url; auth_url/token_url/scopes default per builtin) |
 | `mcp.enabled` | false | Enable MCP cluster gateway |
 | `mcp.host` | 127.0.0.1 | MCP gateway host |
 | `mcp.port` | 11446 | MCP gateway port |
@@ -1552,8 +1553,31 @@ Unified SaaS connector framework for third-party API integration (QuickBooks, Go
 | QuickBooks | OAuth2 | query_overdue_invoice, list_customers, create_invoice, get_company_info |
 | Google Workspace | OAuth2 | list_users, get_user, list_calendar_events, send_email, read_drive_file |
 | HubSpot | OAuth2 | list_contacts, get_contact, create_contact, list_deals, update_deal |
+| Microsoft Graph | OAuth2 | get_me, list_messages, get_message, list_calendar_events, list_calendar_instances |
 
-All connectors make real HTTP API calls to their respective SaaS endpoints. Google Workspace supports automatic token refresh on 401 responses.
+All connectors make real HTTP API calls to their respective SaaS endpoints. Google Workspace and Microsoft Graph support automatic token refresh on 401 responses.
+
+Microsoft Graph is read-only for the pilot (scopes `Mail.Read`, `Calendars.Read`, `offline_access`): mail list/get (optional `folder`/`top`/`userId` params) and calendar list plus `calendarView` instance expansion (`list_calendar_instances` requires `startDateTime`/`endDateTime`, which expands recurring RRULE series into concrete instances). `Mail.Send` is deliberately not exposed.
+
+### Connector OAuth2 Client Apps
+
+OAuth2 client credentials are configured per connector under `connector.oauth2.<connector_key>` (#434). Without an entry the authorize endpoint returns `no oauth2 config`:
+
+```yaml
+connector:
+    persistence_path: data/connections.json
+    oauth2:
+        microsoft_graph:
+            client_id: "<azure-app-client-id>"
+            client_secret: "<azure-app-client-secret>"
+            redirect_url: "https://your-gateway-host/gateway/v1/oauth2/callback"
+            # optional overrides — defaults below
+            # auth_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+            # token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+            # scopes: [Mail.Read, Calendars.Read, offline_access]
+```
+
+`microsoft_graph` defaults use the Entra ID v2 `common` tenant (accepts work/school + personal accounts) and includes `offline_access` so refresh tokens are minted. `google_workspace` defaults to Google's endpoints. Entries missing `client_id`, or lacking both explicit URLs and a builtin default, are skipped with a WARN at startup.
 
 ### HTTPS / TLS
 

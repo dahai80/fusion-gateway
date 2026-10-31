@@ -31,6 +31,24 @@ type EncryptionConfig struct {
 
 type ConnectorConfig struct {
     PersistencePath string `mapstructure:"persistence_path"`
+    // OAuth2 holds per-connector client credentials keyed by connector_key
+    // (#434). Without this the OAuth2 provider never receives a config and
+    // /gateway/v1/oauth2/authorize returns "no oauth2 config" even for the
+    // builtin connectors.
+    OAuth2 map[string]*ConnectorOAuth2Config `mapstructure:"oauth2"`
+}
+
+// ConnectorOAuth2Config is one connector's OAuth2 client app registration.
+// AuthURL/TokenURL/Scopes fall back to connector-package defaults for known
+// builtin keys, so a minimal entry only needs client_id + client_secret +
+// redirect_url.
+type ConnectorOAuth2Config struct {
+    ClientID     string   `mapstructure:"client_id"`
+    ClientSecret string   `mapstructure:"client_secret"`
+    AuthURL      string   `mapstructure:"auth_url"`
+    TokenURL     string   `mapstructure:"token_url"`
+    Scopes       []string `mapstructure:"scopes"`
+    RedirectURL  string   `mapstructure:"redirect_url"`
 }
 
 type ServerConfig struct {

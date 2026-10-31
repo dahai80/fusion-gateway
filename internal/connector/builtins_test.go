@@ -259,12 +259,177 @@ func TestHubSpotConnector_RefreshValidateAuth(t *testing.T) {
     }
 }
 
+func TestMicrosoftGraphConnector_Meta(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    meta := m.Meta()
+    if meta.ConnectorKey != "microsoft_graph" {
+        t.Errorf("ConnectorKey = %q, want %q", meta.ConnectorKey, "microsoft_graph")
+    }
+    if len(meta.Actions) != 5 {
+        t.Fatalf("Actions count = %d, want 5", len(meta.Actions))
+    }
+    for _, a := range meta.Actions {
+        if a.Permission != PermissionRead {
+            t.Errorf("action %q permission = %q, pilot is read-only", a.ActionKey, a.Permission)
+        }
+    }
+}
+
+func TestMicrosoftGraphConnector_TestMode(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph"}
+    for _, act := range []string{"get_me", "list_messages", "get_message", "list_calendar_events", "list_calendar_instances"} {
+        resp, err := m.ExecuteAction(context.Background(), conn, act, nil, true)
+        if err != nil {
+            t.Errorf("action %q test mode error: %v", act, err)
+        }
+        if !resp.Success {
+            t.Errorf("action %q test mode: success=%v", act, resp.Success)
+        }
+    }
+}
+
+func TestMicrosoftGraphConnector_NoToken(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph"}
+    resp, _ := m.ExecuteAction(context.Background(), conn, "list_messages", nil, false)
+    if resp.Code != ErrAuth {
+        t.Errorf("Code = %d, want %d", resp.Code, ErrAuth)
+    }
+}
+
+func TestMicrosoftGraphConnector_ValidationErrors(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph", EncryptedAccessToken: "token"}
+    tests := []struct {
+        action string
+        params map[string]interface{}
+    }{
+        {"get_message", nil},
+        {"list_calendar_instances", nil},
+        {"list_calendar_instances", map[string]interface{}{"startDateTime": "2026-10-31T00:00:00Z"}},
+    }
+    for _, tt := range tests {
+        resp, _ := m.ExecuteAction(context.Background(), conn, tt.action, tt.params, false)
+        if resp.Code != ErrValidation {
+            t.Errorf("%s: Code = %d, want %d", tt.action, resp.Code, ErrValidation)
+        }
+    }
+}
+
+func TestMicrosoftGraphConnector_UnknownAction(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph", EncryptedAccessToken: "token"}
+    resp, _ := m.ExecuteAction(context.Background(), conn, "send_mail", nil, false)
+    // send_mail intentionally not offered (pilot is read-only) → ErrNotFound
+    if resp.Code != ErrNotFound {
+        t.Errorf("Code = %d, want %d", resp.Code, ErrNotFound)
+    }
+}
+
+func TestMicrosoftGraphConnector_ListMessages(t *testing.T) {
+    var gotPath string
+    var gotAuth string
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotPath = r.URL.Path + "?" + r.URL.RawQuery
+        gotAuth = r.Header.Get("Authorization")
+        w.WriteHeader(200)
+        _, _ = w.Write([]byte(`{"value": [{"id": "msg1", "subject": "hi"}]}`))
+    }))
+    defer ts.Close()
+
+    m := NewMicrosoftGraphConnector()
+    m.baseURLForTest = ts.URL
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph", EncryptedAccessToken: "token"}
+    resp, err := m.ExecuteAction(context.Background(), conn, "list_messages", map[string]interface{}{"top": float64(5), "userId": "u1"}, false)
+    if err != nil {
+        t.Fatalf("error: %v", err)
+    }
+    if !resp.Success {
+        t.Fatalf("success=%v code=%d", resp.Success, resp.Code)
+    }
+    if gotAuth != "Bearer token" {
+        t.Errorf("Authorization = %q", gotAuth)
+    }
+    if gotPath != "/users/u1/messages?%24top=5" {
+        t.Errorf("path = %q, want /users/u1/messages?$top=5", gotPath)
+    }
+}
+
+func TestMicrosoftGraphConnector_ListCalendarInstances(t *testing.T) {
+    var gotQuery string
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotQuery = r.URL.RawQuery
+        w.WriteHeader(200)
+        _, _ = w.Write([]byte(`{"value": [{"id": "ev1"}]}`))
+    }))
+    defer ts.Close()
+
+    m := NewMicrosoftGraphConnector()
+    m.baseURLForTest = ts.URL
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph", EncryptedAccessToken: "token"}
+    resp, _ := m.ExecuteAction(context.Background(), conn, "list_calendar_instances", map[string]interface{}{
+        "startDateTime": "2026-10-01T00:00:00Z",
+        "endDateTime":   "2026-11-01T00:00:00Z",
+    }, false)
+    if !resp.Success {
+        t.Fatalf("success=%v code=%d", resp.Success, resp.Code)
+    }
+    want := "endDateTime=2026-11-01T00%3A00%3A00Z&startDateTime=2026-10-01T00%3A00%3A00Z"
+    if gotQuery != want {
+        t.Errorf("query = %q, want %q", gotQuery, want)
+    }
+}
+
+func TestMicrosoftGraphConnector_RefreshValidateAuth(t *testing.T) {
+    m := NewMicrosoftGraphConnector()
+    conn := &Connection{ID: "c1", ConnectorKey: "microsoft_graph"}
+    if err := m.RefreshAuth(context.Background(), conn); err != nil {
+        t.Errorf("RefreshAuth error: %v", err)
+    }
+    if err := m.ValidateAuth(context.Background(), conn); err != nil {
+        t.Errorf("ValidateAuth error: %v", err)
+    }
+}
+
+func TestDefaultOAuth2Endpoints(t *testing.T) {
+    authURL, tokenURL := DefaultOAuth2Endpoints("microsoft_graph")
+    if authURL != "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" {
+        t.Errorf("microsoft_graph authURL = %q", authURL)
+    }
+    if tokenURL != "https://login.microsoftonline.com/common/oauth2/v2.0/token" {
+        t.Errorf("microsoft_graph tokenURL = %q", tokenURL)
+    }
+    authURL, tokenURL = DefaultOAuth2Endpoints("google_workspace")
+    if authURL == "" || tokenURL == "" {
+        t.Error("google_workspace should have default endpoints")
+    }
+    authURL, tokenURL = DefaultOAuth2Endpoints("hubspot")
+    if authURL != "" || tokenURL != "" {
+        t.Error("hubspot has no well-known endpoints")
+    }
+}
+
+func TestDefaultOAuth2Scopes(t *testing.T) {
+    scopes := DefaultOAuth2Scopes("microsoft_graph")
+    if len(scopes) != 3 {
+        t.Fatalf("scopes = %v, want [Mail.Read Calendars.Read offline_access]", scopes)
+    }
+    found := map[string]bool{}
+    for _, s := range scopes {
+        found[s] = true
+    }
+    if !found["offline_access"] {
+        t.Error("offline_access required for Entra ID refresh tokens")
+    }
+}
+
 func TestRegisterBuiltins(t *testing.T) {
     r := NewRegistry()
     RegisterBuiltins(r)
     list := r.ListConnectors()
-    if len(list) != 3 {
-        t.Fatalf("ListConnectors = %d, want 3", len(list))
+    if len(list) != 4 {
+        t.Fatalf("ListConnectors = %d, want 4", len(list))
     }
 }
 
