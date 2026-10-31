@@ -35,10 +35,11 @@ type OverviewLatency struct {
 }
 
 // OverviewCache is one gateway cache's per-window hit/miss delta. The stored
-// counters are cumulative; the delta between the first and last sample in the
-// window is the window's activity. A counter wrap (last < first, i.e. the
-// gateway restarted mid-window) falls back to the last sample as baseline —
-// only the pre-restart part of the window is lost.
+// counters are cumulative and reset to zero on every gateway restart, so the
+// window activity is the SUM of adjacent-sample increments: each run segment
+// between restarts contributes its own growth (a wrap — cur < prev — counts
+// the new run's value from zero). Only the sub-interval before the first
+// sample is lost.
 type OverviewCache struct {
     Cache   string  `json:"cache"`
     Hits    int64   `json:"hits"`
@@ -127,31 +128,43 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
         resp.Totals.SuccessRate = float64(resp.Totals.Successes) / float64(resp.Totals.Requests)
     }
 
-    // Gateway cache deltas (#421): first/last cumulative sample per cache.
+    // Gateway cache deltas (#421/#427): SUM of adjacent-sample increments with
+    // wrap detection. The stored counters are cumulative but reset to zero on
+    // every gateway restart, so a first-vs-last subtraction discards the whole
+    // pre-restart segment when a restart lands inside the window (and shows 0
+    // for both caches right after one). lag() walks consecutive samples per
+    // cache: normal growth contributes cur-prev; a wrap (cur < prev, i.e. a
+    // restart between samples) contributes the new run's value; the first row
+    // has no baseline and contributes 0 (sub-30s pre-window activity is lost,
+    // same as before).
     rows, err := s.pool.Query(ctx, `
+        WITH s AS (
+            SELECT cache, hits, misses, size,
+                   lag(hits)   OVER (PARTITION BY cache ORDER BY ts) AS prev_hits,
+                   lag(misses) OVER (PARTITION BY cache ORDER BY ts) AS prev_misses
+            FROM fg_cache_stats
+            WHERE ts >= $1 AND ts < $2
+        )
         SELECT cache,
-               (array_agg(hits ORDER BY ts))[1],
-               (array_agg(hits ORDER BY ts DESC))[1],
-               (array_agg(misses ORDER BY ts))[1],
-               (array_agg(misses ORDER BY ts DESC))[1],
+               coalesce(sum(CASE WHEN prev_hits IS NULL THEN 0
+                                 WHEN hits >= prev_hits THEN hits - prev_hits
+                                 ELSE hits END), 0),
+               coalesce(sum(CASE WHEN prev_misses IS NULL THEN 0
+                                 WHEN misses >= prev_misses THEN misses - prev_misses
+                                 ELSE misses END), 0),
                max(size),
                count(*)
-        FROM fg_cache_stats
-        WHERE ts >= $1 AND ts < $2
+        FROM s
         GROUP BY cache`, from, to)
     if err != nil {
         return nil, err
     }
     for rows.Next() {
         var c OverviewCache
-        var firstHits, lastHits, firstMisses, lastMisses int64
-        if err := rows.Scan(&c.Cache, &firstHits, &lastHits, &firstMisses, &lastMisses,
-            &c.Size, &c.Samples); err != nil {
+        if err := rows.Scan(&c.Cache, &c.Hits, &c.Misses, &c.Size, &c.Samples); err != nil {
             rows.Close()
             return nil, err
         }
-        c.Hits = delta(firstHits, lastHits)
-        c.Misses = delta(firstMisses, lastMisses)
         if c.Hits+c.Misses > 0 {
             c.HitRate = float64(c.Hits) / float64(c.Hits+c.Misses)
         }
@@ -225,13 +238,4 @@ func (s *Service) overviewTopN(ctx context.Context, from, to time.Time, col stri
         out = append(out, m)
     }
     return out, rows.Err()
-}
-
-// delta computes the per-window activity from cumulative counter samples,
-// treating a wrap (restart) as "everything since the restart counts".
-func delta(first, last int64) int64 {
-    if last >= first {
-        return last - first
-    }
-    return last
 }

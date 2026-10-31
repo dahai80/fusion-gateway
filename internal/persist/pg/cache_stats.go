@@ -1,9 +1,11 @@
 // #421: fg_cache_stats writer — 30s cumulative-counter snapshots of the
 // gateway's in-process caches (response / semantic). The counters are
 // atomic.Int64 in-memory and reset on restart; the insights overview derives
-// per-window deltas between adjacent samples, so a restart only loses one
-// sampling window. Best-effort side channel like the hw sampler: failures
-// log at WARN and retry on the next tick, never block the request path.
+// per-window deltas as the sum of adjacent-sample increments with wrap
+// detection (#427), so a restart mid-window preserves every run segment's
+// activity and loses at most one sampling interval. Best-effort side channel
+// like the hw sampler: failures log at WARN and retry on the next tick,
+// never block the request path.
 package pg
 
 import (

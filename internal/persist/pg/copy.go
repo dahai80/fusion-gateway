@@ -114,9 +114,10 @@ CREATE TABLE IF NOT EXISTS fg_hw_samples (
 );
 
 -- #421: gateway cache counters (semantic/response/embedding caches), 30s
--- cadence. Values are monotonic cumulative counters; the insights overview
--- derives per-window deltas between adjacent samples so a restart only loses
--- one sampling window. Counter wrap (last < first) resets the baseline.
+-- cadence. Values are cumulative counters that reset to zero on gateway
+-- restart; the insights overview (#427) derives per-window deltas as the sum
+-- of adjacent-sample increments with wrap detection, so a restart mid-window
+-- preserves every run segment's activity.
 CREATE TABLE IF NOT EXISTS fg_cache_stats (
     ts     timestamptz NOT NULL,
     cache  text NOT NULL,
