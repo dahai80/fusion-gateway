@@ -624,7 +624,10 @@ func (b *anthropicSSEBridge) finalizeMessage() {
         Type:         "message_delta",
         Delta:        delta,
         StopReason:   stop,
-        Usage:        &adapter.AnthropicUsage{InputTokens: b.inTok, OutputTokens: outTok, CacheReadInputTokens: b.cachedTok},
+        // #430: b.inTok is OpenAI prompt_tokens (INCLUDES cached); the
+        // Anthropic wire input_tokens EXCLUDES cache_read, so subtract to
+        // keep Anthropic clients from double-counting the cached context.
+        Usage:        &adapter.AnthropicUsage{InputTokens: max(0, b.inTok-b.cachedTok), OutputTokens: outTok, CacheReadInputTokens: b.cachedTok},
         StopSequence: nil,
     })
     b.forward("event: message_delta\ndata: " + string(raw) + "\n\n")

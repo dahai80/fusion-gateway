@@ -830,3 +830,34 @@ func (b *blockingReader) Read(p []byte) (int, error) {
     // Stream ended; parser breaks on EOF and returns, closing the channel.
     return 0, io.EOF
 }
+
+// TestAnthropicToOpenAI_UsageIncludesCache (#430): OpenAI
+// prompt_tokens INCLUDES cached tokens, while Anthropic input_tokens EXCLUDES
+// cache_creation + cache_read. The conversion must sum all three, otherwise
+// every consumer of the OpenAI shape (logs, cost, dashboard cache-hit ratio)
+// sees cached > prompt and the ratio explodes past 100%.
+func TestAnthropicToOpenAI_UsageIncludesCache(t *testing.T) {
+    resp := &AnthropicResponse{
+        ID:      "msg_1",
+        Type:    "message",
+        Role:    "assistant",
+        Content: []AnthropicContentBlock{{Type: "text", Text: "hi"}},
+        Model:   "claude-3",
+        Usage: AnthropicUsage{
+            InputTokens:              100,
+            OutputTokens:             7,
+            CacheCreationInputTokens: 200,
+            CacheReadInputTokens:     300,
+        },
+    }
+    got := AnthropicToOpenAI(resp)
+    if got.Usage.PromptTokens != 600 {
+        t.Errorf("PromptTokens = %d, want 600 (input+cache_creation+cache_read)", got.Usage.PromptTokens)
+    }
+    if got.Usage.TotalTokens != 607 {
+        t.Errorf("TotalTokens = %d, want 607", got.Usage.TotalTokens)
+    }
+    if got.Usage.CachedTokenCount() != 300 {
+        t.Errorf("cached tokens = %d, want 300", got.Usage.CachedTokenCount())
+    }
+}
