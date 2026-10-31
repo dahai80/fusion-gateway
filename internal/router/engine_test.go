@@ -1891,10 +1891,13 @@ func TestDecide_LocalExclusiveModel_GPUMemoryLowStaysLocal(t *testing.T) {
     t.Logf("Local-exclusive model stays local under GPU memory low: reason=%s", dec.Reason)
 }
 
-// #148: the hoisted P0.2 guard must NOT bypass the P0 circuit breaker. When
-// local is breaker-tripped (genuinely down), a local-exclusive model still
-// falls through to cloud (least-bad fallback even though cloud will 400) —
-// the breaker is a DOWN signal, not a BUSY signal.
+// #429 supersedes the #148 expectation here: when local is breaker-tripped, a
+// local-exclusive model used to fall through to cloud (least-bad fallback
+// even though cloud would 400). That "least-bad" fallback turned out worse
+// than useless in production — the 400 ("Selected backend does not support
+// image generation") masked the real cause (MLX 507 admission rejection)
+// and arrived fast enough to look like a normal, hard failure. The decision
+// is now Rejected 503 with breaker state: honest, retryable.
 func TestDecide_LocalExclusiveModel_BreakerOpenStillCloud(t *testing.T) {
     cfg := defaultTestSnapshot()
     cfg.Config.Routing.Fallback.Enabled = true
@@ -1915,11 +1918,14 @@ func TestDecide_LocalExclusiveModel_BreakerOpenStillCloud(t *testing.T) {
 
     req := &RouteRequest{Model: "Qwen3.8-27B-4bit", Stream: false}
     dec := e.Decide(ctx, req)
-    if dec.Backend != CloudBackend {
-        t.Errorf("expected cloud when local breaker open (even for local-exclusive), got %s: %s", dec.Backend, dec.Reason)
+    if !dec.Rejected {
+        t.Fatalf("expected Rejected when local breaker open for local-exclusive, got %s: %s", dec.Backend, dec.Reason)
     }
-    if dec.Reason != "circuit_breaker_open" {
-        t.Errorf("expected circuit_breaker_open, got %s", dec.Reason)
+    if dec.RejectStatus != http.StatusServiceUnavailable {
+        t.Errorf("expected 503 RejectStatus, got %d", dec.RejectStatus)
+    }
+    if dec.Reason != "local_exclusive_model_breaker_open" {
+        t.Errorf("expected local_exclusive_model_breaker_open, got %s", dec.Reason)
     }
 }
 
@@ -2627,3 +2633,70 @@ func TestRC2_CloudBreakerClosedGoesCloud(t *testing.T) {
     }
 }
 
+
+// issue #429: a local-exclusive model must NOT be cloud-diverted when the
+// local breaker is open — no cloud backend serves it, so the divert produced
+// a misleading 400 ("Selected backend does not support image generation")
+// that hid the real cause (MLX 507 admission rejection). The decision must
+// be Rejected with HTTP 503 and breaker state so the client sees an honest,
+// retryable overloaded error.
+func TestDecide_LocalExclusiveModel_BreakerOpenRejects503(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.Fallback.Enabled = true
+    cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
+        "claude-opus-4-7": "glm5.2",
+    }
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"flux-image-local": true}
+    })
+    e.Trip("local", "memory overload")
+
+    budget := tokenizer.TokenBudget{InputTokens: 100, TotalBudget: 200}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "flux-image-local", Stream: false}
+    dec := e.Decide(ctx, req)
+    if !dec.Rejected {
+        t.Fatalf("expected Rejected decision, got backend=%s reason=%s", dec.Backend, dec.Reason)
+    }
+    if dec.RejectStatus != http.StatusServiceUnavailable {
+        t.Errorf("RejectStatus = %d, want 503", dec.RejectStatus)
+    }
+    if dec.Reason != "local_exclusive_model_breaker_open" {
+        t.Errorf("reason = %s, want local_exclusive_model_breaker_open", dec.Reason)
+    }
+    if !strings.Contains(dec.RejectDetail, "breaker_state") {
+        t.Errorf("RejectDetail missing breaker_state: %s", dec.RejectDetail)
+    }
+}
+
+// issue #429 regression guard: a NON-local-exclusive model (not in the local
+// set) still diverts to cloud when the local breaker is open — the 503
+// rejection is reserved for models no cloud backend can serve.
+func TestDecide_NonLocalModel_BreakerOpenStillCloud(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+    e.SetLocalModels(func() map[string]bool {
+        return map[string]bool{"flux-image-local": true}
+    })
+    e.Trip("local", "memory overload")
+
+    ctx := config.WithSnapshot(context.Background(), cfg)
+    req := &RouteRequest{Model: "glm-5", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Rejected {
+        t.Fatalf("unexpected Rejected for cloud-routable model: %s", dec.Reason)
+    }
+    if dec.Backend != CloudBackend {
+        t.Errorf("expected cloud after trip, got %s: %s", dec.Backend, dec.Reason)
+    }
+    if dec.Reason != "circuit_breaker_open" {
+        t.Errorf("expected circuit_breaker_open, got %s", dec.Reason)
+    }
+}

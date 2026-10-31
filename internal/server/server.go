@@ -397,6 +397,23 @@ func (s *Server) checkBackendAccess(w http.ResponseWriter, r *http.Request, back
     return true
 }
 
+// writeRouteRejection emits the HTTP response for a Rejected route decision
+// (issue #429). Default status 403 (laya guard / qualified-model lock); a
+// decision carrying RejectStatus (503 overloaded: local-exclusive model with
+// the local breaker open) uses it so clients see an honest, retryable error
+// instead of a permission failure.
+func writeRouteRejection(w http.ResponseWriter, decision *router.RouteDecision) {
+    body := decision.RejectDetail
+    if body == "" {
+        body = `{"dimension":"unknown","score":0,"threshold":0}`
+    }
+    status := http.StatusForbidden
+    if decision.RejectStatus > 0 {
+        status = decision.RejectStatus
+    }
+    http.Error(w, body, status)
+}
+
 // recordOutcome routes a success/failure record to the right breaker (RR5).
 // For cluster requests with a specific node ID, it records on the per-node
 // breaker so one bad node trips itself without poisoning the N-1 healthy
