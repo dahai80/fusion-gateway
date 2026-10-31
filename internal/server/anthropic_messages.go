@@ -510,9 +510,13 @@ func (s *Server) handleNonStreamAnthropicMessages(ctx context.Context, w http.Re
     // non-stream /v1/messages logs show real token counts (were 0/0/0).
     if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
         logEntry.Model = req.Model
-        logEntry.InputTokens = resp.Usage.InputTokens
+        // #430: Anthropic input_tokens EXCLUDES cache_creation/cache_read;
+        // the log's input_tokens must be the full prompt (sum of all three)
+        // so cached_tokens <= input_tokens holds on the Dashboard ratio.
+        fullInput := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
+        logEntry.InputTokens = fullInput
         logEntry.OutputTokens = resp.Usage.OutputTokens
-        logEntry.TotalTokens = resp.Usage.InputTokens + resp.Usage.OutputTokens
+        logEntry.TotalTokens = fullInput + resp.Usage.OutputTokens
         // #421: upstream prompt-cache hits (cache_read_input_tokens).
         logEntry.CachedTokens = resp.Usage.CacheReadInputTokens
         // Plan §5.2 non-stream: the aggregated wait IS the first token.
@@ -617,7 +621,7 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
     // payloads so the request log gets real prompt/completion/total counts.
     // Claude Code traffic flows almost entirely through this stream path; the
     // log previously showed 0/0/0 for all of it.
-    usageInput, usageOutput, usageCached := 0, 0, 0
+    usageInput, usageOutput, usageCached, usageCacheCreation := 0, 0, 0, 0
     captureUsage := func(u *adapter.AnthropicUsage) {
         if u == nil {
             return
@@ -631,15 +635,22 @@ func (s *Server) handleStreamAnthropicMessages(ctx context.Context, w http.Respo
         if u.CacheReadInputTokens > usageCached {
             usageCached = u.CacheReadInputTokens
         }
+        if u.CacheCreationInputTokens > usageCacheCreation {
+            usageCacheCreation = u.CacheCreationInputTokens
+        }
     }
     stampStreamUsage := func() {
         logEntry := middleware.GetRequestLog(ctx)
         if logEntry == nil {
             return
         }
-        logEntry.InputTokens = usageInput
+        // #430: Anthropic input_tokens EXCLUDES cache_creation/cache_read;
+        // log the full prompt (sum of all three) so the Dashboard
+        // cached/input ratio stays <= 1.
+        fullInput := usageInput + usageCacheCreation + usageCached
+        logEntry.InputTokens = fullInput
         logEntry.OutputTokens = usageOutput
-        logEntry.TotalTokens = usageInput + usageOutput
+        logEntry.TotalTokens = fullInput + usageOutput
         logEntry.CachedTokens = usageCached
     }
     // captureEventUsage reads usage from both shapes the Anthropic wire format
