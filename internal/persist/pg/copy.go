@@ -226,15 +226,58 @@ func (w *copyWriter) Close() {
     w.pool.Close()
 }
 
+// beginTxer is the pool seam txGuard needs; *pgxpool.Pool satisfies it.
+type beginTxer interface {
+    Begin(context.Context) (pgx.Tx, error)
+}
+
+// txGuard owns WriteBatch's current transaction. The #407 isolation path
+// re-begins mid-flight; a failed re-Begin must never leave a nil tx behind,
+// or the deferred Rollback panics (seen in the 2026-11-01 prod log when PG
+// timed out under system memory pressure: "invalid memory address or nil
+// pointer dereference" in WriteBatch.func1).
+type txGuard struct {
+    ctx context.Context
+    tx  pgx.Tx
+}
+
+func (g *txGuard) begin(pool beginTxer) error {
+    tx, err := pool.Begin(g.ctx)
+    if err != nil {
+        return err
+    }
+    g.tx = tx
+    return nil
+}
+
+// rebegin rolls back the current tx and opens a fresh one. On failure the
+// old (already rolled back) tx is kept so the deferred rollback stays a
+// harmless ErrTxClosed call instead of a nil-pointer dereference.
+func (g *txGuard) rebegin(pool beginTxer) error {
+    g.rollback()
+    tx, err := pool.Begin(g.ctx)
+    if err != nil {
+        return err
+    }
+    g.tx = tx
+    return nil
+}
+
+func (g *txGuard) rollback() {
+    if g.tx != nil {
+        _ = g.tx.Rollback(g.ctx)
+    }
+}
+
 // WriteBatch COPYs both tables in one transaction: logs rows always, payload
 // rows only when a body was captured. CopyFrom is the plan §4.2 choice —
 // row-by-row INSERT would be ~10× slower at batch scale.
 func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) error {
-    tx, err := w.pool.Begin(ctx)
-    if err != nil {
+    g := &txGuard{ctx: ctx}
+    if err := g.begin(w.pool); err != nil {
         return fmt.Errorf("begin: %w", err)
     }
-    defer func() { _ = tx.Rollback(ctx) }()
+    defer g.rollback()
 
     now := time.Now().UTC()
     logRows := make([][]any, 0, len(entries))
@@ -301,7 +344,7 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             "id", "ts", "req_body", "resp_body", "req_raw", "resp_raw",
             "resp_truncated", "req_truncated", "resp_raw_mime",
         }
-        if _, err := tx.CopyFrom(ctx,
+        if _, err := g.tx.CopyFrom(ctx,
             pgx.Identifier{"fg_request_payloads"},
             payloadCols,
             pgx.CopyFromRows(payloadRows)); err != nil {
@@ -313,33 +356,29 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
             // The failed CopyFrom leaves this tx in an aborted state: every
             // later command on it fails with 25P02 and the final Commit turns
             // into a rollback. Roll back and isolate in a fresh tx.
-            _ = tx.Rollback(ctx)
             slog.Warn("pg persist payload batch copy failed, isolating rows",
                 "error", err, "rows", len(payloadRows))
-            tx, err = w.pool.Begin(ctx)
-            if err != nil {
+            if err := g.rebegin(w.pool); err != nil {
                 return fmt.Errorf("begin isolation: %w", err)
             }
             for i := range payloadRows {
-                if _, err := tx.CopyFrom(ctx,
+                if _, err := g.tx.CopyFrom(ctx,
                     pgx.Identifier{"fg_request_payloads"},
                     payloadCols,
                     pgx.CopyFromRows(payloadRows[i : i+1])); err != nil {
                     // A row-level data error aborts this tx as well — roll
                     // back and re-begin before the next row so one bad row
                     // never poisons the rest.
-                    _ = tx.Rollback(ctx)
                     slog.Error("pg persist payload row dropped",
                         "error", err, "row", i)
-                    tx, err = w.pool.Begin(ctx)
-                    if err != nil {
+                    if err := g.rebegin(w.pool); err != nil {
                         return fmt.Errorf("begin isolation: %w", err)
                     }
                 }
             }
         }
     }
-    if _, err := tx.CopyFrom(ctx,
+    if _, err := g.tx.CopyFrom(ctx,
         pgx.Identifier{"fg_request_logs"},
         []string{
             "id", "ts", "request_id", "api_key_name", "trace_id",
@@ -357,14 +396,14 @@ func (w *copyWriter) WriteBatch(ctx context.Context, entries []*persist.Entry) e
         return fmt.Errorf("copy fg_request_logs: %w", err)
     }
     if len(chunkRows) > 0 {
-        if _, err := tx.CopyFrom(ctx,
+        if _, err := g.tx.CopyFrom(ctx,
             pgx.Identifier{"fg_stream_chunks"},
             []string{"id", "ts", "seq", "delta_ms", "bytes"},
             pgx.CopyFromRows(chunkRows)); err != nil {
             return fmt.Errorf("copy fg_stream_chunks: %w", err)
         }
     }
-    if err := tx.Commit(ctx); err != nil {
+    if err := g.tx.Commit(ctx); err != nil {
         return fmt.Errorf("commit: %w", err)
     }
     return nil
