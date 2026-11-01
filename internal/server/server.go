@@ -240,6 +240,13 @@ type Server struct {
     // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
     // shell.session.users are configured; hash lives only in memory.
     shellBootstrap *shellUserRecord
+    // #438: per-provider most-recent route error surfaced in /health as
+    // last_route_error, so a wedged backend (process alive, healthcheck
+    // green, requests failing) is diagnosable from /health alone. Keyed by
+    // provider name — same keys as the /health backends map. Lazily created;
+    // nil-safe on zero-value Servers (tests build &Server{} literals).
+    routeErrMu sync.Mutex
+    routeErrs  map[string]routeErrEntry
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status

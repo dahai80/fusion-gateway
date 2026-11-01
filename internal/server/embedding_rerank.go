@@ -152,7 +152,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         }
         slog.Error("embedding failed", "provider", provider.Name(), "error", err)
         s.recordOutcome(decision.Backend, decision.NodeID, false)
-        http.Error(w, `{"error":{"message":"Embedding failed"}}`, http.StatusBadGateway)
+        s.noteRouteError(provider.Name(), err)
+        writeChatFailedError(ctx, w, "Embedding failed", err)
         return
     }
 
@@ -290,7 +291,8 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         slog.Error("rerank failed", "provider", provider.Name(), "error", err)
         observability.RecordRequest(string(decision.Backend), req.Model, "error")
         s.recordOutcome(decision.Backend, decision.NodeID, false)
-        http.Error(w, `{"error":{"message":"Rerank failed"}}`, http.StatusBadGateway)
+        s.noteRouteError(provider.Name(), err)
+        writeChatFailedError(ctx, w, "Rerank failed", err)
         return
     }
 
