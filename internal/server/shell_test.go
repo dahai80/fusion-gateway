@@ -909,3 +909,66 @@ func TestShellChatCompletions_SessionGated(t *testing.T) {
         t.Fatalf("chat response missing content: %s", w.Body.String())
     }
 }
+
+// #443: session-gated models catalog — same handler as /v1/models behind the
+// shell session gate. The shell Home picker gets the full routed catalog
+// (cloud backends + aliases), not just fusion-mlx's loaded local models.
+func TestShellModels_SessionGated(t *testing.T) {
+    s := newTestServerWithProvider("test-cloud", &mockProvider{
+        name:    "test-cloud",
+        healthy: true,
+        models: []adapter.ModelInfo{
+            {ID: "glm-5", Object: "model", OwnedBy: "test-cloud"},
+        },
+    })
+    s.cfg.Config.Shell.Enabled = true
+    s.cfg.Config.Shell.Session.Secret = "test-shell-secret-at-least-32-chars!"
+    s.cfg.Config.Shell.Session.Users = []config.ShellUser{
+        {Username: "alice", Password: "alicepw", Roles: []string{"user"}},
+    }
+    s.setupShell()
+
+    handler := s.withShellSession(s.handleModels)
+
+    // Anonymous: 401 from the shell session gate — the shell must not reach
+    // the catalog without a session, same contract as #267 chat.
+    req := httptest.NewRequest(http.MethodGet, "/api/v1/shell/models", nil)
+    w := httptest.NewRecorder()
+    handler(w, req)
+    if w.Code != http.StatusUnauthorized {
+        t.Fatalf("anonymous models code = %d body=%s, want 401", w.Code, w.Body.String())
+    }
+
+    // Session token: full /v1/models payload including the cloud backend.
+    _, resp := loginShell(t, s, "alice", "alicepw")
+    token, _ := resp["token"].(string)
+    if token == "" {
+        t.Fatalf("no token: %v", resp)
+    }
+    req = httptest.NewRequest(http.MethodGet, "/api/v1/shell/models", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
+    w = httptest.NewRecorder()
+    handler(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("session models code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    var body struct {
+        Object string              `json:"object"`
+        Data   []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+        t.Fatalf("invalid models json: %v, body: %s", err, w.Body.String())
+    }
+    if body.Object != "list" {
+        t.Fatalf("object = %q, want list", body.Object)
+    }
+    found := false
+    for _, m := range body.Data {
+        if m.ID == "glm-5" {
+            found = true
+        }
+    }
+    if !found {
+        t.Fatalf("cloud model glm-5 missing from shell models payload: %+v", body.Data)
+    }
+}
