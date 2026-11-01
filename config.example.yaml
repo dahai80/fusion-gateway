@@ -620,6 +620,18 @@ web_shell:
     #    group: fusion-office            # #297: two-level menu grouping
     #    group_title: Fusion Office
     #    sort: 2
+    # #444: static fallback manifest for a module whose service self-registers
+    # dynamically — the static entry keeps the sidebar item alive across
+    # upstream restarts. A live self-registration overrides the static fields.
+    #  - id: fusion-agent-studio
+    #    title: AI Agent
+    #    title_en: AI Agent
+    #    entry: /shell/fusion-agent-studio/
+    #    devices: [desktop]
+    #    category: platform
+    #    icon: Bot
+    #    health: http://127.0.0.1:11432/shell/fusion-agent-studio/api/v1/system/health
+    #    version: 0.1.0
     # #296: static proxy wiring for a self-keyed module (e.g. fusion-security).
     # The upstream validates the injected Bearer credential itself — the key
     # must be one of the UPSTREAM's API keys (with whatever tenant/role the
@@ -629,6 +641,16 @@ web_shell:
     #     fusion-security:
     #         upstream: http://127.0.0.1:11454
     #         api_key: "<fusion-security tenant-assigned key>"
+    #     # #442: every sidebar module needs an upstream/credential entry —
+    #     # without it /shell/<id>/ does not route and the manifest client
+    #     # never sees the module. api_key = the module's web_module_key
+    #     # (fm- key the upstream validates itself).
+    #     fusion-cowork:
+    #         upstream: http://127.0.0.1:11461
+    #         api_key: "<from ~/.fusion-cowork/web_module_key>"
+    #     fusion-agent-studio:
+    #         upstream: http://127.0.0.1:11442
+    #         api_key: "<from the module's web_module_key>"
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
