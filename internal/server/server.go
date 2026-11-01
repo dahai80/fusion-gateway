@@ -7,6 +7,7 @@ import (
     "io"
     "net"
     "os"
+    "sync/atomic"
     "strings"
     "sync"
     "time"
@@ -247,6 +248,10 @@ type Server struct {
     // nil-safe on zero-value Servers (tests build &Server{} literals).
     routeErrMu sync.Mutex
     routeErrs  map[string]routeErrEntry
+    // #449: set from the signal handler the moment shutdown begins; /healthz
+    // and /readyz answer 503 while true (see drain.go). atomic — probers hit
+    // it concurrently with the shutdown path.
+    draining atomic.Bool
 }
 
 // SetVersion stamps the build-time version + commit onto the server so /v1/status
