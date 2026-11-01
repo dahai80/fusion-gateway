@@ -73,6 +73,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
         }
     }
 
+    // #438: surface the most recent route error per backend. A wedged backend
+    // (fusion-mlx engine hung under memory pressure) passes the process
+    // healthcheck with models loaded while every request 502s —
+    // last_route_error makes that visible from /health alone.
+    for name, entry := range backends {
+        lastErr, ok := s.lastRouteError(name)
+        if !ok {
+            continue
+        }
+        if m, ok := entry.(map[string]interface{}); ok {
+            m["last_route_error"] = map[string]interface{}{
+                "message": lastErr.Message,
+                "at":      lastErr.At,
+            }
+        }
+    }
+
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "status":   healthStatus(allHealthy),
