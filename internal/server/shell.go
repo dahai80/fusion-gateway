@@ -162,6 +162,7 @@ func (s *Server) autoRegisterAdminModule() {
         Backend:  m.Backend,
         Devices:  m.Devices,
         Category: m.Category,
+        Sort:     m.Sort,
     }
     if err := s.shellRegistry.Upsert(manifest); err != nil {
         slog.Warn("shell admin module auto-registration rejected",

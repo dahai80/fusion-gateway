@@ -8,5 +8,6 @@
     "health": "/healthz",
     "backend": "gateway",
     "devices": ["desktop"],
-    "category": "infra"
+    "category": "governance",
+    "sort": 20
 }
