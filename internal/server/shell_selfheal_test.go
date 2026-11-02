@@ -195,6 +195,36 @@ func TestShellUpsert_ServiceKeySelfHealRetainsKey(t *testing.T) {
     }
 }
 
+// #468: the #460 rotate-on-admin-re-register fires for EVERY admin-plane
+// re-register — fusion-mlx re-registers every ~15s and never presents its
+// fm- key (the proxy injects the credential), so 246 rotations landed in
+// 44 minutes and nobody ever consumed the returned raw_key. When the module
+// has never authenticated with its service key, the admin re-register
+// RETAINS the key: nothing can consume a fresh plaintext anyway, and the
+// previously issued key keeps working.
+func TestShellUpsert_AdminReRegister_NeverConsumedKeyRetains(t *testing.T) {
+    s := newShellTestServer(t, false)
+    raw := selfHealRegister(t, s, "fusion-demo")
+
+    // No heartbeat with the fm- key — the module never presents it.
+    body, _ := json.Marshal(selfHealManifest("fusion-demo"))
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer mk-selfheal-test-master-key")
+    w := httptest.NewRecorder()
+    s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("admin re-register code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    if strings.Contains(w.Body.String(), "raw_key\":\"fm-") {
+        t.Fatalf("rotation must be gated on demonstrated key consumption (#468), body rotated: %s", w.Body.String())
+    }
+
+    // The previously issued key still heartbeats — retention, not revocation.
+    if w := selfHealBeat(t, s, "fusion-demo", raw); w.Code != http.StatusOK {
+        t.Fatalf("retained key heartbeat code = %d body=%s", w.Code, w.Body.String())
+    }
+}
+
 // TestShellUpsert_AdminKeyBearerAccepted (#436): with the route outside
 // withMiddleware, the web_shell.admin_key Bearer must still pass the upsert
 // gate (raw-token constant-time compare, same helper as heartbeat).

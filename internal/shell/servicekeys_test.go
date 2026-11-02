@@ -179,6 +179,60 @@ func TestServiceKey_ModuleSuppliedKeyPath(t *testing.T) {
     }
 }
 
+// #468: rotation on admin re-register is gated on demonstrated consumption —
+// ServiceKeyConsumed flips only after a successful service-key authentication
+// (heartbeat auth), never on issuance alone, and the flag survives the
+// persistence round-trip so a restart does not unlock rotation for a module
+// that never presented its key.
+func TestServiceKey_ConsumedGate(t *testing.T) {
+    r := NewRegistry(nil, nil, 30*time.Second)
+    if r.ServiceKeyConsumed("fusion-ghost") {
+        t.Fatal("unknown id must not report consumed")
+    }
+    if err := r.Upsert(validManifest("fusion-demo")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    _, plaintext, _, err := r.EnsureServiceKey("fusion-demo")
+    if err != nil {
+        t.Fatalf("ensure: %v", err)
+    }
+    if r.ServiceKeyConsumed("fusion-demo") {
+        t.Fatal("issuance alone must not mark the key consumed")
+    }
+    if !r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
+        t.Fatal("current key must authenticate")
+    }
+    if !r.ServiceKeyConsumed("fusion-demo") {
+        t.Fatal("successful service-key auth must mark the key consumed")
+    }
+}
+
+// #468: the consumed flag round-trips through persistence — a restarted
+// gateway must not treat a previously-consumed key as never-consumed.
+func TestServiceKey_ConsumedPersistRoundTrip(t *testing.T) {
+    path := filepath.Join(t.TempDir(), "shell_manifests.json")
+    r := NewRegistry(nil, nil, 30*time.Second)
+    r.SetPersistence(path)
+    if err := r.Upsert(validManifest("fusion-demo")); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    _, plaintext, _, err := r.EnsureServiceKey("fusion-demo")
+    if err != nil {
+        t.Fatalf("ensure: %v", err)
+    }
+    if !r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
+        t.Fatal("auth must succeed")
+    }
+    r2 := NewRegistry(nil, nil, 30*time.Second)
+    r2.SetPersistence(path)
+    if err := r2.Load(); err != nil {
+        t.Fatalf("load: %v", err)
+    }
+    if !r2.ServiceKeyConsumed("fusion-demo") {
+        t.Fatal("consumed flag must survive the persistence round-trip")
+    }
+}
+
 // #261 K1: service key state survives the persistence round-trip (#230
 // channel) — a restarted gateway keeps authenticating the module's fm- key.
 func TestServiceKey_PersistRoundTrip(t *testing.T) {
