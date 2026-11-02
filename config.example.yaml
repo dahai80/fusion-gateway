@@ -643,6 +643,23 @@ web_shell:
     # no credential, so the modules entry below needs NO api_key (the proxy
     # injects Bearer only when one is set). health points at the upstream's
     # own probe so the offline badge reflects the module's real state.
+    # #464 (fusion-multi-nodes#95): static manifest for the Multi-Node cluster
+    # console (trainer pattern, #462) — a T2 console whose backing services are
+    # never auto-started, so the menu entry must not evaporate when master/vite
+    # are stopped (gray dot per MT-D). Platform group per the approved menu
+    # taxonomy (sort 44), health = the cluster master's own /api/health so the
+    # dot tracks the console's backing service. modules entry below needs NO
+    # api_key (bundle carries no secrets, auth via gateway session — the #448
+    # fusion-design pattern).
+    #  - id: fusion-multi-nodes
+    #    title: 多节点集群
+    #    title_en: Multi-Node
+    #    entry: /shell/fusion-multi-nodes/
+    #    devices: [desktop, mobile-readonly]
+    #    category: platform
+    #    icon: Network
+    #    health: http://127.0.0.1:11452/api/health
+    #    version: 0.1.0
     #  - id: fusion-design
     #    title: Design
     #    title_en: Design
@@ -675,6 +692,11 @@ web_shell:
     #     # an Authorization header (the upstream does not check one).
     #     fusion-design:
     #         upstream: http://127.0.0.1:11493
+    #     # #464: T2 console module — vite dev/preview (:11472, port-registry)
+    #     # serves the bundle; no api_key, proxy forwards without an
+    #     # Authorization header.
+    #     fusion-multi-nodes:
+    #         upstream: http://127.0.0.1:11472
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
