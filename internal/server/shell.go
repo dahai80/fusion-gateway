@@ -115,6 +115,18 @@ func (s *Server) setupShell() {
         "bootstrap_admin", s.shellBootstrap != nil)
 }
 
+// RefreshShellStaticManifests re-applies web_shell.manifests after a config
+// hot-reload (#453). The registry is constructed once at server setup; without
+// this a module added at runtime was proxy-reachable but invisible in the
+// sidebar until a restart. No-op when the shell subsystem is disabled.
+func (s *Server) RefreshShellStaticManifests(manifests []config.ShellManifest) {
+    if s.shellRegistry == nil {
+        return
+    }
+    s.shellRegistry.ReplaceStatic(manifests)
+    slog.Info("shell static manifests refreshed on config reload", "count", len(manifests))
+}
+
 // autoRegisterAdminModule registers the built-in admin console (#216, R-5)
 // into the manifest registry so the shell host menu always carries it
 // without a manual registration step. Metadata comes from the embedded

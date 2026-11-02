@@ -453,6 +453,28 @@ func (r *Registry) Remove(id string) error {
     return nil
 }
 
+// ReplaceStatic swaps the static fallback list (#453): config hot-reload
+// rebuilt the snapshot but the registry kept its construction-time static
+// entries, so a module added to web_shell.manifests stayed invisible in the
+// sidebar until a process restart. Health observations survive for ids that
+// remain listed; observations for removed ids are pruned so a later re-add
+// starts offline instead of resurrecting a stale "online".
+func (r *Registry) ReplaceStatic(manifests []config.ShellManifest) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.staticFallback = manifests
+    keep := make(map[string]bool, len(manifests))
+    for _, m := range manifests {
+        keep[m.ID] = true
+    }
+    for id := range r.lastHealthy {
+        if !keep[id] {
+            delete(r.lastHealthy, id)
+        }
+    }
+    slog.Info("shell static manifests replaced", "count", len(manifests))
+}
+
 // List returns static fallback entries plus dynamic registrations, each with
 // its derived status. Static entries whose id has a dynamic registration are
 // suppressed (the dynamic one wins). Stale dynamic entries stay listed as
