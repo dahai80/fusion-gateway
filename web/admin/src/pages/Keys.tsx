@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Table, Button, Modal, Form, Input, Select, Tag, Space, message, Popconfirm, Typography } from "antd";
+import { Table, Button, Modal, Form, Input, Select, Tag, Space, message, Popconfirm, Typography, theme } from "antd";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import client from "../api/client";
 
@@ -24,6 +24,7 @@ interface KeyForm {
 }
 
 export default function Keys() {
+    const { token } = theme.useToken();
     const [keys, setKeys] = useState<ApiKey[]>([]);
     const [loading, setLoading] = useState(false);
     const [modalOpen, setModalOpen] = useState(false);
@@ -202,7 +203,7 @@ export default function Keys() {
                 okText="I've saved the key"
                 closable={false}
             >
-                <p style={{ marginBottom: 8, color: "#faad14" }}>
+                <p style={{ marginBottom: 8, color: token.colorWarning }}>
                     Copy the key now. You won't be able to see it again!
                 </p>
                 <Typography.Text copyable code style={{ fontSize: 13, wordBreak: "break-all" }}>

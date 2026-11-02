@@ -1,6 +1,7 @@
 import { ReactNode } from "react";
 import { Card, Button, Spin, Space, message } from "antd";
-import { SaveOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Save, RefreshCw } from "lucide-react";
+import { useLocale } from "../i18n";
 
 interface ConfigPageLayoutProps {
     title: string;
@@ -14,17 +15,18 @@ interface ConfigPageLayoutProps {
 export default function ConfigPageLayout({
     title, loading, saving, onSave, onRefresh, children,
 }: ConfigPageLayoutProps) {
+    const { t } = useLocale();
     return (
         <Spin spinning={loading}>
             <Card
                 title={title}
                 extra={
                     <Space>
-                        <Button icon={<ReloadOutlined />} onClick={onRefresh} disabled={saving}>
-                            Refresh
+                        <Button icon={<RefreshCw size={16} />} onClick={onRefresh} disabled={saving}>
+                            {t("config.refresh")}
                         </Button>
-                        <Button type="primary" icon={<SaveOutlined />} onClick={onSave} loading={saving}>
-                            Save
+                        <Button type="primary" icon={<Save size={16} />} onClick={onSave} loading={saving}>
+                            {t("config.save")}
                         </Button>
                     </Space>
                 }
@@ -37,5 +39,7 @@ export default function ConfigPageLayout({
 
 export function useConfigNotifier() {
     const [msg, ctx] = message.useMessage();
-    return { success: () => msg.success("Config saved"), error: (e: string) => msg.error(e), ctx };
+    const { t } = useLocale();
+    return { success: () => msg.success(t("config.saved")), error: (e: string) => msg.error(e), ctx };
 }
+

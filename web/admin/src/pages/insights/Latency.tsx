@@ -186,10 +186,10 @@ export default function Latency() {
                                 <YAxis yAxisId="right" orientation="right" />
                                 <RTooltip />
                                 <Legend />
-                                <Bar yAxisId="right" dataKey="requests" name="requests" fill="#1677ff" fillOpacity={0.15} />
-                                <Line yAxisId="left" type="monotone" dataKey="ttft_p50_ms" name="TTFT p50" stroke="#1677ff" strokeWidth={2} dot={false} />
-                                <Line yAxisId="left" type="monotone" dataKey="ttft_p95_ms" name="TTFT p95" stroke="#ff4d4f" strokeWidth={2} dot={false} />
-                                <Line yAxisId="left" type="monotone" dataKey="ttft_p99_ms" name="TTFT p99" stroke="#722ed1" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
+                                <Bar yAxisId="right" dataKey="requests" name="requests" fill="CHART.primary" fillOpacity={0.15} />
+                                <Line yAxisId="left" type="monotone" dataKey="ttft_p50_ms" name="TTFT p50" stroke="CHART.primary" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="ttft_p95_ms" name="TTFT p95" stroke="CHART.danger" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="ttft_p99_ms" name="TTFT p99" stroke="CHART.violet" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
                                 {anomalyLines.map((a) => (
                                     <ReferenceLine
                                         key={`ttft-${a.id}`}
@@ -198,9 +198,9 @@ export default function Latency() {
                                         // throws an invariant that unmounts the whole page.
                                         yAxisId="left"
                                         x={a.x}
-                                        stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
+                                        stroke={a.severity === "high" ? "CHART.danger" : "CHART.warning"}
                                         strokeDasharray="2 4"
-                                        label={{ value: a.kind, position: "insideTopLeft", fontSize: 10, fill: a.severity === "high" ? "#ff4d4f" : "#faad14" }}
+                                        label={{ value: a.kind, position: "insideTopLeft", fontSize: 10, fill: a.severity === "high" ? "CHART.danger" : "CHART.warning" }}
                                     />
                                 ))}
                             </ComposedChart>
@@ -215,16 +215,16 @@ export default function Latency() {
                                 <YAxis yAxisId="right" orientation="right" />
                                 <RTooltip />
                                 <Legend />
-                                <Bar yAxisId="right" dataKey="error_count" name="errors" fill="#faad14" fillOpacity={0.2} />
-                                <Line yAxisId="left" type="monotone" dataKey="tpot_p50_ms" name="TPOT p50" stroke="#52c41a" strokeWidth={2} dot={false} />
-                                <Line yAxisId="left" type="monotone" dataKey="tpot_p95_ms" name="TPOT p95" stroke="#faad14" strokeWidth={2} dot={false} />
-                                <Line yAxisId="left" type="monotone" dataKey="tpot_p99_ms" name="TPOT p99" stroke="#722ed1" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
+                                <Bar yAxisId="right" dataKey="error_count" name="errors" fill="CHART.warning" fillOpacity={0.2} />
+                                <Line yAxisId="left" type="monotone" dataKey="tpot_p50_ms" name="TPOT p50" stroke="CHART.success" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="tpot_p95_ms" name="TPOT p95" stroke="CHART.warning" strokeWidth={2} dot={false} />
+                                <Line yAxisId="left" type="monotone" dataKey="tpot_p99_ms" name="TPOT p99" stroke="CHART.violet" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
                                 {anomalyLines.map((a) => (
                                     <ReferenceLine
                                         key={`tpot-${a.id}`}
                                         yAxisId="left"
                                         x={a.x}
-                                        stroke={a.severity === "high" ? "#ff4d4f" : "#faad14"}
+                                        stroke={a.severity === "high" ? "CHART.danger" : "CHART.warning"}
                                         strokeDasharray="2 4"
                                     />
                                 ))}

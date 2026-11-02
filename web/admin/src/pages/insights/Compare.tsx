@@ -164,7 +164,7 @@ export default function Compare() {
                                 <XAxis dataKey="label" angle={-20} textAnchor="end" height={70} />
                                 <YAxis unit="ms" />
                                 <RTooltip />
-                                <Bar dataKey="ttft_p95_ms" name="TTFT p95" fill="#1677ff" />
+                                <Bar dataKey="ttft_p95_ms" name="TTFT p95" fill="CHART.primary" />
                             </BarChart>
                         </ResponsiveContainer>
                     </Card>

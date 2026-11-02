@@ -3,7 +3,7 @@
 // Reads /admin/api/insights/overview; survives restarts (unlike the removed
 // in-memory legacy Dashboard).
 import { useState, useEffect } from "react";
-import { Card, Spin, Select, Typography, Row, Col, Alert, Statistic, Table } from "antd";
+import { Card, Spin, Select, Typography, Row, Col, Alert, Statistic, Table, theme } from "antd";
 import {
     ComposedChart,
     Line,
@@ -101,6 +101,7 @@ const promptCacheRate = (t: OverviewTotals | undefined) =>
     t && t.input_tokens > 0 ? t.cached_tokens / t.input_tokens : 0;
 
 export default function Dashboard() {
+    const { token } = theme.useToken();
     const [loading, setLoading] = useState(true);
     const [unavailable, setUnavailable] = useState(false);
     const [data, setData] = useState<OverviewResponse | null>(null);
@@ -160,9 +161,9 @@ export default function Dashboard() {
                             <Card size="small">
                                 <Statistic title="Requests" value={(totals?.requests || 0).toLocaleString()} prefix={<ThunderboltOutlined />} />
                                 <div style={{ marginTop: 8, fontSize: 13 }}>
-                                    <span style={{ color: "#389e0d" }}><CheckCircleOutlined /> {totals?.successes || 0}</span>
+                                    <span style={{ color: token.colorSuccess }}><CheckCircleOutlined /> {totals?.successes || 0}</span>
                                     {"  "}
-                                    <span style={{ color: "#cf1322" }}><CloseCircleOutlined /> {totals?.errors || 0}</span>
+                                    <span style={{ color: token.colorError }}><CloseCircleOutlined /> {totals?.errors || 0}</span>
                                     {"  "}
                                     <span>success {((totals?.success_rate || 0) * 100).toFixed(1)}%</span>
                                 </div>
@@ -234,11 +235,11 @@ export default function Dashboard() {
                                     <YAxis yAxisId="right" orientation="right" />
                                     <RTooltip />
                                     <Legend />
-                                    <Bar yAxisId="right" dataKey="requests" name="requests" fill="#1677ff" fillOpacity={0.15} />
-                                    <Bar yAxisId="right" dataKey="errors" name="errors" fill="#faad14" fillOpacity={0.2} />
-                                    <Line yAxisId="left" type="monotone" dataKey="input_tokens" name="input tokens" stroke="#1677ff" strokeWidth={2} dot={false} />
-                                    <Line yAxisId="left" type="monotone" dataKey="output_tokens" name="output tokens" stroke="#52c41a" strokeWidth={2} dot={false} />
-                                    <Line yAxisId="left" type="monotone" dataKey="cached_tokens" name="cached tokens" stroke="#722ed1" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
+                                    <Bar yAxisId="right" dataKey="requests" name="requests" fill="CHART.primary" fillOpacity={0.15} />
+                                    <Bar yAxisId="right" dataKey="errors" name="errors" fill="CHART.warning" fillOpacity={0.2} />
+                                    <Line yAxisId="left" type="monotone" dataKey="input_tokens" name="input tokens" stroke="CHART.primary" strokeWidth={2} dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="output_tokens" name="output tokens" stroke="CHART.success" strokeWidth={2} dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="cached_tokens" name="cached tokens" stroke="CHART.violet" strokeWidth={1.5} strokeDasharray="6 3" dot={false} />
                                 </ComposedChart>
                             </ResponsiveContainer>
                         )}
