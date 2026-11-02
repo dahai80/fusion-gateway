@@ -95,7 +95,9 @@ func TestAutoRegister_AdminManifest(t *testing.T) {
     if admin == nil {
         t.Fatalf("fusion-admin not auto-registered; views = %+v", views)
     }
-    if admin.Category != "infra" || admin.Backend != "gateway" {
+    // #463: the aggregation normalizes the legacy infra self-report to the
+    // four-group enum — the view emits platform, the stored value stays infra.
+    if admin.Category != "platform" || admin.Backend != "gateway" {
         t.Fatalf("admin manifest = %+v", admin.ShellManifest)
     }
     if !strings.HasPrefix(admin.Entry, "/") {

@@ -183,6 +183,42 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
 // flood the log the way the #281 log-flood sweep cleaned up.
 var groupTitleWarn = logthrottle.New(5 * time.Minute)
 
+// categoryWarn throttles legacy-category normalization warnings (#463): one
+// per (module, raw value) per window — the end state is every module
+// self-reporting correctly and the map below becoming a no-op.
+var categoryWarn = logthrottle.New(5 * time.Minute)
+
+// normalizeCategory maps legacy/pre-taxonomy category values onto the
+// four-group aggregation enum (#463): the API only ever emits
+// core/governance/domain/platform. dev (legacy experiments) folds into
+// core, infra into platform, and anything unrecognized/empty into the
+// platform safe default for infrastructure-ish modules. View-level only —
+// stored registrations keep their raw values.
+func normalizeCategory(id, raw string) string {
+    switch raw {
+    case "core", "governance", "domain", "platform":
+        return raw
+    case "dev":
+        if categoryWarn.Allow(id + ":dev") {
+            slog.Warn("shell manifest category normalized (legacy value, fix the source self-report)",
+                "id", id, "raw", raw, "normalized", "core")
+        }
+        return "core"
+    case "infra":
+        if categoryWarn.Allow(id + ":infra") {
+            slog.Warn("shell manifest category normalized (legacy value, fix the source self-report)",
+                "id", id, "raw", raw, "normalized", "platform")
+        }
+        return "platform"
+    default:
+        if categoryWarn.Allow(id + ":" + raw) {
+            slog.Warn("shell manifest category normalized (unrecognized value, fix the source self-report)",
+                "id", id, "raw", raw, "normalized", "platform")
+        }
+        return "platform"
+    }
+}
+
 // warnGroupTitleMismatchLocked enforces the group-title agreement contract
 // (#297): siblings sharing a group id must agree on the display title —
 // first registered wins, a mismatch is a warning, never a rejection (the
@@ -503,6 +539,7 @@ func (r *Registry) List() []ManifestView {
             }
         }
         m.APIKey = ""
+        m.Category = normalizeCategory(m.ID, m.Category)
         views = append(views, ManifestView{
             ShellManifest: m,
             Status:        status,
@@ -520,6 +557,7 @@ func (r *Registry) List() []ManifestView {
             status = StatusOnline
         }
         m.APIKey = ""
+        m.Category = normalizeCategory(m.ID, m.Category)
         views = append(views, ManifestView{
             ShellManifest: m,
             Status:        status,
