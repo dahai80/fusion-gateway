@@ -183,10 +183,10 @@ export default function Anomalies() {
                             <YAxis yAxisId="mem" orientation="right" unit="%" domain={[0, 100]} />
                             <RTooltip />
                             <Legend />
-                            <Bar yAxisId="traffic" dataKey="requests" name="requests" fill="#1677ff" />
-                            <Bar yAxisId="traffic" dataKey="errors" name="errors" fill="#ff4d4f" />
-                            <Bar yAxisId="traffic" dataKey="breaker_events" name="breaker events" fill="#faad14" />
-                            <Line yAxisId="mem" type="monotone" dataKey="sys_mem_pct" name="system mem %" stroke="#722ed1" strokeWidth={1.5} dot={false} />
+                            <Bar yAxisId="traffic" dataKey="requests" name="requests" fill="CHART.primary" />
+                            <Bar yAxisId="traffic" dataKey="errors" name="errors" fill="CHART.danger" />
+                            <Bar yAxisId="traffic" dataKey="breaker_events" name="breaker events" fill="CHART.warning" />
+                            <Line yAxisId="mem" type="monotone" dataKey="sys_mem_pct" name="system mem %" stroke="CHART.violet" strokeWidth={1.5} dot={false} />
                             <Line yAxisId="mem" type="monotone" dataKey="mlx_mem_pct" name="MLX mem %" stroke="#13c2c2" strokeWidth={1.5} dot={false} />
                         </ComposedChart>
                     </ResponsiveContainer>

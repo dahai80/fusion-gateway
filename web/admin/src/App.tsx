@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { ConfigProvider } from "antd";
+import { ConfigProvider, theme as antdTheme } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
 import client from "./api/client";
 import AppLayout from "./components/AppLayout";
+import { useShellTheme } from "./theme";
+import { useLocale } from "./i18n";
 import Login from "./pages/Login";
 import Keys from "./pages/Keys";
 import Channels from "./pages/Channels";
@@ -85,11 +89,32 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+    // #473: shell design-system alignment — indigo brand accent + zinc
+    // neutrals (UI guardrails: no saturated pure colors), rounded-lg radii,
+    // dark mode via antd's darkAlgorithm driven by the shell host theme
+    // (postMessage) with prefers-color-scheme fallback.
+    const dark = useShellTheme();
+    const { locale } = useLocale();
     return (
         <ConfigProvider
+            locale={locale === "zh" ? zhCN : enUS}
             theme={{
+                algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
                 token: {
-                    colorPrimary: "#1677ff",
+                    colorPrimary: "#6366f1",
+                    colorInfo: "#6366f1",
+                    colorLink: "#6366f1",
+                    colorBgLayout: dark ? "#09090b" : "#f4f4f5",
+                    colorBgContainer: dark ? "#18181b" : "#ffffff",
+                    colorBgElevated: dark ? "#1f1f23" : "#ffffff",
+                    colorBorder: dark ? "#3f3f46" : "#e4e4e7",
+                    colorBorderSecondary: dark ? "#27272a" : "#f4f4f5",
+                    colorText: dark ? "#fafafa" : "#18181b",
+                    colorTextSecondary: dark ? "#d4d4d8" : "#52525b",
+                    colorTextTertiary: dark ? "#a1a1aa" : "#71717a",
+                    borderRadius: 8,
+                    borderRadiusLG: 12,
+                    controlHeight: 32,
                 },
             }}
         >

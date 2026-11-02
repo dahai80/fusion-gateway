@@ -163,10 +163,10 @@ export default function Capacity() {
                                     <YAxis yAxisId="right" orientation="right" allowDecimals={false} />
                                     <RTooltip />
                                     <Legend />
-                                    <Line yAxisId="left" type="monotone" dataKey="sys_mem_pct" name="system mem %" stroke="#1677ff" strokeWidth={1.5} dot={false} />
-                                    <Line yAxisId="left" type="monotone" dataKey="mlx_mem_pct" name="MLX mem %" stroke="#722ed1" strokeWidth={1.5} dot={false} />
-                                    <Line yAxisId="left" type="monotone" dataKey="gpu_util_pct" name="GPU util %" stroke="#52c41a" strokeWidth={1.5} dot={false} />
-                                    <Line yAxisId="right" type="stepAfter" dataKey="loaded_models" name="loaded models" stroke="#faad14" strokeWidth={1.5} dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="sys_mem_pct" name="system mem %" stroke="CHART.primary" strokeWidth={1.5} dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="mlx_mem_pct" name="MLX mem %" stroke="CHART.violet" strokeWidth={1.5} dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="gpu_util_pct" name="GPU util %" stroke="CHART.success" strokeWidth={1.5} dot={false} />
+                                    <Line yAxisId="right" type="stepAfter" dataKey="loaded_models" name="loaded models" stroke="CHART.warning" strokeWidth={1.5} dot={false} />
                                 </ComposedChart>
                             </ResponsiveContainer>
                         )}

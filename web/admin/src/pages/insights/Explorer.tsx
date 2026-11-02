@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { Card, Typography, Input, Row, Col, Table, Tag, Button, Select, Form, Modal, Tooltip } from "antd";
+import { Card, Typography, Input, Row, Col, Table, Tag, Button, Select, Form, Modal, Tooltip, theme } from "antd";
 import { useSearchParams } from "react-router-dom";
 import client from "../../api/client";
 import { isUnavailable, UnavailableAlert, windowFor } from "./shared";
@@ -81,6 +81,7 @@ const bodyToText = (p: PayloadResponse) => {
 };
 
 export default function Explorer() {
+    const { token } = theme.useToken();
     const [loading, setLoading] = useState(false);
     const [unavailable, setUnavailable] = useState(false);
     const [rows, setRows] = useState<SearchRow[]>([]);
@@ -287,7 +288,7 @@ export default function Explorer() {
                                     </pre>
                                     <Card type="inner" title="Stream chunk timing" size="small" style={{ marginTop: 8 }}>
                                         {detail === undefined ? null : detail.chunks === null || detail.chunks.length === 0 ? (
-                                            <span style={{ color: "#999" }}>
+                                            <span style={{ color: token.colorTextTertiary }}>
                                                 No chunk rows — capture.stream_chunks is off or this was not a stream.
                                             </span>
                                         ) : (
