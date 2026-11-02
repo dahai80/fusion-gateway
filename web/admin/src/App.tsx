@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ConfigProvider } from "antd";
+import client from "./api/client";
 import AppLayout from "./components/AppLayout";
 import Login from "./pages/Login";
 import Keys from "./pages/Keys";
@@ -39,12 +41,47 @@ import Reports from "./pages/insights/Reports";
 import Capacity from "./pages/insights/Capacity";
 import Dashboard from "./pages/insights/Dashboard";
 
+// #471: the console runs in a same-origin iframe inside the shell host, so
+// the HttpOnly shell session cookie rides along. Before bouncing to the
+// login page, try the SSO bridge once — it exchanges the shell session for
+// the admin cookie with no second password prompt. A 401/403 (no session or
+// non-admin account) falls through to the classic login silently.
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const loggedIn = localStorage.getItem("admin_logged_in");
-    if (!loggedIn) {
+    const [ssoState, setSsoState] = useState<"pending" | "authed" | "failed">("pending");
+    useEffect(() => {
+        if (loggedIn) {
+            return;
+        }
+        let cancelled = false;
+        client
+            .post("/sso")
+            .then((res) => {
+                if (cancelled) return;
+                if (res.data?.role === "admin") {
+                    localStorage.setItem("admin_logged_in", "true");
+                    setSsoState("authed");
+                } else {
+                    setSsoState("failed");
+                }
+            })
+            .catch(() => {
+                // no shell session / not admin — the login page is the path
+                if (!cancelled) setSsoState("failed");
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [loggedIn]);
+    if (loggedIn || ssoState === "authed") {
+        return <>{children}</>;
+    }
+    if (ssoState === "failed") {
         return <Navigate to="/admin/login" replace />;
     }
-    return <>{children}</>;
+    // SSO attempt in flight — hold the frame instead of bouncing to the
+    // login page and yanking the user on a slow bridge.
+    return null;
 }
 
 export default function App() {
