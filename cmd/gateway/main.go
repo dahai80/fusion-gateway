@@ -760,6 +760,13 @@ func run(configPath string) error {
 
 	sig := <-quit
 	slog.Info("shutting down", "signal", sig.String())
+	// #449: flip the drain flag FIRST so /healthz and /readyz answer 503 for
+	// the whole drain window — before this, a draining process kept answering
+	// 200 and start.sh start printed "already running" instead of starting a
+	// replacement, turning a plain restart into a full port outage (the
+	// 2026-11-01 22:50 incident: 6.4 min of ECONNREFUSED while the port was
+	// free from second 10).
+	srv.SetDraining()
 	close(stopCh)
 
 	// F7 fix: shutdown order must be (1) stop accepting new connections +

@@ -98,11 +98,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+    // #449: a draining gateway is not serving — report 503 so start.sh and
+    // the supervisor stop treating a shutting-down process as healthy.
+    if s.IsDraining() {
+        writeDraining(w)
+        return
+    }
     w.WriteHeader(http.StatusOK)
     fmt.Fprint(w, "ok")
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+    // #449: draining means not ready, full stop — skip the provider health
+    // checks below (the pool is about to be torn down anyway).
+    if s.IsDraining() {
+        writeDraining(w)
+        return
+    }
     ctx := adapter.WithFusionHeaders(r.Context(), r)
     localReady := s.router.CircuitBreakerState("local") != router.StateOpen
     localReasons := []string{}

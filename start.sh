@@ -177,8 +177,40 @@ check_port_registry() {
 
 start() {
     if pid="$(get_pid)"; then
-        echo "Fusion-Gateway already running (PID $pid)"
-        return 0
+        if curl -sf -m 2 "$HEALTH_URL" > /dev/null 2>&1; then
+            echo "Fusion-Gateway already running (PID $pid)"
+            return 0
+        fi
+        # #449: PID alive but /healthz not serving. Two cases, both previously
+        # mis-handled as "already running" (return 0, start nothing):
+        #   1. draining after SIGTERM — the graceful drain keeps the process
+        #      alive up to graceful_shutdown_timeout while the port may already
+        #      be free, so no replacement ever started and the outage lasted
+        #      the whole drain window (2026-11-01 22:50 incident).
+        #   2. a concurrent start.sh still bringing the server up.
+        # Wait for the process to exit (then start a replacement), to turn
+        # healthy (concurrent start won — treat as already running), or to
+        # outlive the bound (fail loudly rather than duplicate).
+        local wait_s
+        wait_s="$(stop_wait_seconds)"
+        echo "PID $pid alive but $HEALTH_URL not serving — draining or starting; waiting up to ${wait_s}s..."
+        for _ in $(seq 1 "$wait_s"); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                break
+            fi
+            if curl -sf -m 2 "$HEALTH_URL" > /dev/null 2>&1; then
+                echo "Fusion-Gateway already running (PID $pid)"
+                return 0
+            fi
+            sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "ERROR: PID $pid still alive after ${wait_s}s and not serving." >&2
+            echo "       Refusing to start a duplicate. Investigate (kill $pid, or fix $HEALTH_URL) and retry." >&2
+            exit 1
+        fi
+        echo "Drained process exited; starting replacement."
+        rm -f "$PID_FILE"
     fi
     # #401: fusion-supervisor relaunches the gateway the instant it exits, so
     # `restart` (stop; start) can reach here while the replacement is still
@@ -292,6 +324,7 @@ status() {
             echo "Health: OK ($HEALTH_URL)"
         else
             echo "Health: FAIL ($HEALTH_URL)"
+            echo "Note: alive but not serving — draining after SIGTERM, or wedged."
         fi
         return 0
     fi
@@ -302,6 +335,7 @@ status() {
             echo "Health: OK ($HEALTH_URL)"
         else
             echo "Health: FAIL ($HEALTH_URL)"
+            echo "Note: alive but not serving — draining after SIGTERM, or wedged."
         fi
         return 0
     fi
