@@ -45,6 +45,7 @@ const { Text } = Typography;
 const menuItems = [
     { key: "/admin/", icon: <DashboardOutlined />, label: "Dashboard" },
     { key: "/admin/keys", icon: <KeyOutlined />, label: "API Keys" },
+    { key: "/admin/config/providers", icon: <CloudServerOutlined />, label: "Model Providers" },
     { key: "/admin/channels", icon: <CloudServerOutlined />, label: "Channels" },
     {
         key: "insights-group",
@@ -90,7 +91,6 @@ const menuItems = [
             { key: "/admin/config/store", icon: <DatabaseOutlined />, label: "Store" },
             { key: "/admin/config/persistence", icon: <DatabaseOutlined />, label: "Persistence" },
             { key: "/admin/config/validation", icon: <CheckCircleOutlined />, label: "Validation" },
-            { key: "/admin/settings", icon: <SettingOutlined />, label: "Routing & Backends" },
         ],
     },
 ];

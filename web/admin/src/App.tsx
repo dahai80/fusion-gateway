@@ -29,6 +29,7 @@ import CostMarkupConfig from "./pages/config/CostMarkupConfig";
 import AdminConfigPage from "./pages/config/AdminConfigPage";
 import PIIConfig from "./pages/config/PIIConfig";
 import PersistenceConfig from "./pages/config/PersistenceConfig";
+import Providers from "./pages/config/Providers";
 import Latency from "./pages/insights/Latency";
 import Compare from "./pages/insights/Compare";
 import Explorer from "./pages/insights/Explorer";
@@ -81,7 +82,8 @@ export default function App() {
                         <Route path="insights/anomalies" element={<Anomalies />} />
                         <Route path="insights/reports" element={<Reports />} />
                         <Route path="insights/capacity" element={<Capacity />} />
-                        <Route path="settings" element={<Navigate to="/admin/config/server" replace />} />
+                        <Route path="settings" element={<Navigate to="/admin/config/providers" replace />} />
+                        <Route path="config/providers" element={<Providers />} />
                         <Route path="config/server" element={<ServerConfig />} />
                         <Route path="config/auth" element={<AuthConfig />} />
                         <Route path="config/rate-limit" element={<RateLimitConfig />} />

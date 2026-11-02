@@ -275,6 +275,17 @@ service's port. A missing registry file only warns (standalone checkouts
 still start); `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests only.
 `FUSION_REGISTRY` overrides the registry path.
 
+## Model Providers (admin UI)
+
+`/admin/config/providers` is the single place to add, edit, enable, or delete
+model providers (Claude, OpenAI-compatible, local MLX, and the other registered
+backend types). Each provider owns its base URL, API key (shown masked after
+save), timeout, and optional model list. Keys live in this gateway's
+`backends:` config; business applications only hold an `fk-` gateway key and a
+default model. Changes are written atomically and the live config is reloaded
+immediately. Deleting the last enabled provider is refused so the gateway
+cannot be left with no upstream.
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -312,6 +323,8 @@ still start); `FUSION_SKIP_REGISTRY_CHECK=1` bypasses for local tests only.
 | `/v1/moderations` | POST | Content moderation (cloud-only) |
 | `/admin/gc` | POST | Trigger safe GC on fusion-mlx (only when in-flight = 0) |
 | `/admin/config/reload` | POST | Config reload notification |
+| `/admin/api/config/backends` | GET/POST | List providers (masked keys) / create a provider backend. Create validates name, registered type, base URL, timeout, and supports `api_key` or `api_key_env`; writes config atomically and reloads. |
+| `/admin/api/config/backends/{name}` | GET/PUT/DELETE | Read, update (base URL, key, timeout, models, enabled), or delete a provider. Deleting the last enabled backend is refused with 409. |
 | `/admin/teams` | GET/POST | List/create teams (admin-only) |
 | `/admin/teams/{id}` | GET/PUT/DELETE | Team CRUD (admin-only) |
 | `/admin/orgs` | GET/POST | List/create organizations (admin-only) |

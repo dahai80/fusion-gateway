@@ -8,13 +8,16 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "net/url"
     "os"
+    "regexp"
     "sort"
     "strconv"
     "strings"
     "sync"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/insights"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
@@ -1376,19 +1379,232 @@ func (h *Handler) handleUpdateRoutingConfig(w http.ResponseWriter, r *http.Reque
 }
 
 type backendResponse struct {
-    Name    string `json:"name"`
-    Type    string `json:"type"`
-    BaseURL string `json:"base_url"`
-    APIKey  string `json:"api_key"`
-    Timeout string `json:"timeout"`
-    Enabled bool   `json:"enabled"`
+    Name    string   `json:"name"`
+    Type    string   `json:"type"`
+    BaseURL string   `json:"base_url"`
+    APIKey  string   `json:"api_key"`
+    Timeout string   `json:"timeout"`
+    Enabled bool     `json:"enabled"`
+    Models  []string `json:"models"`
 }
 
 type backendUpdateRequest struct {
-    BaseURL *string `json:"base_url,omitempty"`
-    APIKey  *string `json:"api_key,omitempty"`
-    Enabled *bool   `json:"enabled,omitempty"`
-    Timeout *string `json:"timeout,omitempty"`
+    BaseURL *string   `json:"base_url,omitempty"`
+    APIKey  *string   `json:"api_key,omitempty"`
+    Enabled *bool     `json:"enabled,omitempty"`
+    Timeout *string   `json:"timeout,omitempty"`
+    Models  *[]string `json:"models,omitempty"`
+}
+
+type backendCreateRequest struct {
+    Name      string   `json:"name"`
+    Type      string   `json:"type"`
+    BaseURL   string   `json:"base_url"`
+    APIKey    string   `json:"api_key"`
+    APIKeyEnv string   `json:"api_key_env"`
+    Timeout   string   `json:"timeout"`
+    Models    []string `json:"models"`
+    Enabled   *bool    `json:"enabled"`
+}
+
+var backendNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+func validateBackendBaseURL(raw string) error {
+    if strings.TrimSpace(raw) == "" {
+        return nil
+    }
+    parsed, err := url.Parse(raw)
+    if err != nil {
+        return fmt.Errorf("base_url is not a valid URL")
+    }
+    if parsed.Scheme != "http" && parsed.Scheme != "https" {
+        return fmt.Errorf("base_url must start with http:// or https://")
+    }
+    if parsed.Host == "" {
+        return fmt.Errorf("base_url must include a host")
+    }
+    return nil
+}
+
+func normalizeBackendModels(models []string) []string {
+    out := make([]string, 0, len(models))
+    seen := make(map[string]struct{}, len(models))
+    for _, m := range models {
+        m = strings.TrimSpace(m)
+        if m == "" {
+            continue
+        }
+        if _, ok := seen[m]; ok {
+            continue
+        }
+        seen[m] = struct{}{}
+        out = append(out, m)
+    }
+    return out
+}
+
+func (h *Handler) createBackend(w http.ResponseWriter, r *http.Request) {
+    var req backendCreateRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeError(w, http.StatusBadRequest, "invalid request body")
+        return
+    }
+    req.Name = strings.TrimSpace(req.Name)
+    req.Type = strings.TrimSpace(req.Type)
+    if !backendNamePattern.MatchString(req.Name) {
+        writeError(w, http.StatusBadRequest, "name must be 1-64 chars: letters, digits, dot, dash, underscore")
+        return
+    }
+    if req.Type == "" {
+        writeError(w, http.StatusBadRequest, "type is required")
+        return
+    }
+    if _, err := adapter.LookupProviderFactory(req.Type); err != nil {
+        writeError(w, http.StatusBadRequest, "unsupported backend type: "+req.Type)
+        return
+    }
+    if err := validateBackendBaseURL(req.BaseURL); err != nil {
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    if req.Timeout != "" {
+        d, err := time.ParseDuration(req.Timeout)
+        if err != nil || d <= 0 {
+            writeError(w, http.StatusBadRequest, "timeout must be a positive duration such as 60s")
+            return
+        }
+    }
+    if strings.TrimSpace(req.APIKey) != "" && strings.TrimSpace(req.APIKeyEnv) != "" {
+        writeError(w, http.StatusBadRequest, "provide api_key or api_key_env, not both")
+        return
+    }
+    if h.configPath == "" {
+        writeError(w, http.StatusInternalServerError, "config file path not configured")
+        return
+    }
+
+    h.configMutex.Lock()
+    defer h.configMutex.Unlock()
+
+    doc, err := readYAMLDoc(h.configPath)
+    if err != nil {
+        slog.Error("failed to read config file", "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to read config file")
+        return
+    }
+    backends := getOrCreateSection(doc, "backends")
+    if _, exists := backends[req.Name]; exists {
+        writeError(w, http.StatusConflict, "backend already exists: "+req.Name)
+        return
+    }
+
+    enabled := true
+    if req.Enabled != nil {
+        enabled = *req.Enabled
+    }
+    entry := map[string]interface{}{
+        "type":    req.Type,
+        "enabled": enabled,
+    }
+    if strings.TrimSpace(req.BaseURL) != "" {
+        entry["base_url"] = strings.TrimSpace(req.BaseURL)
+    }
+    if strings.TrimSpace(req.APIKey) != "" {
+        entry["api_key"] = strings.TrimSpace(req.APIKey)
+    }
+    if strings.TrimSpace(req.APIKeyEnv) != "" {
+        entry["api_key_env"] = strings.TrimSpace(req.APIKeyEnv)
+    }
+    if req.Timeout != "" {
+        entry["timeout"] = req.Timeout
+    }
+    if models := normalizeBackendModels(req.Models); len(models) > 0 {
+        entry["models"] = models
+    }
+    backends[req.Name] = entry
+
+    if err := validateAndWriteYAML(h.configPath, doc); err != nil {
+        slog.Error("failed to write config file", "path", h.configPath, "error", err)
+        writeError(w, http.StatusBadRequest, "config rejected: "+err.Error())
+        return
+    }
+    if _, err := config.Reload(h.configPath); err != nil {
+        slog.Error("config file written but reload failed — live snapshot is STALE",
+            "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "config written but reload failed, live config stale")
+        return
+    }
+
+    slog.Info("backend created via admin API", "backend", req.Name, "type", req.Type)
+    b := config.GetSnapshot().Config.Backends[req.Name]
+    writeJSON(w, http.StatusCreated, backendResponse{
+        Name:    req.Name,
+        Type:    b.Type,
+        BaseURL: b.BaseURL,
+        APIKey:  maskAPIKey(b.APIKey),
+        Timeout: b.Timeout.String(),
+        Enabled: b.Enabled,
+    })
+}
+
+func (h *Handler) deleteBackend(w http.ResponseWriter, r *http.Request, name string) {
+    if h.configPath == "" {
+        writeError(w, http.StatusInternalServerError, "config file path not configured")
+        return
+    }
+    snap := config.GetSnapshot()
+    target, ok := snap.Config.Backends[name]
+    if !ok {
+        writeError(w, http.StatusNotFound, "backend not found")
+        return
+    }
+    if target.Enabled {
+        enabledOthers := 0
+        for other, b := range snap.Config.Backends {
+            if other != name && b.Enabled {
+                enabledOthers++
+            }
+        }
+        if enabledOthers == 0 {
+            writeError(w, http.StatusConflict, "cannot delete the last enabled backend")
+            return
+        }
+    }
+
+    h.configMutex.Lock()
+    defer h.configMutex.Unlock()
+
+    doc, err := readYAMLDoc(h.configPath)
+    if err != nil {
+        slog.Error("failed to read config file", "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to read config file")
+        return
+    }
+    backends, _ := doc["backends"].(map[string]interface{})
+    if backends == nil {
+        writeError(w, http.StatusInternalServerError, "backends section not found in config")
+        return
+    }
+    if _, exists := backends[name]; !exists {
+        writeError(w, http.StatusNotFound, "backend not found in config file")
+        return
+    }
+    delete(backends, name)
+
+    if err := validateAndWriteYAML(h.configPath, doc); err != nil {
+        slog.Error("failed to write config file", "path", h.configPath, "error", err)
+        writeError(w, http.StatusBadRequest, "config rejected: "+err.Error())
+        return
+    }
+    if _, err := config.Reload(h.configPath); err != nil {
+        slog.Error("config file written but reload failed — live snapshot is STALE",
+            "path", h.configPath, "error", err)
+        writeError(w, http.StatusInternalServerError, "config written but reload failed, live config stale")
+        return
+    }
+
+    slog.Info("backend deleted via admin API", "backend", name)
+    writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 }
 
 func maskAPIKey(key string) string {
@@ -1402,6 +1618,10 @@ func maskAPIKey(key string) string {
 }
 
 func (h *Handler) handleBackendsConfig(w http.ResponseWriter, r *http.Request) {
+    if r.Method == http.MethodPost {
+        h.createBackend(w, r)
+        return
+    }
     if r.Method != http.MethodGet {
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")
         return
@@ -1416,6 +1636,7 @@ func (h *Handler) handleBackendsConfig(w http.ResponseWriter, r *http.Request) {
             APIKey:  maskAPIKey(b.APIKey),
             Timeout: b.Timeout.String(),
             Enabled: b.Enabled,
+            Models:  b.Models,
         })
     }
     slog.Info("backends config read", "count", len(result))
@@ -1444,6 +1665,7 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             APIKey:  maskAPIKey(b.APIKey),
             Timeout: b.Timeout.String(),
             Enabled: b.Enabled,
+            Models:  b.Models,
         })
 
     case http.MethodPut:
@@ -1506,6 +1728,9 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
         if req.Timeout != nil {
             backend["timeout"] = *req.Timeout
         }
+        if req.Models != nil {
+            backend["models"] = normalizeBackendModels(*req.Models)
+        }
 
         // B13 (audit): atomic write + pre-write validation + explicit reload,
         // same as routing PUT.
@@ -1533,7 +1758,11 @@ func (h *Handler) handleBackendByName(w http.ResponseWriter, r *http.Request) {
             APIKey:  maskAPIKey(b.APIKey),
             Timeout: b.Timeout.String(),
             Enabled: b.Enabled,
+            Models:  b.Models,
         })
+
+    case http.MethodDelete:
+        h.deleteBackend(w, r, name)
 
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")

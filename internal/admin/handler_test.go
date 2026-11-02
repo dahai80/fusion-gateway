@@ -2825,11 +2825,193 @@ backends:
 
     t.Run("method_not_allowed", func(t *testing.T) {
         h := newTestHandler(t, ms, auth, "")
-        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/config/backends", nil)
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/backends", nil)
         rec := httptest.NewRecorder()
         h.handleBackendsConfig(rec, req)
         if rec.Code != http.StatusMethodNotAllowed {
             t.Fatalf("expected 405, got %d", rec.Code)
+        }
+    })
+}
+
+func TestHandleBackendCreateAndDelete(t *testing.T) {
+    auth := newTestAuth(t)
+    ms := newMockStore()
+
+    backendsYAML := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+  circuit_breaker:
+    failure_threshold: 5
+  fallback:
+    enabled: false
+    cloud_default: "openai"
+  ratio_tiers:
+    enabled: false
+    rules: []
+  token_tiers:
+    enabled: false
+    metric: "total"
+    rules: []
+backends:
+  local:
+    type: local
+    base_url: "http://localhost:11434"
+    api_key: ""
+    timeout: 30s
+    enabled: true
+  openai:
+    type: openai
+    base_url: "https://api.openai.com"
+    api_key: "sk-test-api-key-1234567890"
+    timeout: 60s
+    enabled: true
+`
+    newConfigPath := func(t *testing.T) string {
+        t.Helper()
+        path := filepath.Join(t.TempDir(), "config.yaml")
+        if err := os.WriteFile(path, []byte(backendsYAML), 0644); err != nil {
+            t.Fatalf("failed to write config file: %v", err)
+        }
+        loadTestConfig(t, backendsYAML)
+        return path
+    }
+
+    t.Run("create_success_and_delete", func(t *testing.T) {
+        configPath := newConfigPath(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{
+            "name":      "claude-main",
+            "type":      "openai-compatible",
+            "base_url":  "https://api.anthropic.com",
+            "api_key":   "sk-ant-test-key-1234567890",
+            "timeout":   "60s",
+            "models":    []string{"claude-x", " claude-x ", ""},
+            "enabled":   true,
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/config/backends", body)
+        rec := httptest.NewRecorder()
+        h.handleBackendsConfig(rec, req)
+        if rec.Code != http.StatusCreated {
+            t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        result := decodeResponse(t, rec)
+        if result["name"] != "claude-main" {
+            t.Fatalf("expected claude-main, got %v", result["name"])
+        }
+        if result["api_key"] != "****7890" {
+            t.Fatalf("expected masked key, got %v", result["api_key"])
+        }
+        if _, ok := config.GetSnapshot().Config.Backends["claude-main"]; !ok {
+            t.Fatalf("created backend missing from live snapshot")
+        }
+        written, err := os.ReadFile(configPath)
+        if err != nil {
+            t.Fatalf("failed to read config file: %v", err)
+        }
+        if !strings.Contains(string(written), "claude-main") {
+            t.Fatalf("created backend not persisted to config file")
+        }
+
+        delReq := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/backends/claude-main", nil)
+        delRec := httptest.NewRecorder()
+        h.handleBackendByName(delRec, delReq)
+        if delRec.Code != http.StatusOK {
+            t.Fatalf("expected 200 delete, got %d; body: %s", delRec.Code, delRec.Body.String())
+        }
+        if _, ok := config.GetSnapshot().Config.Backends["claude-main"]; ok {
+            t.Fatalf("deleted backend still in live snapshot")
+        }
+    })
+
+    t.Run("create_duplicate_conflict", func(t *testing.T) {
+        configPath := newConfigPath(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{
+            "name":     "local",
+            "type":     "fusion-mlx",
+            "base_url": "http://localhost:11434",
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/config/backends", body)
+        rec := httptest.NewRecorder()
+        h.handleBackendsConfig(rec, req)
+        if rec.Code != http.StatusConflict {
+            t.Fatalf("expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("create_rejects_unknown_type", func(t *testing.T) {
+        configPath := newConfigPath(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        body := map[string]interface{}{
+            "name":     "bogus",
+            "type":     "not-a-provider",
+            "base_url": "https://example.com",
+        }
+        req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/config/backends", body)
+        rec := httptest.NewRecorder()
+        h.handleBackendsConfig(rec, req)
+        if rec.Code != http.StatusBadRequest {
+            t.Fatalf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("create_rejects_invalid_name_and_url", func(t *testing.T) {
+        configPath := newConfigPath(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        for _, body := range []map[string]interface{}{
+            {"name": "bad name!", "type": "openai-compatible", "base_url": "https://example.com"},
+            {"name": "ok-name", "type": "openai-compatible", "base_url": "ftp://example.com"},
+            {"name": "ok-name", "type": "openai-compatible", "base_url": "https://example.com", "timeout": "soon"},
+        } {
+            req := makeAuthenticatedRequest(t, auth, http.MethodPost, "/admin/api/config/backends", body)
+            rec := httptest.NewRecorder()
+            h.handleBackendsConfig(rec, req)
+            if rec.Code != http.StatusBadRequest {
+                t.Fatalf("expected 400 for %v, got %d; body: %s", body, rec.Code, rec.Body.String())
+            }
+        }
+    })
+
+    t.Run("delete_refuses_last_enabled", func(t *testing.T) {
+        onlyLocal := strings.Replace(backendsYAML, `  openai:
+    type: openai
+    base_url: "https://api.openai.com"
+    api_key: "sk-test-api-key-1234567890"
+    timeout: 60s
+    enabled: true
+`, "", 1)
+        path := filepath.Join(t.TempDir(), "config.yaml")
+        if err := os.WriteFile(path, []byte(onlyLocal), 0644); err != nil {
+            t.Fatalf("failed to write config file: %v", err)
+        }
+        loadTestConfig(t, onlyLocal)
+        h := newTestHandler(t, ms, auth, path)
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/backends/local", nil)
+        rec := httptest.NewRecorder()
+        h.handleBackendByName(rec, req)
+        if rec.Code != http.StatusConflict {
+            t.Fatalf("expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+    })
+
+    t.Run("delete_missing_backend", func(t *testing.T) {
+        configPath := newConfigPath(t)
+        h := newTestHandler(t, ms, auth, configPath)
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/backends/ghost", nil)
+        rec := httptest.NewRecorder()
+        h.handleBackendByName(rec, req)
+        if rec.Code != http.StatusNotFound {
+            t.Fatalf("expected 404, got %d", rec.Code)
         }
     })
 }
@@ -2944,7 +3126,7 @@ backends:
 
     t.Run("method_not_allowed", func(t *testing.T) {
         h := newTestHandler(t, ms, auth, "")
-        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/config/backends/local", nil)
+        req := makeAuthenticatedRequest(t, auth, http.MethodPatch, "/admin/api/config/backends/local", nil)
         rec := httptest.NewRecorder()
         h.handleBackendByName(rec, req)
         if rec.Code != http.StatusMethodNotAllowed {
