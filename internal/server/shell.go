@@ -6,6 +6,7 @@ import (
     "crypto/subtle"
     "encoding/hex"
     "encoding/json"
+    "context"
     "errors"
     "fmt"
     "io"
@@ -629,10 +630,27 @@ func (s *Server) shellManifestAdminAllowed(r *http.Request) bool {
 // it, so the #369 self-heal loop was unreachable. The admin plane is checked
 // from the raw Bearer token here (constant-time, same helper as heartbeat),
 // since no middleware principal is resolved on this path.
+// shellAuthPlaneKey marks HOW a manifest-upsert request authenticated
+// (#460): the admin plane proves nothing about the module holding its
+// issued service key, while the #369 self-heal path authenticates with the
+// valid fm- key itself. The handler uses it to decide between rotating the
+// service key (admin plane) and retaining it (self-heal).
+type shellAuthPlaneKey struct{}
+
+const (
+    shellAuthPlaneAdmin      = "admin"
+    shellAuthPlaneServiceKey = "service_key"
+)
+
+func shellAuthPlaneFromContext(ctx context.Context) string {
+    v, _ := ctx.Value(shellAuthPlaneKey{}).(string)
+    return v
+}
+
 func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         if s.shellHeartbeatAdminToken(shellBearerToken(r)) {
-            next(w, r)
+            next(w, r.WithContext(context.WithValue(r.Context(), shellAuthPlaneKey{}, shellAuthPlaneAdmin)))
             return
         }
         body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxShellBody))
@@ -655,7 +673,7 @@ func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.Handler
                 slog.Info("shell manifest re-register authenticated by module service key (#369 self-heal)", "id", probe.ID)
                 r.Body = io.NopCloser(bytes.NewReader(body))
                 r.ContentLength = int64(len(body))
-                next(w, r)
+                next(w, r.WithContext(context.WithValue(r.Context(), shellAuthPlaneKey{}, shellAuthPlaneServiceKey)))
                 return
             }
         }
@@ -717,6 +735,34 @@ func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Reques
         return
     }
     if !issued {
+        // #460: the two auth planes mean opposite things for key ambiguity.
+        // Admin plane: the module just proved it does NOT hold a working
+        // key (it authenticated with the admin credential), so keep-your-key
+        // vs your-key-is-dead is undecidable for the client — rotate and
+        // return the new plaintext so the re-register always leaves the
+        // module with a working key. Self-heal plane (#369): the module
+        // authenticated WITH its valid fm- key, so retain without
+        // re-revealing (issue-once stands; rotating on every re-register
+        // would churn keys for a demonstrably healthy module).
+        if shellAuthPlaneFromContext(r.Context()) == shellAuthPlaneAdmin {
+            grace := s.cfg.Config.Shell.KeyRotationGrace
+            if grace <= 0 {
+                grace = 24 * time.Hour
+            }
+            rotID, rotPlaintext, err := s.shellRegistry.RotateServiceKey(m.ID, grace)
+            if err != nil {
+                // Builtins/static and no-existing-key cases keep the
+                // legacy shape (their credentials are config-owned or
+                // issuance already handled them above).
+                slog.Warn("shell service key rotation on admin re-register skipped",
+                    "id", m.ID, "error", err)
+                writeShellKeyResponse(w, http.StatusOK, "ok", "manifest registered (service key retained; raw key shown only at issuance)", m.ID, keyID, "")
+                return
+            }
+            slog.Info("shell service key rotated on admin re-register (#460)", "id", m.ID, "key_id", rotID)
+            writeShellKeyResponse(w, http.StatusOK, "ok", "manifest registered; service key rotated — store it now, it is shown exactly once", m.ID, rotID, rotPlaintext)
+            return
+        }
         // Idempotent re-registration: the existing key is retained and the
         // plaintext is NOT re-revealed (returned exactly once, at issuance).
         // A module that lost its key asks an admin to rotate.

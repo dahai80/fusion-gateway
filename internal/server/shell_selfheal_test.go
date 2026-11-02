@@ -129,6 +129,72 @@ func TestShellUpsert_ServiceKeySelfHeal(t *testing.T) {
     }
 }
 
+// #460: an admin-key re-register must ROTATE the service key and return the
+// new plaintext — the module just proved it does not hold a working key (it
+// authenticated with the admin credential), so "key retained, plaintext not
+// re-revealed" leaves the client guessing between keep-your-key and
+// your-key-is-dead and produced a 15s re-register loop in
+// fusion-artifacts-engine. The rotated key must heartbeat clean.
+func TestShellUpsert_AdminKeyReRegisterRotatesServiceKey(t *testing.T) {
+    s := newShellTestServer(t, false)
+    raw := selfHealRegister(t, s, "fusion-demo")
+
+    // Heartbeat with the OLD key works before the re-register.
+    if w := selfHealBeat(t, s, "fusion-demo", raw); w.Code != http.StatusOK {
+        t.Fatalf("pre-rotate heartbeat code = %d body=%s", w.Code, w.Body.String())
+    }
+
+    body, _ := json.Marshal(selfHealManifest("fusion-demo"))
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer mk-selfheal-test-master-key")
+    w := httptest.NewRecorder()
+    s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("admin re-register code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    var kr shellKeyResponse
+    if err := json.Unmarshal(w.Body.Bytes(), &kr); err != nil {
+        t.Fatalf("decode: %v", err)
+    }
+    if kr.RawKey == "" {
+        t.Fatal("admin-key re-register must return a fresh raw_key (#460: no signal = 15s client register loop)")
+    }
+    if kr.RawKey == raw {
+        t.Fatal("admin re-register must rotate, not re-reveal the same key")
+    }
+
+    // The rotated key is heartbeat-valid immediately; the old one is
+    // dead-or-grace but the client's recovered state is unambiguous.
+    if w := selfHealBeat(t, s, "fusion-demo", kr.RawKey); w.Code != http.StatusOK {
+        t.Fatalf("post-rotate heartbeat with returned key code = %d body=%s", w.Code, w.Body.String())
+    }
+}
+
+// #460 counterpart: the #369 self-heal path (module authenticated with its
+// own still-valid fm- key) KEEPS the retain semantics — the key was just
+// proven valid, and re-revealing/rotating on every re-register would churn
+// keys for a module that is demonstrably fine.
+func TestShellUpsert_ServiceKeySelfHealRetainsKey(t *testing.T) {
+    s := newShellTestServer(t, false)
+    raw := selfHealRegister(t, s, "fusion-demo")
+
+    body, _ := json.Marshal(selfHealManifest("fusion-demo"))
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/manifests", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+raw)
+    w := httptest.NewRecorder()
+    s.withShellManifestUpsertAuth(s.handleShellManifestUpsert)(w, req)
+    if w.Code != http.StatusOK {
+        t.Fatalf("self-heal re-register code = %d body=%s, want 200", w.Code, w.Body.String())
+    }
+    if strings.Contains(w.Body.String(), "raw_key\":\"fm-") {
+        t.Fatalf("self-heal path must retain the key, body re-revealed: %s", w.Body.String())
+    }
+    // The proven key still heartbeats.
+    if w := selfHealBeat(t, s, "fusion-demo", raw); w.Code != http.StatusOK {
+        t.Fatalf("retained key heartbeat code = %d body=%s", w.Code, w.Body.String())
+    }
+}
+
 // TestShellUpsert_AdminKeyBearerAccepted (#436): with the route outside
 // withMiddleware, the web_shell.admin_key Bearer must still pass the upsert
 // gate (raw-token constant-time compare, same helper as heartbeat).
