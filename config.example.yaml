@@ -660,6 +660,36 @@ web_shell:
     #    icon: Network
     #    health: http://127.0.0.1:11452/api/health
     #    version: 0.1.0
+    # #466: static manifest for the Supervisor orchestration console —
+    # platform group per the approved menu taxonomy (sort 45), health = the
+    # supervisor's own /health so the dot tracks the orchestrator process.
+    # Its Rust binary is started by launchd, not by the gateway, so the menu
+    # entry must not evaporate when it is stopped (gray dot per MT-D).
+    # modules entry below needs NO api_key (auth via gateway session — the
+    # #448 fusion-design pattern).
+    #  - id: fusion-supervisor
+    #    title: 服务编排
+    #    title_en: Supervisor
+    #    entry: /shell/fusion-supervisor/
+    #    devices: [desktop]
+    #    category: platform
+    #    icon: Activity
+    #    health: http://127.0.0.1:9100/health
+    #    version: 0.1.34
+    # #467: static manifest for the Model Hub repository console — platform
+    # group per the approved menu taxonomy (sort 43), health = the hub's own
+    # /api/v1/system/health. The upstream validates the injected Bearer
+    # credential itself, so the modules entry below carries the hub's fm-
+    # web_module_key (the #442 pattern, like fusion-cowork).
+    #  - id: fusion-models-hub
+    #    title: 模型仓库
+    #    title_en: Model Hub
+    #    entry: /shell/fusion-models-hub/
+    #    devices: [desktop]
+    #    category: platform
+    #    icon: Database
+    #    health: http://127.0.0.1:11444/api/v1/system/health
+    #    version: 0.1.0
     #  - id: fusion-design
     #    title: Design
     #    title_en: Design
@@ -697,6 +727,13 @@ web_shell:
     #     # Authorization header.
     #     fusion-multi-nodes:
     #         upstream: http://127.0.0.1:11472
+    #     # #466: supervisor console — no api_key (auth via gateway session).
+    #     fusion-supervisor:
+    #         upstream: http://127.0.0.1:9100
+    #     # #467: model hub validates the injected fm- credential itself.
+    #     fusion-models-hub:
+    #         upstream: http://127.0.0.1:11444
+    #         api_key: "<from ~/.fusion-model-hub/web_module_key>"
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
