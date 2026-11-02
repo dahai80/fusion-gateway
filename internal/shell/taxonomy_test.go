@@ -65,3 +65,32 @@ func TestList_KeepsUnreachableEntries(t *testing.T) {
         t.Fatalf("unreachable entry status = %q unreachable=%v, want offline+unreachable (health state must be attached)", views[0].Status, views[0].Unreachable)
     }
 }
+
+// #455 MT-1/MT-2: taxonomy (category/sort) is a deployment-side decision —
+// when a dynamic registration carries its own values, they still lose to
+// the static fallback entry for the same id (a module heartbeat must not
+// flip the operator's classification or sink core/11 to the sidebar bottom
+// with platform/0). Ids without a static entry keep the dynamic values.
+func TestList_StaticTaxonomyWinsOverDynamic(t *testing.T) {
+    reg := NewRegistry([]config.ShellManifest{
+        taxonomyManifest("fusion-agent-studio", "core", 11),
+    }, nil, 30*time.Second)
+
+    if err := reg.Upsert(taxonomyManifest("fusion-agent-studio", "platform", 0)); err != nil {
+        t.Fatalf("upsert dynamic: %v", err)
+    }
+    if err := reg.Upsert(taxonomyManifest("fusion-standalone", "domain", 31)); err != nil {
+        t.Fatalf("upsert standalone: %v", err)
+    }
+
+    got := map[string]config.ShellManifest{}
+    for _, v := range reg.List() {
+        got[v.ID] = v.ShellManifest
+    }
+    if m := got["fusion-agent-studio"]; m.Category != "core" || m.Sort != 11 {
+        t.Fatalf("agent-studio taxonomy = (%q, %d), want (core, 11) — static entry is the authority, dynamic registration must not override it", m.Category, m.Sort)
+    }
+    if m := got["fusion-standalone"]; m.Category != "domain" || m.Sort != 31 {
+        t.Fatalf("standalone taxonomy = (%q, %d), want (domain, 31) — no static entry, dynamic values must survive", m.Category, m.Sort)
+    }
+}

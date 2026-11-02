@@ -490,6 +490,18 @@ func (r *Registry) List() []ManifestView {
     for _, e := range r.dynamic {
         status := statusOf(e, now, r.heartbeatExpiry)
         m := e.manifest
+        // #455: taxonomy (category/sort) is a deployment-side decision —
+        // the static web_shell.manifests entry is the authority for ids it
+        // lists, so a module heartbeat re-registration cannot flip the
+        // operator's classification or sink the entry to the sidebar bottom
+        // by re-registering without a sort.
+        for _, s := range r.staticFallback {
+            if s.ID == m.ID {
+                m.Category = s.Category
+                m.Sort = s.Sort
+                break
+            }
+        }
         m.APIKey = ""
         views = append(views, ManifestView{
             ShellManifest: m,
