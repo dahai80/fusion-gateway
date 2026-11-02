@@ -743,6 +743,10 @@ func run(configPath string) error {
 		}
 		// M1 fix: rebuild middleware chain on reload
 		srv.RebuildMiddlewareChain(newSnap)
+		// #453: converge the shell manifest registry's static fallback list —
+		// without this a module added to web_shell.manifests at runtime was
+		// proxy-reachable but absent from the sidebar until a restart.
+		srv.RefreshShellStaticManifests(newSnap.Config.Shell.Manifests)
 	})
 
 	safeGo("config_watch_reload", func() { config.WatchAndReload(configPath) })
