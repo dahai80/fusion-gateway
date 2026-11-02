@@ -95,9 +95,10 @@ func TestAutoRegister_AdminManifest(t *testing.T) {
     if admin == nil {
         t.Fatalf("fusion-admin not auto-registered; views = %+v", views)
     }
-    // #463: the aggregation normalizes the legacy infra self-report to the
-    // four-group enum — the view emits platform, the stored value stays infra.
-    if admin.Category != "platform" || admin.Backend != "gateway" {
+    // #470: the embedded manifest self-reports the taxonomy per the shell
+    // menu doc — governance block, sort 20 (top of governance, before
+    // security 21). No #463 normalization WARN should fire for it anymore.
+    if admin.Category != "governance" || admin.Sort != 20 || admin.Backend != "gateway" {
         t.Fatalf("admin manifest = %+v", admin.ShellManifest)
     }
     if !strings.HasPrefix(admin.Entry, "/") {

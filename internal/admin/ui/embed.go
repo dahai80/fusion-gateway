@@ -27,6 +27,7 @@ type AdminManifest struct {
     Backend  string   `json:"backend"`
     Devices  []string `json:"devices"`
     Category string   `json:"category"`
+    Sort     int      `json:"sort"`
 }
 
 // Manifest parses the embedded dist/manifest.json. ok=false when the file is
