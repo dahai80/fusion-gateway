@@ -66,6 +66,58 @@ func TestList_KeepsUnreachableEntries(t *testing.T) {
     }
 }
 
+// #463: the aggregation API only ever emits the four-group taxonomy —
+// legacy/pre-taxonomy self-reported values are normalized view-level
+// (stored registrations untouched) so consumers don't re-implement the
+// guesswork. Empty/unknown values can no longer pass Upsert validation but
+// can still exist in pre-#455 persisted stores, so they are injected here
+// directly and normalize to the safe platform default.
+func TestList_NormalizesLegacyCategories(t *testing.T) {
+    reg := NewRegistry(nil, nil, 30*time.Second)
+    for _, c := range []string{"dev", "infra", "governance", "core", "domain", "platform"} {
+        if err := reg.Upsert(taxonomyManifest("fusion-norm-"+c, c, 31)); err != nil {
+            t.Fatalf("upsert %q: %v", c, err)
+        }
+    }
+    reg.mu.Lock()
+    reg.dynamic["fusion-norm-legacy"] = &entry{manifest: taxonomyManifest("fusion-norm-legacy", "", 31), lastHeartbeat: time.Now(), dynamic: true}
+    reg.dynamic["fusion-norm-unknown"] = &entry{manifest: taxonomyManifest("fusion-norm-unknown", "workspace", 31), lastHeartbeat: time.Now(), dynamic: true}
+    reg.mu.Unlock()
+
+    want := map[string]string{
+        "fusion-norm-dev":        "core",
+        "fusion-norm-infra":      "platform",
+        "fusion-norm-legacy":     "platform",
+        "fusion-norm-unknown":    "platform",
+        "fusion-norm-governance": "governance",
+        "fusion-norm-core":       "core",
+        "fusion-norm-domain":     "domain",
+        "fusion-norm-platform":   "platform",
+    }
+    for _, v := range reg.List() {
+        w, ok := want[v.ID]
+        if !ok {
+            t.Fatalf("unexpected view id %q", v.ID)
+        }
+        if v.Category != w {
+            t.Fatalf("%s category = %q, want %q", v.ID, v.Category, w)
+        }
+    }
+}
+
+// #463: static fallback entries with legacy values normalize too — the
+// stored config keeps its raw value (authoritative for #457 override
+// semantics), only the aggregation output is canonical.
+func TestList_NormalizesStaticFallbackCategories(t *testing.T) {
+    reg := NewRegistry([]config.ShellManifest{
+        taxonomyManifest("fusion-static-dev", "dev", 11),
+    }, nil, 30*time.Second)
+    views := reg.List()
+    if len(views) != 1 || views[0].Category != "core" {
+        t.Fatalf("static dev entry aggregated as %q, want core", views[0].Category)
+    }
+}
+
 // #455 MT-1/MT-2: taxonomy (category/sort) is a deployment-side decision —
 // when a dynamic registration carries its own values, they still lose to
 // the static fallback entry for the same id (a module heartbeat must not
