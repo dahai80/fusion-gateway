@@ -19,6 +19,24 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
+// appendUniqueStrings appends values to dst, skipping ones already present
+// (#447 dedupe merge).
+func appendUniqueStrings(dst []string, values ...string) []string {
+    for _, v := range values {
+        found := false
+        for _, existing := range dst {
+            if existing == v {
+                found = true
+                break
+            }
+        }
+        if !found {
+            dst = append(dst, v)
+        }
+    }
+    return dst
+}
+
 // listModelsPerProviderTimeout bounds each provider's ListModels call so a
 // single unreachable cloud backend cannot stall the /v1/models endpoint.
 const listModelsPerProviderTimeout = 3 * time.Second
@@ -43,6 +61,47 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     }
 
     models := s.listModelsConcurrent(ctx, providerNames)
+
+    // #447: every enabled anthropic-type backend self-reports the same
+    // claude-* catalog, so the raw aggregation carried ~10 identical entries
+    // per claude id. Dedupe by bare id server-side: first entry keeps its
+    // qualified form (what a client sends to pin the provider), later entries
+    // only merge their backend name into available_backends.
+    byID := make(map[string]int, len(models))
+    deduped := make([]adapter.ModelInfo, 0, len(models))
+    rawCount := len(models)
+    for _, m := range models {
+        if idx, ok := byID[m.ID]; ok {
+            deduped[idx].AvailableBackends = appendUniqueStrings(deduped[idx].AvailableBackends, m.AvailableBackends...)
+            continue
+        }
+        byID[m.ID] = len(deduped)
+        deduped = append(deduped, m)
+    }
+    models = deduped
+    slog.Debug("models deduped across backends", "raw", rawCount, "deduped", len(models))
+
+    // #447: routing-level ids (routing.cloud_models, e.g. glm-5 resolvable
+    // via models.supply) never appear in any provider's ListModels — their
+    // anthropic-type backend reports the standard claude-* catalog instead —
+    // so the shell model picker could not offer the very model shell chat
+    // routes to by default. Surface them as first-class owned_by="cloud"
+    // entries (engine_type omitted: no modality/capabilities to derive from).
+    for _, id := range snap.Config.Routing.CloudModels {
+        if id == "" {
+            continue
+        }
+        if _, ok := byID[id]; ok {
+            continue
+        }
+        byID[id] = len(models)
+        models = append(models, adapter.ModelInfo{
+            ID:      id,
+            Object:  "model",
+            OwnedBy: "cloud",
+        })
+        slog.Debug("models endpoint: added routing.cloud_models entry", "model", id)
+    }
 
     // Mark Loaded on models actually resident in a local engine. The
     // authoritative source is fusion-mlx /health `loaded_models` (ModelSet
@@ -82,6 +141,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     // the tail alphabetically.
     aliases := make([]adapter.ModelInfo, 0, len(snap.Config.Models.Aliases))
     for alias := range snap.Config.Models.Aliases {
+        // #447: an alias that collides with a real model id would re-add the
+        // duplicate the dedupe above just removed.
+        if _, ok := byID[alias]; ok {
+            continue
+        }
         res := config.ResolveModel(alias, snap.Config.Backends, snap.Config.Models)
         aliases = append(aliases, adapter.ModelInfo{
             ID:          alias,

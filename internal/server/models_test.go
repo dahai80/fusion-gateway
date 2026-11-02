@@ -198,6 +198,140 @@ func ids(ms []adapter.ModelInfo) []string {
     return out
 }
 
+// TestHandleModels_DedupesCrossBackendModels (#447): every enabled
+// anthropic-type backend self-reports the same claude-* catalog, so
+// /v1/models (and the shell model picker reusing it) returned ~10 copies of
+// each claude id. The endpoint must dedupe by bare id server-side, merging
+// available_backends, keeping the first qualified form.
+func TestHandleModels_DedupesCrossBackendModels(t *testing.T) {
+    s := newTestServer()
+    s.pool.Register("anthropic-a", &mockProvider{
+        name: "anthropic-a",
+        models: []adapter.ModelInfo{
+            {ID: "claude-sonnet-4", OwnedBy: "anthropic"},
+            {ID: "claude-opus-4", OwnedBy: "anthropic"},
+        },
+    }, config.BackendConfig{Type: "anthropic", Enabled: true})
+    s.pool.Register("anthropic-b", &mockProvider{
+        name: "anthropic-b",
+        models: []adapter.ModelInfo{
+            {ID: "claude-sonnet-4", OwnedBy: "anthropic"},
+            {ID: "claude-opus-4", OwnedBy: "anthropic"},
+        },
+    }, config.BackendConfig{Type: "anthropic", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    var resp struct {
+        Data []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+        t.Fatalf("decode response: %v", err)
+    }
+    if len(resp.Data) != 2 {
+        t.Fatalf("expected 2 deduped models, got %d: %v", len(resp.Data), ids(resp.Data))
+    }
+    for _, m := range resp.Data {
+        if len(m.AvailableBackends) != 2 {
+            t.Fatalf("%s: expected merged available_backends [anthropic-a anthropic-b], got %v", m.ID, m.AvailableBackends)
+        }
+        if m.QualifiedID == "" || !strings.Contains(m.QualifiedID, m.ID) {
+            t.Fatalf("%s: qualified form lost by dedupe, got %q", m.ID, m.QualifiedID)
+        }
+    }
+}
+
+// TestHandleModels_IncludesCloudModelsAllowlist (#447): routing-level ids
+// (routing.cloud_models, e.g. glm-5 backed by models.supply) never appear in
+// any provider's ListModels — their anthropic-type backend reports the
+// standard claude-* catalog instead. The endpoint must surface them as
+// first-class owned_by="cloud" entries or the shell picker cannot offer the
+// very model shell chat routes to by default.
+func TestHandleModels_IncludesCloudModelsAllowlist(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Routing.CloudModels = []string{"glm-5"}
+    s.pool.Register("glm-5", &mockProvider{
+        name: "glm-5",
+        models: []adapter.ModelInfo{
+            {ID: "claude-sonnet-4", OwnedBy: "anthropic"},
+        },
+    }, config.BackendConfig{Type: "anthropic", Enabled: true})
+    s.pool.Register("fusion-mlx", &mockProvider{
+        name:   "fusion-mlx",
+        models: []adapter.ModelInfo{{ID: "qwen3", OwnedBy: "local"}},
+    }, config.BackendConfig{Type: "fusion-mlx", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    var resp struct {
+        Data []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+        t.Fatalf("decode response: %v", err)
+    }
+    var glm *adapter.ModelInfo
+    for i := range resp.Data {
+        if resp.Data[i].ID == "glm-5" {
+            glm = &resp.Data[i]
+            break
+        }
+    }
+    if glm == nil {
+        t.Fatalf("routing.cloud_models id glm-5 missing from /v1/models: %v", ids(resp.Data))
+    }
+    if glm.OwnedBy != "cloud" {
+        t.Fatalf("glm-5 owned_by = %q, want \"cloud\"", glm.OwnedBy)
+    }
+    if glm.EngineType != "" {
+        t.Fatalf("glm-5 engine_type = %q, want omitted (\"\")", glm.EngineType)
+    }
+    if glm.Object != "model" {
+        t.Fatalf("glm-5 object = %q, want \"model\"", glm.Object)
+    }
+}
+
+// TestHandleModels_CloudModelsSkipsKnownIds (#447): when a cloud_models id
+// is already self-reported by a provider, no duplicate synthetic entry may
+// be appended.
+func TestHandleModels_CloudModelsSkipsKnownIds(t *testing.T) {
+    s := newTestServer()
+    s.cfg.Config.Routing.CloudModels = []string{"gpt-4"}
+    s.pool.Register("openai", &mockProvider{
+        name:   "openai",
+        models: []adapter.ModelInfo{{ID: "gpt-4", OwnedBy: "openai"}},
+    }, config.BackendConfig{Type: "openai-compatible", Enabled: true})
+
+    req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+    req = req.WithContext(config.WithSnapshot(req.Context(), s.cfg))
+    rec := httptest.NewRecorder()
+    s.handleModels(rec, req)
+
+    var resp struct {
+        Data []adapter.ModelInfo `json:"data"`
+    }
+    if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+        t.Fatalf("decode response: %v", err)
+    }
+    count := 0
+    for _, m := range resp.Data {
+        if m.ID == "gpt-4" {
+            count++
+        }
+    }
+    if count != 1 {
+        t.Fatalf("expected exactly 1 gpt-4 entry, got %d", count)
+    }
+    if resp.Data[0].OwnedBy == "cloud" {
+        t.Fatalf("provider-reported gpt-4 must keep its provider attribution, got owned_by=cloud")
+    }
+}
+
 // TestHandleAnthropicMessages_AllowlistGatesModel verifies the F5 fix: a key
 // whose allowed_models does not include the requested model must be 403'd at
 // /v1/messages. Before the fix this handler skipped CheckModelAllowlist (every
