@@ -597,6 +597,11 @@ web_shell:
     # agree — first registered wins, mismatch WARNs); sort orders within a
     # group (stable, ties by id). No group-level RBAC — visibility stays
     # per-module.
+    # #455 taxonomy: category must be core|governance|platform|domain|infra|dev
+    # (core = product lines like agent-studio/design, governance = admin
+    # consoles like security) and sort must be an explicit positive value —
+    # the sidebar orders by (sort, id); convention: core 1x, governance 2x,
+    # domain 3x, platform 4x.
     manifests: []
     #  - id: fusion-cowork
     #    title: Cowork
@@ -604,6 +609,7 @@ web_shell:
     #    entry: http://127.0.0.1:11432/shell/fusion-cowork/
     #    devices: [desktop]
     #    category: domain
+    #    sort: 31
     #    search_providers:
     #      - id: workflows
     #        label: 工作流

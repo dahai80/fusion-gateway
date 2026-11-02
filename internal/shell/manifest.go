@@ -7,6 +7,7 @@ import (
     "log/slog"
     "net/url"
     "os"
+    "sort"
     "path/filepath"
     "regexp"
     "strings"
@@ -514,7 +515,26 @@ func (r *Registry) List() []ManifestView {
             Unreachable:   status != StatusOnline,
         })
     }
+    // #455 MT-2: deterministic sidebar order — explicit `sort` wins
+    // (convention: core 1x / governance 2x / domain 3x / platform 4x),
+    // unsorted entries (sort=0) sink below sorted ones, ties break by id.
+    sort.SliceStable(views, func(i, j int) bool {
+        si, sj := effectiveSort(views[i].ShellManifest), effectiveSort(views[j].ShellManifest)
+        if si != sj {
+            return si < sj
+        }
+        return views[i].ID < views[j].ID
+    })
     return views
+}
+
+// effectiveSort maps sort=0 (unset) past every explicit value so modules
+// that declare a sort always precede ones that do not.
+func effectiveSort(m config.ShellManifest) int {
+    if m.Sort <= 0 {
+        return 1 << 30
+    }
+    return m.Sort
 }
 
 // UpstreamFor resolves the /shell/<id>/ proxy target from a dynamic
@@ -682,10 +702,12 @@ func validateManifest(m config.ShellManifest) error {
     if len(m.Devices) == 0 {
         return fmt.Errorf("manifest %q: devices is required", m.ID)
     }
-    switch m.Category {
-    case "platform", "domain", "infra", "dev":
-    default:
-        return fmt.Errorf("manifest %q: category %q must be platform|domain|infra|dev", m.ID, m.Category)
+    // #455 MT-1: `core` = product lines (agent-studio, design),
+    // `governance` = admin consoles (security); platform/domain/infra/dev
+    // stay for compatibility and future infra entries. Vocabulary lives in
+    // config.ValidManifestCategory so static and dynamic validation agree.
+    if !config.ValidManifestCategory(m.Category) {
+        return fmt.Errorf("manifest %q: category %q must be core|governance|platform|domain|infra|dev", m.ID, m.Category)
     }
     for _, f := range m.PermissionsPolicy {
         switch f {
