@@ -745,6 +745,20 @@ func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Reques
         // re-revealing (issue-once stands; rotating on every re-register
         // would churn keys for a demonstrably healthy module).
         if shellAuthPlaneFromContext(r.Context()) == shellAuthPlaneAdmin {
+            // #468: rotate only when the module has demonstrated consumption
+            // (it presented its fm- key at least once — heartbeat auth). A
+            // module that never presents the key (fusion-mlx: the proxy
+            // injects the credential) re-registers as a keep-alive every
+            // ~15s; rotating on each pass churned 246 keys in 44 minutes
+            // and nothing ever consumed the plaintext.
+            if !s.shellRegistry.ServiceKeyConsumed(m.ID) {
+                if allowed, suppressed := rotateGateLog.AllowWithSuppressed(m.ID); allowed {
+                    slog.Info("shell service key rotation suppressed on admin re-register (key never consumed, #468)",
+                        "id", m.ID, "suppressed", suppressed)
+                }
+                writeShellKeyResponse(w, http.StatusOK, "ok", "manifest registered (service key retained; raw key shown only at issuance)", m.ID, keyID, "")
+                return
+            }
             grace := s.cfg.Config.Shell.KeyRotationGrace
             if grace <= 0 {
                 grace = 24 * time.Hour
@@ -799,6 +813,11 @@ var heartbeatDenyLog = logthrottle.New(5 * time.Minute)
 // permanent condition until the operator cleans the config — an unthrottled
 // log would flood at request rate.
 var shellCredentialDivergeLog = logthrottle.New(5 * time.Minute)
+
+// rotateGateLog throttles the #468 rotation-suppression INFO (1 per 5m per
+// module): keep-alive re-registers arrive every ~15s per source, and the
+// suppressed-count carries the churn volume without flooding the log.
+var rotateGateLog = logthrottle.New(5 * time.Minute)
 
 // sameShellUpstream compares two module upstream URLs ignoring a trailing
 // slash so the #294 dynamic-credential preference is not defeated by

@@ -59,6 +59,12 @@ type entry struct {
     serviceKeyPrevHash  string // sha256 hex of the pre-rotation key (dual-active grace)
     serviceKeyRotatedAt time.Time
     serviceKeyRevoked   bool
+    // #468: last successful service-key authentication (the module itself
+    // presented its fm- key, e.g. heartbeat auth). Zero = the module never
+    // consumed the key — the proxy injects the credential for such modules,
+    // so rotating on their admin-plane re-registers would churn keys nobody
+    // can use. Persisted so a restart does not unlock rotation retroactively.
+    serviceKeyAuthAt time.Time
 }
 
 // persistedManifest is the on-disk shape of a dynamic registration
@@ -72,6 +78,7 @@ type persistedManifest struct {
     ServiceKeyPrevHash   string    `json:"service_key_prev_hash,omitempty"`
     ServiceKeyRotatedAt  time.Time `json:"service_key_rotated_at,omitempty"`
     ServiceKeyRevoked    bool      `json:"service_key_revoked,omitempty"`
+    ServiceKeyAuthAt     time.Time `json:"service_key_auth_at,omitempty"`
 }
 
 // Registry holds dynamic registrations plus the static fallback list.
@@ -160,11 +167,16 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         e.serviceKeyPrevHash = prev.serviceKeyPrevHash
         e.serviceKeyRotatedAt = prev.serviceKeyRotatedAt
         e.serviceKeyRevoked = prev.serviceKeyRevoked
+        e.serviceKeyAuthAt = prev.serviceKeyAuthAt
     }
     r.dynamic[m.ID] = e
     r.warnGroupTitleMismatchLocked(m)
     if exists {
-        slog.Info("shell manifest re-registered (idempotent upsert)", "id", m.ID, "entry", m.Entry)
+        // #468: keep-alive re-registrations arrive every ~15s per source —
+        // throttle to 1 per 5m per id, the suppressed count carries the volume.
+        if allowed, suppressed := reRegisterLog.AllowWithSuppressed(m.ID); allowed {
+            slog.Info("shell manifest re-registered (idempotent upsert)", "id", m.ID, "entry", m.Entry, "suppressed", suppressed)
+        }
     } else {
         slog.Info("shell manifest registered", "id", m.ID, "entry", m.Entry, "category", m.Category)
     }
@@ -218,6 +230,11 @@ func normalizeCategory(id, raw string) string {
         return "platform"
     }
 }
+
+// reRegisterLog throttles idempotent re-registration INFOs (#468): keep-alive
+// modules re-register every ~15s, the first line per 5m per id plus a
+// suppressed count carries the full volume.
+var reRegisterLog = logthrottle.New(5 * time.Minute)
 
 // warnGroupTitleMismatchLocked enforces the group-title agreement contract
 // (#297): siblings sharing a group id must agree on the display title —
@@ -293,6 +310,7 @@ func (r *Registry) Load() error {
             serviceKeyPrevHash:  p.ServiceKeyPrevHash,
             serviceKeyRotatedAt: p.ServiceKeyRotatedAt,
             serviceKeyRevoked:   p.ServiceKeyRevoked,
+            serviceKeyAuthAt:    p.ServiceKeyAuthAt,
         }
     }
     n := len(r.dynamic)
@@ -344,6 +362,7 @@ func (r *Registry) save() error {
             ServiceKeyPrevHash:  e.serviceKeyPrevHash,
             ServiceKeyRotatedAt: e.serviceKeyRotatedAt,
             ServiceKeyRevoked:   e.serviceKeyRevoked,
+            ServiceKeyAuthAt:    e.serviceKeyAuthAt,
         })
     }
     r.mu.RUnlock()

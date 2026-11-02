@@ -165,9 +165,9 @@ func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
         return false
     }
     r.mu.Lock()
-    defer r.mu.Unlock()
     e, ok := r.dynamic[id]
     if !ok || e.serviceKeyRevoked {
+        r.mu.Unlock()
         return false
     }
     if hash == e.serviceKeyHash {
@@ -175,15 +175,46 @@ func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
             e.serviceKeyPrevHash = ""
             slog.Info("shell service key previous key retired (module migrated to rotated key)", "id", id)
         }
+        firstAuth := e.serviceKeyAuthAt.IsZero()
+        e.serviceKeyAuthAt = time.Now()
+        r.mu.Unlock()
+        if firstAuth {
+            // #468: persist the consumption flip once — the rotation gate
+            // must survive a restart. Later heartbeats only refresh the
+            // timestamp in memory (no per-heartbeat disk write).
+            if err := r.save(); err != nil {
+                slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
+            }
+        }
         return true
     }
     if e.serviceKeyPrevHash != "" && hash == e.serviceKeyPrevHash {
         if time.Since(e.serviceKeyRotatedAt) <= grace {
+            firstAuth := e.serviceKeyAuthAt.IsZero()
+            e.serviceKeyAuthAt = time.Now()
+            r.mu.Unlock()
+            if firstAuth {
+                if err := r.save(); err != nil {
+                    slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
+                }
+            }
             return true
         }
         slog.Warn("shell service key grace window expired for previous key", "id", id)
     }
+    r.mu.Unlock()
     return false
+}
+
+// ServiceKeyConsumed reports whether the module has ever authenticated with
+// its gateway-issued fm- key (#468). Proxy-injected modules (fusion-mlx)
+// never present the key themselves — for them an admin-plane re-register is
+// a keep-alive, not key loss, and #460 rotation must not fire.
+func (r *Registry) ServiceKeyConsumed(id string) bool {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    e, ok := r.dynamic[id]
+    return ok && !e.serviceKeyAuthAt.IsZero()
 }
 
 // DynamicRegistered reports whether a dynamic registration exists for id
