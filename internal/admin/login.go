@@ -73,6 +73,19 @@ func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    a.SetSessionCookie(w, token)
+
+    writeJSON(w, http.StatusOK, LoginResponse{
+        Username: req.Username,
+        Role:     "admin",
+        Token:    token,
+    })
+}
+
+// SetSessionCookie issues the admin JWT session cookie with the exact
+// attributes of the classic login (#471): the SSO bridge reuses the same
+// cookie contract so the SPA cannot tell the two issuance paths apart.
+func (a *AdminAuth) SetSessionCookie(w http.ResponseWriter, token string) {
     http.SetCookie(w, &http.Cookie{
         Name:     "admin_token",
         Value:    token,
@@ -81,12 +94,6 @@ func (a *AdminAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
         HttpOnly: true,
         Secure:   !a.insecureCookie,
         SameSite: http.SameSiteStrictMode,
-    })
-
-    writeJSON(w, http.StatusOK, LoginResponse{
-        Username: req.Username,
-        Role:     "admin",
-        Token:    token,
     })
 }
 

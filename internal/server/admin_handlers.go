@@ -101,6 +101,92 @@ func (s *Server) bridgeShellSession(r *http.Request) *http.Request {
     return r.WithContext(ctx)
 }
 
+// handleAdminSSO: POST /admin/api/sso — one-click admin sign-in for the
+// embedded console iframe (#471). The console SPA runs in a same-origin
+// iframe inside the shell host, so the HttpOnly shell session cookie rides
+// along; without a bridge the SPA demanded a SECOND login (shell session +
+// admin password) before showing anything. This endpoint exchanges a valid
+// shell session (Bearer or the shared-origin cookie) for the standard
+// admin_token cookie — the exact contract /admin/api/login issues — so the
+// SPA cannot tell the paths apart.
+//
+// Elevation rules (fail-closed, mirroring bridgeShellSession):
+//   - the shell session must validate;
+//   - the account must STILL hold the admin role in the live UserStore
+//     (token claims are trusted for at most the TTL; the store is
+//     authoritative) — disabled or demoted accounts are 403;
+//   - a disabled/unconfigured admin module is 503 (the SPA falls back to
+//     the classic login page);
+//   - non-admin sessions are 403 and never receive a cookie.
+func (s *Server) handleAdminSSO(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        writeAdminSsoError(w, http.StatusMethodNotAllowed, "method not allowed")
+        return
+    }
+    if s.adminAuth == nil || !s.adminAuth.Enabled() {
+        slog.Warn("admin SSO refused: admin module not configured")
+        writeAdminSsoError(w, http.StatusServiceUnavailable, "admin module not configured")
+        return
+    }
+    if s.shellSessions == nil || s.shellUsers == nil {
+        writeAdminSsoError(w, http.StatusUnauthorized, "shell session required")
+        return
+    }
+    token := bearerToken(r)
+    if token == "" {
+        if c, err := r.Cookie(shellSessionCookieName); err == nil {
+            token = c.Value
+        }
+    }
+    if token == "" {
+        writeAdminSsoError(w, http.StatusUnauthorized, "shell session required")
+        return
+    }
+    claims, err := s.shellSessions.Validate(token)
+    if err != nil {
+        slog.Warn("admin SSO refused: invalid shell session")
+        writeAdminSsoError(w, http.StatusUnauthorized, "invalid shell session")
+        return
+    }
+    if !s.ssoAccountIsAdmin(claims.Sub) {
+        slog.Warn("admin SSO refused: account not admin",
+            "user", claims.Sub)
+        writeAdminSsoError(w, http.StatusForbidden, "admin role required")
+        return
+    }
+    adminToken, err := s.adminAuth.GenerateToken(claims.Sub, "admin")
+    if err != nil {
+        slog.Error("admin SSO token generation failed", "user", claims.Sub, "error", err)
+        writeAdminSsoError(w, http.StatusInternalServerError, "token generation failed")
+        return
+    }
+    s.adminAuth.SetSessionCookie(w, adminToken)
+    slog.Info("admin SSO issued from shell session", "user", claims.Sub)
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]string{
+        "username": claims.Sub,
+        "role":     "admin",
+        "sso":      "true",
+    })
+}
+
+// ssoAccountIsAdmin applies the live-store role check: durable user store
+// first (disabled accounts never elevate), then the in-memory bootstrap
+// admin record (a deployment without configured users still has exactly one
+// admin identity). Same shape as resolveShellUser + bridgeShellSession.
+func (s *Server) ssoAccountIsAdmin(username string) bool {
+    if a, ok := s.shellUsers.Get(username); ok {
+        return !a.Disabled && hasAnyRole(a.Roles, "admin")
+    }
+    return s.shellBootstrap != nil && s.shellBootstrap.username == username
+}
+
+func writeAdminSsoError(w http.ResponseWriter, status int, msg string) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 func bridgeAdminJWT(r *http.Request, adminAuth *admin.AdminAuth) *http.Request {
     if adminAuth == nil || !adminAuth.Enabled() {
         return r

@@ -1024,6 +1024,10 @@ func (s *Server) Start() error {
         }
         mux.HandleFunc("/admin/api/login", s.adminAuth.HandleLogin)
         mux.HandleFunc("/admin/api/logout", s.adminAuth.HandleLogout)
+        // #471: one-click admin sign-in for the embedded console iframe —
+        // exchanges the shell session (cookie or Bearer) for the admin JWT
+        // cookie. Registered before the /admin/ SPA catch-all.
+        mux.HandleFunc("/admin/api/sso", s.handleAdminSSO)
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
         // fusion-trainer can target :11432 exclusively. Registered before the
         // /admin/ SPA catch-all so it takes precedence; shares the /v1/*
