@@ -1708,6 +1708,19 @@ func WatchAndReload(path string) {
     })
 }
 
+// ValidManifestCategory is the single source for the shell manifest category
+// vocabulary (#455 MT-1): core = product lines, governance = admin consoles,
+// platform = developer/infra tools, domain = business apps; infra/dev stay
+// for compatibility. Both static config validation and dynamic registration
+// (internal/shell) key off it so the two cannot drift.
+func ValidManifestCategory(c string) bool {
+    switch c {
+    case "core", "governance", "platform", "domain", "infra", "dev":
+        return true
+    }
+    return false
+}
+
 func validate(cfg *Config) error {
     if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
         return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
@@ -2198,6 +2211,19 @@ func validate(cfg *Config) error {
             if u.Password != "" {
                 slog.Warn("shell.session.users entry uses plaintext password — prefer password_bcrypt",
                     "username", u.Username)
+            }
+        }
+        // #455 MT-1/MT-2: static manifest entries must declare a category
+        // from the taxonomy vocabulary and an explicit sort — the sidebar
+        // order is (sort, id), and unsorted entries were silently registering
+        // in file order. Dynamic registrations keep sort optional (modules
+        // self-register without one and sink below sorted entries).
+        for _, m := range cfg.Shell.Manifests {
+            if !ValidManifestCategory(m.Category) {
+                return fmt.Errorf("web_shell.manifests[%s]: category %q must be core|governance|platform|domain|infra|dev", m.ID, m.Category)
+            }
+            if m.Sort <= 0 {
+                return fmt.Errorf("web_shell.manifests[%s]: sort must be an explicit positive value (convention: core 1x / governance 2x / domain 3x / platform 4x)", m.ID)
             }
         }
         for id, m := range cfg.Shell.Modules {
