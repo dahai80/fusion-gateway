@@ -198,20 +198,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // online/unreachable observations in the registry. One lifecycle worker for
 // the whole registry (R1 lesson: no bare ticker goroutine).
 type HealthPoller struct {
-    registry *Registry
-    interval time.Duration
-    client   *http.Client
+    registry   *Registry
+    interval   time.Duration
+    baseOrigin string
+    client     *http.Client
 }
 
-func NewHealthPoller(registry *Registry, interval time.Duration) *HealthPoller {
+// baseOrigin is the gateway's own absolute origin ("http://127.0.0.1:11432").
+// Manifest health fields that are bare paths ("/healthz", the #223
+// same-origin convention used by the built-in admin console) are resolved
+// against it before probing; empty disables resolution and those manifests
+// are probe-skipped as before.
+func NewHealthPoller(registry *Registry, interval time.Duration, baseOrigin string) *HealthPoller {
     if interval <= 0 {
         interval = 30 * time.Second
     }
     bc := config.BackendConfig{Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"}
     return &HealthPoller{
-        registry: registry,
-        interval: interval,
-        client:   &http.Client{Transport: httpx.TransportForBackend(bc), Timeout: 5 * time.Second},
+        registry:   registry,
+        interval:   interval,
+        baseOrigin: strings.TrimSuffix(strings.TrimSpace(baseOrigin), "/"),
+        client:     &http.Client{Transport: httpx.TransportForBackend(bc), Timeout: 5 * time.Second},
     }
 }
 
@@ -252,17 +259,28 @@ func (h *HealthPoller) pollAll(ctx context.Context) {
         if view.Health == "" {
             continue
         }
-        if !absoluteHealthURL(view.Health) {
-            if relativeHealthWarn.Allow(view.ID) {
-                slog.Warn("shell module health URL is not absolute, probe skipped (manifest health must be an http(s) URL)",
-                    "module", view.ID,
-                    "health", view.Health,
-                )
+        healthURL := view.Health
+        if !absoluteHealthURL(healthURL) {
+            // #223: a bare-path health field is same-origin — served by the
+            // gateway itself. Resolve it against the gateway's own origin
+            // and probe it; skipping left same-origin modules (built-in
+            // admin console: health=/healthz) with nobody heartbeating them,
+            // so they went unreachable one heartbeat_timeout after every
+            // restart and the shell rendered "Module unavailable".
+            resolved, ok := h.resolveRelativeHealth(healthURL)
+            if !ok {
+                if relativeHealthWarn.Allow(view.ID) {
+                    slog.Warn("shell module health URL is not absolute, probe skipped (manifest health must be an http(s) URL)",
+                        "module", view.ID,
+                        "health", view.Health,
+                    )
+                }
+                continue
             }
-            continue
+            healthURL = resolved
         }
         reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-        err := h.probe(reqCtx, view.Health)
+        err := h.probe(reqCtx, healthURL)
         cancel()
         h.registry.RecordHealth(view.ID, err == nil)
         if err == nil {
@@ -312,6 +330,22 @@ func (h *HealthPoller) expireStale(ctx context.Context) {
         slog.Info("shell stale manifest expired (heartbeat gone, upstream refuses connections)",
             "module", view.ID, "upstream", view.Upstream, "probe_error", err)
     }
+}
+
+// resolveRelativeHealth turns a bare-path health field into an absolute URL
+// against the gateway's own origin. ok=false when there is no base origin
+// configured or the health field is not a rooted path — those stay
+// probe-skipped exactly as before.
+func (h *HealthPoller) resolveRelativeHealth(raw string) (string, bool) {
+    if h.baseOrigin == "" {
+        return "", false
+    }
+    trimmed := strings.TrimSpace(raw)
+    u, err := url.Parse(trimmed)
+    if err != nil || !strings.HasPrefix(u.Path, "/") || u.Scheme != "" || u.Host != "" {
+        return "", false
+    }
+    return h.baseOrigin + trimmed, true
 }
 
 func (h *HealthPoller) probe(ctx context.Context, healthURL string) error {

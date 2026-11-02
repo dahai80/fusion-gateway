@@ -7,6 +7,7 @@ import (
     "io"
     "net"
     "os"
+    "strconv"
     "sync/atomic"
     "strings"
     "sync"
@@ -789,7 +790,13 @@ func New(
     // and joins it.
     srv.setupShell()
     if srv.shellRegistry != nil {
-        poller := shell.NewHealthPoller(srv.shellRegistry, cfg.Config.Shell.HealthPollInterval)
+        // Relative health paths (#223 same-origin) are resolved against the
+        // gateway's own origin — the built-in admin console ships
+        // health=/healthz and would otherwise go unreachable one heartbeat
+        // timeout after every restart.
+        baseOrigin := "http://127.0.0.1:" + strconv.Itoa(cfg.Config.Server.Port)
+        poller := shell.NewHealthPoller(srv.shellRegistry, cfg.Config.Shell.HealthPollInterval, baseOrigin)
+        slog.Info("shell health poller started", "interval", cfg.Config.Shell.HealthPollInterval, "base_origin", baseOrigin)
         srv.shellPoller = lifecycle.Start(context.Background(), "shell_health_poller", poller.Run)
     }
     return srv

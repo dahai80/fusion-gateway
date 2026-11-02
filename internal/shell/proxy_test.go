@@ -96,7 +96,7 @@ func TestHealthPoller_RecordsObservations(t *testing.T) {
     m := validManifest("fusion-mlx")
     m.Health = upstream.URL + "/health"
     r := NewRegistry([]config.ShellManifest{m}, nil, 30*time.Second)
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
     go poller.Run(ctx)
@@ -114,7 +114,7 @@ func TestHealthPoller_MarksDown(t *testing.T) {
     m := validManifest("fusion-dead")
     m.Health = "http://127.0.0.1:1/health"
     r := NewRegistry([]config.ShellManifest{m}, nil, 30*time.Second)
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
     go poller.Run(ctx)
@@ -125,9 +125,12 @@ func TestHealthPoller_MarksDown(t *testing.T) {
     }
 }
 
-// A manifest whose health field is a bare path ("/healthz") cannot be probed:
-// http.Get fails with "unsupported protocol scheme" on every pass, so the
-// module was flipped offline for a defect in the manifest, not the module.
+// A manifest whose health field is a bare path ("/healthz") cannot be probed
+// when the poller has no base origin: skipping the probe beats feeding the
+// path to http.Get ("unsupported protocol scheme" every pass) — but the
+// registration still goes heartbeat-dead after heartbeat_timeout with nobody
+// refreshing it, which is the #223-relative-entry bug the base-origin
+// resolver below fixes.
 func TestHealthPoller_SkipsRelativeHealthURL(t *testing.T) {
     m := validManifest("fusion-admin")
     m.Health = "/healthz"
@@ -135,7 +138,7 @@ func TestHealthPoller_SkipsRelativeHealthURL(t *testing.T) {
     if err := r.Upsert(m); err != nil {
         t.Fatalf("upsert: %v", err)
     }
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
     go poller.Run(ctx)
@@ -146,6 +149,39 @@ func TestHealthPoller_SkipsRelativeHealthURL(t *testing.T) {
     }
     if views[0].Status != StatusOnline {
         t.Fatalf("relative health URL must be skipped, not probed into offline; got %s", views[0].Status)
+    }
+}
+
+// A relative health path under the #223 same-origin convention is served by
+// the gateway itself — the poller resolves it against the gateway's own
+// origin and probes it, keeping same-origin modules (the built-in admin
+// console ships health=/healthz) alive instead of going unreachable one
+// heartbeat_timeout after every restart.
+func TestHealthPoller_ResolvesRelativeHealthAgainstBaseOrigin(t *testing.T) {
+    var hits atomic.Int64
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        hits.Add(1)
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer upstream.Close()
+
+    m := validManifest("fusion-admin")
+    m.Health = "/healthz"
+    r := NewRegistry(nil, nil, 30*time.Second)
+    if err := r.Upsert(m); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    poller := NewHealthPoller(r, 10*time.Millisecond, upstream.URL)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    go poller.Run(ctx)
+    time.Sleep(60 * time.Millisecond)
+    if hits.Load() == 0 {
+        t.Fatal("relative health path was never resolved against the base origin")
+    }
+    views := r.List()
+    if len(views) != 1 || views[0].Status != StatusOnline {
+        t.Fatalf("want online via resolved relative health, got %+v", views)
     }
 }
 
@@ -502,7 +538,7 @@ func TestHealthPoller_ExpiresStaleRefusedRegistration(t *testing.T) {
     if err := r.Upsert(m); err != nil {
         t.Fatalf("upsert: %v", err)
     }
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     time.Sleep(60 * time.Millisecond) // heartbeat expires
     poller.pollAll(context.Background())
     if views := r.List(); len(views) != 0 {
@@ -523,7 +559,7 @@ func TestHealthPoller_KeepsStaleRegistrationWhenUpstreamAlive(t *testing.T) {
     if err := r.Upsert(m); err != nil {
         t.Fatalf("upsert: %v", err)
     }
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     time.Sleep(60 * time.Millisecond)
     poller.pollAll(context.Background())
     views := r.List()
@@ -542,7 +578,7 @@ func TestHealthPoller_ExpirySkipsBuiltins(t *testing.T) {
         t.Fatalf("upsert: %v", err)
     }
     r.MarkBuiltin(m.ID)
-    poller := NewHealthPoller(r, 10*time.Millisecond)
+    poller := NewHealthPoller(r, 10*time.Millisecond, "")
     time.Sleep(60 * time.Millisecond)
     poller.pollAll(context.Background())
     views := r.List()
