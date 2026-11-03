@@ -48,6 +48,8 @@ func TestServiceKey_IssueOnce(t *testing.T) {
 }
 
 // #261 K1: heartbeat auth — current key valid, wrong key refused.
+// #484: a successful auth reports WHICH key matched ("current" or "stale")
+// so the heartbeat response can tell a still-grace module its key is stale.
 func TestServiceKey_Auth(t *testing.T) {
     r := NewRegistry(nil, nil, 30*time.Second)
     if err := r.Upsert(validManifest("fusion-demo")); err != nil {
@@ -57,14 +59,14 @@ func TestServiceKey_Auth(t *testing.T) {
     if err != nil {
         t.Fatalf("ensure: %v", err)
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
-        t.Fatal("current key must authenticate")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("current key must authenticate as current, got state=%q ok=%v", state, ok)
     }
-    if r.AuthServiceKey("fusion-demo", hashForTest("fm-fusion-demo-deadbeef"), time.Hour) {
-        t.Fatal("wrong key must be refused")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest("fm-fusion-demo-deadbeef"), time.Hour); ok {
+        t.Fatalf("wrong key must be refused, got state=%q", state)
     }
-    if r.AuthServiceKey("fusion-ghost", hashForTest(plaintext), time.Hour) {
-        t.Fatal("key bound to one module must not authenticate another")
+    if state, ok := r.AuthServiceKey("fusion-ghost", hashForTest(plaintext), time.Hour); ok {
+        t.Fatalf("key bound to one module must not authenticate another, got state=%q", state)
     }
 }
 
@@ -86,30 +88,30 @@ func TestServiceKey_RotateGrace(t *testing.T) {
     if newKey == oldKey {
         t.Fatal("rotation must produce a different key")
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(oldKey), time.Hour) {
-        t.Fatal("old key must stay valid inside the grace window")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(oldKey), time.Hour); !ok || state != ServiceKeyStateStale {
+        t.Fatalf("old key must stay valid inside the grace window as stale, got state=%q ok=%v", state, ok)
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(newKey), time.Hour) {
-        t.Fatal("new key must be valid")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(newKey), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("new key must be valid as current, got state=%q ok=%v", state, ok)
     }
     // Early retirement: heartbeat with the new key kills the old one even
     // inside the window.
-    if !r.AuthServiceKey("fusion-demo", hashForTest(newKey), time.Hour) {
-        t.Fatal("new key must remain valid")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(newKey), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("new key must remain valid, got state=%q ok=%v", state, ok)
     }
-    if r.AuthServiceKey("fusion-demo", hashForTest(oldKey), time.Hour) {
-        t.Fatal("old key must be retired after the module migrated")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(oldKey), time.Hour); ok {
+        t.Fatalf("old key must be retired after the module migrated, got state=%q", state)
     }
     // Expired grace: rotating again, the expired old key is refused.
     _, newKey2, err := r.RotateServiceKey("fusion-demo", -time.Minute)
     if err != nil {
         t.Fatalf("rotate 2: %v", err)
     }
-    if r.AuthServiceKey("fusion-demo", hashForTest(newKey), -time.Minute) {
-        t.Fatal("previous key must be refused once the grace window elapsed")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(newKey), -time.Minute); ok {
+        t.Fatalf("previous key must be refused once the grace window elapsed, got state=%q", state)
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(newKey2), -time.Minute) {
-        t.Fatal("current key must stay valid regardless of grace")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(newKey2), -time.Minute); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("current key must stay valid regardless of grace, got state=%q ok=%v", state, ok)
     }
 }
 
@@ -130,8 +132,8 @@ func TestServiceKey_Revoke(t *testing.T) {
     if !r.IsServiceKeyRevoked("fusion-demo") {
         t.Fatal("revoked flag must be set")
     }
-    if r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
-        t.Fatal("revoked key must not authenticate")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour); ok {
+        t.Fatalf("revoked key must not authenticate, got state=%q", state)
     }
     if _, key, ok := r.UpstreamFor("fusion-demo"); ok && key != "" {
         t.Fatalf("revoked entry must not carry an upstream credential, got %q", key)
@@ -199,8 +201,8 @@ func TestServiceKey_ConsumedGate(t *testing.T) {
     if r.ServiceKeyConsumed("fusion-demo") {
         t.Fatal("issuance alone must not mark the key consumed")
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
-        t.Fatal("current key must authenticate")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("current key must authenticate, got state=%q ok=%v", state, ok)
     }
     if !r.ServiceKeyConsumed("fusion-demo") {
         t.Fatal("successful service-key auth must mark the key consumed")
@@ -220,8 +222,8 @@ func TestServiceKey_ConsumedPersistRoundTrip(t *testing.T) {
     if err != nil {
         t.Fatalf("ensure: %v", err)
     }
-    if !r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
-        t.Fatal("auth must succeed")
+    if state, ok := r.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("auth must succeed, got state=%q ok=%v", state, ok)
     }
     r2 := NewRegistry(nil, nil, 30*time.Second)
     r2.SetPersistence(path)
@@ -253,8 +255,8 @@ func TestServiceKey_PersistRoundTrip(t *testing.T) {
     if err := r2.Load(); err != nil {
         t.Fatalf("load: %v", err)
     }
-    if !r2.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour) {
-        t.Fatal("issued key must survive the persistence round-trip")
+    if state, ok := r2.AuthServiceKey("fusion-demo", hashForTest(plaintext), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("issued key must survive the persistence round-trip, got state=%q ok=%v", state, ok)
     }
     if _, key, ok := r2.UpstreamFor("fusion-demo"); !ok || key != plaintext {
         t.Fatalf("persisted plaintext credential must round-trip for proxy injection, got %q ok=%v", key, ok)

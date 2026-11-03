@@ -715,8 +715,8 @@ func TestRegistry_UpsertKeepsIssuedKeyPlaintextOnReregistration(t *testing.T) {
         t.Fatalf("proxy credential lost on re-registration: ok=%v key=%q want %q", ok, key, plaintext)
     }
     // Heartbeat must still authenticate with the same fm- key.
-    if !r.AuthServiceKey("fusion-trainer", serviceKeyHashOf(plaintext), time.Hour) {
-        t.Fatal("issued key no longer authenticates after re-registration")
+    if state, ok := r.AuthServiceKey("fusion-trainer", serviceKeyHashOf(plaintext), time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("issued key no longer authenticates after re-registration, got state=%q ok=%v", state, ok)
     }
 }
 
