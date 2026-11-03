@@ -658,6 +658,16 @@ func shellAuthPlaneFromContext(ctx context.Context) string {
     return v
 }
 
+// #484: withShellHeartbeatAuth records which service-key shape matched
+// (shell.ServiceKeyStateCurrent or ServiceKeyStateStale) so the heartbeat
+// handler can flag a still-grace module. Absent for admin-token heartbeats.
+type shellKeyStateKey struct{}
+
+func shellKeyStateFromContext(ctx context.Context) string {
+    v, _ := ctx.Value(shellKeyStateKey{}).(string)
+    return v
+}
+
 func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         if s.shellHeartbeatAdminToken(shellBearerToken(r)) {
@@ -680,7 +690,7 @@ func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.Handler
             if grace <= 0 {
                 grace = 24 * time.Hour
             }
-            if s.shellRegistry.AuthServiceKey(probe.ID, hex.EncodeToString(sum[:]), grace) {
+            if _, ok := s.shellRegistry.AuthServiceKey(probe.ID, hex.EncodeToString(sum[:]), grace); ok {
                 slog.Info("shell manifest re-register authenticated by module service key (#369 self-heal)", "id", probe.ID)
                 r.Body = io.NopCloser(bytes.NewReader(body))
                 r.ContentLength = int64(len(body))
@@ -865,8 +875,13 @@ func (s *Server) withShellHeartbeatAuth(next http.HandlerFunc) http.HandlerFunc 
             if grace <= 0 {
                 grace = 24 * time.Hour
             }
-            if s.shellRegistry.AuthServiceKey(id, hex.EncodeToString(sum[:]), grace) {
-                next(w, r)
+            if state, ok := s.shellRegistry.AuthServiceKey(id, hex.EncodeToString(sum[:]), grace); ok {
+                // #484: carry the match state to the handler so the 200
+                // response can tell a still-grace module its key is stale
+                // (the proxy injects the NEW key; the module holding the
+                // old one sees every proxied call fail with Unauthorized
+                // while this heartbeat keeps returning 200).
+                next(w, r.WithContext(context.WithValue(r.Context(), shellKeyStateKey{}, state)))
                 return
             }
             // #369: a denied fm- key is three different conditions with
@@ -1023,6 +1038,22 @@ func (s *Server) handleShellManifestHeartbeat(w http.ResponseWriter, r *http.Req
             "id", id, "error", err)
         shell.WriteEnvelope(w, http.StatusBadRequest, "manifest_refresh_rejected", err.Error(), id, false)
         return
+    }
+    // #484: a fm- key that matched inside the rotation grace window means
+    // the module is holding a rotated-out key — surface it so the module
+    // can re-register proactively instead of discovering the rotation
+    // through Unauthorized failures on every proxied call. Header is the
+    // machine-readable signal; the message spells it out for humans.
+    if state := shellKeyStateFromContext(r.Context()); state != "" {
+        w.Header().Set("X-Fusion-Key-State", state)
+        if state == shell.ServiceKeyStateStale {
+            if m != nil {
+                shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted; manifest refreshed; service key is STALE (rotated out, grace window) — re-register via POST /api/v1/shell/manifests to pick up the new key", id, false)
+                return
+            }
+            shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted; service key is STALE (rotated out, grace window) — re-register via POST /api/v1/shell/manifests to pick up the new key", id, false)
+            return
+        }
     }
     if m != nil {
         shell.WriteEnvelope(w, http.StatusOK, "ok", "heartbeat accepted; manifest refreshed", id, false)

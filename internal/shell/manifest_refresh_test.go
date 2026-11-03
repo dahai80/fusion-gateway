@@ -131,8 +131,8 @@ func TestHeartbeatWithManifest_ServiceKeySurvivesRefresh(t *testing.T) {
         t.Fatalf("heartbeat refresh: %v", err)
     }
     // Heartbeat auth with the SAME fm- key must still succeed.
-    if !reg.AuthServiceKey("fusion-cowork", serviceKeyHashOf(plaintext), 24*time.Hour) {
-        t.Fatal("fm- key must survive a manifest refresh via heartbeat")
+    if state, ok := reg.AuthServiceKey("fusion-cowork", serviceKeyHashOf(plaintext), 24*time.Hour); !ok || state != ServiceKeyStateCurrent {
+        t.Fatalf("fm- key must survive a manifest refresh via heartbeat, got state=%q ok=%v", state, ok)
     }
     if id, _, _, err := reg.EnsureServiceKey("fusion-cowork"); err != nil || id != keyID {
         t.Fatalf("key_id must stay stable, got id=%q want %q err=%v", id, keyID, err)

@@ -155,20 +155,32 @@ func (r *Registry) RevokeServiceKey(id string) error {
     return nil
 }
 
+// Service-key auth outcomes reported by AuthServiceKey (#484). "current"
+// means the presented hash matches the live key; "stale" means it matched
+// the pre-rotation key inside the dual-active grace window — the module is
+// holding a rotated-out key and the heartbeat response must tell it so, or
+// the module never learns the rotation happened and every proxied call
+// fails with Unauthorized while its heartbeat stays a lying 200.
+const (
+    ServiceKeyStateCurrent = "current"
+    ServiceKeyStateStale   = "stale"
+)
+
 // AuthServiceKey validates a presented fm- key for the heartbeat of module
 // id: the hash must match the current key, or the pre-rotation key inside
 // the dual-active grace window. A match on the CURRENT key retires the
 // previous key early (the module has migrated). Revoked or never-issued
-// entries never authenticate.
-func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
+// entries never authenticate. The returned state distinguishes the two
+// success shapes so the heartbeat surface can signal staleness (#484).
+func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) (string, bool) {
     if hash == "" {
-        return false
+        return "", false
     }
     r.mu.Lock()
     e, ok := r.dynamic[id]
     if !ok || e.serviceKeyRevoked {
         r.mu.Unlock()
-        return false
+        return "", false
     }
     if hash == e.serviceKeyHash {
         if e.serviceKeyPrevHash != "" {
@@ -186,7 +198,7 @@ func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
                 slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
             }
         }
-        return true
+        return ServiceKeyStateCurrent, true
     }
     if e.serviceKeyPrevHash != "" && hash == e.serviceKeyPrevHash {
         if time.Since(e.serviceKeyRotatedAt) <= grace {
@@ -198,12 +210,12 @@ func (r *Registry) AuthServiceKey(id, hash string, grace time.Duration) bool {
                     slog.Error("shell manifest registry save failed", "path", r.path, "error", err)
                 }
             }
-            return true
+            return ServiceKeyStateStale, true
         }
         slog.Warn("shell service key grace window expired for previous key", "id", id)
     }
     r.mu.Unlock()
-    return false
+    return "", false
 }
 
 // ServiceKeyConsumed reports whether the module has ever authenticated with
