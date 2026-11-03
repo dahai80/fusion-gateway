@@ -104,6 +104,13 @@ type Registry struct {
     // (#253) — a restart re-registers them, yet the process-lifetime menu
     // loss is a config-plane change, not an API one.
     builtins map[string]struct{}
+    // proxyUpstreams mirrors web_shell.modules[*].upstream (the static
+    // proxy mapping the server feeds in at setup). Read-only drift
+    // reference: when a module self-registers an upstream that disagrees
+    // with the static entry, the proxy silently dials the static one
+    // (#478 - both ports health 200, nothing else surfaces the mismatch),
+    // so Upsert WARNs on the disagreement.
+    proxyUpstreams map[string]string
     // path is the persistence file for dynamic registrations ("" = memory
     // only). When set, Upsert persists and Load restores on boot (#230);
     // the loaded lastHeartbeat is kept as-is, so a stale entry comes back
@@ -123,6 +130,19 @@ func NewRegistry(staticFallback []config.ShellManifest, allowlist []string, hear
         allowlist:       allowlist,
         lastHealthy:     make(map[string]time.Time),
         builtins:        make(map[string]struct{}),
+        proxyUpstreams:  make(map[string]string),
+    }
+}
+
+// SetProxyUpstreams feeds the static web_shell.modules upstream map into the
+// registry for #478 drift detection. Called once at server setup; safe to
+// call again on config reload - the map is replaced wholesale.
+func (r *Registry) SetProxyUpstreams(m map[string]string) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.proxyUpstreams = make(map[string]string, len(m))
+    for id, up := range m {
+        r.proxyUpstreams[id] = up
     }
 }
 
@@ -170,6 +190,7 @@ func (r *Registry) Upsert(m config.ShellManifest) error {
         e.serviceKeyAuthAt = prev.serviceKeyAuthAt
     }
     r.dynamic[m.ID] = e
+    r.warnUpstreamDriftLocked(m)
     r.warnGroupTitleMismatchLocked(m)
     if exists {
         // #468: keep-alive re-registrations arrive every ~15s per source —
@@ -235,6 +256,36 @@ func normalizeCategory(id, raw string) string {
 // modules re-register every ~15s, the first line per 5m per id plus a
 // suppressed count carries the full volume.
 var reRegisterLog = logthrottle.New(5 * time.Minute)
+
+// upstreamDriftWarn throttles #478 upstream-drift warnings: heartbeating
+// modules re-register every ~15s, one WARN per 5m per id plus a suppressed
+// count carries the volume.
+var upstreamDriftWarn = logthrottle.New(5 * time.Minute)
+
+// warnUpstreamDriftLocked surfaces the #478 drift class: the static
+// web_shell.modules entry and the module's own registration disagree on the
+// proxy upstream. The proxy always dials the static one, so a stale static
+// port silently mis-routes the iframe document (plugins-ecosystem: static
+// :8765 API server hangs on "/", webui :8795 was never consulted; both
+// healths 200 so nothing else caught it). Warning, never rejecting - the
+// static override is a documented feature (#232/#256); the WARN is for
+// operators who did not intend the override. Caller must hold r.mu (write).
+func (r *Registry) warnUpstreamDriftLocked(m config.ShellManifest) {
+    if m.Upstream == "" {
+        return
+    }
+    stat, ok := r.proxyUpstreams[m.ID]
+    if !ok || stat == "" {
+        return
+    }
+    if strings.TrimRight(stat, "/") == strings.TrimRight(m.Upstream, "/") {
+        return
+    }
+    if allowed, suppressed := upstreamDriftWarn.AllowWithSuppressed(m.ID); allowed {
+        slog.Warn("shell module upstream drift: static config vs self-registered upstream differ; proxy dials the static entry",
+            "id", m.ID, "static_upstream", stat, "registered_upstream", m.Upstream, "suppressed", suppressed)
+    }
+}
 
 // warnGroupTitleMismatchLocked enforces the group-title agreement contract
 // (#297): siblings sharing a group id must agree on the display title —

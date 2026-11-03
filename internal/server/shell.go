@@ -54,6 +54,16 @@ func (s *Server) setupShell() {
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
+    // #478: feed the static proxy upstream map into the registry so a
+    // self-registered upstream that disagrees with web_shell.modules WARNs
+    // at registration instead of silently mis-routing the iframe document.
+    staticUpstreams := make(map[string]string, len(cfg.Shell.Modules))
+    for id, m := range cfg.Shell.Modules {
+        if m.Upstream != "" {
+            staticUpstreams[id] = m.Upstream
+        }
+    }
+    s.shellRegistry.SetProxyUpstreams(staticUpstreams)
     if cfg.Store.DataDir != "" {
         // Dynamic registrations survive restarts (#230). Load before the
         // admin auto-register so an upsert collision resolves to the fresh
