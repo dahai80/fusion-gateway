@@ -35,6 +35,31 @@ func TestProxy_ForwardsToUpstream(t *testing.T) {
     }
 }
 
+// #481: fusion-rag serves its console at /shell/fusion-rag/ on its own
+// origin (same path convention as the shell host), so the pass-through
+// proxy maps 1:1 — expressed as a modules upstream that carries the
+// subpath (http://127.0.0.1:11436/shell/fusion-rag). The proxy must join
+// the upstream path with the rest of the gateway path, not strip it.
+func TestProxy_UpstreamWithPathPassthrough(t *testing.T) {
+    var gotPath string
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotPath = r.URL.Path
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("rag-console"))
+    }))
+    defer upstream.Close()
+
+    p := NewProxy(func(string) (string, string) { return upstream.URL + "/shell/fusion-rag", "" })
+    w := httptest.NewRecorder()
+    p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shell/fusion-rag/kb/bases", nil))
+    if w.Code != http.StatusOK || w.Body.String() != "rag-console" {
+        t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
+    }
+    if gotPath != "/shell/fusion-rag/kb/bases" {
+        t.Fatalf("upstream path = %q, want pass-through", gotPath)
+    }
+}
+
 func TestProxy_UpstreamDownEnvelope(t *testing.T) {
     p := NewProxy(func(id string) (string, string) {
         if id == "fusion-dead" {

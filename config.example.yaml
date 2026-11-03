@@ -690,6 +690,22 @@ web_shell:
     #    icon: Database
     #    health: http://127.0.0.1:11444/api/v1/system/health
     #    version: 0.1.0
+    # #481: static manifest for the fusion-rag knowledge-base console —
+    # platform group per the approved menu taxonomy (sort 46). rag serves the
+    # console itself at /shell/fusion-rag/ on :11436, so the modules upstream
+    # below carries the subpath and the proxy passes through 1:1 (no rewrite).
+    # No api_key — rag's user auth (upstream_auth: user) covers the namespace.
+    # NOTE (fusion-rag#109): the shipped console's fetch("/kb/...") paths are
+    # origin-root-relative and 404 behind the gateway until rag fixes them.
+    #  - id: fusion-rag
+    #    title: 知识库
+    #    title_en: Knowledge Base
+    #    entry: /shell/fusion-rag/
+    #    devices: [desktop]
+    #    category: platform
+    #    icon: Database
+    #    health: http://127.0.0.1:11436/health
+    #    version: 0.1.0
     #  - id: fusion-design
     #    title: Design
     #    title_en: Design
@@ -734,6 +750,19 @@ web_shell:
     #     fusion-models-hub:
     #         upstream: http://127.0.0.1:11444
     #         api_key: "<from ~/.fusion-model-hub/web_module_key>"
+    #     # #481: pass-through — upstream carries the subpath so the proxy
+    #     # joins (not strips) /shell/fusion-rag/*; rag serves the console at
+    #     # that exact path. No api_key — rag's user auth covers the namespace.
+    #     fusion-rag:
+    #         upstream: http://127.0.0.1:11436/shell/fusion-rag
+    #     # #480: pin the artifacts engine proxy — the engine's dynamic
+    #     # self-registration evaporates across gateway restarts and the shell
+    #     # chat artifact tool loop 404s until it re-registers. api_key = the
+    #     # gateway-issued fm- key the engine persists in its
+    #     # gateway_service_key file (#294 contract); proxy injects it.
+    #     fusion-artifacts:
+    #         upstream: http://127.0.0.1:11451
+    #         api_key: "<from ~/.fusion/artifacts/gateway_service_key>"
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
