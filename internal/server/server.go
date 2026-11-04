@@ -1074,9 +1074,16 @@ func (s *Server) Start() error {
 
     addr := fmt.Sprintf("%s:%d", s.cfg.Config.Server.Host, s.cfg.Config.Server.Port)
 
+    // #493: lan tier arms the hard auth gate around the whole mux — every
+    // non-allowlisted route requires a credential before a handler runs.
+    var muxHandler http.Handler = mux
+    if guard := s.lanGuardHandler(); guard != nil {
+        muxHandler = guard(mux)
+    }
+
     s.httpServer = &http.Server{
         Addr:              addr,
-        Handler:           mux,
+        Handler:           muxHandler,
         ReadTimeout:       30 * time.Second,
         ReadHeaderTimeout: 10 * time.Second,
         WriteTimeout:      0, // F3 fix: SSE streams need no write deadline; per-request timeouts handled by ctx

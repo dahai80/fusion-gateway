@@ -688,6 +688,17 @@ func (s *Server) withShellManifestUpsertAuth(next http.HandlerFunc) http.Handler
             ID string `json:"id"`
         }
         token := shellBearerToken(r)
+        // #493: a per-module registered service key (web_shell.service_keys,
+        // overlayed from FUSION_SERVICE_KEY_<MODULE> envs) authenticates that
+        // module's own registration — same scoped plane as the fm- self-heal
+        // below, never a general admin plane.
+        if json.Unmarshal(body, &probe) == nil && probe.ID != "" && s.serviceKeyAllowed(r, probe.ID) {
+            slog.Info("shell manifest re-register authenticated by registered service key (#493)", "id", probe.ID)
+            r.Body = io.NopCloser(bytes.NewReader(body))
+            r.ContentLength = int64(len(body))
+            next(w, r.WithContext(context.WithValue(r.Context(), shellAuthPlaneKey{}, shellAuthPlaneServiceKey)))
+            return
+        }
         if json.Unmarshal(body, &probe) == nil && probe.ID != "" &&
             shell.IsServiceKeyPlaintext(token) && s.shellRegistry != nil {
             sum := sha256.Sum256([]byte(token))

@@ -43,3 +43,4 @@ CLAUDE.md
 .gateway.pid
 .fusion-gateway.pid
 gateway.stdout.log
+.env.bak-*

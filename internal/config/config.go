@@ -25,6 +25,15 @@ type TLSConfig struct {
     KeyFile  string `mapstructure:"key_file"`
 }
 
+// NetworkConfig (#493): deployment network tier. local (default) binds
+// loopback and behaves exactly as before; lan binds per server.host and
+// arms the hard auth gate (every route requires a credential except the
+// anonymous allowlist; startup fails when the auth plane is off). public
+// is deliberately absent in phase 1 — see docs/deployment-public-tier.md.
+type NetworkConfig struct {
+    Tier string `mapstructure:"tier"`
+}
+
 type EncryptionConfig struct {
     MasterKey string `mapstructure:"master_key"`
 }
@@ -1010,6 +1019,7 @@ type Config struct {
     MCP           MCPConfig                `mapstructure:"mcp"`
     Browser       BrowserConfig            `mapstructure:"browser"`
     Catalog       CatalogConfig            `mapstructure:"catalog"`
+    Network       NetworkConfig            `mapstructure:"network"`
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
     Shell           ShellConfig             `mapstructure:"web_shell"`
@@ -1081,6 +1091,11 @@ type ShellConfig struct {
     // rejected: letting any consumer key register manifests was a privilege
     // inversion.
     AdminKey string `mapstructure:"admin_key"`
+    // ServiceKeys (#493): per-module service-to-gateway credentials,
+    // overlayed at load from FUSION_SERVICE_KEY_<MODULE> envs (uppercase
+    // module id). A registered key authenticates that module's own manifest
+    // registration/self-heal only — never a general admin plane.
+    ServiceKeys map[string]string `mapstructure:"service_keys"`
     Session ShellSessionConfig `mapstructure:"session"`
     // Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
     // have not registered still render in the shell menu (greyed offline) so
@@ -1388,7 +1403,9 @@ func decryptBackendAPIKeys(cfg *Config) error {
 func bindSecretEnv(v *viper.Viper) {
     // auth.master_key — admin-equivalent + /metrics + /debug/pprof gate.
     // The Helm chart injects FG_MASTER_KEY via a secretKeyRef (deployment.yaml).
-    v.BindEnv("auth.master_key", "FG_MASTER_KEY")
+    // #493: FUSION_ADMIN_KEY is the ecosystem-canonical management-plane
+    // credential (config-conventions §1) as a second env name.
+    v.BindEnv("auth.master_key", "FG_MASTER_KEY", "FUSION_ADMIN_KEY")
     // encryption.master_key — protects OAuth2/connector tokens at rest.
     v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
     // #175: admin.jwt_secret — HS256 signing key for admin dashboard sessions.
@@ -1427,6 +1444,15 @@ func bindSecretEnv(v *viper.Viper) {
     // reaches the backend key only via an explicit api_key_env reference
     // (normalizeBackends), which is what the shipped configs use.
     v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
+    // #493: FUSION_NETWORK_TIER drives the deployment network tier
+    // (local|lan) with env-first precedence, same family as the other
+    // deployment-injected settings.
+    v.BindEnv("network.tier", "FUSION_NETWORK_TIER")
+    // #493: FUSION_GATEWAY_KEY is documented as an alias of the CLIENT plane
+    // (FUSION_CLIENT_KEY, config-conventions §1). That credential is ambient
+    // on clients and never enters the gateway process (#412) — binding it
+    // server-side would let an ambient client key clobber an auth plane, so
+    // it is only observed (deprecation-style WARN in checkClientKeyAlias).
     // web_shell.admin_key (#243) — the module self-registration credential.
     // Env precedence keeps the admin-plane secret out of config.yaml.
     // FG_SHELL_ADMIN_KEY is the gateway-native canonical name; the legacy
@@ -1487,6 +1513,44 @@ func fusionMLXKeyEnvs() (mlxEnv, clientEnv string) {
 // so it must not block.
 //
 // #412: FUSION_CLIENT_KEY is deliberately NOT part of the hard check. It is
+// overlayServiceKeyEnvs (#493): FUSION_SERVICE_KEY_<MODULE> envs overlay
+// web_shell.service_keys at load — the module id lowercases and drops the
+// FUSION_ prefix (FUSION_SERVICE_KEY_FUSION_RAG → fusion-rag). Env wins over
+// the file per-module so a deployment can rotate a service key without a
+// config rewrite.
+func overlayServiceKeyEnvs(cfg *Config) {
+    for _, kv := range os.Environ() {
+        name, val, ok := strings.Cut(kv, "=")
+        if !ok || !strings.HasPrefix(name, "FUSION_SERVICE_KEY_") || val == "" {
+            continue
+        }
+        module := strings.ToLower(strings.TrimPrefix(name, "FUSION_SERVICE_KEY_"))
+        module = strings.ReplaceAll(module, "_", "-")
+        if module == "" {
+            continue
+        }
+        if cfg.Shell.ServiceKeys == nil {
+            cfg.Shell.ServiceKeys = map[string]string{}
+        }
+        if prev := cfg.Shell.ServiceKeys[module]; prev != "" && prev != val {
+            slog.Warn("FUSION_SERVICE_KEY env overrides the file value for module service key",
+                "module", module, "env", name)
+        }
+        cfg.Shell.ServiceKeys[module] = val
+    }
+}
+
+// checkClientKeyAlias (#493): FUSION_GATEWAY_KEY is documented as an alias
+// of the client plane (FUSION_CLIENT_KEY, config-conventions §1). The client
+// credential never enters the gateway process (#412), so the alias is only
+// observed — one WARN pointing at the canonical name.
+func checkClientKeyAlias() {
+    if v := strings.TrimSpace(os.Getenv("FUSION_GATEWAY_KEY")); v != "" {
+        slog.Warn("FUSION_GATEWAY_KEY is a documentation alias of the client plane and is not consumed by the gateway; use FUSION_CLIENT_KEY (config-conventions §1) on clients",
+            "canonical", "FUSION_CLIENT_KEY")
+    }
+}
+
 // the ecosystem gateway CLIENT credential (config-conventions §1), exported
 // by every client shell with the gateway-issued key. The gateway is not a
 // client of itself, so an ambient client key that differs from the file value
@@ -1547,6 +1611,8 @@ func Load(path string) (*ConfigSnapshot, error) {
     if err := v.Unmarshal(&cfg); err != nil {
         return nil, fmt.Errorf("unmarshal config: %w", err)
     }
+    overlayServiceKeyEnvs(&cfg)
+    checkClientKeyAlias()
 
     // models.supply/aliases: viper cannot decode dotted model-name keys
     // (AllSettings re-nests them), so the fields are mapstructure:"-" and
@@ -1752,6 +1818,26 @@ func ValidManifestCategory(c string) bool {
 func validate(cfg *Config) error {
     if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
         return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
+    }
+
+    // #493: network tier enum + lan hard auth gate. lan must be able to
+    // reject an anonymous request before the listener binds — fail visibly
+    // naming the anonymous surface instead of silently serving one.
+    tier := cfg.Network.Tier
+    if tier == "" {
+        tier = "local"
+    }
+    switch tier {
+    case "local":
+    case "lan":
+        if !cfg.Auth.Enabled || cfg.Auth.Passthrough {
+            return fmt.Errorf("network.tier lan requires auth.enabled with explicit keys (no passthrough); anonymous routes would be: * (auth disabled — every route is anonymous); see docs/network-tiers.md")
+        }
+        if cfg.Auth.MasterKey == "" && len(cfg.Auth.APIKeys) == 0 {
+            return fmt.Errorf("network.tier lan requires at least one credential (auth.master_key or auth.api_keys); anonymous routes would be: * (no credential configured — every route is anonymous); see docs/network-tiers.md")
+        }
+    default:
+        return fmt.Errorf("network.tier must be local|lan (public tier is deployment guidance, docs/deployment-public-tier.md), got: %q", cfg.Network.Tier)
     }
 
     // Inbound UDS listener: when enabled, a socket path is required.
@@ -2542,6 +2628,9 @@ func WarnSharedPortSafety(cfg *Config) {
 
 func DefaultConfig() Config {
     return Config{
+        Network: NetworkConfig{
+            Tier: "local",
+        },
         Server: ServerConfig{
             Host:                   "127.0.0.1", // single-machine: loopback only
             Port:                   11432,
