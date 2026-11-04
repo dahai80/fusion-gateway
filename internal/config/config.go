@@ -1023,6 +1023,11 @@ type Config struct {
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
     Shell           ShellConfig             `mapstructure:"web_shell"`
+    // AuthPortal wires the unified auth portal (#506 follow-up): the /auth
+    // static SPA plus the public identity auth proxy and one-time code
+    // handoff endpoints. Default off — nothing registered until
+    // auth_portal.enabled=true (fail-closed, mirrors service_routes).
+    AuthPortal      AuthPortalConfig        `mapstructure:"auth_portal"`
     // ServiceRoutes wires the /svc/<name>/ platform-service proxy
     // (config-conventions §1/§5): business apps call platform services
     // (rag/identity/drawing-parser…) exclusively through the gateway with
@@ -1071,6 +1076,31 @@ type ServiceRouteConfig struct {
     // the caller's path verbatim (fm-server serves the same /v1/memory/*
     // routes). Must start with "/" or the route is skipped at registration.
     Prefix string `mapstructure:"prefix"`
+}
+
+// AuthPortalConfig wires the unified auth portal: one login/register UI
+// served by the gateway at /auth, from which fusion-site and fusion-web-shell
+// redirect in and receive a one-time code bound to an allowlisted redirect
+// origin (TTL 60s, single use). Registration/login traffic proxies to
+// fusion-identity through an explicit path allowlist — the raw /svc/identity
+// surface (service-token injected) stays credentialed and never public.
+type AuthPortalConfig struct {
+    // Enabled gates the whole subsystem (fail-closed).
+    Enabled bool `mapstructure:"enabled"`
+    // StaticDir is the portal SPA directory served at /auth/. Relative to
+    // the gateway working directory; must contain index.html.
+    StaticDir string `mapstructure:"static_dir"`
+    // IdentityURL is the fusion-identity base URL (default :11470).
+    IdentityURL string `mapstructure:"identity_url"`
+    // RedirectURIs is the allowlist of exact client return URLs (scheme://
+    // host/path — the query string is compared separately). Empty allowlist
+    // disables code issuance (fail-closed).
+    RedirectURIs []string `mapstructure:"redirect_uris"`
+    // CodeTTLSecs is the one-time code lifetime (default 60, max 300).
+    CodeTTLSecs int `mapstructure:"code_ttl_secs"`
+    // RatePerMin is the per-IP request ceiling across all /auth/api/* and
+    // /auth/api/identity/* endpoints (default 30).
+    RatePerMin int `mapstructure:"rate_per_min"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
