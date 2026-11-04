@@ -19,6 +19,7 @@ import (
     "net/http/pprof"
     "runtime/debug"
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/modelpolicy"
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
     "github.com/fusion-gateway/fusion-gateway/internal/connector"
     adminui "github.com/fusion-gateway/fusion-gateway/internal/admin/ui"
@@ -239,6 +240,10 @@ type Server struct {
     shellAudit      *shell.AuditLog
     shellRoles      *shell.RoleStore
     shellMenus      *shell.MenuPermissions
+    // #486 model-policy plane: tenant-scoped policy store + hash-chained
+    // audit log (data_dir/model_policy*.json). Nil (degraded) → handlers 503.
+    modelPolicies    *modelpolicy.Store
+    modelPolicyAudit *shell.AuditLog
     // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
     // shell.session.users are configured; hash lives only in memory.
     shellBootstrap *shellUserRecord
@@ -845,6 +850,9 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/rerank", s.withMiddleware(s.handleRerank))
     mux.HandleFunc("/v1/realtime", s.withMiddleware(s.handleRealtime))
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
+    // #486 model-policy plane: admin policy admin + per-user resolution.
+    mux.HandleFunc("/v1/model-policy", s.withMiddleware(s.handleModelPolicy))
+    mux.HandleFunc("/v1/model-preference", s.withMiddleware(s.handleModelPreference))
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
     mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))

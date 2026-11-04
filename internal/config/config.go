@@ -1178,6 +1178,16 @@ type ShellManifest struct {
     GroupTitle   string `json:"group_title,omitempty"   mapstructure:"group_title"`
     GroupTitleEn string `json:"group_title_en,omitempty" mapstructure:"group_title_en"`
     Sort         int    `json:"sort,omitempty"          mapstructure:"sort"`
+    // Schema v3 model-policy fields (#486): module-declared domain knowledge,
+    // pass-through per the #250/#297 ext-field precedent — the gateway
+    // validates nothing beyond JSON safety, the admin governs them in
+    // Settings. ModelCapable declares the module can consume a resolved
+    // model at all; SuggestedModel is the module's own domain suggestion
+    // (advisory — resolution follows the #486 chain, not this hint).
+    // Older manifests without the fields keep working: omitempty drops both
+    // on the wire and the mapstructure round-trip.
+    ModelCapable   bool   `json:"model_capable,omitempty"   mapstructure:"model_capable"`
+    SuggestedModel string `json:"suggested_model,omitempty" mapstructure:"suggested_model"`
 }
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards

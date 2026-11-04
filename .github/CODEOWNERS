@@ -1,0 +1,2 @@
+# CODEOWNERS — contract files require owner review (type:contract gate, #486).
+/docs/model-policy-api.md @dahai80
