@@ -538,6 +538,25 @@ func (e *Engine) SetLocalModels(fn func() map[string]bool) {
     e.localModels = fn
 }
 
+// IsLocalModel reports whether a model id is currently served by a local
+// backend (mlx / model-hub), per the ModelSet wiring fed by main.go.
+// #486 model-policy privacy_mode=local_only consults this at resolution
+// time. Unwired engine (nil fn or empty set) reports false for everything —
+// a local_only pin then resolves to nothing rather than leaking a cloud
+// model.
+func (e *Engine) IsLocalModel(id string) bool {
+    if id == "" || e == nil {
+        return false
+    }
+    e.inFlightMu.RLock()
+    fn := e.localModels
+    e.inFlightMu.RUnlock()
+    if fn == nil {
+        return false
+    }
+    return fn()[id]
+}
+
 func (e *Engine) CircuitBreakerState(backend string) CircuitBreakerState {
     e.breakerMu.RLock()
     defer e.breakerMu.RUnlock()

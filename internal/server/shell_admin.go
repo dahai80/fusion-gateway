@@ -10,6 +10,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/modelpolicy"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
 )
 
@@ -57,6 +58,20 @@ func (s *Server) setupShellAdminSurfaces(cfg *config.Config) {
     if err := s.shellAudit.Load(); err != nil {
         slog.Error("shell audit store load failed — starting fresh", "error", err)
         s.shellAudit = shell.NewAuditLog(join("shell_audit.json"))
+    }
+    // #486 model-policy plane: policy store + hash-chained audit log. Load
+    // failure degrades to memory-only (hot-apply still works this process).
+    s.modelPolicies = modelpolicy.NewStore()
+    if p := join("model_policy.json"); p != "" {
+        s.modelPolicies.SetPersistence(p)
+        if err := s.modelPolicies.Load(); err != nil {
+            slog.Error("model policy store load failed — starting empty", "error", err)
+        }
+    }
+    s.modelPolicyAudit = shell.NewAuditLog(join("model_policy_audit.json"))
+    if err := s.modelPolicyAudit.Load(); err != nil {
+        slog.Error("model policy audit load failed — starting fresh", "error", err)
+        s.modelPolicyAudit = shell.NewAuditLog(join("model_policy_audit.json"))
     }
     s.shellRoles = shell.NewRoleStore(join("shell_roles.json"))
     if err := s.shellRoles.Load(); err != nil {
