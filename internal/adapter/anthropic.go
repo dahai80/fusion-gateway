@@ -232,6 +232,27 @@ func (p *AnthropicProvider) Name() string { return p.name }
 
 func (p *AnthropicProvider) HealthCheck(ctx context.Context) error { return nil }
 
+// anthropicErrorFromBody renders a non-2xx anthropic-type response body
+// for an error message (#494): a JSON error envelope
+// {"type":"error","error":{"type","message"}} is parsed and surfaced as
+// "type: message" — the raw envelope JSON never rides into the
+// client-facing error. Anything else falls back to the truncated raw body.
+func anthropicErrorFromBody(body []byte) string {
+    var envelope struct {
+        Error struct {
+            Type    string `json:"type"`
+            Message string `json:"message"`
+        } `json:"error"`
+    }
+    if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error.Message != "" {
+        if envelope.Error.Type != "" {
+            return envelope.Error.Type + ": " + envelope.Error.Message
+        }
+        return envelope.Error.Message
+    }
+    return TruncateForError(body)
+}
+
 func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
     antReq := OpenAIToAnthropic(req)
     antReq.Stream = false
@@ -252,7 +273,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
         respBody := ReadErrorBody(resp)
-        return nil, fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, string(respBody))
+        return nil, fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, anthropicErrorFromBody(respBody))
     }
     var antResp AnthropicResponse
     if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
@@ -281,7 +302,7 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
     if resp.StatusCode != http.StatusOK {
         respBody := ReadErrorBody(resp)
         resp.Body.Close()
-        return nil, fmt.Errorf("anthropic stream returned status %d: %s", resp.StatusCode, string(respBody))
+        return nil, fmt.Errorf("anthropic stream returned status %d: %s", resp.StatusCode, anthropicErrorFromBody(respBody))
     }
     ch := make(chan StreamChunk, 64)
     safego.Go("anthropic_stream", func() {
@@ -327,7 +348,7 @@ func (p *AnthropicProvider) Messages(ctx context.Context, req *AnthropicRequest)
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
         respBody := ReadErrorBody(resp)
-        return nil, fmt.Errorf("anthropic messages returned status %d: %s", resp.StatusCode, string(respBody))
+        return nil, fmt.Errorf("anthropic messages returned status %d: %s", resp.StatusCode, anthropicErrorFromBody(respBody))
     }
     var antResp AnthropicResponse
     if err := json.NewDecoder(LimitResponseReader(resp.Body)).Decode(&antResp); err != nil {
@@ -355,7 +376,7 @@ func (p *AnthropicProvider) StreamMessages(ctx context.Context, req *AnthropicRe
     if resp.StatusCode != http.StatusOK {
         respBody := ReadErrorBody(resp)
         resp.Body.Close()
-        return nil, fmt.Errorf("anthropic stream messages returned status %d: %s", resp.StatusCode, string(respBody))
+        return nil, fmt.Errorf("anthropic stream messages returned status %d: %s", resp.StatusCode, anthropicErrorFromBody(respBody))
     }
     ch := make(chan AnthropicStreamEvent, 64)
     safego.Go("anthropic_stream", func() {
