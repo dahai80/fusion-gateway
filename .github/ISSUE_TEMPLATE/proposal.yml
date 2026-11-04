@@ -1,0 +1,37 @@
+name: Proposal
+description: Requirement or design change entering the governance state machine (needs G1 approval)
+labels: [state:proposal]
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: Context and goal; reference the design doc section if any
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files/interfaces touched; state explicit out-of-scope items
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Machine-checkable criteria list (- [ ] form)
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options: ["low", "high", "breaking"]
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies
+      description: Dependent issues/PRs/external conditions
