@@ -138,6 +138,59 @@ func (s *Server) modelPolicyFallback() string {
     return ""
 }
 
+// handleShellModelPolicy serves GET /api/v1/shell/model-policy (and the
+// /api/v1/model-policy alias) behind withShellSession (#487, #491):
+// shell-session modules resolve the same four-layer chain the /v1 plane
+// serves, plus the effective allowlist and privacy_mode. local_only hides
+// cloud models from BOTH the resolution and the surfaced allowlist.
+// Consumers treat this best-effort (404/unreachable = fall through to the
+// manifest suggested_model, #491 contract), so the payload is a superset:
+// resolved_model, source, allowlist, privacy_mode, tenant, user, module.
+func (s *Server) handleShellModelPolicy(w http.ResponseWriter, r *http.Request) {
+    if s.modelPolicies == nil {
+        writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "model policy store unavailable"})
+        return
+    }
+    if r.Method != http.MethodGet {
+        w.Header().Set("Allow", "GET")
+        writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+        return
+    }
+    claims := shellClaimsFrom(r.Context())
+    user := claims.Sub
+    tenant := claims.TenantID
+    if tenant == "" {
+        tenant = "local"
+    }
+    module := r.URL.Query().Get("module")
+    p := s.modelPolicies.Policy(tenant)
+    d := s.modelPolicies.Resolve(tenant, user, module, s.modelPolicyFallback(), s.modelPolicyIsLocal)
+    privacyMode := p.PrivacyMode
+    if privacyMode == "" {
+        privacyMode = modelpolicy.PrivacyModeAll
+    }
+    allowlist := p.UserAllowlist
+    if privacyMode == modelpolicy.PrivacyModeLocalOnly && allowlist != nil {
+        filtered := make([]string, 0, len(allowlist))
+        for _, m := range allowlist {
+            if s.modelPolicyIsLocal(m) {
+                filtered = append(filtered, m)
+            }
+        }
+        allowlist = filtered
+    }
+    writeJSON(w, http.StatusOK, map[string]any{
+        "resolved_model": d.Model,
+        "source":         d.Source,
+        "allowlist":      allowlist,
+        "privacy_mode":   privacyMode,
+        "privacy_filtered": d.PrivacyFiltered,
+        "tenant":         tenant,
+        "user":           user,
+        "module":         module,
+    })
+}
+
 // modelPolicyIsLocal reports local-backend residency via the router's
 // ModelSet wiring. Unwired router = nothing is local (fail-closed for a
 // local_only pin).

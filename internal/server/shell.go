@@ -285,6 +285,11 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // which lists loaded local models only — it could not offer models the
     // #267 shell chat can actually route to.
     mux.HandleFunc("GET /api/v1/shell/models", s.withShellSession(s.handleModels))
+    // #487/#491 model-policy read plane for shell-session modules; the
+    // /api/v1/model-policy alias serves consumers polling the non-sh-prefixed
+    // path (best-effort, fail-open contract).
+    mux.HandleFunc("GET /api/v1/shell/model-policy", s.withShellSession(s.handleShellModelPolicy))
+    mux.HandleFunc("GET /api/v1/model-policy", s.withShellSession(s.handleShellModelPolicy))
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withShellManifestUpsertAuth(s.handleShellManifestUpsert))
     // #261 K1: heartbeat authenticates with the module's gateway-issued fm-
     // service key (hash-compare against the registry), NOT the standard fg-
