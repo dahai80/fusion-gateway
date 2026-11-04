@@ -58,6 +58,11 @@ Request/response body (`PUT`, and the `policy` member of `GET`):
   (`data_dir/model_policy_audit.json`).
 - `GET`/`PUT` responses carry `"tenant"` — the tenant the change applies
   to, so cross-tenant mistakes are visible at the wire.
+- The admin-JWT / shell-session bridges run BEFORE the auth middleware
+  chain (#499): a Bearer admin JWT reaches APIKeyAuth as an already-set
+  `Principal{AuthMethod:"admin-jwt"}` and hits the auth short-circuit,
+  not a 401. The unnamed (`""`) tenant namespace is a valid PUT target —
+  an admin JWT has no team binding, so its policy lands there.
 
 ### GET /v1/model-preference — any authenticated principal
 
