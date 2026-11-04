@@ -41,6 +41,8 @@
         <input name="email" type="email" required autocomplete="email">
         <label data-i18n="f-password">Password</label>
         <input name="password" type="password" required minlength="10" autocomplete="new-password">
+        <label data-i18n="f-password-confirm">Confirm password</label>
+        <input name="password_confirm" type="password" required minlength="10" autocomplete="new-password">
         <p class="hint" data-i18n="hint-verify">We will send a verification email. Address verification is required before sign-in.</p>
         <button type="submit" class="primary" data-i18n="btn-register">Create account</button>
     </form>
@@ -54,6 +56,8 @@
         <input name="admin_email" type="email" required>
         <label data-i18n="f-password">Password</label>
         <input name="admin_password" type="password" required minlength="12" autocomplete="new-password">
+        <label data-i18n="f-password-confirm">Confirm password</label>
+        <input name="admin_password_confirm" type="password" required minlength="12" autocomplete="new-password">
         <p class="hint" data-i18n="hint-tenant">The team activates immediately; token usage is capped by the plan quota.</p>
         <button type="submit" class="primary" data-i18n="btn-tenant">Register team</button>
     </form>

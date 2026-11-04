@@ -14,6 +14,8 @@
             "tab-tenant": "Register a team",
             "f-username": "Username",
             "f-password": "Password",
+            "f-password-confirm": "Confirm password",
+            "err-password-mismatch": "Passwords do not match.",
             "f-tenant": "Tenant",
             "f-optional": "(optional)",
             "f-email": "Email",
@@ -40,6 +42,8 @@
             "tab-tenant": "注册团队",
             "f-username": "用户名",
             "f-password": "密码",
+            "f-password-confirm": "确认密码",
+            "err-password-mismatch": "两次输入的密码不一致。",
             "f-tenant": "租户",
             "f-optional": "（可选）",
             "f-email": "邮箱",
@@ -181,6 +185,10 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (f.password.value !== f.password_confirm.value) {
+            say(t("err-password-mismatch"));
+            return;
+        }
         busy(f, true);
         postJSON("/auth/api/identity/api/v1/auth/register", {
             username: f.username.value.trim(),
@@ -197,6 +205,10 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (f.admin_password.value !== f.admin_password_confirm.value) {
+            say(t("err-password-mismatch"));
+            return;
+        }
         busy(f, true);
         postJSON("/auth/api/identity/api/v1/auth/register-tenant", {
             tenant_display_name: f.tenant_display_name.value.trim(),
