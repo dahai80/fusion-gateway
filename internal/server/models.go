@@ -81,6 +81,19 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     models = deduped
     slog.Debug("models deduped across backends", "raw", rawCount, "deduped", len(models))
 
+    // #501: the merged list must not advertise both spellings of the same
+    // weights. fusion-mlx's registry uses dash-normalized ids ("/" -> "--");
+    // a resident model loaded under a raw slash-spelled request id appears as
+    // an extra entry, so clients saw both forms and either choice loaded a
+    // second copy of the weights (mlx_memory_overload false positive). Drop
+    // the slash-form entry when its dash twin exists; canonical = dash form,
+    // matching the FusionMLXProvider request canonicalization.
+    before := len(models)
+    models = dedupeAliasModels(models)
+    if len(models) != before {
+        slog.Info("models endpoint: dropped slash-form alias duplicates", "before", before, "after", len(models))
+    }
+
     // #447: routing-level ids (routing.cloud_models, e.g. glm-5 resolvable
     // via models.supply) never appear in any provider's ListModels — their
     // anthropic-type backend reports the standard claude-* catalog instead —
@@ -163,6 +176,31 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
         "object": "list",
         "data":   models,
     })
+}
+
+// dedupeAliasModels (#501) drops slash-form model ids whose dash-normalized
+// twin ("/" replaced by "--") also appears in the list. The dash form is the
+// engine registry's canonical spelling; the slash form only exists as a
+// load-time residue and must not be advertised to clients. Ids without a
+// dash twin (cloud catalogs, genuinely slash-keyed backends) pass through.
+func dedupeAliasModels(models []adapter.ModelInfo) []adapter.ModelInfo {
+    dashTwins := make(map[string]bool, len(models))
+    for _, m := range models {
+        if strings.Contains(m.ID, "--") {
+            dashTwins[m.ID] = true
+        }
+    }
+    out := make([]adapter.ModelInfo, 0, len(models))
+    for _, m := range models {
+        if strings.Contains(m.ID, "/") {
+            normalized := strings.ReplaceAll(m.ID, "/", "--")
+            if dashTwins[normalized] {
+                continue
+            }
+        }
+        out = append(out, m)
+    }
+    return out
 }
 
 // modelListLess is the comparator for the /v1/models ordering (#108). Local
