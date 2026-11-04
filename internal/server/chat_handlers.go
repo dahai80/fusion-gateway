@@ -1168,6 +1168,13 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             if e != nil {
                 return
             }
+            // #510: an empty-content response is never published to either
+            // cache — the leader still serves it to its own caller, but the
+            // coalesced waiters re-check the cache, miss, and fetch fresh.
+            if !cacheWorthyChatResponse(r) {
+                slog.Info("skipping cache store: empty-content response", "model", req.Model)
+                return
+            }
             if s.cache != nil && cacheKey != "" {
                 if respData, marshalErr := json.Marshal(r); marshalErr == nil {
                     s.cache.Set(cacheKey, respData)
@@ -1314,7 +1321,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                                 s.latencyTracker.Record(fallbackProvider.Name(), duration)
                             }
                             s.recordAndCharge(ctx, "cloud", req.Model, budget.InputTokens, fallbackResp.Usage.CompletionTokens)
-                            if s.cache != nil && cacheKey != "" {
+                            if s.cache != nil && cacheKey != "" && cacheWorthyChatResponse(fallbackResp) {
                                 if respData, marshalErr := json.Marshal(fallbackResp); marshalErr == nil {
                                     s.cache.Set(cacheKey, respData)
                                 }
@@ -1379,13 +1386,16 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
 
     // Cache store. #400: the successful response also lands in the semantic
     // cache keyed by prompt embedding (miss path already embedded the prompt;
-    // the cache's embed cache dedupes the second lookup).
-    respData, marshalErr := json.Marshal(resp)
-    if s.cache != nil && cacheKey != "" && marshalErr == nil {
-        s.cache.Set(cacheKey, respData)
-    }
-    if s.semanticCache != nil && semanticKey.Payload != "" && marshalErr == nil {
-        s.semanticCache.Store(semanticKey.Payload, semanticKey.SystemHash, req.Model, respData)
+    // the cache's embed cache dedupes the second lookup). #510: empty-content
+    // responses are never stored in either cache.
+    if cacheWorthyChatResponse(resp) {
+        respData, marshalErr := json.Marshal(resp)
+        if s.cache != nil && cacheKey != "" && marshalErr == nil {
+            s.cache.Set(cacheKey, respData)
+        }
+        if s.semanticCache != nil && semanticKey.Payload != "" && marshalErr == nil {
+            s.semanticCache.Store(semanticKey.Payload, semanticKey.SystemHash, req.Model, respData)
+        }
     }
 
     w.Header().Set("Content-Type", "application/json")
@@ -1565,6 +1575,34 @@ func stampCachedUsage(ctx context.Context, cached []byte) {
     logEntry.OutputTokens = resp.Usage.CompletionTokens
     logEntry.TotalTokens = resp.Usage.TotalTokens
     logEntry.CachedTokens = resp.Usage.CachedTokenCount()
+}
+
+// cacheWorthyChatResponse reports whether a successful response carries
+// usable content worth persisting. #510: thinking-only cloud models that
+// exhaust max_tokens before any visible output return an empty content
+// field — caching that poisons both the exact cache (instant empty reply on
+// repeat for the full TTL) and the semantic cache (poisons near-duplicate
+// prompts). Empty responses still pass through to the client; they are just
+// never stored. Tool-call-only responses (empty text + tool_calls) stay
+// cacheable — the tool_calls are the payload.
+func cacheWorthyChatResponse(resp *adapter.ChatResponse) bool {
+    if resp == nil || len(resp.Choices) == 0 {
+        return false
+    }
+    switch msg := resp.Choices[0].Message.(type) {
+    case map[string]interface{}:
+        if tc, present := msg["tool_calls"]; present && tc != nil {
+            return true
+        }
+        if content, ok := msg["content"].(string); ok {
+            return content != ""
+        }
+    case map[string]string:
+        if content, ok := msg["content"]; ok {
+            return content != ""
+        }
+    }
+    return true
 }
 
 // stampRouteInfo records route context (model, channel, backend) on the
