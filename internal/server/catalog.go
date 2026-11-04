@@ -54,9 +54,15 @@ type catalogResponse struct {
     GeneratedAt string          `json:"generated_at"`
 }
 
-// supervisorSnapshot is the cached supervisor status fetch.
+// supervisorSnapshot is the cached supervisor status fetch holder.
 type supervisorSnapshot struct {
-    mu        sync.Mutex
+    mu   sync.Mutex
+    data supervisorStatusData
+}
+
+// supervisorStatusData is the copyable payload of a supervisor status
+// fetch (the cache holder carries the mutex separately).
+type supervisorStatusData struct {
     fetchedAt time.Time
     services  map[string]string // name → state
     available bool
@@ -66,7 +72,7 @@ type supervisorSnapshot struct {
 // supervisorStatus returns the cached service state map, refreshing from
 // the supervisor read-only face when the TTL expired. Unreachable
 // supervisor = available=false + reason; never an error to the caller.
-func (s *Server) supervisorStatus(ctx context.Context) supervisorSnapshot {
+func (s *Server) supervisorStatus(ctx context.Context) supervisorStatusData {
     snap := s.snapshot()
     url := "http://127.0.0.1:9100/api/v1/status"
     ttl := 30 * time.Second
@@ -80,8 +86,8 @@ func (s *Server) supervisorStatus(ctx context.Context) supervisorSnapshot {
     }
     s.catalogSup.mu.Lock()
     defer s.catalogSup.mu.Unlock()
-    if s.catalogSup.services != nil && time.Since(s.catalogSup.fetchedAt) < ttl {
-        return s.catalogSup
+    if s.catalogSup.data.services != nil && time.Since(s.catalogSup.data.fetchedAt) < ttl {
+        return s.catalogSup.data
     }
     services := map[string]string{}
     available := false
@@ -119,12 +125,14 @@ func (s *Server) supervisorStatus(ctx context.Context) supervisorSnapshot {
     if !available && reason == "" {
         reason = "supervisor status unavailable"
     }
-    s.catalogSup.services = services
-    s.catalogSup.available = available
-    s.catalogSup.reason = reason
-    s.catalogSup.fetchedAt = time.Now()
+    s.catalogSup.data = supervisorStatusData{
+        services:  services,
+        available: available,
+        reason:    reason,
+        fetchedAt: time.Now(),
+    }
     slog.Debug("supervisor status fetched", "available", available, "services", len(services), "reason", reason)
-    return s.catalogSup
+    return s.catalogSup.data
 }
 
 // handleCatalog serves GET /v1/catalog (#488).
@@ -188,6 +196,11 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
             p.State = CatalogStateRunning
         case p.Registered:
             p.State = CatalogStateInstalledStopped
+        case sup.available:
+            // Supervisor is live and does not know this product — it is
+            // genuinely not installed. With the supervisor degraded the
+            // state stays empty (unknown, not fabricated).
+            p.State = CatalogStateNotInstalled
         }
         products = append(products, p)
     }
