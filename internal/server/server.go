@@ -857,9 +857,13 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/model-preference", s.withPrincipalBridge(s.handleModelPreference))
     // #488 product catalog merge view (catalog x manifests x supervisor);
     // degrade-by-design per source, gated by catalog.enabled (snapshot at
-    // Start time — route registration is not hot-reloadable).
+    // Start time — route registration is not hot-reloadable). #504: wrapped
+    // in withPrincipalBridge so a browser shell session (or admin JWT)
+    // passes the auth chain — the shell cannot hold an fg-key; /api/v1/
+    // catalog is the shell-path alias (mirror of /api/v1/model-policy).
     if snap := s.snapshot(); snap == nil || snap.Config.Catalog.Enabled {
-        mux.HandleFunc("/v1/catalog", s.withMiddleware(s.handleCatalog))
+        mux.HandleFunc("/v1/catalog", s.withPrincipalBridge(s.handleCatalog))
+        mux.HandleFunc("/api/v1/catalog", s.withPrincipalBridge(s.handleCatalog))
     }
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
