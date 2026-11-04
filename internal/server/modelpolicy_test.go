@@ -8,6 +8,7 @@ import (
     "testing"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
+    "github.com/fusion-gateway/fusion-gateway/internal/admin"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
@@ -63,6 +64,41 @@ func modelPolicyRequest(s *Server, method, target, tenant string, principal *mid
 
 func adminPrincipal() *middleware.Principal {
     return &middleware.Principal{Role: middleware.RoleAdmin}
+}
+
+// #486: the admin JWT bridge must reach the /v1 model-policy plane — the
+// bridge otherwise only runs inside withAdminOnly (admin_handlers.go), so a
+// deployment without OIDC would have NO principal able to administer the
+// policy. A valid admin-login Bearer is bridged to RoleAdmin exactly like
+// the admin surface does; an invalid one fails closed at 403.
+func TestModelPolicy_AdminJWTBridge(t *testing.T) {
+    aa, err := admin.NewAdminAuth("test-admin-jwt-secret-32-characters!", map[string]string{"root": "pw"})
+    if err != nil {
+        t.Fatalf("admin auth: %v", err)
+    }
+    s := modelPolicyTestServer(t)
+    s.adminAuth = aa
+    tok, err := aa.GenerateToken("root", "admin")
+    if err != nil {
+        t.Fatalf("generate token: %v", err)
+    }
+    r := httptest.NewRequest("GET", "/v1/model-policy", nil)
+    r.Header.Set("Authorization", "Bearer "+tok)
+    r = r.WithContext(adapter.WithTenant(r.Context(), "tenant-a"))
+    w := httptest.NewRecorder()
+    s.handleModelPolicy(w, r)
+    if w.Code != http.StatusOK {
+        t.Fatalf("admin JWT GET must be 200, got %d body=%s", w.Code, w.Body.String())
+    }
+    // Tampered token fails closed.
+    r2 := httptest.NewRequest("GET", "/v1/model-policy", nil)
+    r2.Header.Set("Authorization", "Bearer "+tok+"x")
+    r2 = r2.WithContext(adapter.WithTenant(r2.Context(), "tenant-a"))
+    w2 := httptest.NewRecorder()
+    s.handleModelPolicy(w2, r2)
+    if w2.Code != http.StatusForbidden {
+        t.Fatalf("tampered admin JWT must be 403, got %d", w2.Code)
+    }
 }
 
 func decodeBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {

@@ -31,7 +31,9 @@ default rather than assuming a cloud model.
 
 Management-plane surface: the inference master key maps to the inference
 role and is rejected (RR3 plane separation). Requires an admin-role
-principal (OIDC RBAC / identity role).
+principal: OIDC RBAC / identity role, an admin-login JWT, or an admin
+shell-session token (the same bridges the `/admin` plane runs — without
+them a deployment with no OIDC would have no way to administer policy).
 
 Request/response body (`PUT`, and the `policy` member of `GET`):
 

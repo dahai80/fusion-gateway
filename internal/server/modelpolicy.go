@@ -35,6 +35,12 @@ func (s *Server) handleModelPolicy(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "model policy store unavailable"})
         return
     }
+    // The admin-JWT / shell-session bridges only run inside withAdminOnly
+    // (admin_handlers.go); without them here, a deployment with no OIDC
+    // would have NO principal able to administer the policy. Bridge once
+    // and re-check — fail-closed on an invalid token (same contract as
+    // withAdminOnly).
+    r = s.bridgeShellSession(bridgeAdminJWT(r, s.adminAuth))
     if !middleware.IsAdmin(r.Context()) {
         slog.Warn("model policy rejected for non-admin principal", "method", r.Method, "path", r.URL.Path,
             "subject", middleware.GetOIDCSubject(r.Context()))
@@ -77,6 +83,9 @@ func (s *Server) handleModelPreference(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "model policy store unavailable"})
         return
     }
+    // Same bridge as handleModelPolicy: shell-session admins resolve under
+    // their admin role; the subject then reflects the session user.
+    r = s.bridgeShellSession(bridgeAdminJWT(r, s.adminAuth))
     principal := middleware.PrincipalFromContext(r.Context())
     user := "anonymous"
     if principal != nil {
