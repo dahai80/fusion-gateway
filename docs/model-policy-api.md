@@ -78,6 +78,32 @@ chain only).
 `source` ∈ `module_override` | `user_preference` | `tenant_default` |
 `fallback` | `""` (nothing resolved).
 
+### GET /api/v1/shell/model-policy — shell-session modules (#487, #491)
+
+Alias: `GET /api/v1/model-policy` (same handler). Behind the standard
+shell-session gate. Read-only view for module/iframes that authenticate
+with a shell session token instead of an API key; resolution follows the
+identical chain (session tenant, session user):
+
+```json
+{
+    "resolved_model": "mlx/coder",
+    "source": "module_override",
+    "allowlist": ["mlx/coder", "mlx/chat"],
+    "privacy_mode": "all",
+    "privacy_filtered": false,
+    "tenant": "local",
+    "user": "alice",
+    "module": "fusion-code"
+}
+```
+
+Under `privacy_mode: local_only` the surfaced `allowlist` is filtered to
+local models as well. Consumers treat this endpoint best-effort: 404 /
+unreachable / shape drift = fall through to the manifest
+`suggested_model` (#491 consumer contract), so the payload may grow
+without breaking modules.
+
 ### PUT /v1/model-preference — self preference
 
 Body: `{"module": "fusion-code", "model": "mlx/chat"}`. Writes the
