@@ -162,7 +162,9 @@
         postJSON("/auth/api/identity/api/v1/auth/login", {
             username: f.username.value.trim(),
             password: f.password.value,
-            tenant_id: f.tenant_id.value.trim() || undefined
+            // identity requires a non-empty tenant_id; "default" is the
+            // bootstrap tenant every deployment has.
+            tenant_id: f.tenant_id.value.trim() || "default"
         }).then(function (r) {
             if (!r.ok) { say(errMsg(r)); return; }
             if (r.data.mfa_required) { say("MFA code required is not supported here yet."); return; }
