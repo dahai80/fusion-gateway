@@ -943,6 +943,11 @@ func (s *Server) Start() error {
     // with FUSION_CLIENT_KEY. No-op when service_routes is unset.
     s.registerServiceRoutes(mux)
 
+    // #506: unified auth portal — /auth SPA, public identity auth proxy
+    // (allowlisted), and one-time code handoff. No-op when
+    // auth_portal.enabled=false (fail-closed).
+    s.registerAuthPortalRoutes(mux)
+
     // #262 K2: user API key CRUD — master-gated credential issuance surface.
     // Always registered (the control plane is not feature-flagged); auth is
     // the master key itself via withMasterKey inside registerUserKeyRoutes.

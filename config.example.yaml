@@ -781,3 +781,16 @@ service_routes:
     upstream_auth: inject
     upstream_token_file: ~/.fusion-memory/api_key
     prefix: /v1/memory
+
+# Unified auth portal (#506): /auth SPA + public identity auth proxy +
+# one-time code handoff for fusion-site / fusion-web-shell. Default off.
+auth_portal:
+  enabled: false
+  static_dir: web/auth
+  identity_url: http://127.0.0.1:11470
+  # Exact client return URLs (scheme://host/path; query is client state).
+  # Empty list disables code issuance (fail-closed).
+  redirect_uris:
+    - http://localhost:3000/login
+  code_ttl_secs: 60
+  rate_per_min: 30
