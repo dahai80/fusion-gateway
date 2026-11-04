@@ -201,6 +201,37 @@ func TestAnthropicProvider_StreamChat_Error(t *testing.T) {
     }
 }
 
+// #494 AC: a non-2xx JSON error envelope from an anthropic-type backend is
+// parsed and surfaced as a clean "type: message" error — the raw envelope
+// JSON must never ride through into the client-facing error string.
+func TestAnthropicProvider_StreamChat_ErrorEnvelope(t *testing.T) {
+    slog.Info("test AnthropicProvider_StreamChat_ErrorEnvelope")
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusInternalServerError)
+        _, _ = w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"string indices must be integers, not 'str'"},"request_id":"req_1"}`))
+    }))
+    defer srv.Close()
+
+    p := NewAnthropicProvider("anthropic", config.BackendConfig{
+        BaseURL: srv.URL,
+        APIKey:  "test-key",
+    })
+    _, err := p.StreamChat(context.Background(), &ChatRequest{
+        Model:    "test",
+        Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+    })
+    if err == nil {
+        t.Fatal("expected error for 500 status")
+    }
+    msg := err.Error()
+    if !strings.Contains(msg, "api_error: string indices must be integers, not 'str'") {
+        t.Fatalf("error must carry the parsed envelope message, got %q", msg)
+    }
+    if strings.Contains(msg, `"type":"error"`) || strings.Contains(msg, `{"`) {
+        t.Fatalf("raw envelope JSON must not leak into the error, got %q", msg)
+    }
+}
+
 func TestAnthropicProvider_Messages(t *testing.T) {
     slog.Info("test AnthropicProvider_Messages")
     antResp := AnthropicResponse{
