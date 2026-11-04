@@ -112,11 +112,10 @@ func (s *Store) Policy(tenant string) Policy {
 }
 
 // SetPolicy validates and stores the tenant policy. Hot-applies: the next
-// Resolve call sees it.
+// Resolve call sees it. The "" tenant is valid — it is the isolated default
+// namespace for principals with no tenant binding (#499: an admin JWT
+// principal has no team binding, so a PUT would otherwise 400 forever).
 func (s *Store) SetPolicy(tenant string, p Policy) error {
-    if tenant == "" {
-        return fmt.Errorf("%w: tenant is required", ErrInvalidPolicy)
-    }
     switch p.PrivacyMode {
     case "", PrivacyModeAll, PrivacyModeLocalOnly:
     default:

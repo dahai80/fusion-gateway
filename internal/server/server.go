@@ -853,8 +853,8 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/realtime", s.withMiddleware(s.handleRealtime))
     mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
     // #486 model-policy plane: admin policy admin + per-user resolution.
-    mux.HandleFunc("/v1/model-policy", s.withMiddleware(s.handleModelPolicy))
-    mux.HandleFunc("/v1/model-preference", s.withMiddleware(s.handleModelPreference))
+    mux.HandleFunc("/v1/model-policy", s.withPrincipalBridge(s.handleModelPolicy))
+    mux.HandleFunc("/v1/model-preference", s.withPrincipalBridge(s.handleModelPreference))
     // #488 product catalog merge view (catalog x manifests x supervisor);
     // degrade-by-design per source, gated by catalog.enabled (snapshot at
     // Start time — route registration is not hot-reloadable).

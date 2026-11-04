@@ -12,6 +12,20 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
+// withPrincipalBridge (#499): runs the admin-JWT / shell-session bridges
+// BEFORE the withMiddleware chain, so a Bearer admin-login JWT reaches
+// APIKeyAuth as an already-set Principal{AuthMethod:"admin-jwt"} and hits
+// the auth.go short-circuit instead of a 401. Unlike withAdminOnly it does
+// NOT gate — the handler keeps its own role check, so plain API-key
+// principals keep working and the master key still lands at the handler's
+// RR3 reject. Registration shape: s.withPrincipalBridge(s.handler).
+func (s *Server) withPrincipalBridge(handler http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        r = s.bridgeShellSession(bridgeAdminJWT(r, s.adminAuth))
+        s.withMiddleware(handler)(w, r)
+    }
+}
+
 func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // RR3 (audit P0): admin surface requires an admin role, NOT the
