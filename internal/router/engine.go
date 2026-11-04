@@ -1254,9 +1254,13 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "memory_overload"})
     }
 
-    // P1.5: MLX memory overload (independent check)
-    if hwMetrics.MLXActiveMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
-        mlxRatio := float64(hwMetrics.MLXActiveMemory) / float64(hwMetrics.GPUInUseMemory)
+    // P1.5: MLX memory overload (independent check). The denominator is the
+    // GPU's allocated (wired) budget, not the instantaneous "in use" figure:
+    // in-use collapses toward a few hundred MB on an idle machine, which made
+    // a resident model's steady footprint look like a >ratio overload and
+    // diverted every request to the cloud backend (see #501).
+    if hwMetrics.MLXActiveMemory > 0 && hwMetrics.GPUAllocMemory > 0 {
+        mlxRatio := float64(hwMetrics.MLXActiveMemory) / float64(hwMetrics.GPUAllocMemory)
         if mlxRatio > cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio {
             return e.cloudOrFallbackLocked(cfg, req, snap, &RouteDecision{Backend: CloudBackend, Reason: "mlx_memory_overload"})
         }
