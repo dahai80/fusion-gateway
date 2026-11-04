@@ -949,6 +949,23 @@ type MCPConfig struct {
 // key (exposed at GET /gateway/v1/managed-settings/pubkey) before trusting it.
 // Default off (Enabled=false) so the endpoint is not registered on deployments
 // that do not serve managed policy.
+// CatalogConfig configures the built-in product catalog + /v1/catalog
+// merge view (#488). Read-only, no background workers: the endpoint
+// degrades per-source (manifest registry / supervisor status) instead of
+// failing — that is also the core-profile boot contract (#490).
+type CatalogConfig struct {
+    // Enabled gates the /v1/catalog route. Default on.
+    Enabled bool `mapstructure:"enabled"`
+    // SupervisorStatusURL is the fusion-supervisor read-only status face
+    // (GET /api/v1/status, no token, loopback-only) consumed for the
+    // installed/stopped dimension. Zero supervisor changes: unreachable
+    // supervisor = degraded source flag, never a 5xx.
+    SupervisorStatusURL string `mapstructure:"supervisor_status_url"`
+    // StatusTTL caches the supervisor fetch so concurrent catalogs don't
+    // hammer the supervisor. <=0 falls back to the default 30s.
+    StatusTTL time.Duration `mapstructure:"status_ttl"`
+}
+
 type ManagedSettingsConfig struct {
     Enabled    bool   `mapstructure:"enabled"`
     PrivateKey string `mapstructure:"private_key"`
@@ -992,6 +1009,7 @@ type Config struct {
     Connector     *ConnectorConfig         `mapstructure:"connector"`
     MCP           MCPConfig                `mapstructure:"mcp"`
     Browser       BrowserConfig            `mapstructure:"browser"`
+    Catalog       CatalogConfig            `mapstructure:"catalog"`
     ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
     Identity        IdentityConfig          `mapstructure:"identity"`
     Shell           ShellConfig             `mapstructure:"web_shell"`
@@ -2667,6 +2685,14 @@ func DefaultConfig() Config {
             Enabled:   false,
             JWTSecret: defaultJWTSecret,
             LogMaxLen: 10000,
+        },
+        Catalog: CatalogConfig{
+            // #488: read-only merge view, on by default; degrade-by-design
+            // per source so a minimal profile (no supervisor, no modules)
+            // answers 200 with visible degraded flags (#490 contract).
+            Enabled:             true,
+            SupervisorStatusURL: "http://127.0.0.1:9100/api/v1/status",
+            StatusTTL:           30 * time.Second,
         },
         Browser: BrowserConfig{
             // #130: default-off gate. Off = no routes registered, no poll

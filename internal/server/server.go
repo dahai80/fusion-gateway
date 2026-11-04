@@ -244,6 +244,8 @@ type Server struct {
     // audit log (data_dir/model_policy*.json). Nil (degraded) → handlers 503.
     modelPolicies    *modelpolicy.Store
     modelPolicyAudit *shell.AuditLog
+    // #488 catalog merge view: cached supervisor status fetch.
+    catalogSup supervisorSnapshot
     // shellBootstrap is the first-run admin account (PRD §4.1.5) when no
     // shell.session.users are configured; hash lives only in memory.
     shellBootstrap *shellUserRecord
@@ -853,6 +855,12 @@ func (s *Server) Start() error {
     // #486 model-policy plane: admin policy admin + per-user resolution.
     mux.HandleFunc("/v1/model-policy", s.withMiddleware(s.handleModelPolicy))
     mux.HandleFunc("/v1/model-preference", s.withMiddleware(s.handleModelPreference))
+    // #488 product catalog merge view (catalog x manifests x supervisor);
+    // degrade-by-design per source, gated by catalog.enabled (snapshot at
+    // Start time — route registration is not hot-reloadable).
+    if snap := s.snapshot(); snap == nil || snap.Config.Catalog.Enabled {
+        mux.HandleFunc("/v1/catalog", s.withMiddleware(s.handleCatalog))
+    }
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
     mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))
