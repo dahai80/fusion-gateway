@@ -830,3 +830,53 @@ func TestRC4_DecisionSharedLogic(t *testing.T) {
         t.Fatalf("unconfigured: expected sentinel + empty model, got %s/%s/%q", d3.Backend, d3.Reason, m3)
     }
 }
+
+// #501 regression: the merged /v1/models list must not advertise both
+// spellings of the same weights (slash id and its dash-normalized twin) —
+// clients pick either, both reach fusion-mlx, and the engine loads a second
+// copy of the weights (mlx_memory_overload false positive). Canonical form
+// is the dash form (the engine registry's scan-normalized id); a slash-form
+// entry whose dash twin exists is dropped.
+func TestDedupeAliasModels_SlashTwinDropped(t *testing.T) {
+    in := []adapter.ModelInfo{
+        {ID: "mlx-community/Qwen3.5-4B-MLX-4bit", Object: "model", OwnedBy: "local"},
+        {ID: "mlx-community--Qwen3.5-4B-MLX-4bit", Object: "model", OwnedBy: "local"},
+        {ID: "BAAI--bge-m3", Object: "model", OwnedBy: "local"},
+    }
+    out := dedupeAliasModels(in)
+    if len(out) != 2 {
+        t.Fatalf("dash twin must survive, slash twin dropped: got %d entries %v", len(out), ids(out))
+    }
+    for _, m := range out {
+        if m.ID == "mlx-community/Qwen3.5-4B-MLX-4bit" {
+            t.Fatalf("slash twin must be dropped, got %v", ids(out))
+        }
+    }
+}
+
+func TestDedupeAliasModels_KeepsSlashWhenAlone(t *testing.T) {
+    in := []adapter.ModelInfo{{ID: "vendor/model-x", Object: "model", OwnedBy: "local"}}
+    out := dedupeAliasModels(in)
+    if len(out) != 1 || out[0].ID != "vendor/model-x" {
+        t.Fatalf("slash id without dash twin must be kept, got %v", ids(out))
+    }
+}
+
+func TestDedupeAliasModels_KeepsCloudIDsUnchanged(t *testing.T) {
+    in := []adapter.ModelInfo{
+        {ID: "openai/gpt-4o", Object: "model", OwnedBy: "cloud"},
+        {ID: "claude-3-5-sonnet", Object: "model", OwnedBy: "cloud"},
+    }
+    out := dedupeAliasModels(in)
+    if len(out) != 2 {
+        t.Fatalf("cloud ids without dash twins must be untouched, got %v", ids(out))
+    }
+}
+
+func modelIDs(ms []adapter.ModelInfo) []string {
+    out := make([]string, len(ms))
+    for i, m := range ms {
+        out[i] = m.ID
+    }
+    return out
+}

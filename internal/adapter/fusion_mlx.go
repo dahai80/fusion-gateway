@@ -306,7 +306,35 @@ func (p *FusionMLXProvider) HealthDetail(ctx context.Context) MLXHealthDetail {
     return detail
 }
 
+// canonicalizeModelID (#501): fusion-mlx keys its registry by the raw
+// requested id while its scan-normalized ids replace "/" with "--". A
+// request spelling the id with "/" therefore loads a second copy of weights
+// already resident under the dash form — doubling engine memory and tripping
+// the router's mlx_memory_overload local-routing check. When the
+// dash-normalized form matches a model in the engine registry (last
+// successful ListModels refresh), rewrite the request id to it; anything
+// else (no slash, unknown id, no refreshed registry) passes through
+// untouched so exotic ids are never mangled.
+func (p *FusionMLXProvider) canonicalizeModelID(id string) string {
+    if !strings.Contains(id, "/") {
+        return id
+    }
+    infos := p.ModelInfos()
+    if infos == nil {
+        return id
+    }
+    normalized := strings.ReplaceAll(id, "/", "--")
+    if _, ok := infos[normalized]; !ok {
+        return id
+    }
+    if normalized != id {
+        slog.Info("model id normalized to engine-canonical form", "requested", id, "canonical", normalized)
+    }
+    return normalized
+}
+
 func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     release, ok := p.tryInFlightAcquire()
     if !ok {
         slog.Info("local slot full, chat diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
@@ -353,6 +381,7 @@ func (p *FusionMLXProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 }
 
 func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     // RR4: hard slot cap at the real Acquire point. If the local cap is
     // reached, return ErrLocalSlotFull before opening any connection so the
     // handler can divert to cloud (A4-style) instead of overflowing mlx.
@@ -441,6 +470,7 @@ func (p *FusionMLXProvider) StreamChat(ctx context.Context, req *ChatRequest) (<
 // returned OpenAI SSE, which Claude Code could not parse ("Streaming
 // response ended before any complete data was received").
 func (p *FusionMLXProvider) Messages(ctx context.Context, req *AnthropicRequest) (*AnthropicResponse, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     release, ok := p.tryInFlightAcquire()
     if !ok {
         slog.Info("local slot full, messages diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
@@ -484,6 +514,7 @@ func (p *FusionMLXProvider) Messages(ctx context.Context, req *AnthropicRequest)
 // StreamMessages implements MessagesProvider (issue #188). Streams native
 // Anthropic SSE from fusion-mlx /v1/messages — no OpenAI conversion.
 func (p *FusionMLXProvider) StreamMessages(ctx context.Context, req *AnthropicRequest) (<-chan AnthropicStreamEvent, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     release, ok := p.tryInFlightAcquire()
     if !ok {
         slog.Info("local slot full, stream messages diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
@@ -561,6 +592,7 @@ func (p *FusionMLXProvider) setAnthropicHeaders(req *http.Request) {
 }
 
 func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     release, ok := p.tryInFlightAcquire()
     if !ok {
         slog.Info("local slot full, embedding diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
@@ -607,6 +639,7 @@ func (p *FusionMLXProvider) Embedding(ctx context.Context, req *EmbeddingRequest
 }
 
 func (p *FusionMLXProvider) Rerank(ctx context.Context, req *RerankRequest) (*RerankResponse, error) {
+    req.Model = p.canonicalizeModelID(req.Model)
     release, ok := p.tryInFlightAcquire()
     if !ok {
         slog.Info("local slot full, rerank diverting to cloud", "model", req.Model, "in_flight", p.InFlight(), "max", p.maxConcurrent)
