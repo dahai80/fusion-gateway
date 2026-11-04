@@ -1786,7 +1786,7 @@ func TestDecide_MLXMemoryOverload(t *testing.T) {
     hw := hardware.NewCollector(&cfg.Config.Hardware)
     hw.SetLatestForTest(hardware.HardwareMetrics{
         MLXActiveMemory: 800,
-        GPUInUseMemory:  1000,
+        GPUAllocMemory:  1000,
     })
     e := NewEngine(cfg, hw)
     e.SetLocalReady(true)
@@ -1804,6 +1804,33 @@ func TestDecide_MLXMemoryOverload(t *testing.T) {
         t.Errorf("expected mlx_memory_overload, got %s", dec.Reason)
     }
     t.Logf("MLX memory overload routes to cloud: reason=%s", dec.Reason)
+}
+
+// An idle machine reports a tiny instantaneous "in use" GPU figure; a resident
+// model's steady footprint divided by it once tripped this check on every
+// request. The ratio must be judged against the allocated budget instead.
+func TestDecide_MLXMemoryNotOverloadedOnIdleMachine(t *testing.T) {
+    cfg := defaultTestSnapshot()
+    cfg.Config.Routing.LocalPriority.MaxMLXMemoryRatio = 0.7
+    hw := hardware.NewCollector(&cfg.Config.Hardware)
+    hw.SetLatestForTest(hardware.HardwareMetrics{
+        MLXActiveMemory: 2384703121, // bge-m3 + one 4B model, resident
+        GPUAllocMemory:  5505957888, // allocated (wired) budget
+        GPUInUseMemory:  1358888960, // instantaneous in-use, collapsed on an idle machine
+    })
+    e := NewEngine(cfg, hw)
+    e.SetLocalReady(true)
+
+    budget := tokenizer.TokenBudget{InputTokens: 10, TotalBudget: 20}
+    ctx := tokenizer.WithTokenBudget(context.Background(), budget)
+    ctx = config.WithSnapshot(ctx, cfg)
+
+    req := &RouteRequest{Model: "test-model", Stream: false}
+    dec := e.Decide(ctx, req)
+    if dec.Reason == "mlx_memory_overload" {
+        t.Errorf("idle machine with a resident model must not trip mlx_memory_overload, got %s", dec.Reason)
+    }
+    t.Logf("idle machine stays local: backend=%s reason=%s", dec.Backend, dec.Reason)
 }
 
 func TestDecide_SwapThrashing(t *testing.T) {
