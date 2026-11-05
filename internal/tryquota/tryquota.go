@@ -61,6 +61,43 @@ type Store struct {
     usage     map[string]*dayUse
     overrides map[string]int // sub → daily budget override (0 = remove)
     path      string         // optional JSON snapshot path ("" = memory only)
+    saveTimer *time.Timer    // pending debounced save (nil = none armed)
+    writeMu   sync.Mutex     // serializes snapshot writes (Flush may race the timer)
+}
+
+// saveDebounce coalesces bursty Record calls into one snapshot write. A var
+// (not const) so tests can shorten it.
+var saveDebounce = 2 * time.Second
+
+// scheduleSave arms the debounced snapshot write. Callers must hold s.mu.
+// #526: without this the state_path snapshot was never written and the
+// usage rollup reset on every restart.
+func (s *Store) scheduleSave() {
+    if s.path == "" {
+        return
+    }
+    if s.saveTimer != nil {
+        return
+    }
+    s.saveTimer = time.AfterFunc(saveDebounce, func() {
+        s.mu.Lock()
+        s.saveTimer = nil
+        s.mu.Unlock()
+        s.Save()
+    })
+}
+
+// Flush persists any pending debounced snapshot immediately (shutdown path).
+// No-op when nothing is pending or no path is configured.
+func (s *Store) Flush() {
+    s.mu.Lock()
+    t := s.saveTimer
+    s.saveTimer = nil
+    s.mu.Unlock()
+    if t != nil {
+        t.Stop()
+        s.Save()
+    }
 }
 
 func NewStore(path string) *Store {
@@ -99,12 +136,15 @@ func (s *Store) load() {
     slog.Info("try-quota snapshot loaded", "path", s.path, "users", len(s.usage))
 }
 
-// Save persists the usage snapshot (call after accounting; debounced by the
-// caller). Best-effort — a failed write logs and keeps serving.
+// Save persists the usage snapshot (debounced via scheduleSave; Flush forces
+// a pending save). Best-effort — a failed write logs and keeps serving.
 func (s *Store) Save() {
     if s.path == "" {
         return
     }
+    // Serialize the write: Flush can race the debounce timer's final Save.
+    s.writeMu.Lock()
+    defer s.writeMu.Unlock()
     s.mu.Lock()
     snap := struct {
         Usage     map[string]*dayUse `json:"usage"`
@@ -160,6 +200,7 @@ func (s *Store) Record(sub string, tokens int, detail CallDetail, now time.Time)
         u.CallsCapped = true
     }
     u.Calls = append(u.Calls, detail)
+    s.scheduleSave()
     s.mu.Unlock()
 }
 
@@ -169,9 +210,11 @@ func (s *Store) SetBudgetOverride(sub string, budget int) {
     defer s.mu.Unlock()
     if budget <= 0 {
         delete(s.overrides, sub)
+        s.scheduleSave()
         return
     }
     s.overrides[sub] = budget
+    s.scheduleSave()
 }
 
 // BudgetOverride returns the user's pinned budget override, if any.
