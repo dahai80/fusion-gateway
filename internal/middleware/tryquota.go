@@ -25,11 +25,42 @@ import (
 // safe — reads the snapshot, never a stale copy).
 type TryQuotaConfigSource func() (enabled bool, budget int, secret string, estimateFallback int)
 
+// exactGatePaths are the single-endpoint LLM routes; prefixGatePaths cover
+// sub-path families (/v1/audio/transcriptions, /v1/audio/translations, ...).
+var (
+    exactGatePaths  = []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages", "/v1/rerank"}
+    prefixGatePaths = []string{"/v1/images/", "/v1/audio/"}
+)
+
+// gateApplies scopes the gate to product LLM call paths only. The gate must
+// NOT run on admin/ops surfaces: /admin/api/* requests authenticate with the
+// admin JWT and carry no identity token — gating them made every admin
+// endpoint 401 the moment try_quota.enabled flipped on (caught in live
+// verification). /v1/models and other discovery routes stay ungated too —
+// the quota is a usage limit, not an access wall for metadata.
+func gateApplies(path string) bool {
+    for _, p := range exactGatePaths {
+        if path == p {
+            return true
+        }
+    }
+    for _, p := range prefixGatePaths {
+        if strings.HasPrefix(path, p) {
+            return true
+        }
+    }
+    return false
+}
+
 // TryQuota builds the gate middleware. store may be nil (metering disabled
 // server-side; the gate itself still runs when enabled).
 func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(r *http.Request) int) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if !gateApplies(r.URL.Path) {
+                next.ServeHTTP(w, r)
+                return
+            }
             enabled, budget, secret, estFallback := cfgSrc()
             if !enabled || secret == "" {
                 next.ServeHTTP(w, r)

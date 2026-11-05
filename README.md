@@ -174,7 +174,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `try_quota.state_path` | "" | Optional JSON snapshot path for usage + budget overrides (survives restarts). Empty = memory only |
 | `try_quota.estimate_fallback` | 1024 | Token estimate used in the pre-check when the tokenizer cannot read the request body |
 
-**Try-quota admin endpoints (#514)**: `GET /admin/api/try-quota/usage` lists per-sub usage rows (day rollup, budget, override, recent calls); `POST /admin/api/try-quota/budget` with `{"sub": "...", "daily_budget": N}` pins a per-user budget override (`N <= 0` clears it). Both are admin-role gated. Over-budget requests get `429` with `{"detail": "daily token quota exceeded", "quota": {"used", "budget", "estimate"}}`.
+**Try-quota admin endpoints (#514)**: `GET /admin/api/try-quota/usage` lists per-sub usage rows (day rollup, budget, override, recent calls); `POST /admin/api/try-quota/budget` with `{"sub": "...", "daily_budget": N}` pins a per-user budget override (`N <= 0` clears it). Both are admin-role gated. Over-budget requests get `429` with `{"detail": "daily token quota exceeded", "quota": {"used", "budget", "estimate"}}`. The gate scopes to product LLM paths only (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/v1/rerank`, `/v1/images/*`, `/v1/audio/*`) — admin surfaces and discovery routes like `/v1/models` are never gated.
 
 ### Config file protection (防错 + 纠错)
 
