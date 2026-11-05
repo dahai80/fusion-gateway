@@ -40,3 +40,28 @@ func TestCatalog_ValidAndUnique(t *testing.T) {
         }
     }
 }
+
+// #518 AC: entries whose repo URL has no real remote must be marked
+// installable=false so install clients can filter them; every other entry
+// defaults to installable (missing flag = clonable repo).
+func TestCatalog_LocalOnlyEntriesNotInstallable(t *testing.T) {
+    entries, err := All()
+    if err != nil {
+        t.Fatalf("all: %v", err)
+    }
+    marked := 0
+    for _, e := range entries {
+        if e.IsInstallable() {
+            continue
+        }
+        marked++
+        t.Logf("local-only: %s -> %s", e.ID, e.Repo)
+    }
+    if marked == 0 {
+        t.Fatalf("no installable=false entries; ai-fit/ai-charactervoice must be marked (#518)")
+    }
+    // Default-installer semantics: entries without the flag are installable.
+    if entries[0].Installable != nil {
+        t.Fatalf("flagged entry %q in first position — default (omitted) entries must omit installable", entries[0].ID)
+    }
+}

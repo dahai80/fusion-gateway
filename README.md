@@ -303,6 +303,7 @@ cannot be left with no upstream.
 | `/v1/embeddings` | POST | Text embeddings (local-first, cluster sharding for batch) |
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
 | `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
+| `/v1/catalog` | GET | Three-source product catalog merge view (#488): static catalog + live manifest registry + supervisor health. Entries carry `installable` (#518) — `false` means the repo URL is a local-only product with no remote; install clients (e.g. `fusion install`) must reject those with a "local-only" message instead of a clone error. Absent flag = installable |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
 | `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `routing.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
 | `/v1/models/{id}/load` | POST | Load model (intercepted → model-hub `POST /api/v1/models/{id}/serve`). **Hub registry IDs only** — the id must exist in the model-hub registry; an MLX repo name loops back to the hub and 404s there. For MLX-level load/unload use `/v1/admin/models/{name}/load` (#340). |
