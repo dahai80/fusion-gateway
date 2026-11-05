@@ -271,6 +271,8 @@ func (s *Server) setupShellUsers(cfg *config.Config) {
 //     session Bearer token; user management additionally requires admin role
 func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/session", s.handleShellSessionIssue)
+    // #517: identity SSO ticket exchange → shell session (no second login).
+    mux.HandleFunc("POST /api/v1/shell/session/sso", s.handleShellSessionSSO)
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
     mux.HandleFunc("GET /api/v1/shell/me", s.withShellSession(s.handleShellMe))
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
