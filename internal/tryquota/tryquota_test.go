@@ -149,6 +149,71 @@ func TestSaveLoadRoundtrip(t *testing.T) {
     }
 }
 
+// #526: Record must schedule a debounced save when a snapshot path is set —
+// without it the usage rollup resets on every restart and state_path is dead
+// config.
+func TestRecordPersistsDebounced(t *testing.T) {
+    old := saveDebounce
+    saveDebounce = 30 * time.Millisecond
+    defer func() { saveDebounce = old }()
+    path := filepath.Join(t.TempDir(), "quota.json")
+    now := time.Now()
+    s := NewStore(path)
+    s.Record("u1", 42, CallDetail{Model: "m"}, now)
+    if _, err := os.Stat(path); !os.IsNotExist(err) {
+        t.Fatalf("snapshot written before debounce elapsed, want no file")
+    }
+    time.Sleep(150 * time.Millisecond)
+    s2 := NewStore(path)
+    if got := s2.UsedToday("u1", now); got != 42 {
+        t.Fatalf("reloaded UsedToday = %d, want 42", got)
+    }
+}
+
+// #526: SetBudgetOverride participates in the same debounced persistence.
+func TestSetBudgetOverridePersistsDebounced(t *testing.T) {
+    old := saveDebounce
+    saveDebounce = 30 * time.Millisecond
+    defer func() { saveDebounce = old }()
+    path := filepath.Join(t.TempDir(), "quota.json")
+    s := NewStore(path)
+    s.SetBudgetOverride("u1", 9000)
+    time.Sleep(150 * time.Millisecond)
+    s2 := NewStore(path)
+    if b, ok := s2.BudgetOverride("u1"); !ok || b != 9000 {
+        t.Fatalf("reloaded override = %d,%v want 9000,true", b, ok)
+    }
+}
+
+// #526: Flush persists any pending debounced snapshot immediately (shutdown
+// path) — no waiting for the debounce to elapse.
+func TestFlushPersistsImmediately(t *testing.T) {
+    old := saveDebounce
+    saveDebounce = time.Hour
+    defer func() { saveDebounce = old }()
+    path := filepath.Join(t.TempDir(), "quota.json")
+    now := time.Now()
+    s := NewStore(path)
+    s.Record("u1", 42, CallDetail{Model: "m"}, now)
+    s.Flush()
+    s2 := NewStore(path)
+    if got := s2.UsedToday("u1", now); got != 42 {
+        t.Fatalf("reloaded UsedToday after Flush = %d, want 42", got)
+    }
+}
+
+// #526: Flush without a pending save is a no-op (path empty or timer nil).
+func TestFlushNoPendingNoop(t *testing.T) {
+    s := NewStore("")
+    s.Flush()
+    path := filepath.Join(t.TempDir(), "quota.json")
+    s = NewStore(path)
+    s.Flush()
+    if _, err := os.Stat(path); !os.IsNotExist(err) {
+        t.Fatalf("Flush with no pending save wrote a file")
+    }
+}
+
 func TestSnapshotCorruptStartsEmpty(t *testing.T) {
     dir := t.TempDir()
     path := filepath.Join(dir, "quota.json")

@@ -1328,6 +1328,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
             slog.Warn("identity client close error", "error", cerr)
         }
     }
+    // #526: persist any pending debounced try-quota snapshot so the usage
+    // rollup survives a graceful restart. No-op when the meter is disabled.
+    if s.tryQuotaMeter != nil {
+        s.tryQuotaMeter.Flush()
+    }
     return err
 }
 
