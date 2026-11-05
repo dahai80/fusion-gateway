@@ -22,6 +22,22 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
 )
 
+// clampMaxTokens (#528) caps a client-supplied max_tokens at the configured
+// server.max_output_tokens ceiling before the request is proxied, so behavior
+// stays consistent regardless of backend. A ceiling of 0 (default) or less
+// disables the clamp; nil and non-positive values pass through untouched.
+func (s *Server) clampMaxTokens(v *int, path string) {
+    if v == nil || *v <= 0 {
+        return
+    }
+    ceiling := s.cfg.Config.Server.MaxOutputTokens
+    if ceiling <= 0 || *v <= ceiling {
+        return
+    }
+    slog.Info("clamping max_tokens to configured ceiling", "path", path, "requested", *v, "ceiling", ceiling)
+    *v = ceiling
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
@@ -45,6 +61,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
         return
     }
+    // #528: cap an oversized client max_tokens before routing/budget math.
+    s.clampMaxTokens(req.MaxTokens, "/v1/chat/completions")
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
 
@@ -1427,6 +1445,8 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Invalid JSON","type":"invalid_request"}}`, http.StatusBadRequest)
         return
     }
+    // #528: same ceiling as the chat path — the legacy shape funnels into it.
+    s.clampMaxTokens(legacyReq.MaxTokens, "/v1/completions")
 
     slog.Info("legacy completions request, converting to chat format", "model", legacyReq.Model)
 

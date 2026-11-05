@@ -71,6 +71,12 @@ type ServerConfig struct {
     // (maxProxyBodySize, 256 MiB). E5 (audit): proxy paths forwarded r.Body to
     // httputil.ReverseProxy with no cap → unbounded body OOMs fusion-mlx.
     ProxyMaxBodySize        int64           `mapstructure:"proxy_max_body_size"`
+    // MaxOutputTokens caps a client-supplied max_tokens before the request is
+    // proxied (#528): the gateway clamps the value so behavior stays
+    // consistent regardless of backend (some upstreams reject oversized
+    // values, pay-per-token clouds may not). 0 = disabled (default — no
+    // behavior change; set an explicit ceiling to enable).
+    MaxOutputTokens         int             `mapstructure:"max_output_tokens"`
     EnablePProf             bool            `mapstructure:"enable_pprof"`
     TLS                     *TLSConfig      `mapstructure:"tls"`
     AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
