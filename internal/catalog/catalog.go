@@ -33,6 +33,20 @@ type Entry struct {
     ModelClass     string   `json:"model_class"`
     SuggestedModel string   `json:"suggested_model,omitempty"`
     Dependencies   []string `json:"dependencies,omitempty"`
+    // Installable (#518) marks whether the repo URL is a real, clonable
+    // remote. Nil (field omitted) = installable — the historical default:
+    // every catalog entry pointed at a published repo before local-only
+    // products existed. Entries with installable=false are advertised for
+    // discovery (fusion list) but install clients (fusion install) must
+    // reject them with a clear "local-only" message instead of a clone
+    // error.
+    Installable *bool `json:"installable,omitempty"`
+}
+
+// Installable defaults to true: a missing flag means the entry predates the
+// local-only concept and its repo URL is clonable.
+func (e Entry) IsInstallable() bool {
+    return e.Installable == nil || *e.Installable
 }
 
 // All parses the embedded catalog. It never fails at runtime in practice

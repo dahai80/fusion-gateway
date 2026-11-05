@@ -1,376 +1,431 @@
 [
-    {
-        "id": "fusion-mlx",
-        "title_en": "Fusion-MLX",
-        "title_cn": "本地推理引擎",
-        "category": "core",
-        "repo": "https://github.com/dahai80/fusion-mlx",
-        "description_en": "MLX inference engine with an OpenAI-compatible API on :11434 — the local backend every domain app calls over HTTP.",
-        "description_cn": "MLX 推理引擎，:11434 提供 OpenAI 兼容 API，所有领域应用经 HTTP 调用的本地后端。",
-        "footprint": "~2 GB (plus model cache)",
-        "model_class": "local-inference",
-        "suggested_model": "",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-gateway",
-        "title_en": "Fusion-Gateway",
-        "title_cn": "混合推理网关",
-        "category": "core",
-        "repo": "https://github.com/dahai80/fusion-gateway",
-        "description_en": "Unified hybrid inference gateway (:11432) — hardware-aware local/cloud routing, OpenAI + Anthropic v1 surface, shell host, model-policy plane.",
-        "description_cn": "统一混合推理网关 (:11432) — 硬件感知本地/云路由，OpenAI + Anthropic v1 接口，shell 宿主，模型策略面。",
-        "footprint": "~45 MB",
-        "model_class": "none",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-supervisor",
-        "title_en": "Fusion-Supervisor",
-        "title_cn": "服务监督器",
-        "category": "core",
-        "repo": "https://github.com/dahai80/fusion-supervisor",
-        "description_en": "Unified start/stop + crash auto-recovery + SQLite health history + Prometheus metrics for the whole fleet (fusion-sv CLI, :9100 read-only face).",
-        "description_cn": "全舰队统一启停 + 崩溃自恢复 + SQLite 健康历史 + Prometheus 指标（fusion-sv CLI，:9100 只读面）。",
-        "footprint": "~15 MB",
-        "model_class": "none",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-web-shell",
-        "title_en": "Fusion Web Shell",
-        "title_cn": "统一 Web 宿主",
-        "category": "core",
-        "repo": "https://github.com/dahai80/fusion-web-shell",
-        "description_en": "Union web host: single entry via the gateway, unified login + RBAC, per-tab same-origin iframe modules, hot-pluggable manifest registry.",
-        "description_cn": "统一 Web 宿主：经网关单入口，统一登录 + RBAC，每标签同源 iframe 模块，可热插拔 manifest 注册表。",
-        "footprint": "~80 MB",
-        "model_class": "none",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-cli",
-        "title_en": "Fusion CLI",
-        "title_cn": "命令行入口",
-        "category": "core",
-        "repo": "https://github.com/dahai80/fusion-cli",
-        "description_en": "Rust single binary (`fusion` command) — the developer entry point for install, service control, and doctor flows.",
-        "description_cn": "Rust 单二进制（`fusion` 命令）— 开发者入口：安装、服务控制与 doctor 流程。",
-        "footprint": "~20 MB",
-        "model_class": "none",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-model-hub",
-        "title_en": "Fusion-Model-Hub",
-        "title_cn": "模型仓库",
-        "category": "platform",
-        "repo": "https://github.com/dahai80/fusion-models-hub",
-        "description_en": "Model repository and management service (:11444) — download, register, and serve model metadata for the local fleet.",
-        "description_cn": "模型仓库与管理服务 (:11444) — 本地舰队的模型下载、注册与元数据服务。",
-        "footprint": "~60 MB (plus model store)",
-        "model_class": "none",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-rag",
-        "title_en": "Knowledge Base",
-        "title_cn": "知识库",
-        "category": "platform",
-        "repo": "https://github.com/dahai80/fusion-rag",
-        "description_en": "Offline vector knowledge base (:11436) — embedding, indexing, and retrieval over local documents; successor of fusion-kb.",
-        "description_cn": "离线向量知识库 (:11436) — 本地文档的嵌入、索引与检索；fusion-kb 后继。",
-        "footprint": "~200 MB (plus index store)",
-        "model_class": "embedding",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-bench",
-        "title_en": "Fusion-Bench",
-        "title_cn": "评测基准",
-        "category": "platform",
-        "repo": "https://github.com/dahai80/fusion-bench",
-        "description_en": "Benchmark harness for local and cloud models — standardized eval suites, scoring, and comparison reports.",
-        "description_cn": "本地与云模型评测框架 — 标准化评测集、打分与对比报告。",
-        "footprint": "~50 MB",
-        "model_class": "any",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-trainer",
-        "title_en": "Fusion-Trainer",
-        "title_cn": "训练器",
-        "category": "platform",
-        "repo": "https://github.com/dahai80/fusion-trainer",
-        "description_en": "MLX SFT + RL trainer — fine-tune local models on Apple Silicon with LoRA adapters and full-parameter runs.",
-        "description_cn": "MLX SFT + RL 训练器 — 在 Apple Silicon 上以 LoRA 适配器与全参数方式微调本地模型。",
-        "footprint": "~150 MB (plus training data)",
-        "model_class": "local-inference",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-plugins-ecosystem",
-        "title_en": "Plugin Ecosystem",
-        "title_cn": "插件生态",
-        "category": "platform",
-        "repo": "https://github.com/dahai80/fusion-plugins-ecosystem",
-        "description_en": "Plugin registry and runtime — ClaudeGateway for Claude Desktop/Code/Web integration, per-plugin manifests and lifecycle.",
-        "description_cn": "插件注册表与运行时 — ClaudeGateway 承接 Claude Desktop/Code/Web 集成，插件 manifest 与生命周期管理。",
-        "footprint": "~120 MB",
-        "model_class": "any",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-memory",
-        "title_en": "Fusion-Memory",
-        "title_cn": "记忆中枢",
-        "category": "governance",
-        "repo": "https://github.com/dahai80/fusion-memory",
-        "description_en": "System-level long/short-term memory + cognitive graph hub (fm-server UDS/HTTP :11435, fm-py binding) — cross-session memory with forgetting curve + KG alignment.",
-        "description_cn": "系统级长期/短期记忆 + 认知图中枢（fm-server UDS/HTTP :11435，fm-py 绑定）— 跨会话记忆，遗忘曲线 + 知识图谱对齐。",
-        "footprint": "~90 MB (Rust workspace)",
-        "model_class": "embedding",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-identity",
-        "title_en": "Fusion-Identity",
-        "title_cn": "身份底座",
-        "category": "governance",
-        "repo": "https://github.com/dahai80/fusion-identity",
-        "description_en": "Tenant/identity/auth backbone — multi-tenancy, RBAC, and API-key lifecycle consumed by domain apps via the gateway identity gRPC plane.",
-        "description_cn": "租户/身份/认证底座 — 多租户、RBAC 与 API-key 生命周期，领域应用经网关 identity gRPC 面消费。",
-        "footprint": "~40 MB",
-        "model_class": "none",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-guard",
-        "title_en": "Fusion-Guard",
-        "title_cn": "安全护栏",
-        "category": "governance",
-        "repo": "https://github.com/dahai80/fusion-guard",
-        "description_en": "Prompt-injection / PII / policy guard library — the vendored SSOT behind the gateway's PII guard and prompt-injection screening.",
-        "description_cn": "提示注入 / PII / 策略护栏库 — 网关 PII 护栏与提示注入筛查的 vendored 权威源。",
-        "footprint": "~30 MB",
-        "model_class": "none",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-code",
-        "title_en": "Fusion-Code",
-        "title_cn": "代码助手",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-code",
-        "description_en": "AI coding module (TypeScript/Bun) — code generation and editing tools mounted into the shell host; consumes the model-policy chain.",
-        "description_cn": "AI 编码模块（TypeScript/Bun）— 挂入 shell 宿主的代码生成与编辑工具；消费模型策略链。",
-        "footprint": "~100 MB",
-        "model_class": "chat",
-        "suggested_model": "qwen3-coder-30b",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-agent-studio",
-        "title_en": "Agent Studio",
-        "title_cn": "智能体工作室",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-agent-studio",
-        "description_en": "Agent authoring and runtime studio — agent harness, budget funnels, permission engine; web GUI mounts into the shell.",
-        "description_cn": "智能体编排与运行时工作室 — agent 内核、预算漏斗、权限引擎；Web GUI 挂入 shell。",
-        "footprint": "~180 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway", "fusion-harness"]
-    },
-    {
-        "id": "fusion-cowork",
-        "title_en": "Fusion-Cowork",
-        "title_cn": "协作工作流",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-cowork",
-        "description_en": "DAG workflow engine — lazy-import node system, Chinese-friendly aliases, space-based session affinity through the gateway.",
-        "description_cn": "DAG 工作流引擎 — 懒加载节点系统，中文友好别名，经网关的 space 会话亲和。",
-        "footprint": "~140 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway", "fusion-harness"]
-    },
-    {
-        "id": "fusion-doc",
-        "title_en": "Fusion-Doc",
-        "title_cn": "文档服务",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-doc",
-        "description_en": "Document generation and management service (:11449) — structured document authoring backed by local models.",
-        "description_cn": "文档生成与管理服务 (:11449) — 本地模型支撑的结构化文档创作。",
-        "footprint": "~80 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-artifacts-engine",
-        "title_en": "Artifacts Engine",
-        "title_cn": "产物引擎",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-artifacts-engine",
-        "description_en": "Artifact generation and hosting engine (:11451) — renders and serves AI-produced artifacts with gateway service-key auth.",
-        "description_cn": "产物生成与托管引擎 (:11451) — 渲染并托管 AI 产物，走网关服务密钥认证。",
-        "footprint": "~70 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-autotest",
-        "title_en": "Fusion-AutoTest",
-        "title_cn": "自动化测试",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-autotest",
-        "description_en": "AI-driven macOS app testing — AX-tree automation agents that drive and verify native UI flows.",
-        "description_cn": "AI 驱动的 macOS 应用测试 — AX 树自动化 agent，驱动并验证原生 UI 流程。",
-        "footprint": "~60 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-studio",
-        "title_en": "Fusion-Studio",
-        "title_cn": "桌面客户端",
-        "category": "application",
-        "repo": "https://github.com/dahai80/fusion-studio",
-        "description_en": "SwiftUI unified desktop client — native macOS shell over the same gateway services (JSON-RPC 2.0 over UDS).",
-        "description_cn": "SwiftUI 统一桌面客户端 — 同一套网关服务的原生 macOS 外壳（UDS 上的 JSON-RPC 2.0）。",
-        "footprint": "~50 MB",
-        "model_class": "none",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-science",
-        "title_en": "Science Workbench",
-        "title_cn": "科学工作台",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-science",
-        "description_en": "Scientific computing domain app — literature, data analysis, and experiment drafting over local models.",
-        "description_cn": "科学计算领域应用 — 本地模型支撑的文献、数据分析与实验草拟。",
-        "footprint": "~90 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-finance",
-        "title_en": "Finance",
-        "title_cn": "金融分析",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-finance",
-        "description_en": "Finance domain app — market analysis and report drafting with local inference.",
-        "description_cn": "金融领域应用 — 本地推理支撑的市场分析与报告草拟。",
-        "footprint": "~70 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-health",
-        "title_en": "Health",
-        "title_cn": "健康助手",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-health",
-        "description_en": "Health domain app — personal health record summaries and Q&A, fully offline.",
-        "description_cn": "健康领域应用 — 个人健康档案摘要与问答，完全离线。",
-        "footprint": "~60 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-simulation",
-        "title_en": "Simulation",
-        "title_cn": "物理仿真",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-simulation",
-        "description_en": "PyBullet physics + gRPC + FlatBuffers service layer for simulation workloads.",
-        "description_cn": "PyBullet 物理 + gRPC + FlatBuffers 服务层的仿真工作负载。",
-        "footprint": "~300 MB",
-        "model_class": "none",
-        "dependencies": []
-    },
-    {
-        "id": "fusion-security",
-        "title_en": "Security Console",
-        "title_cn": "安全控制台",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-security",
-        "description_en": "Security operations console (:11454) — tenant audit, console home, identity admin integration.",
-        "description_cn": "安全运营控制台 (:11454) — 租户审计、控制台首页、identity admin 集成。",
-        "footprint": "~80 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway", "fusion-identity"]
-    },
-    {
-        "id": "fusion-speech",
-        "title_en": "Speech",
-        "title_cn": "语音服务",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-speech",
-        "description_en": "Local STT/TTS daemon — offline speech transcription and synthesis for all fusion apps.",
-        "description_cn": "本地 STT/TTS 守护进程 — 离线语音转写与合成，供全部 fusion 应用使用。",
-        "footprint": "~500 MB (plus voice models)",
-        "model_class": "speech",
-        "dependencies": ["fusion-mlx"]
-    },
-    {
-        "id": "fusion-gupiao",
-        "title_en": "A-Share Platform",
-        "title_cn": "A股平台",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-gupiao",
-        "description_en": "A-share stock platform — quotes, screening, and analysis over local models.",
-        "description_cn": "A股股票平台 — 本地模型支撑的行情、选股与分析。",
-        "footprint": "~100 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-multi-node",
-        "title_en": "Multi-Node",
-        "title_cn": "多机协同",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-multi-node",
-        "description_en": "Multi-node orchestration — cluster routing, HA master election, cross-node browser scheduling via the gateway.",
-        "description_cn": "多机编排 — 集群路由、HA 主选举、经网关的跨节点浏览器调度。",
-        "footprint": "~60 MB",
-        "model_class": "none",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "fusion-osagent",
-        "title_en": "OS Agent",
-        "title_cn": "桌面体感代理",
-        "category": "domain",
-        "repo": "https://github.com/dahai80/fusion-osagent",
-        "description_en": "Desktop embodied-AI barrier layer — OS automation agents with audited action surfaces.",
-        "description_cn": "桌面具身智能屏障层 — 带审计动作面的操作系统自动化 agent。",
-        "footprint": "~90 MB",
-        "model_class": "chat",
-        "dependencies": ["fusion-gateway"]
-    },
-    {
-        "id": "ai-charactervoice",
-        "title_en": "Character Voice",
-        "title_cn": "角色配音",
-        "category": "business",
-        "repo": "https://github.com/dahai80/ai-charactervoice",
-        "description_en": "Business app: character voice acting pipeline (session-based TTS over identity-provisioned tenants).",
-        "description_cn": "业务应用：角色配音流水线（基于 identity 供给租户的会话式 TTS）。",
-        "footprint": "~120 MB",
-        "model_class": "speech",
-        "dependencies": ["fusion-identity"]
-    },
-    {
-        "id": "ai-fit",
-        "title_en": "AI Fit",
-        "title_cn": "AI 健身",
-        "category": "business",
-        "repo": "https://github.com/dahai80/ai-fit",
-        "description_en": "Business app: fitness coaching with pose analysis and plan generation.",
-        "description_cn": "业务应用：姿态分析与计划生成的健身教练。",
-        "footprint": "~150 MB",
-        "model_class": "vision",
-        "dependencies": ["fusion-gateway"]
-    }
+  {
+    "id": "fusion-mlx",
+    "title_en": "Fusion-MLX",
+    "title_cn": "本地推理引擎",
+    "category": "core",
+    "repo": "https://github.com/dahai80/fusion-mlx",
+    "description_en": "MLX inference engine with an OpenAI-compatible API on :11434 — the local backend every domain app calls over HTTP.",
+    "description_cn": "MLX 推理引擎，:11434 提供 OpenAI 兼容 API，所有领域应用经 HTTP 调用的本地后端。",
+    "footprint": "~2 GB (plus model cache)",
+    "model_class": "local-inference",
+    "suggested_model": "",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-gateway",
+    "title_en": "Fusion-Gateway",
+    "title_cn": "混合推理网关",
+    "category": "core",
+    "repo": "https://github.com/dahai80/fusion-gateway",
+    "description_en": "Unified hybrid inference gateway (:11432) — hardware-aware local/cloud routing, OpenAI + Anthropic v1 surface, shell host, model-policy plane.",
+    "description_cn": "统一混合推理网关 (:11432) — 硬件感知本地/云路由，OpenAI + Anthropic v1 接口，shell 宿主，模型策略面。",
+    "footprint": "~45 MB",
+    "model_class": "none",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-supervisor",
+    "title_en": "Fusion-Supervisor",
+    "title_cn": "服务监督器",
+    "category": "core",
+    "repo": "https://github.com/dahai80/fusion-supervisor",
+    "description_en": "Unified start/stop + crash auto-recovery + SQLite health history + Prometheus metrics for the whole fleet (fusion-sv CLI, :9100 read-only face).",
+    "description_cn": "全舰队统一启停 + 崩溃自恢复 + SQLite 健康历史 + Prometheus 指标（fusion-sv CLI，:9100 只读面）。",
+    "footprint": "~15 MB",
+    "model_class": "none",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-web-shell",
+    "title_en": "Fusion Web Shell",
+    "title_cn": "统一 Web 宿主",
+    "category": "core",
+    "repo": "https://github.com/dahai80/fusion-web-shell",
+    "description_en": "Union web host: single entry via the gateway, unified login + RBAC, per-tab same-origin iframe modules, hot-pluggable manifest registry.",
+    "description_cn": "统一 Web 宿主：经网关单入口，统一登录 + RBAC，每标签同源 iframe 模块，可热插拔 manifest 注册表。",
+    "footprint": "~80 MB",
+    "model_class": "none",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-cli",
+    "title_en": "Fusion CLI",
+    "title_cn": "命令行入口",
+    "category": "core",
+    "repo": "https://github.com/dahai80/fusion-cli",
+    "description_en": "Rust single binary (`fusion` command) — the developer entry point for install, service control, and doctor flows.",
+    "description_cn": "Rust 单二进制（`fusion` 命令）— 开发者入口：安装、服务控制与 doctor 流程。",
+    "footprint": "~20 MB",
+    "model_class": "none",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-model-hub",
+    "title_en": "Fusion-Model-Hub",
+    "title_cn": "模型仓库",
+    "category": "platform",
+    "repo": "https://github.com/dahai80/fusion-models-hub",
+    "description_en": "Model repository and management service (:11444) — download, register, and serve model metadata for the local fleet.",
+    "description_cn": "模型仓库与管理服务 (:11444) — 本地舰队的模型下载、注册与元数据服务。",
+    "footprint": "~60 MB (plus model store)",
+    "model_class": "none",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-rag",
+    "title_en": "Knowledge Base",
+    "title_cn": "知识库",
+    "category": "platform",
+    "repo": "https://github.com/dahai80/fusion-rag",
+    "description_en": "Offline vector knowledge base (:11436) — embedding, indexing, and retrieval over local documents; successor of fusion-kb.",
+    "description_cn": "离线向量知识库 (:11436) — 本地文档的嵌入、索引与检索；fusion-kb 后继。",
+    "footprint": "~200 MB (plus index store)",
+    "model_class": "embedding",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-bench",
+    "title_en": "Fusion-Bench",
+    "title_cn": "评测基准",
+    "category": "platform",
+    "repo": "https://github.com/dahai80/fusion-bench",
+    "description_en": "Benchmark harness for local and cloud models — standardized eval suites, scoring, and comparison reports.",
+    "description_cn": "本地与云模型评测框架 — 标准化评测集、打分与对比报告。",
+    "footprint": "~50 MB",
+    "model_class": "any",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-trainer",
+    "title_en": "Fusion-Trainer",
+    "title_cn": "训练器",
+    "category": "platform",
+    "repo": "https://github.com/dahai80/fusion-trainer",
+    "description_en": "MLX SFT + RL trainer — fine-tune local models on Apple Silicon with LoRA adapters and full-parameter runs.",
+    "description_cn": "MLX SFT + RL 训练器 — 在 Apple Silicon 上以 LoRA 适配器与全参数方式微调本地模型。",
+    "footprint": "~150 MB (plus training data)",
+    "model_class": "local-inference",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-plugins-ecosystem",
+    "title_en": "Plugin Ecosystem",
+    "title_cn": "插件生态",
+    "category": "platform",
+    "repo": "https://github.com/dahai80/fusion-plugins-ecosystem",
+    "description_en": "Plugin registry and runtime — ClaudeGateway for Claude Desktop/Code/Web integration, per-plugin manifests and lifecycle.",
+    "description_cn": "插件注册表与运行时 — ClaudeGateway 承接 Claude Desktop/Code/Web 集成，插件 manifest 与生命周期管理。",
+    "footprint": "~120 MB",
+    "model_class": "any",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-memory",
+    "title_en": "Fusion-Memory",
+    "title_cn": "记忆中枢",
+    "category": "governance",
+    "repo": "https://github.com/dahai80/fusion-memory",
+    "description_en": "System-level long/short-term memory + cognitive graph hub (fm-server UDS/HTTP :11435, fm-py binding) — cross-session memory with forgetting curve + KG alignment.",
+    "description_cn": "系统级长期/短期记忆 + 认知图中枢（fm-server UDS/HTTP :11435，fm-py 绑定）— 跨会话记忆，遗忘曲线 + 知识图谱对齐。",
+    "footprint": "~90 MB (Rust workspace)",
+    "model_class": "embedding",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-identity",
+    "title_en": "Fusion-Identity",
+    "title_cn": "身份底座",
+    "category": "governance",
+    "repo": "https://github.com/dahai80/fusion-identity",
+    "description_en": "Tenant/identity/auth backbone — multi-tenancy, RBAC, and API-key lifecycle consumed by domain apps via the gateway identity gRPC plane.",
+    "description_cn": "租户/身份/认证底座 — 多租户、RBAC 与 API-key 生命周期，领域应用经网关 identity gRPC 面消费。",
+    "footprint": "~40 MB",
+    "model_class": "none",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-guard",
+    "title_en": "Fusion-Guard",
+    "title_cn": "安全护栏",
+    "category": "governance",
+    "repo": "https://github.com/dahai80/fusion-guard",
+    "description_en": "Prompt-injection / PII / policy guard library — the vendored SSOT behind the gateway's PII guard and prompt-injection screening.",
+    "description_cn": "提示注入 / PII / 策略护栏库 — 网关 PII 护栏与提示注入筛查的 vendored 权威源。",
+    "footprint": "~30 MB",
+    "model_class": "none",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-code",
+    "title_en": "Fusion-Code",
+    "title_cn": "代码助手",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-code",
+    "description_en": "AI coding module (TypeScript/Bun) — code generation and editing tools mounted into the shell host; consumes the model-policy chain.",
+    "description_cn": "AI 编码模块（TypeScript/Bun）— 挂入 shell 宿主的代码生成与编辑工具；消费模型策略链。",
+    "footprint": "~100 MB",
+    "model_class": "chat",
+    "suggested_model": "qwen3-coder-30b",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-agent-studio",
+    "title_en": "Agent Studio",
+    "title_cn": "智能体工作室",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-agent-studio",
+    "description_en": "Agent authoring and runtime studio — agent harness, budget funnels, permission engine; web GUI mounts into the shell.",
+    "description_cn": "智能体编排与运行时工作室 — agent 内核、预算漏斗、权限引擎；Web GUI 挂入 shell。",
+    "footprint": "~180 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway",
+      "fusion-harness"
+    ]
+  },
+  {
+    "id": "fusion-cowork",
+    "title_en": "Fusion-Cowork",
+    "title_cn": "协作工作流",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-cowork",
+    "description_en": "DAG workflow engine — lazy-import node system, Chinese-friendly aliases, space-based session affinity through the gateway.",
+    "description_cn": "DAG 工作流引擎 — 懒加载节点系统，中文友好别名，经网关的 space 会话亲和。",
+    "footprint": "~140 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway",
+      "fusion-harness"
+    ]
+  },
+  {
+    "id": "fusion-doc",
+    "title_en": "Fusion-Doc",
+    "title_cn": "文档服务",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-doc",
+    "description_en": "Document generation and management service (:11449) — structured document authoring backed by local models.",
+    "description_cn": "文档生成与管理服务 (:11449) — 本地模型支撑的结构化文档创作。",
+    "footprint": "~80 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-artifacts-engine",
+    "title_en": "Artifacts Engine",
+    "title_cn": "产物引擎",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-artifacts-engine",
+    "description_en": "Artifact generation and hosting engine (:11451) — renders and serves AI-produced artifacts with gateway service-key auth.",
+    "description_cn": "产物生成与托管引擎 (:11451) — 渲染并托管 AI 产物，走网关服务密钥认证。",
+    "footprint": "~70 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-autotest",
+    "title_en": "Fusion-AutoTest",
+    "title_cn": "自动化测试",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-autotest",
+    "description_en": "AI-driven macOS app testing — AX-tree automation agents that drive and verify native UI flows.",
+    "description_cn": "AI 驱动的 macOS 应用测试 — AX 树自动化 agent，驱动并验证原生 UI 流程。",
+    "footprint": "~60 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-studio",
+    "title_en": "Fusion-Studio",
+    "title_cn": "桌面客户端",
+    "category": "application",
+    "repo": "https://github.com/dahai80/fusion-studio",
+    "description_en": "SwiftUI unified desktop client — native macOS shell over the same gateway services (JSON-RPC 2.0 over UDS).",
+    "description_cn": "SwiftUI 统一桌面客户端 — 同一套网关服务的原生 macOS 外壳（UDS 上的 JSON-RPC 2.0）。",
+    "footprint": "~50 MB",
+    "model_class": "none",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-science",
+    "title_en": "Science Workbench",
+    "title_cn": "科学工作台",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-science",
+    "description_en": "Scientific computing domain app — literature, data analysis, and experiment drafting over local models.",
+    "description_cn": "科学计算领域应用 — 本地模型支撑的文献、数据分析与实验草拟。",
+    "footprint": "~90 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-finance",
+    "title_en": "Finance",
+    "title_cn": "金融分析",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-finance",
+    "description_en": "Finance domain app — market analysis and report drafting with local inference.",
+    "description_cn": "金融领域应用 — 本地推理支撑的市场分析与报告草拟。",
+    "footprint": "~70 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-health",
+    "title_en": "Health",
+    "title_cn": "健康助手",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-health",
+    "description_en": "Health domain app — personal health record summaries and Q&A, fully offline.",
+    "description_cn": "健康领域应用 — 个人健康档案摘要与问答，完全离线。",
+    "footprint": "~60 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-simulation",
+    "title_en": "Simulation",
+    "title_cn": "物理仿真",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-simulation",
+    "description_en": "PyBullet physics + gRPC + FlatBuffers service layer for simulation workloads.",
+    "description_cn": "PyBullet 物理 + gRPC + FlatBuffers 服务层的仿真工作负载。",
+    "footprint": "~300 MB",
+    "model_class": "none",
+    "dependencies": []
+  },
+  {
+    "id": "fusion-security",
+    "title_en": "Security Console",
+    "title_cn": "安全控制台",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-security",
+    "description_en": "Security operations console (:11454) — tenant audit, console home, identity admin integration.",
+    "description_cn": "安全运营控制台 (:11454) — 租户审计、控制台首页、identity admin 集成。",
+    "footprint": "~80 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway",
+      "fusion-identity"
+    ]
+  },
+  {
+    "id": "fusion-speech",
+    "title_en": "Speech",
+    "title_cn": "语音服务",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-speech",
+    "description_en": "Local STT/TTS daemon — offline speech transcription and synthesis for all fusion apps.",
+    "description_cn": "本地 STT/TTS 守护进程 — 离线语音转写与合成，供全部 fusion 应用使用。",
+    "footprint": "~500 MB (plus voice models)",
+    "model_class": "speech",
+    "dependencies": [
+      "fusion-mlx"
+    ]
+  },
+  {
+    "id": "fusion-gupiao",
+    "title_en": "A-Share Platform",
+    "title_cn": "A股平台",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-gupiao",
+    "description_en": "A-share stock platform — quotes, screening, and analysis over local models.",
+    "description_cn": "A股股票平台 — 本地模型支撑的行情、选股与分析。",
+    "footprint": "~100 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-multi-node",
+    "title_en": "Multi-Node",
+    "title_cn": "多机协同",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-multi-node",
+    "description_en": "Multi-node orchestration — cluster routing, HA master election, cross-node browser scheduling via the gateway.",
+    "description_cn": "多机编排 — 集群路由、HA 主选举、经网关的跨节点浏览器调度。",
+    "footprint": "~60 MB",
+    "model_class": "none",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "fusion-osagent",
+    "title_en": "OS Agent",
+    "title_cn": "桌面体感代理",
+    "category": "domain",
+    "repo": "https://github.com/dahai80/fusion-osagent",
+    "description_en": "Desktop embodied-AI barrier layer — OS automation agents with audited action surfaces.",
+    "description_cn": "桌面具身智能屏障层 — 带审计动作面的操作系统自动化 agent。",
+    "footprint": "~90 MB",
+    "model_class": "chat",
+    "dependencies": [
+      "fusion-gateway"
+    ]
+  },
+  {
+    "id": "ai-charactervoice",
+    "title_en": "Character Voice",
+    "title_cn": "角色配音",
+    "category": "business",
+    "repo": "https://github.com/dahai80/ai-charactervoice",
+    "description_en": "Business app: character voice acting pipeline (session-based TTS over identity-provisioned tenants).",
+    "description_cn": "业务应用：角色配音流水线（基于 identity 供给租户的会话式 TTS）。",
+    "footprint": "~120 MB",
+    "model_class": "speech",
+    "dependencies": [
+      "fusion-identity"
+    ],
+    "installable": false
+  },
+  {
+    "id": "ai-fit",
+    "title_en": "AI Fit",
+    "title_cn": "AI 健身",
+    "category": "business",
+    "repo": "https://github.com/dahai80/ai-fit",
+    "description_en": "Business app: fitness coaching with pose analysis and plan generation.",
+    "description_cn": "业务应用：姿态分析与计划生成的健身教练。",
+    "footprint": "~150 MB",
+    "model_class": "vision",
+    "dependencies": [
+      "fusion-gateway"
+    ],
+    "installable": false
+  }
 ]
