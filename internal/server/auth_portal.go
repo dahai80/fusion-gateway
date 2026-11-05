@@ -16,6 +16,7 @@
 package server
 
 import (
+    "context"
     "crypto/rand"
     "crypto/rsa"
     "encoding/base64"
@@ -31,6 +32,8 @@ import (
     "strings"
     "sync"
     "time"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 
     "github.com/golang-jwt/jwt/v5"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -129,7 +132,7 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
     mux.Handle("/auth/api/code", portal.guard(portal.handleIssueCode))
     mux.Handle("/auth/api/code/exchange", portal.guard(portal.handleExchangeCode))
 
-    go portal.janitor()
+    s.authPortalWorker = lifecycle.Start(context.Background(), "auth_portal_janitor", portal.janitor)
     slog.Info("auth portal registered", "static_dir", staticDir, "identity", identityURL, "code_ttl_secs", ttl, "redirect_uris", len(cfg.RedirectURIs))
 }
 
@@ -166,11 +169,17 @@ func (p *authPortal) allow(ip string) bool {
     return true
 }
 
-// janitor purges expired codes and stale rate windows periodically.
-func (p *authPortal) janitor() {
+// janitor purges expired codes and stale rate windows periodically. Runs as
+// a lifecycle.Worker (bare-goroutine gate) so Shutdown cancels + joins it.
+func (p *authPortal) janitor(ctx context.Context) {
     ticker := time.NewTicker(time.Duration(p.cfg.CodeTTLSecs) * time.Second)
     defer ticker.Stop()
-    for range ticker.C {
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+        }
         now := time.Now()
         p.codesMu.Lock()
         for code, g := range p.codes {

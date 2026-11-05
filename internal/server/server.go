@@ -231,6 +231,9 @@ type Server struct {
     shellProxy    *shell.Proxy
     shellUsers    *shell.UserStore
     shellPoller   *lifecycle.Worker
+    // #506: auth-portal janitor (expired codes + stale rate windows); a
+    // lifecycle worker so Shutdown cancels + joins it (bare-goroutine gate).
+    authPortalWorker *lifecycle.Worker
     // #275: E6 admin surfaces — encrypted adapter vault, connector document
     // store, policy overrides, hash-chain audit, roles + menu matrix. All nil
     // when shell.enabled=false.
@@ -1284,6 +1287,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
     }
     if s.evictOAuth2Worker != nil {
         s.evictOAuth2Worker.Stop()
+    }
+    // #506: stop the auth-portal janitor (cancel + join).
+    if s.authPortalWorker != nil {
+        s.authPortalWorker.Stop()
     }
     // #215: stop the shell health poller (cancel + join) so it does not tick
     // against a torn-down registry.
