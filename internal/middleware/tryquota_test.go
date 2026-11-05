@@ -69,6 +69,35 @@ func tqDecodeQuota(t *testing.T, body []byte) (string, map[string]interface{}) {
     return detail, quota
 }
 
+func TestGateAppliesScoping(t *testing.T) {
+    yes := []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages", "/v1/rerank", "/v1/images/generations", "/v1/audio/transcriptions"}
+    no := []string{"/v1/models", "/admin/api/try-quota/usage", "/admin/api/keys", "/healthz", "/v1/stream/abc/events", "/gateway/v1/browser/nodes", "/v1/moderations", "/v1/batches"}
+    for _, p := range yes {
+        if !gateApplies(p) {
+            t.Fatalf("gateApplies(%q) = false, want true", p)
+        }
+    }
+    for _, p := range no {
+        if gateApplies(p) {
+            t.Fatalf("gateApplies(%q) = true, want false", p)
+        }
+    }
+}
+
+// Live-verification regression: enabling the gate must not 401 the admin
+// surface (admin JWT carries no identity token).
+func TestTryQuotaAdminPathUntouched(t *testing.T) {
+    called := false
+    h := tqHandler(tqCfgSrc(true, 1000), tryquota.NewStore(""), func(w http.ResponseWriter, r *http.Request) {
+        called = true
+    })
+    req := httptest.NewRequest(http.MethodGet, "/admin/api/try-quota/usage", nil)
+    h.ServeHTTP(httptest.NewRecorder(), req)
+    if !called {
+        t.Fatalf("admin path must bypass the identity gate")
+    }
+}
+
 func TestTryQuotaDisabledPassesThrough(t *testing.T) {
     called := false
     h := tqHandler(tqCfgSrc(false, 1000), tryquota.NewStore(""), func(w http.ResponseWriter, r *http.Request) {
