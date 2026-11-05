@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fusion Account — Sign in</title>
+<link rel="stylesheet" href="/auth/style.css">
+</head>
+<body>
+<main class="card">
+    <header class="head">
+        <div class="logo">F</div>
+        <h1 id="title">Sign in to Fusion</h1>
+        <p id="subtitle" class="sub">One account for the fusion ecosystem</p>
+        <div class="lang">
+            <button id="lang-en" type="button" class="langbtn active">EN</button>
+            <button id="lang-zh" type="button" class="langbtn">中文</button>
+        </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+        <button type="button" data-tab="login" class="tab active" data-i18n="tab-login">Sign in</button>
+        <button type="button" data-tab="register" class="tab" data-i18n="tab-register">Create account</button>
+        <button type="button" data-tab="tenant" class="tab" data-i18n="tab-tenant">Register a team</button>
+    </nav>
+
+    <form id="form-login" class="pane active" autocomplete="on">
+        <label data-i18n="f-username">Username</label>
+        <input name="username" required autocomplete="username">
+        <label data-i18n="f-password">Password</label>
+        <input name="password" type="password" required autocomplete="current-password">
+        <label data-i18n="f-tenant">Tenant <span class="opt" data-i18n="f-optional">(optional)</span></label>
+        <input name="tenant_id" autocomplete="off">
+        <button type="submit" class="primary" data-i18n="btn-login">Sign in</button>
+    </form>
+
+    <form id="form-register" class="pane">
+        <label data-i18n="f-username">Username</label>
+        <input name="username" required minlength="3" autocomplete="username">
+        <label data-i18n="f-email">Email</label>
+        <input name="email" type="email" required autocomplete="email">
+        <label data-i18n="f-password">Password</label>
+        <input name="password" type="password" required minlength="10" autocomplete="new-password">
+        <label data-i18n="f-password-confirm">Confirm password</label>
+        <input name="password_confirm" type="password" required minlength="10" autocomplete="new-password">
+        <p class="hint" data-i18n="hint-verify">We will send a verification email. Address verification is required before sign-in.</p>
+        <button type="submit" class="primary" data-i18n="btn-register">Create account</button>
+    </form>
+
+    <form id="form-tenant" class="pane">
+        <label data-i18n="f-team">Team name</label>
+        <input name="tenant_display_name" required maxlength="128">
+        <label data-i18n="f-username">Username</label>
+        <input name="admin_username" required minlength="3">
+        <label data-i18n="f-email">Email</label>
+        <input name="admin_email" type="email" required>
+        <label data-i18n="f-password">Password</label>
+        <input name="admin_password" type="password" required minlength="12" autocomplete="new-password">
+        <label data-i18n="f-password-confirm">Confirm password</label>
+        <input name="admin_password_confirm" type="password" required minlength="12" autocomplete="new-password">
+        <p class="hint" data-i18n="hint-tenant">The team activates immediately; token usage is capped by the plan quota.</p>
+        <button type="submit" class="primary" data-i18n="btn-tenant">Register team</button>
+    </form>
+
+    <form id="form-verify" class="pane">
+        <p class="hint" id="verify-msg" data-i18n="hint-verify-sent">Verification sent. Enter the token from the email link.</p>
+        <label data-i18n="f-token">Verification token</label>
+        <input name="token" required>
+        <button type="submit" class="primary" data-i18n="btn-verify">Verify email</button>
+    </form>
+
+    <div id="message" class="msg" hidden></div>
+    <footer class="foot" data-i18n="foot">Protected by the fusion gateway · one-time handoff to your app</footer>
+</main>
+<script src="/auth/app.js"></script>
+</body>
+</html>
