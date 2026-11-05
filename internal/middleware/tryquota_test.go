@@ -48,7 +48,7 @@ func tqRoundTrip(t *testing.T, h http.Handler, token string) *httptest.ResponseR
     entry := &store.RequestLog{}
     req = WithRequestLogContext(req, entry)
     if token != "" {
-        req.Header.Set("Authorization", "Bearer "+token)
+        req.Header.Set("X-Fusion-Identity-Token", token)
     }
     rec := httptest.NewRecorder()
     h.ServeHTTP(rec, req)
@@ -225,15 +225,19 @@ func TestTryQuotaFinalizeNoopGuards(t *testing.T) {
     }
 }
 
-func TestTryQuotaNonBearerAuthIgnored(t *testing.T) {
+func TestTryQuotaAuthorizationHeaderIgnored(t *testing.T) {
     h := tqHandler(tqCfgSrc(true, 1000), tryquota.NewStore(""), func(w http.ResponseWriter, r *http.Request) {
         t.Fatalf("handler must not run")
     })
+    // The Authorization header is the gateway-key plane (extractAPIKey reads
+    // Bearer first) — it must never satisfy the identity gate, even when it
+    // carries a structurally valid JWT.
+    tok := tqMint(t, "u1", time.Now().Add(time.Hour))
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-    req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+    req.Header.Set("Authorization", "Bearer "+tok)
     rec := httptest.NewRecorder()
     h.ServeHTTP(rec, req)
     if rec.Code != http.StatusUnauthorized {
-        t.Fatalf("code = %d, want 401 (non-Bearer credential is not an identity token)", rec.Code)
+        t.Fatalf("code = %d, want 401 (Authorization is not the identity plane)", rec.Code)
     }
 }

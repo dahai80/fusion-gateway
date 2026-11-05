@@ -796,8 +796,8 @@ auth_portal:
   rate_per_min: 30
 
 # Per-user daily token quota gate (#514). When enabled, every non-master
-# /v1/* LLM call must carry a fusion-identity HS256 JWT as the Bearer
-# credential; the `sub` claim is the metering key.
+# /v1/* LLM call must carry a fusion-identity HS256 JWT in the
+# X-Fusion-Identity-Token header; the `sub` claim is the metering key.
 try_quota:
   enabled: false
   daily_token_budget: 100000

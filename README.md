@@ -168,7 +168,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `mcp.max_requests` | 10000 | Max tracked MCP requests |
 | `mcp.node_port` | 11445 | Remote node port for forwarding |
 | `mcp.local_port` | 9000 | Local plugin server port |
-| `try_quota.enabled` | false | #514: enable the per-user daily token quota gate. When on, every non-master `/v1/*` LLM call must carry a fusion-identity HS256 JWT as the Bearer credential; the `sub` claim is the metering key |
+| `try_quota.enabled` | false | #514: enable the per-user daily token quota gate. When on, every non-master `/v1/*` LLM call must carry a fusion-identity HS256 JWT in the `X-Fusion-Identity-Token` header (the Authorization/Bearer plane stays the gateway API key); the token's `sub` claim is the metering key |
 | `try_quota.daily_token_budget` | 100000 | Default daily token budget per user (soft limit: in-flight requests finish, new over-budget requests get 429) |
 | `try_quota.jwt_secret` | "" | fusion-identity HS256 signing secret. Empty = gate passes through even when enabled (not provisioned) |
 | `try_quota.state_path` | "" | Optional JSON snapshot path for usage + budget overrides (survives restarts). Empty = memory only |

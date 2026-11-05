@@ -1090,8 +1090,8 @@ type ServiceRouteConfig struct {
 // fusion-identity through an explicit path allowlist — the raw /svc/identity
 // surface (service-token injected) stays credentialed and never public.
 // TryQuotaConfig wires the per-user daily token quota meter (#514). The
-// metering key is the `sub` of a fusion-identity HS256 access token sent as
-// the Bearer credential on product LLM calls; the daily budget applies per
+// metering key is the `sub` of a fusion-identity HS256 access token sent in
+// the X-Fusion-Identity-Token header on product LLM calls; the daily budget applies per
 // user (override per user via the admin endpoint), soft-limit semantics —
 // in-flight requests finish, only new requests are rejected with 429.
 type TryQuotaConfig struct {

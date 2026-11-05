@@ -2,7 +2,8 @@ package middleware
 
 // #514: try-quota gate middleware. Runs LAST in the chain (after auth/RBAC/
 // budget/rate-limit). When try_quota.enabled, every product LLM call must
-// carry a valid fusion-identity HS256 access token as the Bearer credential;
+// carry a valid fusion-identity HS256 access token in the
+// X-Fusion-Identity-Token header;
 // the metering key is the token's `sub`. Pre-check: used_today(sub) +
 // tokenizer estimate vs the user's daily budget → 429 over budget. The sub
 // + estimate are stamped onto the request-log entry so the finalize path
@@ -40,7 +41,7 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
                 next.ServeHTTP(w, r)
                 return
             }
-            token := bearerToken(r)
+            token := identityToken(r)
             if token == "" {
                 writeTryQuotaError(w, http.StatusUnauthorized, "identity token required",
                     0, budget, 0)
@@ -80,19 +81,16 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
     }
 }
 
-// bearerToken extracts the Bearer credential. A fusion-identity JWT is
-// visually distinct from an fg-key (three dot-separated segments) but we do
-// not shape-check here: VerifyToken is the authority.
-func bearerToken(r *http.Request) string {
-    h := r.Header.Get("Authorization")
-    if h == "" {
-        return ""
-    }
-    const prefix = "Bearer "
-    if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-        return ""
-    }
-    return strings.TrimSpace(h[len(prefix):])
+// identityToken extracts the fusion-identity credential from the dedicated
+// X-Fusion-Identity-Token header. It deliberately does NOT read the
+// Authorization header: extractAPIKey (auth chain) treats "Authorization:
+// Bearer <token>" as the gateway API key with higher precedence than
+// X-API-Key, so an identity JWT sent as Bearer would be hashed as an API key
+// and rejected with 401 before this middleware ever runs. The dedicated
+// header keeps the credential planes separated (gateway key vs identity
+// subject); VerifyToken is still the only authority on its value.
+func identityToken(r *http.Request) string {
+    return strings.TrimSpace(r.Header.Get("X-Fusion-Identity-Token"))
 }
 
 // writeTryQuotaError emits the quota error shape used by the fusion-site
