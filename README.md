@@ -168,6 +168,13 @@ See `config.example.yaml` for full reference. Key settings:
 | `mcp.max_requests` | 10000 | Max tracked MCP requests |
 | `mcp.node_port` | 11445 | Remote node port for forwarding |
 | `mcp.local_port` | 9000 | Local plugin server port |
+| `try_quota.enabled` | false | #514: enable the per-user daily token quota gate. When on, every non-master `/v1/*` LLM call must carry a fusion-identity HS256 JWT as the Bearer credential; the `sub` claim is the metering key |
+| `try_quota.daily_token_budget` | 100000 | Default daily token budget per user (soft limit: in-flight requests finish, new over-budget requests get 429) |
+| `try_quota.jwt_secret` | "" | fusion-identity HS256 signing secret. Empty = gate passes through even when enabled (not provisioned) |
+| `try_quota.state_path` | "" | Optional JSON snapshot path for usage + budget overrides (survives restarts). Empty = memory only |
+| `try_quota.estimate_fallback` | 1024 | Token estimate used in the pre-check when the tokenizer cannot read the request body |
+
+**Try-quota admin endpoints (#514)**: `GET /admin/api/try-quota/usage` lists per-sub usage rows (day rollup, budget, override, recent calls); `POST /admin/api/try-quota/budget` with `{"sub": "...", "daily_budget": N}` pins a per-user budget override (`N <= 0` clears it). Both are admin-role gated. Over-budget requests get `429` with `{"detail": "daily token quota exceeded", "quota": {"used", "budget", "estimate"}}`.
 
 ### Config file protection (防错 + 纠错)
 
