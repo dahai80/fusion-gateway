@@ -567,6 +567,12 @@ web_shell:
     # session:
     #     ttl: 12h
     #     secret: ""                      # empty = derived from auth.master_key
+    # Identity SSO (#517): POST /api/v1/shell/session/sso {ticket} exchanges
+    # a one-time fusion-identity ticket (identity#48) server-side and issues
+    # the shell session + identity JWT (for #514 metering headers) —
+    # fusion-site → workbench with no second login.
+    # identity_url: ""                   # empty = auth_portal.identity_url = http://127.0.0.1:11470
+    # sso_modules: ["*"]                 # module ids an SSO session may open; empty = all
     #     users:
     #         - username: admin
     #           password_bcrypt: "$2a$..."

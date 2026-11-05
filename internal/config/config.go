@@ -1153,6 +1153,14 @@ type ShellConfig struct {
     // module id). A registered key authenticates that module's own manifest
     // registration/self-heal only — never a general admin plane.
     ServiceKeys map[string]string `mapstructure:"service_keys"`
+    // IdentityURL (#517) is the fusion-identity base URL for the shell SSO
+    // ticket exchange (POST /api/v1/auth/ticket/exchange). Empty falls back
+    // to auth_portal.identity_url, then the default :11470.
+    IdentityURL string `mapstructure:"identity_url"`
+    // SSOModules (#517) is the module id list an identity-SSO session may
+    // open. Empty = ["*"] (identity already authenticated the user; shell
+    // write classes stay gated by the mapped role).
+    SSOModules []string `mapstructure:"sso_modules"`
     Session ShellSessionConfig `mapstructure:"session"`
     // Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
     // have not registered still render in the shell menu (greyed offline) so
