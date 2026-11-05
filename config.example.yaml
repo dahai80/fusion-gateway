@@ -794,3 +794,17 @@ auth_portal:
     - http://localhost:3000/login
   code_ttl_secs: 60
   rate_per_min: 30
+
+# Per-user daily token quota gate (#514). When enabled, every non-master
+# /v1/* LLM call must carry a fusion-identity HS256 JWT as the Bearer
+# credential; the `sub` claim is the metering key.
+try_quota:
+  enabled: false
+  daily_token_budget: 100000
+  # fusion-identity HS256 signing secret. Empty = gate passes through even
+  # when enabled (not provisioned).
+  jwt_secret: ""
+  # Optional JSON snapshot for usage + budget overrides (survives restarts).
+  state_path: ""
+  # Pre-check estimate when the tokenizer cannot read the request body.
+  estimate_fallback: 1024

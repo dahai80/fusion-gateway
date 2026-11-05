@@ -1028,6 +1028,11 @@ type Config struct {
     // handoff endpoints. Default off — nothing registered until
     // auth_portal.enabled=true (fail-closed, mirrors service_routes).
     AuthPortal      AuthPortalConfig        `mapstructure:"auth_portal"`
+    // TryQuota wires the per-user daily token quota meter (#514, cloud-try
+    // plan Phase 1): fusion-identity JWT on product LLM calls keys the
+    // meter; over-budget new requests get 429. Default off — no behavior
+    // change until try_quota.enabled=true.
+    TryQuota        TryQuotaConfig          `mapstructure:"try_quota"`
     // ServiceRoutes wires the /svc/<name>/ platform-service proxy
     // (config-conventions §1/§5): business apps call platform services
     // (rag/identity/drawing-parser…) exclusively through the gateway with
@@ -1084,6 +1089,28 @@ type ServiceRouteConfig struct {
 // origin (TTL 60s, single use). Registration/login traffic proxies to
 // fusion-identity through an explicit path allowlist — the raw /svc/identity
 // surface (service-token injected) stays credentialed and never public.
+// TryQuotaConfig wires the per-user daily token quota meter (#514). The
+// metering key is the `sub` of a fusion-identity HS256 access token sent as
+// the Bearer credential on product LLM calls; the daily budget applies per
+// user (override per user via the admin endpoint), soft-limit semantics —
+// in-flight requests finish, only new requests are rejected with 429.
+type TryQuotaConfig struct {
+    // Enabled gates the whole meter (fail-closed OFF: no gate, no metering).
+    Enabled bool `mapstructure:"enabled"`
+    // DailyTokenBudget is the default per-user daily token budget
+    // (FUSION_TRY_TOKEN_BUDGET in the plan; ~100k default).
+    DailyTokenBudget int `mapstructure:"daily_token_budget"`
+    // JWTSecret is the fusion-identity HS256 signing secret shared for local
+    // verification (no per-request identity hop). Required when enabled.
+    JWTSecret string `mapstructure:"jwt_secret"`
+    // StatePath is the optional JSON snapshot file for usage rollups
+    // (survives restarts). Empty = memory only.
+    StatePath string `mapstructure:"state_path"`
+    // EstimateFallback is the tokenizer-estimate floor used when a request
+    // body cannot be read (default 1024).
+    EstimateFallback int `mapstructure:"estimate_fallback"`
+}
+
 type AuthPortalConfig struct {
     // Enabled gates the whole subsystem (fail-closed).
     Enabled bool `mapstructure:"enabled"`
@@ -2660,6 +2687,10 @@ func DefaultConfig() Config {
     return Config{
         Network: NetworkConfig{
             Tier: "local",
+        },
+        TryQuota: TryQuotaConfig{
+            DailyTokenBudget: 100000,
+            EstimateFallback: 1024,
         },
         Server: ServerConfig{
             Host:                   "127.0.0.1", // single-machine: loopback only

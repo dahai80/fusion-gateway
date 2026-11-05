@@ -38,6 +38,13 @@ type RequestLog struct {
     // the per-scenario cost aggregation and alerting key.
     Scenario     string `json:"scenario,omitempty"`
 
+    // TryQuotaSub (#514) stamps the fusion-identity subject when the request
+    // passed the try-quota gate. The quota meter reads it at finalize (the
+    // outer withMiddleware defer) — same entry-pointer pattern as
+    // StampAPIKeyName, since the middleware's derived ctx is invisible there.
+    TryQuotaSub  string `json:"try_quota_sub,omitempty"`
+    TryQuotaEst  int    `json:"try_quota_est,omitempty"`
+
     InputTokens  int `json:"input_tokens"`
     OutputTokens int `json:"output_tokens"`
     TotalTokens  int `json:"total_tokens"`

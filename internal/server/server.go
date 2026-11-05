@@ -46,6 +46,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     memorystore "github.com/fusion-gateway/fusion-gateway/internal/store/memory"
     "github.com/fusion-gateway/fusion-gateway/internal/tokenizer"
+    "github.com/fusion-gateway/fusion-gateway/internal/tryquota"
 
     "gopkg.in/natefinch/lumberjack.v2"
 )
@@ -231,6 +232,10 @@ type Server struct {
     shellProxy    *shell.Proxy
     shellUsers    *shell.UserStore
     shellPoller   *lifecycle.Worker
+    // #514: identity-keyed daily token quota meter (cloud-try Phase 1).
+    // nil when try_quota.enabled=false — the gate middleware is then a
+    // pass-through and finalize accounting is a no-op.
+    tryQuotaMeter *tryquota.Store
     // #506: auth-portal janitor (expired codes + stale rate windows); a
     // lifecycle worker so Shutdown cancels + joins it (bare-goroutine gate).
     authPortalWorker *lifecycle.Worker
@@ -605,6 +610,15 @@ func New(
     lt := router.NewLatencyTracker(1000)
     cs := router.NewCloudStrategy(cfg.Config.CloudRouting, lt)
 
+    // #514: identity-keyed daily token quota meter (cloud-try Phase 1).
+    // nil when disabled — the gate middleware and finalize accounting are
+    // nil-safe pass-throughs.
+    var quotaMeter *tryquota.Store
+    if cfg.Config.TryQuota.Enabled {
+        quotaMeter = tryquota.NewStore(cfg.Config.TryQuota.StatePath)
+        slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath)
+    }
+
     logMaxLen := 10000
     if cfg.Config.Admin != nil && cfg.Config.Admin.LogMaxLen > 0 {
         logMaxLen = cfg.Config.Admin.LogMaxLen
@@ -707,6 +721,7 @@ func New(
         cloudStrategy:     cs,
         latencyTracker:    lt,
         store:             s,
+        tryQuotaMeter:     quotaMeter,
         // #400: wire the embedding function from the adapter pool so an
         // enabled semantic cache actually caches. nil (disabled) when the
         // provider/model config is incomplete — NewSemanticCache WARNs.
@@ -1056,6 +1071,10 @@ func (s *Server) Start() error {
         // exchanges the shell session (cookie or Bearer) for the admin JWT
         // cookie. Registered before the /admin/ SPA catch-all.
         mux.HandleFunc("/admin/api/sso", s.handleAdminSSO)
+        // #514: try-quota admin surfaces (per-sub usage + budget overrides),
+        // admin-role gated like the orgs routes.
+        mux.HandleFunc("/admin/api/try-quota/usage", s.withAdminOnly(s.handleTryQuotaUsage))
+        mux.HandleFunc("/admin/api/try-quota/budget", s.withAdminOnly(s.handleTryQuotaBudget))
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
         // fusion-trainer can target :11432 exclusively. Registered before the
         // /admin/ SPA catch-all so it takes precedence; shares the /v1/*
@@ -1514,6 +1533,9 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         }
         entry.StatusCode = rec.StatusCode
         middleware.FinalizeAndAppendLog(entry, s.store, start, keyName)
+        // #514: account real usage against the identity-keyed daily quota
+        // after finalize (entry carries the metering key stamped by the gate).
+        middleware.TryQuotaFinalize(entry, s.tryQuotaMeter)
         if s.persistSink != nil && snap.Config.Persistence.Enabled {
             s.enqueuePersistEntry(entry, r, rec, snap.Config.Persistence, start)
         }
@@ -1601,6 +1623,11 @@ func (s *Server) buildMiddlewareChain() {
         middleware.PromptInjectionMiddleware(s.cfg.Config.PromptInjection),
         middleware.BudgetBlock(s.store),
         middleware.RateLimit(&s.cfg.Config.Routing.RateLimit, s.rateLimiter, s.estimateRequestTokens),
+        // #514: identity-keyed daily token quota gate (cloud-try Phase 1).
+        // Last in the chain: the metering key is the fusion-identity JWT sub,
+        // checked only after the request is fully authenticated + scoped.
+        // No-op when try_quota.enabled=false.
+        middleware.TryQuota(s.tryQuotaConfigSource, s.tryQuotaMeter, s.estimateRequestTokens),
     }
 
     s.middlewareChainMu.Lock()
@@ -1693,6 +1720,18 @@ func (s *Server) estimateRequestTokens(r *http.Request) int {
         return 0
     }
     return n
+}
+
+// tryQuotaConfigSource resolves the live try_quota config from the current
+// snapshot (hot-reload safe — the chain closure reads config per request).
+// #514.
+func (s *Server) tryQuotaConfigSource() (bool, int, string, int) {
+    snap := s.snapshot()
+    if snap == nil {
+        return false, 0, "", 0
+    }
+    tq := snap.Config.TryQuota
+    return tq.Enabled, tq.DailyTokenBudget, tq.JWTSecret, tq.EstimateFallback
 }
 
 // snapshot returns the current config snapshot under cfgMu.RLock. Background
