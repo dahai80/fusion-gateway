@@ -7,6 +7,7 @@ import (
     "log/slog"
     "net/http"
     "net/http/httptest"
+    "fmt"
     "strings"
     "testing"
     "time"
@@ -416,6 +417,36 @@ func TestAnthropicProvider_Rerank(t *testing.T) {
     _, err := p.Rerank(context.Background(), &RerankRequest{})
     if err == nil {
         t.Error("expected error for unsupported rerank")
+    }
+}
+
+func TestOpenAIToAnthropicToolChoice(t *testing.T) {
+    auto := interface{}("auto")
+    required := interface{}("required")
+    none := interface{}("none")
+    named := interface{}(map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "insert_table"}})
+    cases := []struct {
+        name string
+        in   *interface{}
+        want interface{}
+    }{
+        {"auto string becomes the object form", &auto, map[string]interface{}{"type": "auto"}},
+        {"required becomes any", &required, map[string]interface{}{"type": "any"}},
+        {"none is dropped", &none, nil},
+        {"named function becomes the tool form", &named, map[string]interface{}{"type": "tool", "name": "insert_table"}},
+    }
+    for _, tc := range cases {
+        req := &ChatRequest{Model: "m", ToolChoice: *tc.in}
+        got := OpenAIToAnthropic(req).ToolChoice
+        if tc.want == nil {
+            if got != nil {
+                t.Errorf("%s: expected nil, got %v", tc.name, got)
+            }
+            continue
+        }
+        if got == nil || fmt.Sprint(got) != fmt.Sprint(tc.want) {
+            t.Errorf("%s: expected %v, got %v", tc.name, tc.want, got)
+        }
     }
 }
 

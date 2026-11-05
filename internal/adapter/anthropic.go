@@ -657,7 +657,7 @@ func OpenAIToAnthropic(req *ChatRequest) *AnthropicRequest {
             }
         }
     }
-    if req.ToolChoice != nil { antReq.ToolChoice = req.ToolChoice }
+    if req.ToolChoice != nil { antReq.ToolChoice = openAIToolChoiceToAnthropic(req.ToolChoice) }
     return antReq
 }
 
@@ -852,6 +852,38 @@ func anthropicToolResultContent(b AnthropicContentBlock) string {
             return ""
         }
         return string(raw)
+    }
+}
+
+// openAIToolChoiceToAnthropic maps the OpenAI tool_choice to the Anthropic
+// shape. Anthropic-protocol backends reject the OpenAI string forms with a
+// 400 ("expected an object, but got \"auto\" instead"), so "auto" becomes
+// {"type":"auto"}, "required" becomes {"type":"any"}, "none" is dropped
+// (the absence of tool_choice already means no forcing once tools are sent),
+// and the named-function form becomes {"type":"tool","name":...}.
+func openAIToolChoiceToAnthropic(choice interface{}) interface{} {
+    switch v := choice.(type) {
+    case string:
+        switch v {
+        case "auto":
+            return map[string]interface{}{"type": "auto"}
+        case "required":
+            return map[string]interface{}{"type": "any"}
+        default:
+            // "none" and anything unknown: let the backend default apply.
+            return nil
+        }
+    case map[string]interface{}:
+        if v["type"] == "function" {
+            if fn, ok := v["function"].(map[string]interface{}); ok {
+                if name, ok := fn["name"].(string); ok && name != "" {
+                    return map[string]interface{}{"type": "tool", "name": name}
+                }
+            }
+        }
+        return choice
+    default:
+        return choice
     }
 }
 
