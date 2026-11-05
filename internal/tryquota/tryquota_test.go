@@ -1,8 +1,16 @@
 package tryquota
 
 import (
+    "crypto/rand"
+    "crypto/rsa"
+    "encoding/base64"
+    "encoding/json"
+    "math/big"
+    "net/http"
+    "net/http/httptest"
     "os"
     "path/filepath"
+    "sync"
     "testing"
     "time"
 
@@ -221,5 +229,204 @@ func TestVerifyTokenNonHMACRejected(t *testing.T) {
     }
     if _, err := VerifyToken(str, "secret", now); err == nil {
         t.Fatalf("non-HMAC alg must reject")
+    }
+}
+
+// --- #524: RS256 / JWKS verification (deployed fusion-identity signs RS256) ---
+
+// rsaJWK builds a JWK-style map for a public key (base64url, unpadded).
+func rsaJWK(pub *rsa.PublicKey, kid string) map[string]interface{} {
+    return map[string]interface{}{
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": kid,
+        "n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+        "e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+    }
+}
+
+// jwksServer serves a rotating JWKS document. Swap keys to simulate
+// identity-side rotation and assert the verifier refreshes.
+type jwksServer struct {
+    mu   sync.Mutex
+    keys []map[string]interface{}
+    hits int
+}
+
+func (s *jwksServer) setKeys(keys ...map[string]interface{}) {
+    s.mu.Lock()
+    s.keys = keys
+    s.mu.Unlock()
+}
+
+func (s *jwksServer) handler() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        s.hits++
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]interface{}{"keys": s.keys})
+    }
+}
+
+func testRSAKey(t *testing.T) *rsa.PrivateKey {
+    t.Helper()
+    key, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        t.Fatalf("rsa keygen: %v", err)
+    }
+    return key
+}
+
+func mintRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims jwt.MapClaims) string {
+    t.Helper()
+    tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+    tok.Header["kid"] = kid
+    str, err := tok.SignedString(key)
+    if err != nil {
+        t.Fatalf("mint RS256: %v", err)
+    }
+    return str
+}
+
+func TestRS256VerifierValid(t *testing.T) {
+    now := time.Now()
+    key := testRSAKey(t)
+    srv := &jwksServer{}
+    srv.setKeys(rsaJWK(&key.PublicKey, "kid-a"))
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    tok := mintRS256(t, key, "kid-a", jwt.MapClaims{"sub": "user-rs", "exp": now.Add(time.Hour).Unix()})
+    sub, err := v.Verify(tok, now)
+    if err != nil {
+        t.Fatalf("RS256 Verify: %v", err)
+    }
+    if sub != "user-rs" {
+        t.Fatalf("sub = %q, want user-rs", sub)
+    }
+}
+
+func TestRS256VerifierExpired(t *testing.T) {
+    now := time.Now()
+    key := testRSAKey(t)
+    srv := &jwksServer{}
+    srv.setKeys(rsaJWK(&key.PublicKey, "kid-a"))
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    tok := mintRS256(t, key, "kid-a", jwt.MapClaims{"sub": "u", "exp": now.Add(-time.Minute).Unix()})
+    if _, err := v.Verify(tok, now); err == nil {
+        t.Fatalf("expired RS256 token must reject")
+    }
+}
+
+func TestRS256VerifierGarbage(t *testing.T) {
+    srv := &jwksServer{}
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    if _, err := v.Verify("not-a-jwt", time.Now()); err == nil {
+        t.Fatalf("garbage token must reject")
+    }
+}
+
+func TestRS256VerifierUnknownKid(t *testing.T) {
+    now := time.Now()
+    key := testRSAKey(t)
+    srv := &jwksServer{}
+    srv.setKeys(rsaJWK(&key.PublicKey, "kid-a"))
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    tok := mintRS256(t, key, "kid-other", jwt.MapClaims{"sub": "u", "exp": now.Add(time.Hour).Unix()})
+    if _, err := v.Verify(tok, now); err == nil {
+        t.Fatalf("unknown kid must reject")
+    }
+}
+
+// Algorithm-confusion guard: an HS256 token must never verify in rs256 mode.
+func TestRS256VerifierRejectsHS256Token(t *testing.T) {
+    now := time.Now()
+    srv := &jwksServer{}
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    hsTok := mint(t, "secret", jwt.MapClaims{"sub": "u", "exp": now.Add(time.Hour).Unix()})
+    if _, err := v.Verify(hsTok, now); err == nil {
+        t.Fatalf("HS256 token in rs256 mode must reject (alg confusion)")
+    }
+}
+
+// Algorithm-confusion guard, reverse direction: an RS256 token must never
+// verify against the HS256 path.
+func TestHS256VerifierRejectsRS256Token(t *testing.T) {
+    now := time.Now()
+    key := testRSAKey(t)
+    tok := mintRS256(t, key, "kid-a", jwt.MapClaims{"sub": "u", "exp": now.Add(time.Hour).Unix()})
+    if _, err := VerifyToken(tok, "secret", now); err == nil {
+        t.Fatalf("RS256 token in hs256 mode must reject (alg confusion)")
+    }
+}
+
+// Key rotation: once the identity JWKS drops the old kid and serves a new
+// one, tokens signed by the new key must verify without a restart.
+func TestRS256VerifierRefreshOnRotation(t *testing.T) {
+    now := time.Now()
+    key1 := testRSAKey(t)
+    key2 := testRSAKey(t)
+    srv := &jwksServer{}
+    srv.setKeys(rsaJWK(&key1.PublicKey, "kid-a"))
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    v.refetchCooldown = 0
+    tok1 := mintRS256(t, key1, "kid-a", jwt.MapClaims{"sub": "u1", "exp": now.Add(time.Hour).Unix()})
+    if _, err := v.Verify(tok1, now); err != nil {
+        t.Fatalf("pre-rotation Verify: %v", err)
+    }
+
+    srv.setKeys(rsaJWK(&key2.PublicKey, "kid-b"))
+    tok2 := mintRS256(t, key2, "kid-b", jwt.MapClaims{"sub": "u2", "exp": now.Add(time.Hour).Unix()})
+    sub, err := v.Verify(tok2, now)
+    if err != nil {
+        t.Fatalf("post-rotation Verify: %v", err)
+    }
+    if sub != "u2" {
+        t.Fatalf("sub = %q, want u2", sub)
+    }
+}
+
+// DoS guard: repeated unknown-kid probes must not hammer the JWKS endpoint
+// — fetches are rate-limited by the refetch cooldown.
+func TestRS256VerifierRefetchThrottled(t *testing.T) {
+    now := time.Now()
+    key := testRSAKey(t)
+    srv := &jwksServer{}
+    srv.setKeys(rsaJWK(&key.PublicKey, "kid-a"))
+    httpSrv := httptest.NewServer(srv.handler())
+    defer httpSrv.Close()
+
+    v := NewRS256Verifier(httpSrv.URL)
+    tok := mintRS256(t, key, "kid-unknown", jwt.MapClaims{"sub": "u", "exp": now.Add(time.Hour).Unix()})
+    for i := 0; i < 5; i++ {
+        if _, err := v.Verify(tok, now); err == nil {
+            t.Fatalf("unknown kid must reject")
+        }
+    }
+    if srv.hits > 2 {
+        t.Fatalf("JWKS fetched %d times for 5 throttled probes, want <= 2", srv.hits)
     }
 }

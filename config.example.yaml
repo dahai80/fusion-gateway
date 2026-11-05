@@ -807,9 +807,20 @@ auth_portal:
 try_quota:
   enabled: false
   daily_token_budget: 100000
-  # fusion-identity HS256 signing secret. Empty = gate passes through even
-  # when enabled (not provisioned).
+  # Identity-token verification mode (#524): "rs256" verifies against the
+  # fusion-identity JWKS (identity_url + /.well-known/jwks.json), "hs256"
+  # verifies the shared jwt_secret locally (test/local profile). Empty
+  # resolves by provisioning: rs256 when jwt_secret is empty (the deployed
+  # fusion-identity signs RS256), hs256 when set. Only the resolved
+  # algorithm is ever accepted — a token signed with the other algorithm is
+  # rejected (alg-confusion guard).
+  jwt_algorithm: ""
+  # fusion-identity HS256 signing secret (hs256 mode only).
   jwt_secret: ""
+  # fusion-identity base URL for JWKS discovery (rs256 mode). Falls back to
+  # web_shell.identity_url, then auth_portal.identity_url, then
+  # http://127.0.0.1:11470.
+  identity_url: ""
   # Optional JSON snapshot for usage + budget overrides (survives restarts).
   state_path: ""
   # Pre-check estimate when the tokenizer cannot read the request body.

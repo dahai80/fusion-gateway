@@ -1101,8 +1101,21 @@ type TryQuotaConfig struct {
     // (FUSION_TRY_TOKEN_BUDGET in the plan; ~100k default).
     DailyTokenBudget int `mapstructure:"daily_token_budget"`
     // JWTSecret is the fusion-identity HS256 signing secret shared for local
-    // verification (no per-request identity hop). Required when enabled.
+    // verification (no per-request identity hop). Required when jwt_algorithm
+    // is hs256 (explicitly or by default resolution).
     JWTSecret string `mapstructure:"jwt_secret"`
+    // JwtAlgorithm selects the identity-token verification mode (#524):
+    // "rs256" verifies against the fusion-identity JWKS
+    // (identity_url + /.well-known/jwks.json — the same source the shell-SSO
+    // exchange trusts), "hs256" verifies the shared jwt_secret locally.
+    // Empty resolves by provisioning: rs256 when jwt_secret is empty (the
+    // deployed identity signs RS256), hs256 when set. Only the resolved
+    // algorithm is ever accepted (alg-confusion guard).
+    JwtAlgorithm string `mapstructure:"jwt_algorithm"`
+    // IdentityURL is the fusion-identity base URL for JWKS discovery in
+    // rs256 mode. Falls back to web_shell.identity_url, then
+    // auth_portal.identity_url, then http://127.0.0.1:11470.
+    IdentityURL string `mapstructure:"identity_url"`
     // StatePath is the optional JSON snapshot file for usage rollups
     // (survives restarts). Empty = memory only.
     StatePath string `mapstructure:"state_path"`

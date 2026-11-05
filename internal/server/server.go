@@ -1724,14 +1724,30 @@ func (s *Server) estimateRequestTokens(r *http.Request) int {
 
 // tryQuotaConfigSource resolves the live try_quota config from the current
 // snapshot (hot-reload safe — the chain closure reads config per request).
-// #514.
-func (s *Server) tryQuotaConfigSource() (bool, int, string, int) {
+// The rs256 identity URL falls back web_shell.identity_url →
+// auth_portal.identity_url → the middleware default (:11470), matching the
+// #517 shell-SSO resolution order. #514/#524.
+func (s *Server) tryQuotaConfigSource() middleware.TryQuotaSettings {
     snap := s.snapshot()
     if snap == nil {
-        return false, 0, "", 0
+        return middleware.TryQuotaSettings{}
     }
     tq := snap.Config.TryQuota
-    return tq.Enabled, tq.DailyTokenBudget, tq.JWTSecret, tq.EstimateFallback
+    identityURL := tq.IdentityURL
+    if identityURL == "" {
+        identityURL = snap.Config.Shell.IdentityURL
+    }
+    if identityURL == "" {
+        identityURL = snap.Config.AuthPortal.IdentityURL
+    }
+    return middleware.TryQuotaSettings{
+        Enabled:          tq.Enabled,
+        Budget:           tq.DailyTokenBudget,
+        Algorithm:        tq.JwtAlgorithm,
+        Secret:           tq.JWTSecret,
+        IdentityURL:      identityURL,
+        EstimateFallback: tq.EstimateFallback,
+    }
 }
 
 // snapshot returns the current config snapshot under cfgMu.RLock. Background

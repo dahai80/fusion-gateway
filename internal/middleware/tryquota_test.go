@@ -1,10 +1,15 @@
 package middleware
 
 import (
+    "crypto/rand"
+    "crypto/rsa"
+    "encoding/base64"
     "encoding/json"
+    "math/big"
     "net/http"
     "net/http/httptest"
     "strings"
+    "sync"
     "testing"
     "time"
 
@@ -29,8 +34,14 @@ func tqMint(t *testing.T, sub string, exp time.Time) string {
 }
 
 func tqCfgSrc(enabled bool, budget int) TryQuotaConfigSource {
-    return func() (bool, int, string, int) {
-        return enabled, budget, tqTestSecret, 1024
+    return func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          enabled,
+            Budget:           budget,
+            Algorithm:        "hs256",
+            Secret:           tqTestSecret,
+            EstimateFallback: 1024,
+        }
     }
 }
 
@@ -111,7 +122,13 @@ func TestTryQuotaDisabledPassesThrough(t *testing.T) {
 
 func TestTryQuotaEmptySecretPassesThrough(t *testing.T) {
     called := false
-    h := TryQuota(func() (bool, int, string, int) { return true, 1000, "", 1024 }, nil, nil)(
+    // Empty algorithm + empty secret = not provisioned: pass through. (An
+    // empty secret now resolves to rs256 mode, but with no token present the
+    // gate still 401s — the pass-through applies to the hs256-without-secret
+    // profile only, asserted via the explicit algorithm below.)
+    h := TryQuota(func() TryQuotaSettings {
+        return TryQuotaSettings{Enabled: true, Budget: 1000, Algorithm: "hs256", EstimateFallback: 1024}
+    }, nil, nil)(
         http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
     tqRoundTrip(t, h, "")
     if !called {
@@ -268,5 +285,101 @@ func TestTryQuotaAuthorizationHeaderIgnored(t *testing.T) {
     h.ServeHTTP(rec, req)
     if rec.Code != http.StatusUnauthorized {
         t.Fatalf("code = %d, want 401 (Authorization is not the identity plane)", rec.Code)
+    }
+}
+
+// --- #524: RS256 / JWKS mode ---
+
+// tqMintRS256 signs an RS256 token with a kid header (identity-style).
+func tqMintRS256(t *testing.T, key *rsa.PrivateKey, kid string, sub string, exp time.Time) string {
+    t.Helper()
+    tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"sub": sub, "exp": exp.Unix()})
+    tok.Header["kid"] = kid
+    str, err := tok.SignedString(key)
+    if err != nil {
+        t.Fatalf("mint RS256: %v", err)
+    }
+    return str
+}
+
+func TestTryQuotaRS256Mode(t *testing.T) {
+    key, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        t.Fatalf("rsa keygen: %v", err)
+    }
+    jwk := map[string]interface{}{
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": "kid-live",
+        "n":   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+        "e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+    }
+    var mu sync.Mutex
+    keys := []map[string]interface{}{jwk}
+    jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        mu.Lock()
+        defer mu.Unlock()
+        _ = json.NewEncoder(w).Encode(map[string]interface{}{"keys": keys})
+    }))
+    defer jwksSrv.Close()
+
+    meter := tryquota.NewStore("")
+    src := func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          true,
+            Budget:           100000,
+            Algorithm:        "rs256",
+            IdentityURL:      jwksSrv.URL,
+            EstimateFallback: 1024,
+        }
+    }
+    ran := false
+    h := tqHandler(src, meter, func(w http.ResponseWriter, r *http.Request) { ran = true })
+
+    // Valid RS256 identity token: gate passes, handler runs.
+    tok := tqMintRS256(t, key, "kid-live", "user-rs", time.Now().Add(time.Hour))
+    rec := tqRoundTrip(t, h, tok)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("RS256 token code = %d, want 200, body %s", rec.Code, rec.Body.String())
+    }
+    if !ran {
+        t.Fatalf("handler must run for a valid RS256 token")
+    }
+
+    // Alg-confusion: HS256 token in rs256 mode must 401.
+    hsTok := tqMint(t, "user-rs", time.Now().Add(time.Hour))
+    rec = tqRoundTrip(t, h, hsTok)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("HS256 token in rs256 mode code = %d, want 401", rec.Code)
+    }
+
+    // Quota enforcement still keys on the RS256 sub.
+    meter.Record("user-rs", 100001, tryquota.CallDetail{}, time.Now())
+    rec = tqRoundTrip(t, h, tok)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("over-budget RS256 user code = %d, want 429", rec.Code)
+    }
+}
+
+// Default algorithm resolution: empty jwt_algorithm + empty jwt_secret
+// resolves to rs256 (the deployed identity signs RS256); a set secret
+// keeps the hs256 test/local profile.
+func TestResolveAlgorithm(t *testing.T) {
+    cases := []struct {
+        alg, secret, want string
+    }{
+        {"", "", "rs256"},
+        {"", "s", "hs256"},
+        {"rs256", "s", "rs256"},
+        {"hs256", "", "hs256"},
+        {"RS256", "", "rs256"},
+        {"bogus", "", ""},
+    }
+    for _, c := range cases {
+        got := resolveAlgorithm(TryQuotaSettings{Algorithm: c.alg, Secret: c.secret})
+        if got != c.want {
+            t.Fatalf("resolveAlgorithm(%q,%q) = %q, want %q", c.alg, c.secret, got, c.want)
+        }
     }
 }

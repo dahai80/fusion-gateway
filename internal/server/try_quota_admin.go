@@ -25,7 +25,7 @@ func (s *Server) handleTryQuotaUsage(w http.ResponseWriter, r *http.Request) {
         return
     }
     rows := s.tryQuotaMeter.Usage(time.Now(), func(sub string) int {
-        _, budget, _, _ := s.tryQuotaConfigSource()
+        budget := s.tryQuotaConfigSource().Budget
         if b, ok := s.tryQuotaMeter.BudgetOverride(sub); ok {
             return b
         }
