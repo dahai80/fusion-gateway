@@ -9,13 +9,20 @@ package tryquota
 // finish and are accounted normally.
 
 import (
+    "crypto/rsa"
+    "encoding/base64"
     "encoding/json"
+    "fmt"
     "log/slog"
+    "math"
+    "math/big"
+    "net/http"
     "os"
     "path/filepath"
     "sync"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
     "github.com/golang-jwt/jwt/v5"
 )
 
@@ -221,16 +228,28 @@ func (s *Store) Usage(now time.Time, budgetFn func(sub string) int) []UsageRow {
     return rows
 }
 
-// VerifyToken validates a fusion-identity HS256 access token and returns the
-// `sub` claim (the metering key). Any parse/validation failure is a reject.
-func VerifyToken(tokenStr, secret string, now time.Time) (string, error) {
+// --- #524: identity-token verifiers (HS256 shared-secret and RS256 JWKS) ---
+
+// Verifier validates a fusion-identity access token and returns the `sub`
+// claim (the metering key). Each verifier accepts exactly one signing
+// algorithm — never both — so a token can never cross modes (alg-confusion
+// guard).
+type Verifier interface {
+    // Algorithm reports the accepted JOSE alg ("hs256" / "rs256").
+    Algorithm() string
+    // Verify returns the token's `sub`, or an error for any
+    // parse/signature/claims failure.
+    Verify(tokenStr string, now time.Time) (string, error)
+}
+
+// verifyWithKeyfunc is the shared parse+claims core: exp required, method
+// pinned to the verifier's algorithm, non-empty sub mandatory.
+func verifyWithKeyfunc(tokenStr string, now time.Time, alg string, kf jwt.Keyfunc) (string, error) {
     claims := jwt.MapClaims{}
-    _, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
-        if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, jwt.ErrSignatureInvalid
-        }
-        return []byte(secret), nil
-    }, jwt.WithTimeFunc(func() time.Time { return now }), jwt.WithExpirationRequired())
+    _, err := jwt.ParseWithClaims(tokenStr, claims, kf,
+        jwt.WithTimeFunc(func() time.Time { return now }),
+        jwt.WithExpirationRequired(),
+        jwt.WithValidMethods([]string{alg}))
     if err != nil {
         return "", err
     }
@@ -239,4 +258,171 @@ func VerifyToken(tokenStr, secret string, now time.Time) (string, error) {
         return "", jwt.ErrTokenInvalidClaims
     }
     return sub, nil
+}
+
+// HS256Verifier verifies shared-secret identity tokens (test/local profile).
+type HS256Verifier struct {
+    secret string
+}
+
+func NewHS256Verifier(secret string) *HS256Verifier {
+    return &HS256Verifier{secret: secret}
+}
+
+func (v *HS256Verifier) Algorithm() string { return "HS256" }
+
+func (v *HS256Verifier) Verify(tokenStr string, now time.Time) (string, error) {
+    return verifyWithKeyfunc(tokenStr, now, "HS256", func(t *jwt.Token) (interface{}, error) {
+        return []byte(v.secret), nil
+    })
+}
+
+// VerifyToken validates a fusion-identity HS256 access token and returns the
+// `sub` claim (the metering key). Any parse/validation failure is a reject.
+// Kept for compatibility; see Verifier for the algorithm-dispatched forms.
+func VerifyToken(tokenStr, secret string, now time.Time) (string, error) {
+    return NewHS256Verifier(secret).Verify(tokenStr, now)
+}
+
+// jwksRefreshInterval re-fetches the cached key set even when the requested
+// kid is known (stale-refresh).
+const jwksRefreshInterval = 15 * time.Minute
+
+// RS256Verifier verifies RSA-signed identity tokens against the
+// fusion-identity JWKS (identity_url + /.well-known/jwks.json — the same
+// source the #523 shell-SSO exchange trusts). Keys are cached in memory and
+// refreshed when stale or when a token carries an unknown kid (rotation).
+type RS256Verifier struct {
+    jwksURL string
+    client  *http.Client
+    // refetchCooldown is the minimum gap between JWKS fetches when the kid
+    // is unknown — garbage-kid probes must not hammer the identity service.
+    refetchCooldown time.Duration
+
+    mu        sync.Mutex
+    keys      map[string]*rsa.PublicKey
+    fetchedAt time.Time
+}
+
+func NewRS256Verifier(jwksURL string) *RS256Verifier {
+    return &RS256Verifier{
+        jwksURL:         jwksURL,
+        client:          &http.Client{Timeout: 10 * time.Second},
+        refetchCooldown: 5 * time.Second,
+        keys:            map[string]*rsa.PublicKey{},
+    }
+}
+
+func (v *RS256Verifier) Algorithm() string { return "RS256" }
+
+func (v *RS256Verifier) Verify(tokenStr string, now time.Time) (string, error) {
+    return verifyWithKeyfunc(tokenStr, now, "RS256", func(t *jwt.Token) (interface{}, error) {
+        kid, _ := t.Header["kid"].(string)
+        return v.key(kid)
+    })
+}
+
+// key resolves a kid to a public key, refreshing the cached JWKS when the
+// entry is missing or stale. A refresh failure serves the stale set when it
+// still contains the kid (identity briefly unreachable must not lock out
+// known users).
+func (v *RS256Verifier) key(kid string) (interface{}, error) {
+    v.mu.Lock()
+    key, ok := v.keys[kid]
+    age := time.Since(v.fetchedAt)
+    cooldown := v.refetchCooldown
+    v.mu.Unlock()
+
+    if ok && age < jwksRefreshInterval {
+        return key, nil
+    }
+    if !ok && age < cooldown {
+        return nil, fmt.Errorf("unknown kid %q (refetch throttled)", kid)
+    }
+    if err := v.fetch(); err != nil {
+        if ok {
+            slog.Warn("try-quota: JWKS refresh failed, serving stale key", "kid", kid, "error", err)
+            return key, nil
+        }
+        return nil, fmt.Errorf("fetch jwks: %w", err)
+    }
+
+    v.mu.Lock()
+    defer v.mu.Unlock()
+    if key, ok := v.keys[kid]; ok {
+        return key, nil
+    }
+    return nil, fmt.Errorf("unknown kid %q after jwks refresh", kid)
+}
+
+// fetch pulls and parses the JWKS document. Mirrors the middleware OIDC
+// fetcher: bounded 10 MiB read, RSA keys only.
+func (v *RS256Verifier) fetch() error {
+    resp, err := v.client.Get(v.jwksURL)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        return fmt.Errorf("jwks status %d", resp.StatusCode)
+    }
+
+    var doc struct {
+        Keys []struct {
+            Kid string `json:"kid"`
+            Kty string `json:"kty"`
+            Use string `json:"use"`
+            N   string `json:"n"`
+            E   string `json:"e"`
+        } `json:"keys"`
+    }
+    if err := json.NewDecoder(httpx.LimitResponseReader(resp.Body)).Decode(&doc); err != nil {
+        return fmt.Errorf("decode jwks: %w", err)
+    }
+
+    keys := make(map[string]*rsa.PublicKey, len(doc.Keys))
+    for _, jwk := range doc.Keys {
+        if jwk.Kty != "RSA" {
+            continue
+        }
+        // "use" is optional per RFC 7517; only reject an explicit non-sig use.
+        if jwk.Use != "" && jwk.Use != "sig" {
+            continue
+        }
+        pub, err := jwkToRSAPublicKey(jwk.N, jwk.E)
+        if err != nil {
+            slog.Warn("try-quota: skip jwk", "kid", jwk.Kid, "error", err)
+            continue
+        }
+        keys[jwk.Kid] = pub
+    }
+
+    v.mu.Lock()
+    v.keys = keys
+    v.fetchedAt = time.Now()
+    v.mu.Unlock()
+    slog.Info("try-quota: jwks fetched", "url", v.jwksURL, "key_count", len(keys))
+    return nil
+}
+
+// jwkToRSAPublicKey decodes an RSA JWK (base64url, unpadded; exponent is
+// big-endian, possibly short).
+func jwkToRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
+    nBytes, err := base64.RawURLEncoding.DecodeString(nStr)
+    if err != nil {
+        return nil, fmt.Errorf("decode n: %w", err)
+    }
+    eBytes, err := base64.RawURLEncoding.DecodeString(eStr)
+    if err != nil {
+        return nil, fmt.Errorf("decode e: %w", err)
+    }
+    if len(nBytes) == 0 || len(eBytes) == 0 || len(eBytes) > 8 {
+        return nil, fmt.Errorf("invalid jwk modulus/exponent sizes")
+    }
+    n := new(big.Int).SetBytes(nBytes)
+    e := new(big.Int).SetBytes(eBytes)
+    if !e.IsInt64() || e.Int64() <= 1 || e.Int64() > math.MaxInt32 {
+        return nil, fmt.Errorf("invalid jwk exponent")
+    }
+    return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 }
