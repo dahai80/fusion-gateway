@@ -1,6 +1,9 @@
 server:
     host: "127.0.0.1"                        # single-machine: loopback only (was 0.0.0.0)
     port: 11432                           # Fusion-Gateway default port
+    max_output_tokens: 0                  # #528: cap client max_tokens before proxying (0 = disabled).
+                                          # When set, oversized max_tokens on /v1/chat/completions,
+                                          # /v1/completions and /v1/messages are clamped to this ceiling.
     enable_pprof: false                   # Enable pprof debug endpoints (requires master_key auth)
     # tls:                                # HTTPS termination (optional, for single-binary deployment)
     #     cert_file: "certs/server.crt"

@@ -64,6 +64,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
         inputTokens = len(textContent) / 4
     }
     maxTokens := antReq.MaxTokens
+    // #528: cap an oversized client max_tokens before routing/budget math.
+    s.clampMaxTokens(&maxTokens, "/v1/messages")
+    antReq.MaxTokens = maxTokens
     budget := s.tokEngine.EstimateBudget(inputTokens, &maxTokens, antReq.Model, len(antReq.Tools) > 0, antReq.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 

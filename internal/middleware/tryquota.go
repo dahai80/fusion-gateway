@@ -241,6 +241,15 @@ func TryQuotaFinalize(entry *store.RequestLog, meter *tryquota.Store) {
     }
     tokens := entry.TotalTokens
     if tokens <= 0 {
+        // #528: a failed upstream call (status >= 400) produced no provider
+        // usage — do not charge the admission estimate, or metered spend
+        // diverges from actual provider billing on every failure. Real token
+        // counts reported by the upstream are still metered above.
+        if entry.StatusCode >= 400 {
+            slog.Debug("try-quota: failed upstream call, estimate not charged",
+                "sub", entry.TryQuotaSub, "status", entry.StatusCode)
+            return
+        }
         tokens = entry.TryQuotaEst
     }
     product := "web"

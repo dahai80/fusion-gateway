@@ -260,6 +260,31 @@ func TestTryQuotaFinalizeEstimateFallback(t *testing.T) {
     }
 }
 
+// #528: a failed upstream call (status >= 400) produced no provider usage —
+// the admission estimate must NOT be charged, or metered spend diverges from
+// actual provider billing on every failure.
+func TestTryQuotaFinalizeSkipsEstimateOnFailure(t *testing.T) {
+    meter := tryquota.NewStore("")
+    for _, status := range []int{400, 401, 429, 500, 502} {
+        entry := &store.RequestLog{TryQuotaSub: "u1", TryQuotaEst: 100, StatusCode: status}
+        TryQuotaFinalize(entry, meter)
+    }
+    if got := meter.UsedToday("u1", time.Now()); got != 0 {
+        t.Fatalf("failed calls must not charge the estimate, got %d", got)
+    }
+}
+
+// #528: real upstream usage is still metered even when the call failed — the
+// provider billed for those tokens.
+func TestTryQuotaFinalizeRealTokensOnFailureStillMetered(t *testing.T) {
+    meter := tryquota.NewStore("")
+    entry := &store.RequestLog{TryQuotaSub: "u1", TryQuotaEst: 100, TotalTokens: 55, StatusCode: 400}
+    TryQuotaFinalize(entry, meter)
+    if got := meter.UsedToday("u1", time.Now()); got != 55 {
+        t.Fatalf("used = %d, want 55 (real usage billed despite failure)", got)
+    }
+}
+
 func TestTryQuotaFinalizeNoopGuards(t *testing.T) {
     meter := tryquota.NewStore("")
     // Nil meter, nil entry, empty sub — all no-ops, no panic.
