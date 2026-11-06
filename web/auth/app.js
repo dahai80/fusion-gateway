@@ -119,7 +119,14 @@
     }
 
     function errMsg(r) {
-        return (r.data && (r.data.detail || r.data.message)) || t("err-generic");
+        var detail = (r.data && (r.data.detail || r.data.message)) || "";
+        if (detail === "tenant_mismatch") {
+            return "This account does not belong to the selected tenant. Leave the tenant field empty or use the tenant you registered under.";
+        }
+        if (detail === "invalid credentials") {
+            return "Wrong username or password.";
+        }
+        return detail || t("err-generic");
     }
 
     // finishLogin: hand the token pair to the waiting client via a one-time
@@ -163,13 +170,15 @@
         clearMsg();
         var f = e.target;
         busy(f, true);
-        postJSON("/auth/api/identity/api/v1/auth/login", {
+        var payload = {
             username: f.username.value.trim(),
-            password: f.password.value,
-            // identity requires a non-empty tenant_id; "default" is the
-            // bootstrap tenant every deployment has.
-            tenant_id: f.tenant_id.value.trim() || "default"
-        }).then(function (r) {
+            password: f.password.value
+        };
+        // Omit tenant_id when empty: identity resolves the tenant from the
+        // user's memberships server-side; pinning "default" rejected every
+        // user registered under another tenant (401 tenant_mismatch).
+        if (f.tenant_id.value.trim()) payload.tenant_id = f.tenant_id.value.trim();
+        postJSON("/auth/api/identity/api/v1/auth/login", payload).then(function (r) {
             if (!r.ok) { say(errMsg(r)); return; }
             if (r.data.mfa_required) { say("MFA code required is not supported here yet."); return; }
             finishLogin({
