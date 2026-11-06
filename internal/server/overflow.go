@@ -32,6 +32,20 @@ func (o *overflowState) cooldownActive(now time.Time) bool {
     return now.Before(o.overflowUntil)
 }
 
+// clearCooldown drops any armed cooldown window (issue #541). Called on a
+// config reload that disables overflow or zeroes the cooldown: a disabled
+// feature must not keep steering traffic from stale in-memory state, and a
+// stale window must not resurrect traffic diversion when overflow is
+// re-enabled later with a different cooldown.
+func (o *overflowState) clearCooldown() {
+    o.mu.Lock()
+    defer o.mu.Unlock()
+    if !o.overflowUntil.IsZero() && o.overflowUntil.After(time.Now()) {
+        slog.Info("overflow cooldown cleared by config reload")
+    }
+    o.overflowUntil = time.Time{}
+}
+
 func (o *overflowState) armCooldown(now time.Time, cooldown time.Duration) {
     if cooldown <= 0 {
         return

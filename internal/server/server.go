@@ -1657,6 +1657,17 @@ func (s *Server) buildMiddlewareChain() {
 
 // RebuildMiddlewareChain rebuilds the middleware chain on config reload
 func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
+    // Issue #541: a reload that disables overflow (or zeroes the cooldown)
+    // must drop the stale in-memory cooldown window — the gate already
+    // checks Enabled, but arming is self-perpetuating while local fails, so
+    // without the reset a disabled overflow keeps diverting traffic and the
+    // stale window resurrects it on a later re-enable. Log the effective
+    // policy either way so the operator can see what reload actually set.
+    ov := newCfg.Config.Routing.Fallback.Overflow
+    if !ov.Enabled || ov.Cooldown <= 0 {
+        s.overflow.clearCooldown()
+    }
+    slog.Info("overflow policy after reload", "enabled", ov.Enabled, "cooldown", ov.Cooldown.String(), "cost_ceiling", ov.CostCeiling, "config_version", newCfg.Version)
     // cfgMu: the pointer swap must not race background reaper goroutines that
     // read s.cfg on their own lifecycle.Worker (race detector: server.go:937
     // write vs agent_tasks.go:91 read). Take the write lock for the swap, then
