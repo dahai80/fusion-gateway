@@ -8,6 +8,7 @@ import (
     "strings"
 
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
+    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
@@ -111,6 +112,11 @@ func (s *Server) bridgeShellSession(r *http.Request) *http.Request {
         Role:       middleware.RoleAdmin,
         IsMaster:   false,
     })
+    // Tenant-scoped handlers (/v1/model-policy PUT) resolve the tenant from
+    // the context, not the claims; without this the bridged admin wrote the
+    // policy under tenant "" while the shell plane read tenant "local" and
+    // never saw it.
+    ctx = adapter.WithTenant(ctx, claims.TenantID)
     slog.Debug("shell session bridged to admin Principal", "path", r.URL.Path, "user", claims.Sub)
     return r.WithContext(ctx)
 }

@@ -114,10 +114,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     // never restricts them — without this gate any shell user could call
     // chat with an arbitrary model regardless of the tenant allowlist the
     // model picker shows. Enforce the same tenant policy the picker renders.
-    if claims := shellClaimsFrom(r.Context()); claims.Sub != "" && !s.modelPolicyAllowsModel(claims.TenantID, req.Model) {
-        slog.Warn("model not allowed by tenant model policy", "model", req.Model, "tenant", claims.TenantID, "user", claims.Sub)
-        http.Error(w, `{"error":{"message":"Model not allowed by the tenant model policy","type":"auth_error"}}`, http.StatusForbidden)
-        return
+    // Same "local" fallback as handleShellModelPolicy, so both read one key.
+    if claims := shellClaimsFrom(r.Context()); claims.Sub != "" {
+        tenant := claims.TenantID
+        if tenant == "" {
+            tenant = "local"
+        }
+        if !s.modelPolicyAllowsModel(tenant, req.Model) {
+            slog.Warn("model not allowed by tenant model policy", "model", req.Model, "tenant", tenant, "user", claims.Sub)
+            http.Error(w, `{"error":{"message":"Model not allowed by the tenant model policy","type":"auth_error"}}`, http.StatusForbidden)
+            return
+        }
     }
 
     textContent := extractTextContent(req.Messages)
