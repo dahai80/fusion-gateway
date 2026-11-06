@@ -12,6 +12,7 @@ import (
     "regexp"
     "strings"
     "sync"
+    "syscall"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
@@ -86,10 +87,16 @@ type persistedManifest struct {
 // manifest fields and resets the heartbeat, never duplicates.
 type Registry struct {
     mu              sync.RWMutex
-    // saveMu guards the temp-file-plus-rename write in save(). It is separate
-    // from mu: the write happens outside the state lock (slow I/O must not
-    // block reads), but two writers still cannot share one temp path.
+    // saveMu guards the temp-file-plus-rename write in save() and the
+    // Load() read. It is separate from mu: the write happens outside the
+    // state lock (slow I/O must not block reads), but two writers still
+    // cannot share one temp path.
     saveMu          sync.Mutex
+    // lastPersisted records the manifest ids present in the store file as of
+    // this process's last Load or save (#542). A disk id that is neither in
+    // memory nor here was written by another gateway process sharing the
+    // same data_dir and is adopted instead of clobbered on the next save.
+    lastPersisted   map[string]bool
     dynamic         map[string]*entry
     staticFallback  []config.ShellManifest
     heartbeatExpiry time.Duration
@@ -125,6 +132,7 @@ func NewRegistry(staticFallback []config.ShellManifest, allowlist []string, hear
     }
     return &Registry{
         dynamic:         make(map[string]*entry),
+        lastPersisted:   make(map[string]bool),
         staticFallback:  staticFallback,
         heartbeatExpiry: heartbeatExpiry,
         allowlist:       allowlist,
@@ -333,6 +341,17 @@ func (r *Registry) Load() error {
     if path == "" {
         return nil
     }
+    // The file lock serialises the read against another gateway process's
+    // save() on a shared data_dir (#542): without it a concurrent rename can
+    // leave this read with a torn or just-replaced file.
+    r.saveMu.Lock()
+    defer r.saveMu.Unlock()
+    lockFile, lockErr := lockStore(path)
+    if lockErr != nil {
+        slog.Warn("shell manifest store lock unavailable, loading unlocked", "path", path, "error", lockErr)
+    } else {
+        defer releaseStore(lockFile)
+    }
     raw, err := os.ReadFile(path)
     if os.IsNotExist(err) {
         return nil
@@ -365,6 +384,10 @@ func (r *Registry) Load() error {
         }
     }
     n := len(r.dynamic)
+    r.lastPersisted = make(map[string]bool, n)
+    for id := range r.dynamic {
+        r.lastPersisted[id] = true
+    }
     r.mu.Unlock()
     slog.Info("shell manifest store loaded", "path", path, "manifests", n)
     return nil
@@ -403,6 +426,19 @@ func (r *Registry) save() error {
         r.mu.RUnlock()
         return nil
     }
+    r.mu.RUnlock()
+    // Cross-process guard (#542): with two gateway instances on one data_dir
+    // each process's full rewrite used to drop the other's registrations.
+    // The flock serialises read-modify-write cycles; adoptForeign merges
+    // registrations written by the other process since our last Load/save.
+    lockFile, lockErr := lockStore(path)
+    if lockErr != nil {
+        slog.Warn("shell manifest store lock unavailable, saving unlocked", "path", path, "error", lockErr)
+    } else {
+        defer releaseStore(lockFile)
+        r.adoptForeign(path)
+    }
+    r.mu.RLock()
     persisted := make([]persistedManifest, 0, len(r.dynamic))
     for _, e := range r.dynamic {
         persisted = append(persisted, persistedManifest{
@@ -431,7 +467,92 @@ func (r *Registry) save() error {
     if err := os.Rename(tmp, path); err != nil {
         return fmt.Errorf("rename shell manifest store: %w", err)
     }
+    r.mu.Lock()
+    r.lastPersisted = make(map[string]bool, len(persisted))
+    for _, p := range persisted {
+        r.lastPersisted[p.ShellManifest.ID] = true
+    }
+    r.mu.Unlock()
     return nil
+}
+
+// lockStore takes an exclusive advisory flock on path+".lock" so two gateway
+// processes sharing one data_dir serialise their shell manifest store
+// read-modify-write cycles (#542). The lock file itself persists on disk;
+// only the lock is transient. Caller must releaseStore the result.
+func lockStore(path string) (*os.File, error) {
+    lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+    if err != nil {
+        return nil, fmt.Errorf("open shell manifest lock: %w", err)
+    }
+    if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+        lf.Close()
+        return nil, fmt.Errorf("lock shell manifest store: %w", err)
+    }
+    return lf, nil
+}
+
+func releaseStore(lf *os.File) {
+    if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_UN); err != nil {
+        slog.Warn("shell manifest store unlock failed", "error", err)
+    }
+    lf.Close()
+}
+
+// adoptForeign merges registrations another gateway process wrote to the
+// store file since our last Load or save (#542). An id counts as foreign
+// only when it is on disk but neither in memory nor in lastPersisted:
+// lastPersisted records what this process last read or wrote, so entries
+// this process deleted stay deleted, and concurrent updates to entries we
+// already hold keep our in-memory state (the next write is ours). Called
+// with saveMu held and, when the lock was acquired, the file lock held.
+// Without tombstones there is one residual race: if process A removes an
+// entry that process B still holds in memory, B's next save re-adds it. The
+// production failure this fixes — whole manifests vanishing because another
+// instance's snapshot predated them — is gone either way.
+func (r *Registry) adoptForeign(path string) {
+    raw, err := os.ReadFile(path)
+    if os.IsNotExist(err) {
+        return
+    }
+    if err != nil {
+        slog.Warn("shell manifest store unreadable before save, overwriting", "path", path, "error", err)
+        return
+    }
+    var disk []persistedManifest
+    if err := json.Unmarshal(raw, &disk); err != nil {
+        slog.Warn("shell manifest store unparsable before save, overwriting", "path", path, "error", err)
+        return
+    }
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    adopted := 0
+    for i := range disk {
+        p := disk[i]
+        m := p.ShellManifest
+        if _, ok := r.dynamic[m.ID]; ok || r.lastPersisted[m.ID] {
+            continue
+        }
+        if err := r.validateForStoreLocked(m); err != nil {
+            slog.Warn("foreign shell manifest store entry skipped", "id", m.ID, "error", err)
+            continue
+        }
+        r.dynamic[m.ID] = &entry{
+            manifest:            m,
+            lastHeartbeat:       p.LastHeartbeat,
+            dynamic:             true,
+            serviceKeyID:        p.ServiceKeyID,
+            serviceKeyHash:      p.ServiceKeyHash,
+            serviceKeyPrevHash:  p.ServiceKeyPrevHash,
+            serviceKeyRotatedAt: p.ServiceKeyRotatedAt,
+            serviceKeyRevoked:   p.ServiceKeyRevoked,
+            serviceKeyAuthAt:    p.ServiceKeyAuthAt,
+        }
+        adopted++
+    }
+    if adopted > 0 {
+        slog.Info("adopted shell manifests written by another gateway process", "count", adopted, "path", path)
+    }
 }
 
 // Heartbeat refreshes the liveness clock of one dynamic manifest.
