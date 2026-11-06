@@ -1226,6 +1226,13 @@ type ShellSessionConfig struct {
     // admin with a random password is generated and logged once at startup
     // (PRD §4.1.5), with must_change_password in the claims.
     Users []ShellUser `mapstructure:"users"`
+    // Tenant is the tenant id stamped into password-session claims (issue
+    // #543). Default "local". A deployment that mixes password logins with
+    // identity-SSO sessions must set this to the SSO tenant id, or the two
+    // login methods operate on isolated model-policy / preference namespaces.
+    // Changing it re-keys future sessions only; policies already stored under
+    // the old tenant keep living there until re-keyed.
+    Tenant string `mapstructure:"tenant"`
 }
 
 type ShellUser struct {
@@ -2926,7 +2933,8 @@ func DefaultConfig() Config {
             HealthPollInterval: 30 * time.Second,
             KeyRotationGrace:   24 * time.Hour,
             Session: ShellSessionConfig{
-                TTL: 12 * time.Hour,
+                TTL:    12 * time.Hour,
+                Tenant: "local",
             },
         },
         Persistence: defaultPersistenceConfig(),
