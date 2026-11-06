@@ -113,12 +113,23 @@ func decodeIdentityClaims(token string) identityClaims {
     return c
 }
 
+// identityAdminRoles (#538) lists the admin-class roles fusion-identity
+// mints. Its roles table names the tenant admin "tenant_admin" (beside
+// operator / member / viewer); "global_admin" is the cross-tenant class.
+// An explicit set, not a name-shape rule: a suffix match would elevate any
+// future identity role that merely ends in _admin.
+var identityAdminRoles = map[string]bool{
+    "admin":        true,
+    "global_admin": true,
+    "tenant_admin": true,
+}
+
 // mapIdentityRoleToShell maps the identity tenant role onto the shell role
-// model (admin/editor/viewer). Identity "admin" is the only elevated role —
-// every other identity role (member, custom) lands on viewer so SSO can
-// never grant shell write classes the identity never had.
+// model (admin/editor/viewer). Only identity admin-class roles elevate —
+// every other identity role (operator, member, custom) lands on viewer so
+// SSO can never grant shell write classes the identity never had.
 func mapIdentityRoleToShell(role string) string {
-    if strings.EqualFold(role, "admin") {
+    if identityAdminRoles[strings.ToLower(role)] {
         return "admin"
     }
     return "viewer"

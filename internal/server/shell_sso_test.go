@@ -137,6 +137,54 @@ func TestShellSSOAdminRoleMaps(t *testing.T) {
     }
 }
 
+// #538: fusion-identity's admin-class role is tenant_admin (its roles table:
+// tenant_admin / operator / member / viewer). An identity tenant admin must
+// land on shell admin, else no SSO principal can ever reach the
+// requireShellAdmin surfaces (PUT /v1/model-policy) for their own tenant.
+func TestShellSSOTenantAdminRoleMaps(t *testing.T) {
+    s, _ := ssoTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "access_token":  ssoJWT(t, "boss", "t1", "tenant_admin"),
+            "refresh_token": "r",
+            "expires_in":    60,
+        })
+    })
+    rec := ssoPost(t, s, `{"ticket":"t"}`)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("code = %d", rec.Code)
+    }
+    var out struct {
+        Roles []string `json:"roles"`
+    }
+    _ = json.Unmarshal(rec.Body.Bytes(), &out)
+    if len(out.Roles) != 1 || out.Roles[0] != "admin" {
+        t.Fatalf("roles = %v, want [admin]", out.Roles)
+    }
+}
+
+// Non-admin identity roles keep landing on viewer — operator is a
+// privileged-but-not-admin identity role and must not gain shell admin.
+func TestShellSSOOperatorRoleStaysViewer(t *testing.T) {
+    s, _ := ssoTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "access_token":  ssoJWT(t, "ops", "t1", "operator"),
+            "refresh_token": "r",
+            "expires_in":    60,
+        })
+    })
+    rec := ssoPost(t, s, `{"ticket":"t"}`)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("code = %d", rec.Code)
+    }
+    var out struct {
+        Roles []string `json:"roles"`
+    }
+    _ = json.Unmarshal(rec.Body.Bytes(), &out)
+    if len(out.Roles) != 1 || out.Roles[0] != "viewer" {
+        t.Fatalf("roles = %v, want [viewer]", out.Roles)
+    }
+}
+
 func TestShellSSOReplayedTicket401(t *testing.T) {
     s, _ := ssoTestServer(t, func(w http.ResponseWriter, r *http.Request) {
         // Identity consumed-ticket semantics: single-use, replay = 401.
