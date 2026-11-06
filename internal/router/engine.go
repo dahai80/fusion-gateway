@@ -872,6 +872,53 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
     for _, reason := range trips {
         e.Trip("local", reason)
     }
+
+    // #535: decide-then-admit. The half-open single-probe reservation is
+    // taken HERE — on a decision about to dispatch local — so the probe
+    // always reaches the backend and always gets a Record* pairing (chat,
+    // embedding, and rerank all funnel through recordOutcome). Requests the
+    // chain diverts to cloud no longer consume the probe at P0, which under
+    // sustained divert pressure pin-cycled the breaker open/half_open
+    // forever. Denial reuses the #429 divert shape: local-exclusive models
+    // reject 503, everything else falls to cluster then cloud. mode=local
+    // skips the gate: the fast path overrides the breaker by design, and its
+    // traffic is exactly what records the breaker back to closed.
+    if decision != nil && !decision.Rejected && decision.Backend == LocalBackend &&
+        cfg.Config.Routing.Mode != "local" {
+        // breakerMu guards the e.breakers map itself (DrainAndApply rebuilds
+        // it) — same read pattern as decideLocked. Admit()/tryClusterLocked
+        // nest the per-breaker mutex inside, matching Record*/Trip order.
+        e.breakerMu.RLock()
+        defer e.breakerMu.RUnlock()
+        if !e.breakers["local"].Admit() {
+            snapBreaker := e.breakers["local"].Snapshot()
+            slog.Warn("half-open probe admission denied at dispatch; diverting local decision",
+                "model", req.Model,
+                "planned_reason", decision.Reason,
+                "breaker_state", snapBreaker.State.String(),
+                "trip_reason", snapBreaker.TripReason,
+            )
+            observability.RecordHalfOpenProbeDenied("local", snapBreaker.State.String())
+            if localExclusiveDecision(cfg, req, snap) != nil {
+                detail, _ := json.Marshal(map[string]any{
+                    "type":          "overloaded_error",
+                    "model":         req.Model,
+                    "breaker_state": snapBreaker.State.String(),
+                    "trip_reason":   snapBreaker.TripReason,
+                })
+                return &RouteDecision{
+                    Rejected:     true,
+                    RejectStatus: http.StatusServiceUnavailable,
+                    Reason:       "local_exclusive_model_breaker_open",
+                    RejectDetail: string(detail),
+                }
+            }
+            if d := e.tryClusterLocked(cfg, req.Model, snap); d != nil {
+                return d
+            }
+            return &RouteDecision{Backend: CloudBackend, Reason: "half_open_probe_busy"}
+        }
+    }
     return decision
 }
 
@@ -1120,11 +1167,13 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         return decision
     }
 
-    // P0: Circuit breaker check — local. B6 (audit): Admit() enforces the
-    // half-open single-probe rule at the authoritative admission gate — a
-    // recovering local backend sees at most one probe at a time instead of
-    // the full flood State() used to let through. Divert reason unchanged.
-    if !e.breakers["local"].Admit() {
+    // P0: Circuit breaker check — local. Open-state gate only: the half-open
+    // single-probe admission moved to the Decide tail (#535) so the probe is
+    // reserved on a decision that actually dispatches local, not on the
+    // first request to arrive (which the chain below may divert to cloud,
+    // burning the probe window with no outcome ever recorded). IsOpen()
+    // still drives the open->half_open transition on timeout.
+    if e.breakers["local"].IsOpen() {
         // #429: a local-exclusive model has NO cloud backend that can serve
         // it — diverting it cloud on a tripped breaker produced a misleading
         // 400 ("Selected backend does not support image generation") in
