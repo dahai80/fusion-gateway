@@ -13,6 +13,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/modelpolicy"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
 )
 
@@ -879,7 +880,14 @@ func TestShellChatCompletions_SessionGated(t *testing.T) {
     s.cfg.Config.Shell.Session.Users = []config.ShellUser{
         {Username: "alice", Password: "alicepw", Roles: []string{"user"}},
     }
+    // Fail-closed policy gate: password sessions land in tenant "local", so
+    // the chat model must be allowlisted for the session to pass. Seed after
+    // setupShell, which rebuilds the policy store.
     s.setupShell()
+    s.modelPolicies = modelpolicy.NewStore()
+    if err := s.modelPolicies.SetPolicy("local", modelpolicy.Policy{UserAllowlist: []string{"gpt-4"}}); err != nil {
+        t.Fatalf("SetPolicy: %v", err)
+    }
 
     chatBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"stream":false}`
     handler := s.withShellSession(s.handleChatCompletions)

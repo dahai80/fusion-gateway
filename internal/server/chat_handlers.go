@@ -79,7 +79,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
             if tenant == "" {
                 tenant = "local"
             }
-            resolved = s.modelPolicies.Resolve(tenant, claims.Sub, "", s.modelPolicyFallback(), s.modelPolicyIsLocal).Model
+            // Fail-closed: a tenant without an explicit allowlist has no
+            // allowable model, so do not backfill one the policy gate below
+            // would have to reject anyway.
+            if len(s.modelPolicies.Policy(tenant).UserAllowlist) > 0 {
+                resolved = s.modelPolicies.Resolve(tenant, claims.Sub, "", s.modelPolicyFallback(), s.modelPolicyIsLocal).Model
+            }
         }
         var err error
         if resolved == "" {
@@ -135,8 +140,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
             tenant = "local"
         }
         if !s.modelPolicyAllowsModel(tenant, req.Model) {
+            msg := "Model not allowed by the tenant model policy"
+            if s.modelPolicies == nil || len(s.modelPolicies.Policy(tenant).UserAllowlist) == 0 {
+                msg = "AI chat is not enabled for this account: no model policy is configured for its tenant. Contact the administrator."
+            }
             slog.Warn("model not allowed by tenant model policy", "model", req.Model, "tenant", tenant, "user", claims.Sub)
-            http.Error(w, `{"error":{"message":"Model not allowed by the tenant model policy","type":"auth_error"}}`, http.StatusForbidden)
+            http.Error(w, `{"error":{"message":"`+msg+`","type":"auth_error"}}`, http.StatusForbidden)
             return
         }
     }

@@ -142,23 +142,26 @@ func (s *Server) modelPolicyFallback() string {
 // modelPolicyAllowsModel reports whether the tenant model policy permits
 // calling chat with the given model directly (issue #11): a non-empty
 // user_allowlist must contain it, and privacy_mode local_only must not
-// route it to a cloud backend. Empty allowlist and "all" are unrestricted.
+// route it to a cloud backend. Fail-closed: a tenant without an explicit
+// non-empty allowlist (or a disabled policy store) permits no model at all —
+// an unconfigured tenant must never widen to the full catalog.
 func (s *Server) modelPolicyAllowsModel(tenant, model string) bool {
     if s.modelPolicies == nil {
-        return true
+        return false
     }
     policy := s.modelPolicies.Policy(tenant)
-    if len(policy.UserAllowlist) > 0 {
-        found := false
-        for _, allowed := range policy.UserAllowlist {
-            if strings.EqualFold(allowed, model) {
-                found = true
-                break
-            }
+    if len(policy.UserAllowlist) == 0 {
+        return false
+    }
+    found := false
+    for _, allowed := range policy.UserAllowlist {
+        if strings.EqualFold(allowed, model) {
+            found = true
+            break
         }
-        if !found {
-            return false
-        }
+    }
+    if !found {
+        return false
     }
     if policy.PrivacyMode == modelpolicy.PrivacyModeLocalOnly && !s.modelPolicyIsLocal(model) {
         return false
