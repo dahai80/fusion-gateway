@@ -109,3 +109,29 @@ func TestModelPolicyPut_ShellSessionBridgeWritesSessionTenant(t *testing.T) {
         t.Fatalf("policy stored under wrong tenant: %+v", p)
     }
 }
+
+// Issue #14 companion: an empty model on a shell-session chat must backfill
+// from the tenant policy chain, not the global routing default — the global
+// default is invisible to the tenant allowlist and would 403 on the policy
+// gate even though the tenant has a valid default model.
+func TestShellChatCompletions_EmptyModelBackfillsTenantDefault(t *testing.T) {
+    s := newTestServer()
+    s.modelPolicies = modelpolicy.NewStore()
+    s.cfg.Config.Routing.DefaultModel = "global-default"
+    if err := s.modelPolicies.SetPolicy("local", modelpolicy.Policy{
+        DefaultModel:  "tenant-default",
+        UserAllowlist: []string{"tenant-default"},
+    }); err != nil {
+        t.Fatalf("SetPolicy: %v", err)
+    }
+    ctx := config.WithSnapshot(context.Background(), s.cfg)
+    ctx = withShellClaims(ctx, shell.SessionClaims{Sub: "user-1", TenantID: "local"})
+
+    body := `{"messages":[{"role":"user","content":"hi"}],"stream":false}`
+    req := httptest.NewRequest(http.MethodPost, "/api/v1/shell/chat/completions", strings.NewReader(body))
+    rec := httptest.NewRecorder()
+    s.handleChatCompletions(rec, req.WithContext(ctx))
+    if rec.Code == http.StatusForbidden {
+        t.Fatalf("empty model must backfill from the tenant policy default, got 403: %s", rec.Body.String())
+    }
+}

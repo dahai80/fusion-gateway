@@ -68,11 +68,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
     // Issue #28: empty model would be passed through to fusion-mlx and 404.
     // Backfill from routing.default_model, or auto-discover the first loaded
-    // local model when no default is configured.
+    // local model when no default is configured. Shell sessions resolve the
+    // tenant policy chain first (issue #14 companion): the global routing
+    // default is invisible to the tenant allowlist and would 403 on the gate
+    // below even though the tenant has a perfectly good default model.
     if strings.TrimSpace(req.Model) == "" {
-        resolved, err := s.resolveDefaultModel(ctx)
-        if err != nil {
-            slog.Warn("default model resolution failed", "error", err)
+        resolved := ""
+        if claims := shellClaimsFrom(r.Context()); claims.Sub != "" && s.modelPolicies != nil {
+            tenant := claims.TenantID
+            if tenant == "" {
+                tenant = "local"
+            }
+            resolved = s.modelPolicies.Resolve(tenant, claims.Sub, "", s.modelPolicyFallback(), s.modelPolicyIsLocal).Model
+        }
+        var err error
+        if resolved == "" {
+            resolved, err = s.resolveDefaultModel(ctx)
+            if err != nil {
+                slog.Warn("default model resolution failed", "error", err)
+            }
         }
         if resolved != "" {
             slog.Info("backfilling empty model", "model", resolved)
