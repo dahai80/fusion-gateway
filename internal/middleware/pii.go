@@ -144,8 +144,28 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
         return false, nil
     }
 
+    detected := pm.checker.Detect(text)
+    if len(detected) > 0 {
+        logPIIDetection(pm.checker.action, detected)
+        switch pm.checker.action {
+        case "deny":
+            return true, detected
+        case "mask":
+            return false, detected
+        default:
+            return false, detected
+        }
+    }
+
+    return false, nil
+}
+
+// Detect (G4) runs pure pattern detection with no action semantics and no
+// logging — the guardrail chain applies per-link actions. The detection loop
+// is the same validator-aware scan ScanText has always used.
+func (c *PIIChecker) Detect(text string) []string {
     var detected []string
-    for _, p := range pm.checker.patterns {
+    for _, p := range c.patterns {
         // #128: a pattern with a validator (ipv4/aws_secret/credit_card/phone)
         // must re-check each candidate with the guard-ported validator — a
         // candidate the validator rejects (e.g. 999.1.1.1 for ipv4, non-Luhn
@@ -175,19 +195,7 @@ func (pm *PIIMiddleware) ScanText(text string) (bool, []string) {
         }
     }
 
-    if len(detected) > 0 {
-        logPIIDetection(pm.checker.action, detected)
-        switch pm.checker.action {
-        case "deny":
-            return true, detected
-        case "mask":
-            return false, detected
-        default:
-            return false, detected
-        }
-    }
-
-    return false, nil
+    return detected
 }
 
 // guardScan holds the lazily compiled guard SSOT patterns for persistence

@@ -1959,6 +1959,23 @@ Three actions:
 
 Custom patterns supported via `pii.patterns` config.
 
+## Guardrail Chain
+
+When the single PII scan is not enough, configure an ordered guardrail chain (G4). An empty `guardrails:` list keeps the legacy single-point PII behavior verbatim — the chain only activates when explicitly configured:
+
+```yaml
+guardrails:
+    - name: compliance-pii
+      type: pii        # builtins today: pii (vendored guard SSOT patterns + pii.patterns)
+      action: deny     # log | deny | mask (empty falls back to pii.action)
+      enabled: true
+```
+
+- Links run in configured order; a `deny` link short-circuits the request with the same 400 `pii_error` envelope the legacy scan returns.
+- A `pii` link's presence is the explicit enablement — it loads the pattern set even when `pii.enabled` is false.
+- Unknown link `type` values and invalid `action` values fail config validation (fail-closed on config, not silent skip at request time).
+- Scanned on every inference path the legacy scan covered: `/v1/chat/completions`, `/v1/completions`, `/v1/messages`.
+
 ## Cloud Routing Strategies
 
 When multiple cloud backends are available, select a strategy via `cloud_routing.strategy`:

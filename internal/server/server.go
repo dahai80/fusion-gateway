@@ -85,6 +85,7 @@ type Server struct {
     // counter). Policy knobs live in routing.fallback.overflow config.
     overflow        overflowState
     piiMiddleware   *middleware.PIIMiddleware
+    guardrailChain  *middleware.GuardrailChain
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
     store           store.Store
@@ -724,6 +725,9 @@ func New(
         fetchCoalescer:    newCoalescer(),
         costTracker:       cost.NewTracker(10000),
         piiMiddleware:     middleware.NewPIIMiddleware(cfg.Config.PII),
+        // G4: the guardrail chain activates only when guardrails: is
+        // configured; nil keeps the legacy single-point PII behavior.
+        guardrailChain:    middleware.NewGuardrailChain(cfg.Config.Guardrails, cfg.Config.PII),
         cloudStrategy:     cs,
         latencyTracker:    lt,
         store:             s,
