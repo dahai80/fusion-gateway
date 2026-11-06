@@ -2,7 +2,9 @@ package config
 
 import (
     "crypto/ed25519"
+    "crypto/sha256"
     "encoding/base64"
+    "encoding/hex"
     "encoding/json"
     "fmt"
     "os"
@@ -1574,6 +1576,25 @@ func fileValueForKey(path, key string) (string, bool) {
     return val, true
 }
 
+// logMasterKeySource (#536): bindSecretEnv gives FG_MASTER_KEY and
+// FUSION_ADMIN_KEY silent precedence over auth.master_key in config.yaml.
+// Derivations that assume the file value (shell session secret minting, smoke
+// tooling) then fail with 401 and no visible cause. Log the winning source
+// (first non-empty bound env name, else the file) plus a short non-secret
+// fingerprint of the effective value, so the override is visible without
+// dumping process env. Called from Load and Reload.
+func logMasterKeySource(effective string) {
+    source := "config file"
+    for _, name := range []string{"FG_MASTER_KEY", "FUSION_ADMIN_KEY"} {
+        if os.Getenv(name) != "" {
+            source = "env " + name
+            break
+        }
+    }
+    sum := sha256.Sum256([]byte(effective))
+    slog.Info("auth.master_key resolved", "source", source, "fingerprint", "sha256:"+hex.EncodeToString(sum[:8]))
+}
+
 // fusionMLXKeyEnvs (#412) returns the two env values relevant to the
 // fusion-mlx backend credential. FUSION_MLX_API_KEY is the deliberate
 // operator-injection name (the only one viper binds — see bindSecretEnv).
@@ -1714,6 +1735,7 @@ func Load(path string) (*ConfigSnapshot, error) {
     if err := validate(&cfg); err != nil {
         return nil, fmt.Errorf("validate config: %w", err)
     }
+    logMasterKeySource(cfg.Auth.MasterKey)
 
     // N4 (audit): decrypt backends[*].api_key stored as "enc:" ciphertext.
     // Runs after validate (master_key placeholder refusal) and before the
@@ -1827,6 +1849,7 @@ func Reload(path string) (*ConfigSnapshot, error) {
         slog.Error("reload: config validation failed", "error", err)
         return nil, fmt.Errorf("validate config: %w", err)
     }
+    logMasterKeySource(cfg.Auth.MasterKey)
 
     ver := configVersion.Add(1)
     newSnap := &ConfigSnapshot{
