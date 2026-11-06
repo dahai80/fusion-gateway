@@ -22,6 +22,7 @@ import (
     "errors"
     "log/slog"
     "net/http"
+    "strings"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
@@ -136,6 +137,33 @@ func (s *Server) modelPolicyFallback() string {
         return snap.Config.Routing.DefaultModel
     }
     return ""
+}
+
+// modelPolicyAllowsModel reports whether the tenant model policy permits
+// calling chat with the given model directly (issue #11): a non-empty
+// user_allowlist must contain it, and privacy_mode local_only must not
+// route it to a cloud backend. Empty allowlist and "all" are unrestricted.
+func (s *Server) modelPolicyAllowsModel(tenant, model string) bool {
+    if s.modelPolicies == nil {
+        return true
+    }
+    policy := s.modelPolicies.Policy(tenant)
+    if len(policy.UserAllowlist) > 0 {
+        found := false
+        for _, allowed := range policy.UserAllowlist {
+            if strings.EqualFold(allowed, model) {
+                found = true
+                break
+            }
+        }
+        if !found {
+            return false
+        }
+    }
+    if policy.PrivacyMode == modelpolicy.PrivacyModeLocalOnly && !s.modelPolicyIsLocal(model) {
+        return false
+    }
+    return true
 }
 
 // handleShellModelPolicy serves GET /api/v1/shell/model-policy (and the
