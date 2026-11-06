@@ -523,6 +523,15 @@ type PIIPattern struct {
 type CloudRoutingConfig struct {
     Strategy     string         `mapstructure:"strategy"`
     CloudWeights map[string]int `mapstructure:"cloud_weights"`
+    // CooldownSeconds (G1): after a cloud deployment fails
+    // FailureThreshold consecutive outcomes, exclude it from strategy
+    // selection for this window. 0 (default) disables cooldown entirely —
+    // every backend stays eligible, matching pre-G1 behavior.
+    CooldownSeconds int `mapstructure:"cooldown_seconds"`
+    // FailureThreshold is the consecutive-failure count that arms the
+    // cooldown. 0 means 1 (first failure cools the deployment) when
+    // CooldownSeconds > 0. Capped by config.Validate.
+    FailureThreshold int `mapstructure:"failure_threshold"`
 }
 
 type GCConfig struct {
@@ -1961,6 +1970,14 @@ func validate(cfg *Config) error {
 
     if cfg.Routing.TokenThreshold <= 0 {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
+    }
+
+    // G1: cloud_routing cooldown sanity (EI8: numeric range checks).
+    if cfg.CloudRouting.CooldownSeconds < 0 || cfg.CloudRouting.CooldownSeconds > 3600 {
+        return fmt.Errorf("cloud_routing.cooldown_seconds must be within [0, 3600], got: %d", cfg.CloudRouting.CooldownSeconds)
+    }
+    if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
+        return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
     }
 
     // §13.3 models.* namespace (alias/supply sanity, WARN-first).

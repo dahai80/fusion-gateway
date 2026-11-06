@@ -609,6 +609,10 @@ func New(
     }
     lt := router.NewLatencyTracker(1000)
     cs := router.NewCloudStrategy(cfg.Config.CloudRouting, lt)
+    // G1: cloud provider outcomes (from the cloudTrackingProvider decorator)
+    // feed the strategy's per-deployment cooldown. Requests routed before
+    // this line simply record nothing — nil-safe on the adapter side.
+    adapter.SetCloudOutcomeRecorder(cs)
 
     // #514: identity-keyed daily token quota meter (cloud-try Phase 1).
     // nil when disabled — the gate middleware and finalize accounting are
@@ -1675,6 +1679,12 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     s.cfgMu.Lock()
     s.cfg = newCfg
     s.cfgMu.Unlock()
+    // G1: cloud_routing (strategy/weights/cooldown) was read from the copy
+    // captured at startup — reload never reached the strategy and the old
+    // settings silently stayed live. Push the new snapshot on every reload.
+    if s.cloudStrategy != nil {
+        s.cloudStrategy.UpdateConfig(newCfg.Config.CloudRouting)
+    }
     s.buildMiddlewareChain()
     // #129 Gap 3: propagate managed-MCP tool allowlist changes on hot-reload
     // so toggling mcp.managed_tool_allowlist takes effect without a restart.
