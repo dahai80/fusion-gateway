@@ -33,6 +33,22 @@ func DayKey(t time.Time) string {
     return t.Format("2006-01-02")
 }
 
+// WindowKey (G3) generalizes the bucket key to the configured reset window:
+// daily (default, = DayKey), weekly (ISO year-week, 2026-W45), monthly
+// (2026-11). Rollover stays derived from the record timestamp — a new window
+// simply starts a fresh bucket on the next request, no timers.
+func WindowKey(t time.Time, window string) string {
+    switch window {
+    case "weekly":
+        y, w := t.ISOWeek()
+        return fmt.Sprintf("%d-W%02d", y, w)
+    case "monthly":
+        return t.Format("2006-01")
+    default:
+        return DayKey(t)
+    }
+}
+
 // CallDetail is one accounted call (per-call detail rollup row).
 type CallDetail struct {
     Time    time.Time `json:"time"`
@@ -42,7 +58,9 @@ type CallDetail struct {
     Tokens  int       `json:"tokens"`
 }
 
-// DayUse is one user's rollup for one day.
+// DayUse is one user's rollup for one metering window (day / ISO week /
+// month — the field name predates G3 windows and the JSON key stays "day"
+// for snapshot-file compatibility).
 type dayUse struct {
     Day    string       `json:"day"`
     Total  int          `json:"total"`
@@ -50,16 +68,20 @@ type dayUse struct {
     // CallsCapped marks that per-call detail rows were evicted (the detail
     // ring is bounded; the Total rollup stays exact).
     CallsCapped bool `json:"calls_capped,omitempty"`
+    // SoftAlerted (G3): the soft-limit webhook fired for this window —
+    // once per window, not once per request.
+    SoftAlerted bool `json:"soft_alerted,omitempty"`
 }
 
 const maxDetailPerDay = 200
 
-// Store holds per-sub daily usage + per-user budget overrides. Safe for
+// Store holds per-sub usage rollups + per-user budget overrides. Safe for
 // concurrent use; a single mutex is fine at product-call rates.
 type Store struct {
     mu        sync.Mutex
     usage     map[string]*dayUse
     overrides map[string]int // sub → daily budget override (0 = remove)
+    window    string         // reset window: "" / daily / weekly / monthly
     path      string         // optional JSON snapshot path ("" = memory only)
     saveTimer *time.Timer    // pending debounced save (nil = none armed)
     writeMu   sync.Mutex     // serializes snapshot writes (Flush may race the timer)
@@ -164,34 +186,80 @@ func (s *Store) Save() {
     }
 }
 
-// UsedToday returns the user's accounted total for the day of `now`.
+// SetWindow (G3) switches the reset window ("" / daily / weekly / monthly).
+// A switch starts fresh buckets — the old rollup keys stay in the snapshot
+// until evicted, and the change is logged for the operator. Called at
+// startup and from the reload path.
+func (s *Store) SetWindow(window string) {
+    switch window {
+    case "", "daily", "weekly", "monthly":
+    default:
+        slog.Warn("try-quota: unknown reset window, keeping current", "window", window)
+        return
+    }
+    s.mu.Lock()
+    changed := s.window != window
+    s.window = window
+    s.mu.Unlock()
+    if changed {
+        slog.Info("try-quota: reset window set", "window", WindowKey(time.Now(), window))
+    }
+}
+
+// UsedToday returns the user's accounted total for the current metering
+// window of `now` (day / week / month per the configured window — the name
+// predates G3 windows).
 func (s *Store) UsedToday(sub string, now time.Time) int {
     s.mu.Lock()
     defer s.mu.Unlock()
     u, ok := s.usage[sub]
-    if !ok || u.Day != DayKey(now) {
+    if !ok || u.Day != WindowKey(now, s.window) {
         return 0
     }
     return u.Total
 }
 
-// Record accounts `tokens` for sub on the day of `now`, rolling the day
-// bucket forward when the date changed. The store keeps ONE bucket per sub —
-// a rollover discards the previous day's rollup (the quota gate only reads
-// today). The per-call detail ring is bounded (maxDetailPerDay); the rollup
-// Total stays exact.
+// MarkSoftAlerted (G3) records that the soft-limit alert fired for sub in
+// the window of `now`. Returns true when this call is the one that armed it
+// (once per window); false when an alert already fired. The check-and-set is
+// atomic under the store mutex, so concurrent requests crossing the soft
+// threshold together fire exactly one webhook.
+func (s *Store) MarkSoftAlerted(sub string, now time.Time) bool {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    key := WindowKey(now, s.window)
+    u, ok := s.usage[sub]
+    if !ok || u.Day != key {
+        // No rollup yet (the gate marks before Record lands) — create the
+        // bucket so the once-per-window flag has a home.
+        u = &dayUse{Day: key}
+        s.usage[sub] = u
+    }
+    if u.SoftAlerted {
+        return false
+    }
+    u.SoftAlerted = true
+    s.scheduleSave()
+    return true
+}
+
+// Record accounts `tokens` for sub in the metering window of `now`, rolling
+// the bucket forward when the window key changed. The store keeps ONE bucket
+// per sub — a rollover discards the previous window's rollup (the quota gate
+// only reads the current window). The per-call detail ring is bounded
+// (maxDetailPerDay); the rollup Total stays exact.
 func (s *Store) Record(sub string, tokens int, detail CallDetail, now time.Time) {
     if sub == "" {
         return
     }
-    day := DayKey(now)
     if detail.Time.IsZero() {
         detail.Time = now
     }
     s.mu.Lock()
+    key := WindowKey(now, s.window)
     u, ok := s.usage[sub]
-    if !ok || u.Day != day {
-        u = &dayUse{Day: day}
+    if !ok || u.Day != key {
+        u = &dayUse{Day: key}
         s.usage[sub] = u
     }
     u.Total += tokens
