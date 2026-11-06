@@ -520,6 +520,23 @@ type PIIPattern struct {
     Regex string `mapstructure:"regex"`
 }
 
+// GuardrailConfig (G4) is one link of the ordered guardrail chain. The chain
+// activates only when guardrails: is configured — an empty list preserves the
+// legacy single-point PII middleware behavior verbatim.
+type GuardrailConfig struct {
+    // Name labels the link in logs and metrics.
+    Name string `mapstructure:"name"`
+    // Type selects the builtin guard. Today: "pii" (the vendored guard SSOT
+    // pattern set + pii.patterns extensions). config.Validate rejects others.
+    Type string `mapstructure:"type"`
+    // Action for this link: log / deny / mask. Empty falls back to
+    // pii.action. deny short-circuits the request with a 400.
+    Action string `mapstructure:"action"`
+    // Enabled gates the link (default false — an explicit opt-in per link,
+    // consistent with pii.enabled).
+    Enabled bool `mapstructure:"enabled"`
+}
+
 type CloudRoutingConfig struct {
     Strategy     string         `mapstructure:"strategy"`
     CloudWeights map[string]int `mapstructure:"cloud_weights"`
@@ -1021,6 +1038,10 @@ type Config struct {
     Realtime      RealtimeConfig           `mapstructure:"realtime"`
     Cache         CacheConfig              `mapstructure:"cache"`
     PII           PIIConfig                `mapstructure:"pii"`
+    // Guardrails (G4): ordered governance chain scanned before inference.
+    // Empty = legacy single-point PII behavior (the chain never activates on
+    // its own).
+    Guardrails    []GuardrailConfig        `mapstructure:"guardrails"`
     CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
     Admin         *AdminConfig             `mapstructure:"admin"`
     OIDC          OIDCConfig               `mapstructure:"oidc"`
@@ -1999,6 +2020,18 @@ func validate(cfg *Config) error {
     }
     if cfg.TryQuota.SoftLimitPercent < 0 || cfg.TryQuota.SoftLimitPercent > 100 {
         return fmt.Errorf("try_quota.soft_limit_percent must be within [0, 100], got: %d", cfg.TryQuota.SoftLimitPercent)
+    }
+
+    // G4: guardrail chain links must reference known builtins (fail-closed on
+    // config — an unknown type must not silently skip at request time).
+    validGuardrailActions := map[string]bool{"": true, "log": true, "deny": true, "mask": true}
+    for i, g := range cfg.Guardrails {
+        if g.Type != "pii" {
+            return fmt.Errorf("guardrails[%d].type must be \"pii\" (known builtins: pii), got: %q", i, g.Type)
+        }
+        if !validGuardrailActions[g.Action] {
+            return fmt.Errorf("guardrails[%d].action must be log|deny|mask, got: %q", i, g.Action)
+        }
     }
 
     // §13.3 models.* namespace (alias/supply sanity, WARN-first).

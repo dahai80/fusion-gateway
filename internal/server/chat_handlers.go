@@ -1735,6 +1735,21 @@ func extractTextContent(messages []adapter.ChatMessage) string {
 // chat was silently skipped on the other two inference paths. This helper
 // closes that gap by giving every inference handler the same gate.
 func (s *Server) scanPIIOrDeny(w http.ResponseWriter, textContent, model, endpoint string) bool {
+    // G4: the guardrail chain, when configured, replaces the legacy
+    // single-point PII scan (same deny/400 contract, ordered links).
+    if s.guardrailChain.Len() > 0 {
+        deny, detected := s.guardrailChain.ScanText(textContent)
+        if deny {
+            slog.Warn("request denied by guardrail chain",
+                "types", detected,
+                "model", model,
+                "endpoint", endpoint,
+            )
+            http.Error(w, fmt.Sprintf(`{"error":{"message":"Request contains PII (%s)","type":"pii_error"}}`, strings.Join(detected, ",")), http.StatusBadRequest)
+            return true
+        }
+        return false
+    }
     if s.piiMiddleware == nil {
         return false
     }
