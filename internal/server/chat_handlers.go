@@ -1736,9 +1736,15 @@ func extractTextContent(messages []adapter.ChatMessage) string {
 // closes that gap by giving every inference handler the same gate.
 func (s *Server) scanPIIOrDeny(w http.ResponseWriter, textContent, model, endpoint string) bool {
     // G4: the guardrail chain, when configured, replaces the legacy
-    // single-point PII scan (same deny/400 contract, ordered links).
-    if s.guardrailChain.Len() > 0 {
-        deny, detected := s.guardrailChain.ScanText(textContent)
+    // single-point PII scan (same deny/400 contract, ordered links). Fields
+    // are rebuilt under cfgMu on reload — read them under RLock so the
+    // pointer swap is race-free.
+    s.cfgMu.RLock()
+    chain := s.guardrailChain
+    pii := s.piiMiddleware
+    s.cfgMu.RUnlock()
+    if chain != nil && chain.Len() > 0 {
+        deny, detected := chain.ScanText(textContent)
         if deny {
             slog.Warn("request denied by guardrail chain",
                 "types", detected,
@@ -1750,10 +1756,10 @@ func (s *Server) scanPIIOrDeny(w http.ResponseWriter, textContent, model, endpoi
         }
         return false
     }
-    if s.piiMiddleware == nil {
+    if pii == nil {
         return false
     }
-    deny, detected := s.piiMiddleware.ScanText(textContent)
+    deny, detected := pii.ScanText(textContent)
     if deny {
         slog.Warn("request denied: PII detected",
             "types", detected,
