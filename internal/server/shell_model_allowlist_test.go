@@ -6,6 +6,7 @@ import (
     "net/http/httptest"
     "strings"
     "testing"
+    "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/modelpolicy"
@@ -75,5 +76,36 @@ func TestShellChatCompletions_TenantModelPolicyDefaults(t *testing.T) {
     }
     if code := post("cloud/glm-5"); code != http.StatusForbidden {
         t.Fatalf("expected 403 for a cloud model under local_only privacy, got %d", code)
+    }
+}
+
+// A policy PUT through the shell-session admin bridge must land under the
+// session's tenant, not "": handleShellModelPolicy and the chat policy gate
+// resolve claims.TenantID, so a policy written under the empty tenant was
+// invisible to the entire shell plane.
+func TestModelPolicyPut_ShellSessionBridgeWritesSessionTenant(t *testing.T) {
+    s := newTestServer()
+    s.modelPolicies = modelpolicy.NewStore()
+    s.shellSessions = shell.NewManager([]byte("test-secret"), time.Hour)
+    s.shellUsers = shell.NewUserStore("")
+    if err := s.shellUsers.SeedFromConfig([]shell.UserAccount{{Username: "admin", Roles: []string{"admin"}}}); err != nil {
+        t.Fatalf("SeedFromConfig: %v", err)
+    }
+    token, err := s.shellSessions.Issue(shell.SessionClaims{Sub: "admin", TenantID: "local", Roles: []string{"admin"}})
+    if err != nil {
+        t.Fatalf("Issue: %v", err)
+    }
+
+    body := `{"default_model":"local-small","user_allowlist":["local-small"]}`
+    req := httptest.NewRequest(http.MethodPut, "/v1/model-policy", strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+token)
+    rec := httptest.NewRecorder()
+    s.handleModelPolicy(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("PUT /v1/model-policy: got %d: %s", rec.Code, rec.Body.String())
+    }
+    p := s.modelPolicies.Policy("local")
+    if len(p.UserAllowlist) != 1 || p.UserAllowlist[0] != "local-small" {
+        t.Fatalf("policy stored under wrong tenant: %+v", p)
     }
 }
