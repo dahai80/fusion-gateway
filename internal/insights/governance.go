@@ -32,7 +32,7 @@ func (s *Service) PIIDaily(ctx context.Context, days int) ([]PIIDailyRow, error)
     rows, err := s.pool.Query(ctx,
         `SELECT to_char(date_trunc('day', ts), 'YYYY-MM-DD') AS day, count(*)
          FROM fg_request_logs
-         WHERE contains_pii AND ts >= now() - ($1 || ' days')::interval
+         WHERE contains_pii AND ts >= now() - make_interval(days => $1)
          GROUP BY 1 ORDER BY 1`, days)
     if err != nil {
         return nil, fmt.Errorf("pii daily query: %w", err)
@@ -61,7 +61,7 @@ func (s *Service) RejectsByKey(ctx context.Context, days int) ([]RejectsRow, err
     rows, err := s.pool.Query(ctx,
         `SELECT COALESCE(api_key_name, '') AS key_name, count(*)
          FROM fg_request_logs
-         WHERE status_code = 429 AND ts >= now() - ($1 || ' days')::interval
+         WHERE status_code = 429 AND ts >= now() - make_interval(days => $1)
          GROUP BY 1 ORDER BY 2 DESC LIMIT 20`, days)
     if err != nil {
         return nil, fmt.Errorf("rejects by key query: %w", err)
