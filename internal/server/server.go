@@ -1684,7 +1684,18 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     // rebuild the middleware chain under the existing middlewareChainMu.
     s.cfgMu.Lock()
     s.cfg = newCfg
+    // G4: the guardrail chain (and the legacy PII middleware it replaces)
+    // were built once at startup — a reload that added/changed guardrails
+    // or pii config silently kept the old chain (live-verified on v0.9.136:
+    // a deny link added via reload never fired). Both are pure in-process
+    // recomputes; rebuild under cfgMu so request readers of the fields are
+    // race-free. Log the effective policy either way.
+    s.piiMiddleware = middleware.NewPIIMiddleware(newCfg.Config.PII)
+    s.guardrailChain = middleware.NewGuardrailChain(newCfg.Config.Guardrails, newCfg.Config.PII)
+    links := s.guardrailChain.Len()
+    piiEnabled := newCfg.Config.PII.Enabled
     s.cfgMu.Unlock()
+    slog.Info("guardrail policy after reload", "links", links, "pii_enabled", piiEnabled, "config_version", newCfg.Version)
     // G1: cloud_routing (strategy/weights/cooldown) was read from the copy
     // captured at startup — reload never reached the strategy and the old
     // settings silently stayed live. Push the new snapshot on every reload.
