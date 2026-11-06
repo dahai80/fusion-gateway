@@ -620,7 +620,9 @@ func New(
     var quotaMeter *tryquota.Store
     if cfg.Config.TryQuota.Enabled {
         quotaMeter = tryquota.NewStore(cfg.Config.TryQuota.StatePath)
-        slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath)
+        // G3: honor the configured reset window from the first request.
+        quotaMeter.SetWindow(cfg.Config.TryQuota.ResetWindow)
+        slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath, "reset_window", cfg.Config.TryQuota.ResetWindow)
     }
 
     logMaxLen := 10000
@@ -1685,6 +1687,11 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     if s.cloudStrategy != nil {
         s.cloudStrategy.UpdateConfig(newCfg.Config.CloudRouting)
     }
+    // G3: a reload that changes try_quota.reset_window must reach the store
+    // (the gate reads only per-request settings, not the store's bucket key).
+    if s.tryQuotaMeter != nil {
+        s.tryQuotaMeter.SetWindow(newCfg.Config.TryQuota.ResetWindow)
+    }
     s.buildMiddlewareChain()
     // #129 Gap 3: propagate managed-MCP tool allowlist changes on hot-reload
     // so toggling mcp.managed_tool_allowlist takes effect without a restart.
@@ -1773,6 +1780,9 @@ func (s *Server) tryQuotaConfigSource() middleware.TryQuotaSettings {
         Secret:           tq.JWTSecret,
         IdentityURL:      identityURL,
         EstimateFallback: tq.EstimateFallback,
+        ResetWindow:      tq.ResetWindow,
+        SoftLimitPercent: tq.SoftLimitPercent,
+        AlertWebhook:     tq.AlertWebhook,
     }
 }
 

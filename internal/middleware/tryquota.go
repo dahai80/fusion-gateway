@@ -11,6 +11,7 @@ package middleware
 // StampAPIKeyName) can account real usage without any ctx-propagation trap.
 
 import (
+    "bytes"
     "encoding/json"
     "fmt"
     "log/slog"
@@ -19,6 +20,9 @@ import (
     "sync"
     "time"
 
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/httpx"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
     "github.com/fusion-gateway/fusion-gateway/internal/tryquota"
 )
@@ -40,6 +44,16 @@ type TryQuotaSettings struct {
     IdentityURL string
     // EstimateFallback is the estimate floor when the body is unreadable.
     EstimateFallback int
+    // ResetWindow (G3): "daily" (default) / "weekly" / "monthly" — the
+    // bucket the budget applies to. Forwarded to the store.
+    ResetWindow string
+    // SoftLimitPercent (G3): 0 (default) = off; otherwise when a request
+    // pushes projected usage to this percent of the budget, fire the
+    // soft-limit alert (log + webhook) once per window.
+    SoftLimitPercent int
+    // AlertWebhook (G3): POST target for the soft-limit alert JSON. Empty =
+    // log-only alerting (webhook is an addition, never a dependency).
+    AlertWebhook string
 }
 
 // TryQuotaConfigSource resolves the current try_quota config (hot-reload
@@ -187,6 +201,19 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
                 }
             }
             used := meter.UsedToday(sub, time.Now())
+            // G3 soft limit: when this request pushes projected usage past
+            // the configured percent of the budget, fire the alert once per
+            // window (atomic in the store). Advisory only — never gates the
+            // request; the hard reject below is unchanged.
+            if settings.SoftLimitPercent > 0 && budget > 0 {
+                soft := budget * settings.SoftLimitPercent / 100
+                if soft > 0 && used+est >= soft && meter.MarkSoftAlerted(sub, time.Now()) {
+                    slog.Warn("try-quota: soft budget threshold crossed",
+                        "sub", sub, "window", settings.ResetWindow, "used", used, "estimate", est,
+                        "budget", budget, "soft_limit_percent", settings.SoftLimitPercent)
+                    postBudgetAlert(settings.AlertWebhook, sub, settings.ResetWindow, used+est, budget, settings.SoftLimitPercent)
+                }
+            }
             if used+est > budget {
                 slog.Info("try-quota: daily budget exceeded", "sub", sub, "used", used, "estimate", est, "budget", budget)
                 writeTryQuotaError(w, http.StatusTooManyRequests, "daily token quota exceeded",
@@ -202,6 +229,53 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
             next.ServeHTTP(w, r)
         })
     }
+}
+
+// postBudgetAlert fires the G3 soft-limit webhook asynchronously: the
+// request path must never wait on (or fail because of) alert delivery.
+// Empty URL = log-only, the caller already logged the WARN. Delivery is
+// best-effort: one attempt, 5s timeout, failure logged — no retry queue
+// (an alert storm must not build state).
+func postBudgetAlert(url, sub, window string, used, budget, softPct int) {
+    if url == "" {
+        return
+    }
+    payload := map[string]interface{}{
+        "event":              "budget.soft_limit",
+        "sub":                sub,
+        "window":             window,
+        "used":               used,
+        "budget":             budget,
+        "soft_limit_percent": softPct,
+        "timestamp":          time.Now().UTC().Format(time.RFC3339),
+    }
+    body, err := json.Marshal(payload)
+    if err != nil {
+        return
+    }
+    safego.Go("try_quota_budget_alert", func() {
+        client := &http.Client{
+            Timeout:   5 * time.Second,
+            Transport: httpx.TransportForBackend(config.BackendConfig{Type: "openai-compatible", BaseURL: url}),
+        }
+        req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+        if err != nil {
+            slog.Warn("try-quota: budget alert webhook build failed", "error", err)
+            return
+        }
+        req.Header.Set("Content-Type", "application/json")
+        resp, err := client.Do(req)
+        if err != nil {
+            slog.Warn("try-quota: budget alert webhook delivery failed", "error", err)
+            return
+        }
+        defer resp.Body.Close()
+        if resp.StatusCode >= 400 {
+            slog.Warn("try-quota: budget alert webhook rejected", "status", resp.StatusCode)
+            return
+        }
+        slog.Info("try-quota: budget alert webhook delivered", "status", resp.StatusCode)
+    })
 }
 
 // identityToken extracts the fusion-identity credential from the dedicated

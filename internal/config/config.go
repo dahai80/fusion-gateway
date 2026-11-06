@@ -1139,6 +1139,17 @@ type TryQuotaConfig struct {
     // EstimateFallback is the tokenizer-estimate floor used when a request
     // body cannot be read (default 1024).
     EstimateFallback int `mapstructure:"estimate_fallback"`
+    // ResetWindow (G3): the budget period — "daily" (default) / "weekly"
+    // (ISO year-week) / "monthly". The bucket rolls over on the next request
+    // after the boundary; no timers.
+    ResetWindow string `mapstructure:"reset_window"`
+    // SoftLimitPercent (G3): 0 (default) = off; when projected usage reaches
+    // this percent of the budget, a soft-limit alert fires once per window
+    // (WARN log + AlertWebhook POST). Hard rejection at 100% is unchanged.
+    SoftLimitPercent int `mapstructure:"soft_limit_percent"`
+    // AlertWebhook (G3): URL that receives the budget.soft_limit alert JSON.
+    // Empty = log-only alerting. Delivery is best-effort, async, 5s timeout.
+    AlertWebhook string `mapstructure:"alert_webhook"`
 }
 
 type AuthPortalConfig struct {
@@ -1978,6 +1989,16 @@ func validate(cfg *Config) error {
     }
     if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
         return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
+    }
+
+    // G3: try_quota budget window sanity.
+    switch cfg.TryQuota.ResetWindow {
+    case "", "daily", "weekly", "monthly":
+    default:
+        return fmt.Errorf("try_quota.reset_window must be daily|weekly|monthly, got: %q", cfg.TryQuota.ResetWindow)
+    }
+    if cfg.TryQuota.SoftLimitPercent < 0 || cfg.TryQuota.SoftLimitPercent > 100 {
+        return fmt.Errorf("try_quota.soft_limit_percent must be within [0, 100], got: %d", cfg.TryQuota.SoftLimitPercent)
     }
 
     // §13.3 models.* namespace (alias/supply sanity, WARN-first).
