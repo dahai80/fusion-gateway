@@ -34,6 +34,7 @@ const DICT: Record<string, Entry> = {
     "menu.insights.optimize": { zh: "优化建议", en: "Optimize" },
     "menu.insights.anomalies": { zh: "异常检测", en: "Anomalies" },
     "menu.insights.reports": { zh: "报告", en: "Reports" },
+    "menu.insights.governance": { zh: "治理与支出", en: "Governance & Spend" },
     "menu.insights.capacity": { zh: "容量规划", en: "Capacity" },
     "menu.config": { zh: "配置", en: "Configuration" },
     "menu.config.server": { zh: "服务器", en: "Server" },

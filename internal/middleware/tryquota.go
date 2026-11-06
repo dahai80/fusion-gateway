@@ -54,6 +54,10 @@ type TryQuotaSettings struct {
     // AlertWebhook (G3): POST target for the soft-limit alert JSON. Empty =
     // log-only alerting (webhook is an addition, never a dependency).
     AlertWebhook string
+    // EmitEvent (governance dashboard): optional structured-event sink for
+    // the fg_gateway_events stream (wired from the server's persistence
+    // sink). Nil = log-only; never gates the request.
+    EmitEvent func(level, event string, detail map[string]any)
 }
 
 // TryQuotaConfigSource resolves the current try_quota config (hot-reload
@@ -212,6 +216,15 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
                         "sub", sub, "window", settings.ResetWindow, "used", used, "estimate", est,
                         "budget", budget, "soft_limit_percent", settings.SoftLimitPercent)
                     postBudgetAlert(settings.AlertWebhook, sub, settings.ResetWindow, used+est, budget, settings.SoftLimitPercent)
+                    if settings.EmitEvent != nil {
+                        settings.EmitEvent("warn", "budget_soft_limit", map[string]any{
+                            "sub":                sub,
+                            "window":             settings.ResetWindow,
+                            "used":               used + est,
+                            "budget":             budget,
+                            "soft_limit_percent": settings.SoftLimitPercent,
+                        })
+                    }
                 }
             }
             if used+est > budget {

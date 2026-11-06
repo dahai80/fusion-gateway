@@ -302,6 +302,9 @@ type UsageRow struct {
     Override  int          `json:"override,omitempty"`
     Recent    []CallDetail `json:"recent,omitempty"`
     LastSeen  time.Time    `json:"last_seen,omitempty"`
+    // SoftAlerted (governance dashboard): the soft-limit alert fired for
+    // this window.
+    SoftAlerted bool `json:"soft_alerted,omitempty"`
 }
 
 // Usage lists one summary row per tracked sub. A stale previous-day bucket
@@ -315,9 +318,10 @@ func (s *Store) Usage(now time.Time, budgetFn func(sub string) int) []UsageRow {
     rows := make([]UsageRow, 0, len(s.usage))
     for sub, u := range s.usage {
         row := UsageRow{
-            Sub:  sub,
-            Day:  u.Day,
-            Used: u.Total,
+            Sub:         sub,
+            Day:         u.Day,
+            Used:        u.Total,
+            SoftAlerted: u.SoftAlerted,
         }
         if ov, ok := s.overrides[sub]; ok {
             row.Override = ov

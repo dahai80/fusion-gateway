@@ -1,6 +1,7 @@
 package router
 
 import (
+    "sync"
     "testing"
     "time"
 
@@ -350,5 +351,55 @@ func TestCloudStrategy_CooldownDisabledByReload(t *testing.T) {
     }
     if !eligible {
         t.Fatal("reload that zeroes cooldown must re-enable cooled backends")
+    }
+}
+
+func TestCloudStrategy_CooldownGovernanceEvents(t *testing.T) {
+    cfg := config.CloudRoutingConfig{Strategy: "round-robin", CooldownSeconds: 60, FailureThreshold: 1}
+    cs := NewCloudStrategy(cfg, nil)
+    type ev struct {
+        level  string
+        event  string
+        detail map[string]any
+    }
+    var mu sync.Mutex
+    var events []ev
+    cs.SetEventHook(func(level, event string, detail map[string]any) {
+        mu.Lock()
+        events = append(events, ev{level, event, detail})
+        mu.Unlock()
+    })
+
+    cs.RecordOutcome("dep-a", false)
+    cs.RecordOutcome("dep-a", true)
+
+    mu.Lock()
+    n := len(events)
+    var armed, cleared ev
+    if n >= 2 {
+        armed, cleared = events[0], events[1]
+    }
+    mu.Unlock()
+    if n != 2 {
+        t.Fatalf("expected arm+clear events, got %d", n)
+    }
+    if armed.event != "cloud_cooldown_armed" || armed.level != "warn" {
+        t.Fatalf("unexpected arm event %q/%q", armed.level, armed.event)
+    }
+    if armed.detail["backend"] != "dep-a" {
+        t.Fatalf("arm detail must carry backend, got %v", armed.detail)
+    }
+    if cleared.event != "cloud_cooldown_cleared" || cleared.level != "info" {
+        t.Fatalf("unexpected clear event %q/%q", cleared.level, cleared.event)
+    }
+}
+
+func TestCloudStrategy_NilEventHookSafe(t *testing.T) {
+    cfg := config.CloudRoutingConfig{Strategy: "round-robin", CooldownSeconds: 60, FailureThreshold: 1}
+    cs := NewCloudStrategy(cfg, nil)
+    cs.RecordOutcome("dep-b", false)
+    cs.RecordOutcome("dep-b", true)
+    if cs.Select([]string{"dep-b", "dep-c"}) == "" {
+        t.Fatal("select must still work with nil hook")
     }
 }

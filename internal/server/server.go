@@ -748,6 +748,9 @@ func New(
         shutdownCancel:    shutdownCancel,
         browserHandler:    browserHandler,
     }
+    // Governance dashboard: cooldown arm/clear land in fg_gateway_events
+    // via the persistence sink (no-op log-only when persistence is off).
+    cs.SetEventHook(srv.recordGovernanceEvent)
     // #151: build the managed-settings Ed25519 signer when enabled. nil when
     // disabled — routes are not registered below in that case.
     srv.managedSettingsSigner = newManagedSettingsSigner(cfg.Config.ManagedSettings)
@@ -1085,6 +1088,9 @@ func (s *Server) Start() error {
         // admin-role gated like the orgs routes.
         mux.HandleFunc("/admin/api/try-quota/usage", s.withAdminOnly(s.handleTryQuotaUsage))
         mux.HandleFunc("/admin/api/try-quota/budget", s.withAdminOnly(s.handleTryQuotaBudget))
+        // Governance report (LiteLLM-gap dashboard wave) — exact pattern
+        // wins over the admin handler's /admin/api/reports/ prefix.
+        mux.HandleFunc("/admin/api/reports/governance", s.withAdminOnly(s.handleGovernanceReport))
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
         // fusion-trainer can target :11432 exclusively. Registered before the
         // /admin/ SPA catch-all so it takes precedence; shares the /v1/*
@@ -1798,6 +1804,7 @@ func (s *Server) tryQuotaConfigSource() middleware.TryQuotaSettings {
         ResetWindow:      tq.ResetWindow,
         SoftLimitPercent: tq.SoftLimitPercent,
         AlertWebhook:     tq.AlertWebhook,
+        EmitEvent:        s.recordGovernanceEvent,
     }
 }
 

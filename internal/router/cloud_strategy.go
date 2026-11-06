@@ -24,6 +24,18 @@ type CloudStrategy struct {
     // state immediately (#541 lesson: state must not outlive its config).
     cooldownUntil map[string]time.Time
     failures      map[string]int
+    // eventHook (governance dashboard) receives cooldown arm/clear events
+    // for the fg_gateway_events stream. Called OUTSIDE cs.mu (the hook does
+    // persistence I/O); nil = log-only.
+    eventHook func(level, event string, detail map[string]any)
+}
+
+// SetEventHook installs the structured-event sink (server wiring, once at
+// startup before serving).
+func (cs *CloudStrategy) SetEventHook(hook func(level, event string, detail map[string]any)) {
+    cs.mu.Lock()
+    cs.eventHook = hook
+    cs.mu.Unlock()
 }
 
 func NewCloudStrategy(cfg config.CloudRoutingConfig, lt *LatencyTracker) *CloudStrategy {
@@ -111,8 +123,12 @@ func (cs *CloudStrategy) filterCooled(backends []string) []string {
 // clears an active cooldown — a proven-healthy deployment is eligible again
 // without waiting out the window.
 func (cs *CloudStrategy) RecordOutcome(backend string, ok bool) {
+    // Governance events are collected under the lock and fired after it —
+    // the hook does persistence I/O and must never run holding cs.mu.
+    var firedLevel, firedEvent string
+    var firedDetail map[string]any
+
     cs.mu.Lock()
-    defer cs.mu.Unlock()
 
     if ok {
         if cs.failures[backend] > 0 {
@@ -121,7 +137,11 @@ func (cs *CloudStrategy) RecordOutcome(backend string, ok bool) {
         if _, cooled := cs.cooldownUntil[backend]; cooled {
             delete(cs.cooldownUntil, backend)
             slog.Info("cloud deployment cooldown cleared by success", "backend", backend)
+            firedLevel, firedEvent = "info", "cloud_cooldown_cleared"
+            firedDetail = map[string]any{"backend": backend, "reason": "success"}
         }
+        cs.mu.Unlock()
+        cs.fireEvent(firedLevel, firedEvent, firedDetail)
         return
     }
 
@@ -136,6 +156,28 @@ func (cs *CloudStrategy) RecordOutcome(backend string, ok bool) {
         delete(cs.failures, backend)
         slog.Warn("cloud deployment cooled down after consecutive failures",
             "backend", backend, "cooldown_seconds", cs.cfg.CooldownSeconds, "cooldown_until", until.Format(time.RFC3339))
+        firedLevel, firedEvent = "warn", "cloud_cooldown_armed"
+        firedDetail = map[string]any{
+            "backend":          backend,
+            "cooldown_seconds": cs.cfg.CooldownSeconds,
+            "cooldown_until":   until.Format(time.RFC3339),
+        }
+    }
+    cs.mu.Unlock()
+    cs.fireEvent(firedLevel, firedEvent, firedDetail)
+}
+
+// fireEvent invokes the hook when an event was collected; nil-hook and
+// no-event paths are no-ops.
+func (cs *CloudStrategy) fireEvent(level, event string, detail map[string]any) {
+    if level == "" || event == "" {
+        return
+    }
+    cs.mu.RLock()
+    hook := cs.eventHook
+    cs.mu.RUnlock()
+    if hook != nil {
+        hook(level, event, detail)
     }
 }
 
