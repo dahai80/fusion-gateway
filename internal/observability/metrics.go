@@ -44,6 +44,9 @@ var (
     // misconfigured module stays observable in /metrics.
     shellHeartbeatDenied *prometheus.CounterVec
 
+    // #535: dispatch-time half-open probe admission denials.
+    halfOpenProbeDenied *prometheus.CounterVec
+
     // #282: invalid-key rejections by hash prefix. A client stuck on a
     // rotated/stale key shows up as a recurring label value — spot it in
     // /metrics without log grepping.
@@ -216,6 +219,14 @@ func init() {
         Help: "Shell heartbeat denials (log line throttled; counter is not)",
     }, []string{"module_id", "reason"})
 
+    // #535: local decisions denied the half-open probe at the dispatch-time
+    // admission gate (single-probe rule) and diverted to cloud — visible
+    // probe pressure, no longer silent.
+    halfOpenProbeDenied = prometheus.NewCounterVec(prometheus.CounterOpts{
+        Name: "fusion_gateway_half_open_probe_denied_total",
+        Help: "Local decisions diverted because the half-open probe slot was busy",
+    }, []string{"backend", "breaker_state"})
+
     authInvalidKey = prometheus.NewCounterVec(prometheus.CounterOpts{
         Name: "fusion_gateway_auth_invalid_key_total",
         Help: "Invalid API key rejections by key hash prefix (8 hex chars, non-secret)",
@@ -312,6 +323,13 @@ func RecordRouteDecision(backend, reason string) {
 
 func RecordCircuitBreakerTrip(backend, reason string) {
     circuitBreakerTrips.WithLabelValues(backend, reason).Inc()
+}
+
+// RecordHalfOpenProbeDenied counts a local decision diverted at the
+// dispatch-time admission gate because the half-open probe slot was already
+// taken (#535).
+func RecordHalfOpenProbeDenied(backend, breakerState string) {
+    halfOpenProbeDenied.WithLabelValues(backend, breakerState).Inc()
 }
 
 // RecordShellHeartbeatDenied counts every heartbeat denial (#281). The WARN
