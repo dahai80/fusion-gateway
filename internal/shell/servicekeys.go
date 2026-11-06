@@ -268,3 +268,10 @@ func (r *Registry) ServiceKeyID(id string) string {
 func IsServiceKeyPlaintext(plaintext string) bool {
     return strings.HasPrefix(plaintext, serviceKeyPrefix)
 }
+
+// IsModuleServiceKey reports whether plaintext is shaped like the service key
+// issued for moduleID (fm-<moduleID>-<hex>) — the proxy auth path uses it to
+// reject a sibling module's key on sight before the hash compare (#530).
+func IsModuleServiceKey(plaintext, moduleID string) bool {
+    return moduleID != "" && strings.HasPrefix(plaintext, serviceKeyPrefix+moduleID+"-")
+}

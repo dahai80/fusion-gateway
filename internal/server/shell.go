@@ -320,10 +320,44 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // #275: E6 admin surfaces (adapters vault / connectors / config
     // overrides / audit / roles + menu matrix).
     s.registerShellAdminRoutes(mux)
-    mux.HandleFunc("/shell/", s.withShellSession(s.withShellModuleAccess(s.shellProxy.ServeHTTP)))
+    mux.HandleFunc("/shell/", s.withShellProxyAuth(s.shellProxy.ServeHTTP))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
         "proxy", "/shell/{module_id}/")
+}
+
+// withShellProxyAuth guards /shell/<module_id>/* proxy requests on two
+// credential planes. Session plane (unchanged): a shell session token, with
+// the module-permission check. Service-key plane (#530): the module's own
+// gateway-issued fm- key — the backend modules accept that key direct, so
+// the gateway hop must not be stricter than the module behind it; the key is
+// bound to the module id in the path via a hash compare (the same registry
+// entry that persists across restarts), so a previously-issued key keeps
+// working after a restart and a revoked key never authenticates. A key that
+// authenticates IS the module speaking for itself — the user permission
+// matrix does not apply.
+func (s *Server) withShellProxyAuth(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        moduleID, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/shell/"), "/")
+        token := bearerToken(r)
+        if token != "" && shell.IsModuleServiceKey(token, moduleID) && s.shellRegistry != nil {
+            sum := sha256.Sum256([]byte(token))
+            grace := s.cfg.Config.Shell.KeyRotationGrace
+            if grace <= 0 {
+                grace = 24 * time.Hour
+            }
+            if state, ok := s.shellRegistry.AuthServiceKey(moduleID, hex.EncodeToString(sum[:]), grace); ok {
+                slog.Debug("shell proxy request authenticated by module service key", "module", moduleID, "state", state)
+                next(w, r)
+                return
+            }
+            slog.Info("shell proxy denied: module service key rejected", "module", moduleID, "path", r.URL.Path)
+            shell.WriteEnvelope(w, http.StatusUnauthorized, "service_key_invalid",
+                "module service key rejected for this module", moduleID, false)
+            return
+        }
+        s.withShellSession(s.withShellModuleAccess(next)).ServeHTTP(w, r)
+    }
 }
 
 // withShellModuleAccess enforces the module-level permission check in the
