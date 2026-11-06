@@ -124,7 +124,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `cost.enabled` | true | Enable cost tracking with built-in pricing |
 | `pii.enabled` | false | Enable PII detection on request content |
 | `pii.action` | log | PII action: log, mask, or deny. `deny` rejects the request with HTTP 400; `log` and `mask` detect and forward the text unchanged (masking is not implemented). Any other value falls back to `log` and warns once at startup |
-| `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, round-robin |
+| `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, usage, round-robin |
 | `hardware.collect_interval` | 2s | Hardware metrics collection interval |
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
 | `hot_reload.enabled` | true | Enable config file hot reload |
@@ -1967,8 +1967,20 @@ When multiple cloud backends are available, select a strategy via `cloud_routing
 | `cost` | Route to cheapest backend (DeepSeek < Qianfan/Volcengine < OpenAI/Anthropic) |
 | `weight` | Weighted random selection via `cloud_weights` config |
 | `least-busy` | Route to backend with fewest tracked samples |
+| `usage` | Route to backend with fewest selections since process start |
 
 Latency tracking uses quickselect algorithm for efficient P95 calculation (configurable window size, default 1000 samples).
+
+### Per-Deployment Cooldown
+
+Cloud deployments that fail repeatedly can be temporarily excluded from strategy selection:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `cloud_routing.cooldown_seconds` | `0` (off) | Exclusion window after failures reach the threshold; capped at 3600 |
+| `cloud_routing.failure_threshold` | `1` | Consecutive failures before the cooldown arms; capped at 100 |
+
+Outcomes are recorded per cloud request by the adapter layer. A success resets the failure streak and clears an active cooldown immediately. When every candidate is cooled, the full list stays eligible — cooldown never causes a request to fail on its own. Strategy and cooldown settings apply on config reload without restart.
 
 ## Config Hot-Update (Drain/Apply/Warmup)
 

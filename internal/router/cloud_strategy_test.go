@@ -184,3 +184,171 @@ func TestCloudStrategy_DefaultStrategyFallsToFirst(t *testing.T) {
         t.Errorf("unknown strategy expected first backend %q, got %q", "openai", picked)
     }
 }
+
+func TestCloudStrategy_UsagePicksLeastUsed(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{Strategy: "usage"}, lt)
+    backends := []string{"openai", "deepseek"}
+
+    first := cs.Select(backends)
+    // No usage recorded yet: tie breaks to the first backend.
+    if first != "openai" {
+        t.Fatalf("usage tie expected first backend, got %q", first)
+    }
+    second := cs.Select(backends)
+    if second != "deepseek" {
+        t.Fatalf("usage should rotate to least used, got %q", second)
+    }
+    third := cs.Select(backends)
+    if third != "openai" {
+        t.Fatalf("usage counts even again, got %q", third)
+    }
+}
+
+func TestCloudStrategy_CooldownSkipsFailedBackend(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:        "round-robin",
+        CooldownSeconds: 60,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    for i := 0; i < 6; i++ {
+        if got := cs.Select(backends); got != "deepseek" {
+            t.Fatalf("cooled backend should be skipped, pick %d got %q", i, got)
+        }
+    }
+}
+
+func TestCloudStrategy_CooldownRequiresThreshold(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:         "round-robin",
+        CooldownSeconds:  60,
+        FailureThreshold: 3,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    cs.RecordOutcome("openai", false)
+    if got := cs.Select(backends); got != "openai" {
+        t.Fatalf("below threshold backend must stay eligible, got %q", got)
+    }
+    cs.RecordOutcome("openai", false)
+    if got := cs.Select(backends); got != "deepseek" {
+        t.Fatalf("threshold reached, expected cooldown, got %q", got)
+    }
+}
+
+func TestCloudStrategy_CooldownSuccessResetsFailures(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:         "round-robin",
+        CooldownSeconds:  60,
+        FailureThreshold: 2,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    cs.RecordOutcome("openai", true)
+    cs.RecordOutcome("openai", false)
+    if got := cs.Select(backends); got != "openai" {
+        t.Fatalf("success must reset the failure streak, got %q", got)
+    }
+}
+
+func TestCloudStrategy_CooldownAllCooledFallsBackToFullList(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:        "round-robin",
+        CooldownSeconds: 60,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    cs.RecordOutcome("deepseek", false)
+    // Availability first: never 503 because of cooldown state alone.
+    for i := 0; i < 4; i++ {
+        got := cs.Select(backends)
+        if got != "openai" && got != "deepseek" {
+            t.Fatalf("all cooled must fall back to full list, got %q", got)
+        }
+    }
+}
+
+func TestCloudStrategy_CooldownExpires(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:        "round-robin",
+        CooldownSeconds: 1,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    if got := cs.Select(backends); got != "deepseek" {
+        t.Fatalf("expected cooled backend skipped, got %q", got)
+    }
+    time.Sleep(1100 * time.Millisecond)
+    eligible := false
+    for i := 0; i < 4; i++ {
+        if cs.Select(backends) == "openai" {
+            eligible = true
+            break
+        }
+    }
+    if !eligible {
+        t.Fatal("cooldown must expire and re-include the backend")
+    }
+}
+
+func TestCloudStrategy_CooldownDisabledIgnoresOutcomes(t *testing.T) {
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{Strategy: "round-robin"}, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    cs.RecordOutcome("openai", false)
+    cs.RecordOutcome("openai", false)
+    seen := map[string]bool{}
+    for i := 0; i < 4; i++ {
+        seen[cs.Select(backends)] = true
+    }
+    if !seen["openai"] {
+        t.Fatalf("cooldown off (default) must keep every backend eligible")
+    }
+}
+
+func TestCloudStrategy_CooldownDisabledByReload(t *testing.T) {
+    // #541 lesson: cooldown state must not outlive a config that disables it.
+    t.Parallel()
+    lt := NewLatencyTracker(1000)
+    cs := NewCloudStrategy(config.CloudRoutingConfig{
+        Strategy:        "round-robin",
+        CooldownSeconds: 60,
+    }, lt)
+    backends := []string{"openai", "deepseek"}
+
+    cs.RecordOutcome("openai", false)
+    if got := cs.Select(backends); got != "deepseek" {
+        t.Fatalf("precondition: openai should be cooled, got %q", got)
+    }
+    cs.UpdateConfig(config.CloudRoutingConfig{Strategy: "round-robin"})
+    eligible := false
+    for i := 0; i < 4; i++ {
+        if cs.Select(backends) == "openai" {
+            eligible = true
+            break
+        }
+    }
+    if !eligible {
+        t.Fatal("reload that zeroes cooldown must re-enable cooled backends")
+    }
+}
