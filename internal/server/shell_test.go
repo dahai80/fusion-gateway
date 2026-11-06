@@ -972,3 +972,25 @@ func TestShellModels_SessionGated(t *testing.T) {
         t.Fatalf("cloud model glm-5 missing from shell models payload: %+v", body.Data)
     }
 }
+
+// Issue #543: shell.session.tenant stamps password-session claims; the
+// default stays "local", and a mixed password/SSO deployment points it at
+// the SSO tenant so both login methods share one policy namespace.
+func TestShellSession_ConfiguredTenant(t *testing.T) {
+    s := newShellTestServer(t, false)
+    code, resp := loginShell(t, s, "admin", "s3cret")
+    if code != http.StatusOK || resp["tenant_id"] != "local" {
+        t.Fatalf("default tenant = %v code %d", resp["tenant_id"], code)
+    }
+
+    s.cfg.Config.Shell.Session.Tenant = "default"
+    _, resp = loginShell(t, s, "admin", "s3cret")
+    if resp["tenant_id"] != "default" {
+        t.Fatalf("configured tenant = %v, want default", resp["tenant_id"])
+    }
+    token, _ := resp["token"].(string)
+    claims, err := s.shellSessions.Validate(token)
+    if err != nil || claims.TenantID != "default" {
+        t.Fatalf("claims tenant = %q err %v, want default", claims.TenantID, err)
+    }
+}

@@ -488,11 +488,18 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         return
     }
 
+    // Issue #543: the tenant comes from shell.session.tenant (default
+    // "local"), not a hard-coded id — a mixed password/SSO deployment points
+    // it at the SSO tenant so both login methods share one policy namespace.
+    tenant := s.cfg.Config.Shell.Session.Tenant
+    if tenant == "" {
+        tenant = "local"
+    }
     token, err := s.shellSessions.Issue(shell.SessionClaims{
         Sub:                user.username,
         Roles:              user.roles,
         Modules:            user.modules,
-        TenantID:           "local",
+        TenantID:           tenant,
         MustChangePassword: user.mustChange,
     })
     if err != nil {
@@ -525,7 +532,7 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
     _ = json.NewEncoder(w).Encode(shellSessionResponse{
         Token:              token,
         TokenType:          "bearer",
-        TenantID:           "local",
+        TenantID:           tenant,
         MustChangePassword: user.mustChange,
         UserID:             user.username,
         DisplayName:        user.displayName,
