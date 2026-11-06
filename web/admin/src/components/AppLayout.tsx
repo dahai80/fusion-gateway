@@ -43,6 +43,7 @@ function useMenuItems() {
                 { key: "/admin/insights/optimize", icon: ic(Lightbulb), label: t("menu.insights.optimize") },
                 { key: "/admin/insights/anomalies", icon: ic(TriangleAlert), label: t("menu.insights.anomalies") },
                 { key: "/admin/insights/reports", icon: ic(FileText), label: t("menu.insights.reports") },
+                { key: "/admin/insights/governance", icon: ic(ShieldCheck), label: t("menu.insights.governance") },
                 { key: "/admin/insights/capacity", icon: ic(Database), label: t("menu.insights.capacity") },
             ],
         },

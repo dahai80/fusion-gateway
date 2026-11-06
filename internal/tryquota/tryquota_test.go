@@ -572,3 +572,22 @@ func TestMarkSoftAlertedOncePerWindow(t *testing.T) {
         t.Fatal("new window must allow the alert again")
     }
 }
+
+func TestUsageReportsSoftAlerted(t *testing.T) {
+    s := NewStore("")
+    now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local)
+    s.Record("alerted", 100, CallDetail{}, now)
+    s.Record("quiet", 50, CallDetail{}, now)
+    s.MarkSoftAlerted("alerted", now)
+    rows := s.Usage(now, nil)
+    bySub := map[string]UsageRow{}
+    for _, r := range rows {
+        bySub[r.Sub] = r
+    }
+    if !bySub["alerted"].SoftAlerted {
+        t.Fatal("alerted row must carry soft_alerted")
+    }
+    if bySub["quiet"].SoftAlerted {
+        t.Fatal("quiet row must not carry soft_alerted")
+    }
+}
