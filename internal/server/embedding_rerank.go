@@ -36,6 +36,12 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         req.Model = modelIdent.Bare
         stampModelIdentity(r, modelIdent)
     }
+    // #564: stamp the request-log entry with the resolved model so the
+    // dashboard's LLM-scoped aggregates attribute embedding traffic
+    // correctly (chat paths already do this; embeddings never did).
+    if logEntry := middleware.GetRequestLog(ctx); logEntry != nil {
+        logEntry.Model = req.Model
+    }
 
     if !middleware.CheckModelAllowlist(r, req.Model) {
         slog.Warn("model not allowed for this key", "model", req.Model)
@@ -189,6 +195,10 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
     if rerankIdent.Bare != req.Model {
         req.Model = rerankIdent.Bare
         stampModelIdentity(r, rerankIdent)
+    }
+    // #564: same request-log model stamp as embeddings above.
+    if logEntry := middleware.GetRequestLog(r.Context()); logEntry != nil {
+        logEntry.Model = req.Model
     }
 
     ctx := adapter.WithFusionHeaders(r.Context(), r)
