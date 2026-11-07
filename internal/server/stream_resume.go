@@ -103,6 +103,8 @@ func (s *Server) handleStreamChatResumable(ctx context.Context, w http.ResponseW
         if errors.Is(err, adapter.ErrLocalSlotFull) && decision.Backend == router.LocalBackend {
             slog.Info("RR4 local slot full, diverting resumable stream to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #568: diverted probe neither succeeds nor fails — release the slot.
+            s.router.ReleaseProbe(string(decision.Backend))
             s.streamBuffers.Release(sid)
             cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "rr4_slot_full_redirect"}
             cloudProvider := s.resolveCloudProvider(cloudDecision, req, nil)
