@@ -45,7 +45,7 @@ func TestSQL_OverviewCacheDeltaAcrossRestart(t *testing.T) {
     }
     from := base.Add(-time.Minute).Format(time.RFC3339)
     to := base.Add(10 * time.Minute).Format(time.RFC3339)
-    resp, err := svc.Overview(ctx, from, to, "hour")
+    resp, err := svc.Overview(ctx, from, to, "hour", "llm")
     if err != nil {
         t.Fatalf("overview query: %v", err)
     }
@@ -92,7 +92,7 @@ func TestSQL_OverviewAgainstLiveDB(t *testing.T) {
     svc := requireTestDSN(t)
     ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
     defer cancel()
-    resp, err := svc.Overview(ctx, "", "", "hour")
+    resp, err := svc.Overview(ctx, "", "", "hour", "llm")
     if err != nil {
         t.Fatalf("overview query: %v", err)
     }
