@@ -85,6 +85,7 @@ type Server struct {
     // counter). Policy knobs live in routing.fallback.overflow config.
     overflow        overflowState
     piiMiddleware   *middleware.PIIMiddleware
+    guardrailChain  *middleware.GuardrailChain
     cloudStrategy   *router.CloudStrategy
     latencyTracker  *router.LatencyTracker
     store           store.Store
@@ -609,6 +610,10 @@ func New(
     }
     lt := router.NewLatencyTracker(1000)
     cs := router.NewCloudStrategy(cfg.Config.CloudRouting, lt)
+    // G1: cloud provider outcomes (from the cloudTrackingProvider decorator)
+    // feed the strategy's per-deployment cooldown. Requests routed before
+    // this line simply record nothing — nil-safe on the adapter side.
+    adapter.SetCloudOutcomeRecorder(cs)
 
     // #514: identity-keyed daily token quota meter (cloud-try Phase 1).
     // nil when disabled — the gate middleware and finalize accounting are
@@ -616,7 +621,9 @@ func New(
     var quotaMeter *tryquota.Store
     if cfg.Config.TryQuota.Enabled {
         quotaMeter = tryquota.NewStore(cfg.Config.TryQuota.StatePath)
-        slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath)
+        // G3: honor the configured reset window from the first request.
+        quotaMeter.SetWindow(cfg.Config.TryQuota.ResetWindow)
+        slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath, "reset_window", cfg.Config.TryQuota.ResetWindow)
     }
 
     logMaxLen := 10000
@@ -718,6 +725,9 @@ func New(
         fetchCoalescer:    newCoalescer(),
         costTracker:       cost.NewTracker(10000),
         piiMiddleware:     middleware.NewPIIMiddleware(cfg.Config.PII),
+        // G4: the guardrail chain activates only when guardrails: is
+        // configured; nil keeps the legacy single-point PII behavior.
+        guardrailChain:    middleware.NewGuardrailChain(cfg.Config.Guardrails, cfg.Config.PII),
         cloudStrategy:     cs,
         latencyTracker:    lt,
         store:             s,
@@ -738,6 +748,9 @@ func New(
         shutdownCancel:    shutdownCancel,
         browserHandler:    browserHandler,
     }
+    // Governance dashboard: cooldown arm/clear land in fg_gateway_events
+    // via the persistence sink (no-op log-only when persistence is off).
+    cs.SetEventHook(srv.recordGovernanceEvent)
     // #151: build the managed-settings Ed25519 signer when enabled. nil when
     // disabled — routes are not registered below in that case.
     srv.managedSettingsSigner = newManagedSettingsSigner(cfg.Config.ManagedSettings)
@@ -1075,6 +1088,9 @@ func (s *Server) Start() error {
         // admin-role gated like the orgs routes.
         mux.HandleFunc("/admin/api/try-quota/usage", s.withAdminOnly(s.handleTryQuotaUsage))
         mux.HandleFunc("/admin/api/try-quota/budget", s.withAdminOnly(s.handleTryQuotaBudget))
+        // Governance report (LiteLLM-gap dashboard wave) — exact pattern
+        // wins over the admin handler's /admin/api/reports/ prefix.
+        mux.HandleFunc("/admin/api/reports/governance", s.withAdminOnly(s.handleGovernanceReport))
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
         // fusion-trainer can target :11432 exclusively. Registered before the
         // /admin/ SPA catch-all so it takes precedence; shares the /v1/*
@@ -1674,7 +1690,29 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     // rebuild the middleware chain under the existing middlewareChainMu.
     s.cfgMu.Lock()
     s.cfg = newCfg
+    // G4: the guardrail chain (and the legacy PII middleware it replaces)
+    // were built once at startup — a reload that added/changed guardrails
+    // or pii config silently kept the old chain (live-verified on v0.9.136:
+    // a deny link added via reload never fired). Both are pure in-process
+    // recomputes; rebuild under cfgMu so request readers of the fields are
+    // race-free. Log the effective policy either way.
+    s.piiMiddleware = middleware.NewPIIMiddleware(newCfg.Config.PII)
+    s.guardrailChain = middleware.NewGuardrailChain(newCfg.Config.Guardrails, newCfg.Config.PII)
+    links := s.guardrailChain.Len()
+    piiEnabled := newCfg.Config.PII.Enabled
     s.cfgMu.Unlock()
+    slog.Info("guardrail policy after reload", "links", links, "pii_enabled", piiEnabled, "config_version", newCfg.Version)
+    // G1: cloud_routing (strategy/weights/cooldown) was read from the copy
+    // captured at startup — reload never reached the strategy and the old
+    // settings silently stayed live. Push the new snapshot on every reload.
+    if s.cloudStrategy != nil {
+        s.cloudStrategy.UpdateConfig(newCfg.Config.CloudRouting)
+    }
+    // G3: a reload that changes try_quota.reset_window must reach the store
+    // (the gate reads only per-request settings, not the store's bucket key).
+    if s.tryQuotaMeter != nil {
+        s.tryQuotaMeter.SetWindow(newCfg.Config.TryQuota.ResetWindow)
+    }
     s.buildMiddlewareChain()
     // #129 Gap 3: propagate managed-MCP tool allowlist changes on hot-reload
     // so toggling mcp.managed_tool_allowlist takes effect without a restart.
@@ -1763,6 +1801,10 @@ func (s *Server) tryQuotaConfigSource() middleware.TryQuotaSettings {
         Secret:           tq.JWTSecret,
         IdentityURL:      identityURL,
         EstimateFallback: tq.EstimateFallback,
+        ResetWindow:      tq.ResetWindow,
+        SoftLimitPercent: tq.SoftLimitPercent,
+        AlertWebhook:     tq.AlertWebhook,
+        EmitEvent:        s.recordGovernanceEvent,
     }
 }
 

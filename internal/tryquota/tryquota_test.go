@@ -495,3 +495,99 @@ func TestRS256VerifierRefetchThrottled(t *testing.T) {
         t.Fatalf("JWKS fetched %d times for 5 throttled probes, want <= 2", srv.hits)
     }
 }
+
+func TestWindowKeyVariants(t *testing.T) {
+    ts := time.Date(2026, 11, 6, 23, 45, 0, 0, time.Local)
+    if got := WindowKey(ts, ""); got != "2026-11-06" {
+        t.Fatalf("default window key = %q, want 2026-11-06", got)
+    }
+    if got := WindowKey(ts, "daily"); got != "2026-11-06" {
+        t.Fatalf("daily window key = %q", got)
+    }
+    if got := WindowKey(ts, "monthly"); got != "2026-11" {
+        t.Fatalf("monthly window key = %q, want 2026-11", got)
+    }
+    wk := WindowKey(ts, "weekly")
+    if len(wk) != 8 || wk[4] != '-' || wk[5] != 'W' {
+        t.Fatalf("weekly window key %q must look like 2026-W45", wk)
+    }
+    // 2026-11-06 is ISO week 45 (Friday).
+    if wk != "2026-W45" {
+        t.Fatalf("weekly window key = %q, want 2026-W45", wk)
+    }
+}
+
+func TestRecordAccumulatesAcrossDaysInWeeklyWindow(t *testing.T) {
+    s := NewStore("")
+    s.SetWindow("weekly")
+    mon := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+    fri := time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local)
+    s.Record("u1", 100, CallDetail{}, mon)
+    s.Record("u1", 50, CallDetail{}, fri)
+    if got := s.UsedToday("u1", fri); got != 150 {
+        t.Fatalf("same ISO week must accumulate, got %d", got)
+    }
+    // Next Monday starts a fresh bucket.
+    next := time.Date(2026, 11, 9, 10, 0, 0, 0, time.Local)
+    if got := s.UsedToday("u1", next); got != 0 {
+        t.Fatalf("new week must start empty, got %d", got)
+    }
+}
+
+func TestMonthlyWindowResetsOnMonthRollover(t *testing.T) {
+    s := NewStore("")
+    s.SetWindow("monthly")
+    s.Record("u1", 300, CallDetail{}, time.Date(2026, 10, 31, 23, 0, 0, 0, time.Local))
+    nov := time.Date(2026, 11, 1, 0, 5, 0, 0, time.Local)
+    if got := s.UsedToday("u1", nov); got != 0 {
+        t.Fatalf("new month must start empty, got %d", got)
+    }
+}
+
+func TestSetWindowSwitchBuckets(t *testing.T) {
+    s := NewStore("")
+    s.Record("u1", 100, CallDetail{}, time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local))
+    s.SetWindow("monthly")
+    if got := s.UsedToday("u1", time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local)); got != 0 {
+        t.Fatalf("window switch must start a fresh bucket, got %d", got)
+    }
+    s.Record("u1", 40, CallDetail{}, time.Date(2026, 11, 6, 11, 0, 0, 0, time.Local))
+    if got := s.UsedToday("u1", time.Date(2026, 11, 6, 12, 0, 0, 0, time.Local)); got != 40 {
+        t.Fatalf("record after switch must land in new bucket, got %d", got)
+    }
+}
+
+func TestMarkSoftAlertedOncePerWindow(t *testing.T) {
+    s := NewStore("")
+    now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local)
+    s.Record("u1", 100, CallDetail{}, now)
+    if fired := s.MarkSoftAlerted("u1", now); !fired {
+        t.Fatal("first mark must fire")
+    }
+    if fired := s.MarkSoftAlerted("u1", now); fired {
+        t.Fatal("second mark in same window must not fire")
+    }
+    next := time.Date(2026, 11, 7, 10, 0, 0, 0, time.Local)
+    if fired := s.MarkSoftAlerted("u1", next); !fired {
+        t.Fatal("new window must allow the alert again")
+    }
+}
+
+func TestUsageReportsSoftAlerted(t *testing.T) {
+    s := NewStore("")
+    now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local)
+    s.Record("alerted", 100, CallDetail{}, now)
+    s.Record("quiet", 50, CallDetail{}, now)
+    s.MarkSoftAlerted("alerted", now)
+    rows := s.Usage(now, nil)
+    bySub := map[string]UsageRow{}
+    for _, r := range rows {
+        bySub[r.Sub] = r
+    }
+    if !bySub["alerted"].SoftAlerted {
+        t.Fatal("alerted row must carry soft_alerted")
+    }
+    if bySub["quiet"].SoftAlerted {
+        t.Fatal("quiet row must not carry soft_alerted")
+    }
+}

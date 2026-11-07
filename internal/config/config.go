@@ -520,9 +520,35 @@ type PIIPattern struct {
     Regex string `mapstructure:"regex"`
 }
 
+// GuardrailConfig (G4) is one link of the ordered guardrail chain. The chain
+// activates only when guardrails: is configured — an empty list preserves the
+// legacy single-point PII middleware behavior verbatim.
+type GuardrailConfig struct {
+    // Name labels the link in logs and metrics.
+    Name string `mapstructure:"name"`
+    // Type selects the builtin guard. Today: "pii" (the vendored guard SSOT
+    // pattern set + pii.patterns extensions). config.Validate rejects others.
+    Type string `mapstructure:"type"`
+    // Action for this link: log / deny / mask. Empty falls back to
+    // pii.action. deny short-circuits the request with a 400.
+    Action string `mapstructure:"action"`
+    // Enabled gates the link (default false — an explicit opt-in per link,
+    // consistent with pii.enabled).
+    Enabled bool `mapstructure:"enabled"`
+}
+
 type CloudRoutingConfig struct {
     Strategy     string         `mapstructure:"strategy"`
     CloudWeights map[string]int `mapstructure:"cloud_weights"`
+    // CooldownSeconds (G1): after a cloud deployment fails
+    // FailureThreshold consecutive outcomes, exclude it from strategy
+    // selection for this window. 0 (default) disables cooldown entirely —
+    // every backend stays eligible, matching pre-G1 behavior.
+    CooldownSeconds int `mapstructure:"cooldown_seconds"`
+    // FailureThreshold is the consecutive-failure count that arms the
+    // cooldown. 0 means 1 (first failure cools the deployment) when
+    // CooldownSeconds > 0. Capped by config.Validate.
+    FailureThreshold int `mapstructure:"failure_threshold"`
 }
 
 type GCConfig struct {
@@ -1012,6 +1038,10 @@ type Config struct {
     Realtime      RealtimeConfig           `mapstructure:"realtime"`
     Cache         CacheConfig              `mapstructure:"cache"`
     PII           PIIConfig                `mapstructure:"pii"`
+    // Guardrails (G4): ordered governance chain scanned before inference.
+    // Empty = legacy single-point PII behavior (the chain never activates on
+    // its own).
+    Guardrails    []GuardrailConfig        `mapstructure:"guardrails"`
     CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
     Admin         *AdminConfig             `mapstructure:"admin"`
     OIDC          OIDCConfig               `mapstructure:"oidc"`
@@ -1130,6 +1160,17 @@ type TryQuotaConfig struct {
     // EstimateFallback is the tokenizer-estimate floor used when a request
     // body cannot be read (default 1024).
     EstimateFallback int `mapstructure:"estimate_fallback"`
+    // ResetWindow (G3): the budget period — "daily" (default) / "weekly"
+    // (ISO year-week) / "monthly". The bucket rolls over on the next request
+    // after the boundary; no timers.
+    ResetWindow string `mapstructure:"reset_window"`
+    // SoftLimitPercent (G3): 0 (default) = off; when projected usage reaches
+    // this percent of the budget, a soft-limit alert fires once per window
+    // (WARN log + AlertWebhook POST). Hard rejection at 100% is unchanged.
+    SoftLimitPercent int `mapstructure:"soft_limit_percent"`
+    // AlertWebhook (G3): URL that receives the budget.soft_limit alert JSON.
+    // Empty = log-only alerting. Delivery is best-effort, async, 5s timeout.
+    AlertWebhook string `mapstructure:"alert_webhook"`
 }
 
 type AuthPortalConfig struct {
@@ -1961,6 +2002,36 @@ func validate(cfg *Config) error {
 
     if cfg.Routing.TokenThreshold <= 0 {
         return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
+    }
+
+    // G1: cloud_routing cooldown sanity (EI8: numeric range checks).
+    if cfg.CloudRouting.CooldownSeconds < 0 || cfg.CloudRouting.CooldownSeconds > 3600 {
+        return fmt.Errorf("cloud_routing.cooldown_seconds must be within [0, 3600], got: %d", cfg.CloudRouting.CooldownSeconds)
+    }
+    if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
+        return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
+    }
+
+    // G3: try_quota budget window sanity.
+    switch cfg.TryQuota.ResetWindow {
+    case "", "daily", "weekly", "monthly":
+    default:
+        return fmt.Errorf("try_quota.reset_window must be daily|weekly|monthly, got: %q", cfg.TryQuota.ResetWindow)
+    }
+    if cfg.TryQuota.SoftLimitPercent < 0 || cfg.TryQuota.SoftLimitPercent > 100 {
+        return fmt.Errorf("try_quota.soft_limit_percent must be within [0, 100], got: %d", cfg.TryQuota.SoftLimitPercent)
+    }
+
+    // G4: guardrail chain links must reference known builtins (fail-closed on
+    // config — an unknown type must not silently skip at request time).
+    validGuardrailActions := map[string]bool{"": true, "log": true, "deny": true, "mask": true}
+    for i, g := range cfg.Guardrails {
+        if g.Type != "pii" {
+            return fmt.Errorf("guardrails[%d].type must be \"pii\" (known builtins: pii), got: %q", i, g.Type)
+        }
+        if !validGuardrailActions[g.Action] {
+            return fmt.Errorf("guardrails[%d].action must be log|deny|mask, got: %q", i, g.Action)
+        }
     }
 
     // §13.3 models.* namespace (alias/supply sanity, WARN-first).

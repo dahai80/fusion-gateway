@@ -124,7 +124,7 @@ See `config.example.yaml` for full reference. Key settings:
 | `cost.enabled` | true | Enable cost tracking with built-in pricing |
 | `pii.enabled` | false | Enable PII detection on request content |
 | `pii.action` | log | PII action: log, mask, or deny. `deny` rejects the request with HTTP 400; `log` and `mask` detect and forward the text unchanged (masking is not implemented). Any other value falls back to `log` and warns once at startup |
-| `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, round-robin |
+| `cloud_routing.strategy` | round-robin | Cloud routing: latency, cost, weight, least-busy, usage, round-robin |
 | `hardware.collect_interval` | 2s | Hardware metrics collection interval |
 | `hardware.mlx_metrics.enabled` | true | Collect fusion-mlx /metrics |
 | `hot_reload.enabled` | true | Enable config file hot reload |
@@ -175,6 +175,11 @@ See `config.example.yaml` for full reference. Key settings:
 | `try_quota.identity_url` | "" (#524) | fusion-identity base URL for JWKS discovery in `rs256` mode. Falls back to `web_shell.identity_url`, then `auth_portal.identity_url`, then `http://127.0.0.1:11470`. Keys are cached and refreshed (stale refresh 15 min, unknown-kid rotation refetch with a cooldown) |
 | `try_quota.state_path` | "" | Optional JSON snapshot path for usage + budget overrides (survives restarts). Empty = memory only |
 | `try_quota.estimate_fallback` | 1024 | Token estimate used in the pre-check when the tokenizer cannot read the request body. A failed upstream call (status >= 400, #528) is not charged the estimate — real upstream-reported token counts are still metered |
+| `try_quota.reset_window` | daily | Budget period (G3): `daily` / `weekly` (ISO year-week) / `monthly`. The bucket rolls over on the first request after the boundary; a reload that changes the window starts fresh buckets. Applies to the budget, budget overrides, and usage rollups |
+| `try_quota.soft_limit_percent` | 0 (off) | When projected usage reaches this percent of the budget, a soft-limit alert fires once per window (WARN log + `alert_webhook` POST). Hard rejection at 100% is unchanged |
+| `try_quota.alert_webhook` | "" | URL receiving the `budget.soft_limit` alert JSON (`{"event","sub","window","used","budget","soft_limit_percent","timestamp"}`). Empty = log-only alerting. Delivery is async, best-effort, 5s timeout, no retry — alerting never gates or delays a request |
+
+Soft-limit crossings also emit a `budget_soft_limit` event into the structured event stream (`fg_gateway_events`), surfaced on the Governance & Spend dashboard page.
 | `server.max_output_tokens` | 0 | #528: cap client-supplied `max_tokens` at this ceiling before proxying (`/v1/chat/completions`, `/v1/completions`, `/v1/messages`); oversized values are clamped and logged so behavior stays consistent regardless of backend. 0 = disabled (no behavior change) |
 
 **Try-quota admin endpoints (#514)**: `GET /admin/api/try-quota/usage` lists per-sub usage rows (day rollup, budget, override, recent calls); `POST /admin/api/try-quota/budget` with `{"sub": "...", "daily_budget": N}` pins a per-user budget override (`N <= 0` clears it). Both are admin-role gated. Over-budget requests get `429` with `{"detail": "daily token quota exceeded", "quota": {"used", "budget", "estimate"}}`. The gate scopes to product LLM paths only (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/v1/rerank`, `/v1/images/*`, `/v1/audio/*`) — admin surfaces and discovery routes like `/v1/models` are never gated. #524: the identity token is verified per `try_quota.jwt_algorithm` — `rs256` (default when `jwt_secret` is empty; deployed fusion-identity) verifies the RS256 signature against the identity JWKS with cached-key refresh, `hs256` keeps the shared-secret path for test/local profiles; a token signed with the non-configured algorithm is always rejected.
@@ -1874,6 +1879,7 @@ Built-in web admin dashboard at `/admin`, served from the single binary via Go `
 | `/admin/api/analytics/errors` | GET | Error statistics |
 | `/admin/api/usage/aggregate` | GET | Per-(app, scenario, model) call/token/cost aggregation (#326) |
 | `/admin/api/dashboard/overview` | GET | Dashboard overview (QPS, tokens, cost, local hit rate) |
+| `/admin/api/reports/governance` | GET | Governance & spend rollup: try-quota budget rows (incl. `soft_alerted`), PII detections per day (14d, PG), 429 rejections by key (7d, PG), recent governance events (`budget_soft_limit`, `cloud_cooldown_armed/cleared`, `cloud_overflow`). PG sections degrade to empty arrays when persistence is off |
 | `/admin/api/quota/:key` | GET/PUT | Get / Set key quota usage |
 | `/admin/api/config/:domain` | GET/PUT | Read / Update config domain (server, auth, rate-limit, retry, negotiation, cache, cost, cost-markup, pii, cloud-routing, hardware, tokenizer, observability, cors, hot-reload, cluster, realtime, admin, oidc, rbac, semantic-cache, prompt-injection, batch, store, validation) |
 
@@ -1956,6 +1962,23 @@ Three actions:
 
 Custom patterns supported via `pii.patterns` config.
 
+## Guardrail Chain
+
+When the single PII scan is not enough, configure an ordered guardrail chain (G4). An empty `guardrails:` list keeps the legacy single-point PII behavior verbatim — the chain only activates when explicitly configured:
+
+```yaml
+guardrails:
+    - name: compliance-pii
+      type: pii        # builtins today: pii (vendored guard SSOT patterns + pii.patterns)
+      action: deny     # log | deny | mask (empty falls back to pii.action)
+      enabled: true
+```
+
+- Links run in configured order; a `deny` link short-circuits the request with the same 400 `pii_error` envelope the legacy scan returns.
+- A `pii` link's presence is the explicit enablement — it loads the pattern set even when `pii.enabled` is false.
+- Unknown link `type` values and invalid `action` values fail config validation (fail-closed on config, not silent skip at request time).
+- Scanned on every inference path the legacy scan covered: `/v1/chat/completions`, `/v1/completions`, `/v1/messages`.
+
 ## Cloud Routing Strategies
 
 When multiple cloud backends are available, select a strategy via `cloud_routing.strategy`:
@@ -1967,8 +1990,20 @@ When multiple cloud backends are available, select a strategy via `cloud_routing
 | `cost` | Route to cheapest backend (DeepSeek < Qianfan/Volcengine < OpenAI/Anthropic) |
 | `weight` | Weighted random selection via `cloud_weights` config |
 | `least-busy` | Route to backend with fewest tracked samples |
+| `usage` | Route to backend with fewest selections since process start |
 
 Latency tracking uses quickselect algorithm for efficient P95 calculation (configurable window size, default 1000 samples).
+
+### Per-Deployment Cooldown
+
+Cloud deployments that fail repeatedly can be temporarily excluded from strategy selection:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `cloud_routing.cooldown_seconds` | `0` (off) | Exclusion window after failures reach the threshold; capped at 3600 |
+| `cloud_routing.failure_threshold` | `1` | Consecutive failures before the cooldown arms; capped at 100 |
+
+Outcomes are recorded per cloud request by the adapter layer. A success resets the failure streak and clears an active cooldown immediately. When every candidate is cooled, the full list stays eligible — cooldown never causes a request to fail on its own. Strategy and cooldown settings apply on config reload without restart. Cooldown arm/clear events land in the structured event stream (`cloud_cooldown_armed` / `cloud_cooldown_cleared`) and surface on the Governance & Spend dashboard page.
 
 ## Config Hot-Update (Drain/Apply/Warmup)
 
@@ -2133,6 +2168,7 @@ config.example.yaml   Example configuration
 | API Keys | CRUD + quota management + budget limits + per-key usage analytics |
 | Channels | Backend provider management + health check + connectivity test |
 | Insights | Seven PG-backed analytics pages: Latency (real percentiles + TTFT/TPOT), Compare, Explorer (request log search + payload view), Optimize, Anomalies, Reports, Capacity — sourced from the persisted `fg_*` tables, survives restarts |
+| Governance & Spend | Budget rows (try-quota usage vs budget + soft-alert flag), PII detections per day chart, rate-limit rejections by key, recent governance events (budget soft-limit, cloud deployment cooldown arm/clear, cloud overflow) — answers "who is spending, what got blocked, what fired" |
 | Configuration | 24 config pages for all gateway settings (Server, Auth, Rate Limit, Retry, Cache, Cost, PII, Cloud Routing, Hardware, Tokenizer, Observability, CORS, Hot Reload, Cluster, Realtime, Admin, OIDC, RBAC, Semantic Cache, Prompt Injection, Batch, Store, Validation, Cost Markup, Negotiation) |
 
 > **Deprecated (v0.9.91)**: the legacy Dashboard / Logs / Analytics pages were removed — they read only the in-memory ring buffer (empty after restart) and duplicated Insights. `/admin/logs` redirects to `/admin/insights/explorer` and `/admin/analytics` to `/admin/insights/latency`; `/admin/` itself is now the persistent Dashboard (#421). The `/admin/api/dashboard`, `/admin/api/logs*` and `/admin/api/analytics*` endpoints remain available.

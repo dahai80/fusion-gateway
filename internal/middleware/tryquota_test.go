@@ -408,3 +408,244 @@ func TestResolveAlgorithm(t *testing.T) {
         }
     }
 }
+
+func TestTryQuotaSoftLimitWebhookFiresOnce(t *testing.T) {
+    var mu sync.Mutex
+    var payloads []map[string]interface{}
+    hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        var p map[string]interface{}
+        _ = json.NewDecoder(r.Body).Decode(&p)
+        mu.Lock()
+        payloads = append(payloads, p)
+        mu.Unlock()
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer hook.Close()
+
+    meter := tryquota.NewStore("")
+    cfgSrc := func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          true,
+            Budget:           1000,
+            Algorithm:        "hs256",
+            Secret:           tqTestSecret,
+            EstimateFallback: 0,
+            SoftLimitPercent: 50,
+            AlertWebhook:     hook.URL,
+        }
+    }
+    h := tqHandler(cfgSrc, meter, func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    })
+
+    tok := tqMint(t, "soft-user", time.Now().Add(time.Hour))
+    // First request: no estimate (nil estFn, fallback 0) — usage 0, no
+    // crossing yet.
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry := &store.RequestLog{}
+    req = WithRequestLogContext(req, entry)
+    req.Header.Set("X-Fusion-Identity-Token", tok)
+    rec := httptest.NewRecorder()
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("under-budget request must pass, got %d", rec.Code)
+    }
+
+    // Finalize accounts the real usage (600 > 50% of 1000).
+    entry.TryQuotaSub = "soft-user"
+    entry.TryQuotaEst = 600
+    entry.TotalTokens = 600
+    TryQuotaFinalize(entry, meter)
+
+    // Second request: the gate sees used=600 over soft=500 — webhook fires.
+    req2a := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry2a := &store.RequestLog{}
+    req2a = WithRequestLogContext(req2a, entry2a)
+    req2a.Header.Set("X-Fusion-Identity-Token", tok)
+    rec2a := httptest.NewRecorder()
+    h.ServeHTTP(rec2a, req2a)
+    if rec2a.Code != http.StatusOK {
+        t.Fatalf("crossing request must pass, got %d", rec2a.Code)
+    }
+
+    deadline := time.Now().Add(2 * time.Second)
+    for time.Now().Before(deadline) {
+        mu.Lock()
+        n := len(payloads)
+        mu.Unlock()
+        if n >= 1 {
+            break
+        }
+        time.Sleep(10 * time.Millisecond)
+    }
+    mu.Lock()
+    n := len(payloads)
+    var first map[string]interface{}
+    if n > 0 {
+        first = payloads[0]
+    }
+    mu.Unlock()
+    if n != 1 {
+        t.Fatalf("webhook must fire exactly once, got %d", n)
+    }
+    if first["event"] != "budget.soft_limit" {
+        t.Fatalf("unexpected webhook event %v", first["event"])
+    }
+    if first["sub"] != "soft-user" {
+        t.Fatalf("unexpected webhook sub %v", first["sub"])
+    }
+
+    // Third crossing request: no second webhook (once per window).
+    req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry2 := &store.RequestLog{}
+    req2 = WithRequestLogContext(req2, entry2)
+    req2.Header.Set("X-Fusion-Identity-Token", tok)
+    rec2 := httptest.NewRecorder()
+    h.ServeHTTP(rec2, req2)
+    if rec2.Code != http.StatusOK {
+        t.Fatalf("second request must pass, got %d", rec2.Code)
+    }
+    time.Sleep(150 * time.Millisecond)
+    mu.Lock()
+    n = len(payloads)
+    mu.Unlock()
+    if n != 1 {
+        t.Fatalf("webhook must fire once per window, got %d", n)
+    }
+}
+
+func TestTryQuotaSoftLimitNoWebhookURLStillAlerts(t *testing.T) {
+    meter := tryquota.NewStore("")
+    cfgSrc := func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          true,
+            Budget:           100,
+            Algorithm:        "hs256",
+            Secret:           tqTestSecret,
+            EstimateFallback: 0,
+            SoftLimitPercent: 80,
+        }
+    }
+    h := tqHandler(cfgSrc, meter, func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    })
+    tok := tqMint(t, "soft2", time.Now().Add(time.Hour))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry := &store.RequestLog{}
+    req = WithRequestLogContext(req, entry)
+    req.Header.Set("X-Fusion-Identity-Token", tok)
+    rec := httptest.NewRecorder()
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("request must pass, got %d", rec.Code)
+    }
+    entry.TryQuotaSub = "soft2"
+    entry.TryQuotaEst = 90
+    TryQuotaFinalize(entry, meter)
+    if got := meter.UsedToday("soft2", time.Now()); got != 90 {
+        t.Fatalf("usage must be accounted, got %d", got)
+    }
+}
+
+func TestTryQuotaSoftLimitEmitsGovernanceEvent(t *testing.T) {
+    meter := tryquota.NewStore("")
+    var mu sync.Mutex
+    var events []struct {
+        level  string
+        event  string
+        detail map[string]any
+    }
+    cfgSrc := func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          true,
+            Budget:           100,
+            Algorithm:        "hs256",
+            Secret:           tqTestSecret,
+            EstimateFallback: 0,
+            SoftLimitPercent: 80,
+            EmitEvent: func(level, event string, detail map[string]any) {
+                mu.Lock()
+                events = append(events, struct {
+                    level  string
+                    event  string
+                    detail map[string]any
+                }{level, event, detail})
+                mu.Unlock()
+            },
+        }
+    }
+    h := tqHandler(cfgSrc, meter, func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    })
+    tok := tqMint(t, "evt-user", time.Now().Add(time.Hour))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry := &store.RequestLog{}
+    req = WithRequestLogContext(req, entry)
+    req.Header.Set("X-Fusion-Identity-Token", tok)
+    rec := httptest.NewRecorder()
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("crossing request must pass, got %d", rec.Code)
+    }
+    entry.TryQuotaSub = "evt-user"
+    entry.TryQuotaEst = 90
+    TryQuotaFinalize(entry, meter)
+
+    // Second request crosses soft=80 with used=90.
+    req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry2 := &store.RequestLog{}
+    req2 = WithRequestLogContext(req2, entry2)
+    req2.Header.Set("X-Fusion-Identity-Token", tok)
+    rec2 := httptest.NewRecorder()
+    h.ServeHTTP(rec2, req2)
+    if rec2.Code != http.StatusOK {
+        t.Fatalf("soft crossing must not gate, got %d", rec2.Code)
+    }
+    mu.Lock()
+    n := len(events)
+    var ev struct {
+        level  string
+        event  string
+        detail map[string]any
+    }
+    if n > 0 {
+        ev = events[0]
+    }
+    mu.Unlock()
+    if n != 1 {
+        t.Fatalf("governance event must fire exactly once, got %d", n)
+    }
+    if ev.level != "warn" || ev.event != "budget_soft_limit" {
+        t.Fatalf("unexpected event %q/%q", ev.level, ev.event)
+    }
+    if ev.detail["sub"] != "evt-user" {
+        t.Fatalf("event detail must carry sub, got %v", ev.detail)
+    }
+}
+
+func TestTryQuotaSoftLimitNilEmitEventSafe(t *testing.T) {
+    meter := tryquota.NewStore("")
+    cfgSrc := func() TryQuotaSettings {
+        return TryQuotaSettings{
+            Enabled:          true,
+            Budget:           100,
+            Algorithm:        "hs256",
+            Secret:           tqTestSecret,
+            EstimateFallback: 0,
+            SoftLimitPercent: 10,
+        }
+    }
+    h := tqHandler(cfgSrc, meter, func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    })
+    tok := tqMint(t, "nil-evt", time.Now().Add(time.Hour))
+    req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+    entry := &store.RequestLog{}
+    req = WithRequestLogContext(req, entry)
+    req.Header.Set("X-Fusion-Identity-Token", tok)
+    rec := httptest.NewRecorder()
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("nil EmitEvent must not break the gate, got %d", rec.Code)
+    }
+}

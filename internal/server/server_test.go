@@ -10371,3 +10371,38 @@ func TestHandleStreamAnthropicMessages_UsageLogIncludesCache(t *testing.T) {
         t.Errorf("OutputTokens = %d, want 5", entry.OutputTokens)
     }
 }
+
+// G4: the guardrail chain must rebuild on config reload — a deny link added
+// via reload takes effect on the next request without a restart (live-
+// verified gap on v0.9.136 where the chain stayed the startup-built nil).
+func TestRebuildMiddlewareChain_GuardrailChainRebuilds(t *testing.T) {
+    s := newTestServer()
+    if s.guardrailChain != nil && s.guardrailChain.Len() > 0 {
+        t.Fatal("precondition: test server starts without guardrails")
+    }
+
+    newCfg := &config.ConfigSnapshot{
+        Config: config.DefaultConfig(),
+    }
+    newCfg.Config.Guardrails = []config.GuardrailConfig{
+        {Name: "reload-probe", Type: "pii", Action: "deny", Enabled: true},
+    }
+    newCfg.Config.PII = config.PIIConfig{
+        Enabled: false,
+        Patterns: []config.PIIPattern{
+            {Name: "reload_probe_token", Regex: `RELOAD_PROBE_TOKEN`},
+        },
+    }
+    s.RebuildMiddlewareChain(newCfg)
+
+    s.cfgMu.RLock()
+    chain := s.guardrailChain
+    s.cfgMu.RUnlock()
+    if chain == nil || chain.Len() != 1 {
+        t.Fatalf("reload must rebuild the guardrail chain, got links %d", chain.Len())
+    }
+    deny, detected := chain.ScanText("contains RELOAD_PROBE_TOKEN here")
+    if !deny || len(detected) == 0 {
+        t.Fatalf("rebuilt chain must deny on match, deny=%v detected=%v", deny, detected)
+    }
+}
