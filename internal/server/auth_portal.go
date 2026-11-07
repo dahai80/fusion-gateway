@@ -216,7 +216,12 @@ var identityProxyAllowlist = map[string]string{
     "POST|/api/v1/auth/register-tenant":    "register-tenant",
     "POST|/api/v1/auth/verify-email":       "verify-email",
     "POST|/api/v1/auth/verify-email/resend": "verify-email-resend",
-    "GET|/.well-known/jwks.json":           "jwks",
+    // #549: self-service password recovery (identity #54). Credential-shaped
+    // POST bodies, same handling as login; the Authorization strip in
+    // handleIdentityProxy applies as everywhere else on this surface.
+    "POST|/api/v1/auth/password/forgot": "password-forgot",
+    "POST|/api/v1/auth/password/reset":  "password-reset",
+    "GET|/.well-known/jwks.json":        "jwks",
 }
 
 // handleIdentityProxy forwards an allowlisted public auth call to identity.

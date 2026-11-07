@@ -94,6 +94,17 @@ input:focus { outline: none; border-color: var(--ink); }
     cursor: pointer;
 }
 .primary:disabled { opacity: 0.5; cursor: wait; }
+.linkbtn {
+    display: block;
+    width: 100%;
+    margin: 12px 0 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    text-decoration: underline;
+    cursor: pointer;
+}
 .hint { font-size: 12px; color: var(--ink-soft); margin: 10px 0 0; line-height: 1.5; }
 .msg {
     margin-top: 16px;

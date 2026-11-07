@@ -200,3 +200,27 @@ func TestAuthPortalProxyAllowlist(t *testing.T) {
         t.Fatalf("proxy login: status %d", rec2.Code)
     }
 }
+
+func TestAuthPortalProxyPasswordRecoveryAllowlist(t *testing.T) {
+    p, _ := newTestPortal(t, []string{"http://localhost:3000/login"})
+    h := p.guard(p.handleIdentityProxy)
+
+    for _, path := range []string{
+        "/auth/api/identity/api/v1/auth/password/forgot",
+        "/auth/api/identity/api/v1/auth/password/reset",
+    } {
+        req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"email":"u@example.com"}`))
+        rec := httptest.NewRecorder()
+        h.ServeHTTP(rec, req)
+        if rec.Code != http.StatusOK {
+            t.Fatalf("proxy %s: status %d", path, rec.Code)
+        }
+        // GET must stay refused — credential-shaped POST surface only.
+        getReq := httptest.NewRequest(http.MethodGet, path, nil)
+        getRec := httptest.NewRecorder()
+        h.ServeHTTP(getRec, getReq)
+        if getRec.Code != http.StatusNotFound {
+            t.Fatalf("GET %s must be refused, got %d", path, getRec.Code)
+        }
+    }
+}

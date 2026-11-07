@@ -32,6 +32,26 @@
         <label data-i18n="f-tenant">Tenant <span class="opt" data-i18n="f-optional">(optional)</span></label>
         <input name="tenant_id" autocomplete="off">
         <button type="submit" class="primary" data-i18n="btn-login">Sign in</button>
+        <button type="button" id="forgot-link" class="linkbtn" data-i18n="link-forgot">Forgot password?</button>
+    </form>
+
+    <form id="form-forgot" class="pane">
+        <p class="hint" data-i18n="hint-forgot">Enter the account email. If it exists, a reset link is sent — the response is identical either way.</p>
+        <label data-i18n="f-email">Email</label>
+        <input name="email" type="email" required autocomplete="email">
+        <button type="submit" class="primary" data-i18n="btn-forgot">Send reset link</button>
+        <button type="button" id="forgot-back" class="linkbtn" data-i18n="link-back-signin">Back to sign in</button>
+    </form>
+
+    <form id="form-reset" class="pane">
+        <p class="hint" data-i18n="hint-reset">Enter the token from the reset email and a new password.</p>
+        <label data-i18n="f-token">Reset token</label>
+        <input name="token" required>
+        <label data-i18n="f-password">New password</label>
+        <input name="password" type="password" required minlength="10" autocomplete="new-password">
+        <label data-i18n="f-password-confirm">Confirm password</label>
+        <input name="password_confirm" type="password" required minlength="10" autocomplete="new-password">
+        <button type="submit" class="primary" data-i18n="btn-reset">Set new password</button>
     </form>
 
     <form id="form-register" class="pane">
