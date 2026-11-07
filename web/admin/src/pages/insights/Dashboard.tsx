@@ -39,6 +39,7 @@ interface OverviewTotals {
     total_tokens: number;
     cost: number;
     local_savings: number;
+    cache_savings: number;
 }
 
 interface OverviewLatency {
@@ -109,6 +110,25 @@ interface ErrorRow {
     last_seen: string;
 }
 
+// #564 P2: any-dimension summary row + rescued counters.
+interface SummaryRow {
+    name: string;
+    requests: number;
+    errors: number;
+    success_rate: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cost: number;
+    duration_p95_ms: number;
+}
+
+interface RescuedCounts {
+    breaker_trips: number;
+    cloud_overflows: number;
+    total: number;
+}
+
 // #564: auto granularity — minute buckets for the 1h preset, hour for a day,
 // day beyond (keeps the trend chart at a readable bucket count).
 const granularityFor = (hours: number) => (hours <= 1 ? "minute" : hours <= 24 ? "hour" : "day");
@@ -131,6 +151,9 @@ export default function Dashboard() {
     const [data, setData] = useState<OverviewResponse | null>(null);
     const [spend, setSpend] = useState<SpendRow[]>([]);
     const [errors, setErrors] = useState<ErrorRow[]>([]);
+    const [summary, setSummary] = useState<SummaryRow[]>([]);
+    const [rescued, setRescued] = useState<RescuedCounts | null>(null);
+    const [groupBy, setGroupBy] = useState("model");
     const [period, setPeriod] = useState(24);
 
     useEffect(() => {
@@ -143,12 +166,16 @@ export default function Dashboard() {
             client.get("/insights/overview", { params: { ...win, granularity: granularityFor(period) } }),
             client.get("/insights/spend", { params: { ...win, limit: 10 } }),
             client.get("/insights/errors", { params: { ...win, limit: 10 } }),
+            client.get("/insights/summary", { params: { ...win, group_by: groupBy, limit: 10 } }),
+            client.get("/insights/rescued", { params: { ...win } }),
         ])
-            .then(([ov, sp, er]) => {
+            .then(([ov, sp, er, sm, rc]) => {
                 if (cancelled) return;
                 setData(ov.data);
                 setSpend(sp.data?.spend || []);
                 setErrors(er.data?.errors || []);
+                setSummary(sm.data?.summary || []);
+                setRescued(rc.data || null);
                 setUnavailable(false);
             })
             .catch((err) => {
@@ -160,7 +187,7 @@ export default function Dashboard() {
         return () => {
             cancelled = true;
         };
-    }, [period]);
+    }, [period, groupBy]);
 
     if (unavailable) return <UnavailableAlert />;
 
@@ -188,6 +215,15 @@ export default function Dashboard() {
         { title: "Message", dataIndex: "error_message", key: "error_message", ellipsis: true, render: (v: string) => v || "(no message)" },
         { title: "Count", dataIndex: "count", key: "count", sorter: (a: ErrorRow, b: ErrorRow) => a.count - b.count, render: (v: number) => v.toLocaleString() },
         { title: "Last Seen", dataIndex: "last_seen", key: "last_seen", ellipsis: true },
+    ];
+    const summaryColumns = [
+        { title: "Name", dataIndex: "name", key: "name", ellipsis: true, render: (v: string) => v || "(none)" },
+        { title: "Requests", dataIndex: "requests", key: "requests", sorter: (a: SummaryRow, b: SummaryRow) => a.requests - b.requests, render: (v: number) => v.toLocaleString() },
+        { title: "Errors", dataIndex: "errors", key: "errors", render: (v: number) => v.toLocaleString() },
+        { title: "Success", dataIndex: "success_rate", key: "success_rate", render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: "Tokens", dataIndex: "total_tokens", key: "total_tokens", render: (v: number) => fmtTokens(v) },
+        { title: "Cost", dataIndex: "cost", key: "cost", sorter: (a: SummaryRow, b: SummaryRow) => a.cost - b.cost, render: (v: number) => `$${v.toFixed(4)}` },
+        { title: "p95", dataIndex: "duration_p95_ms", key: "duration_p95_ms", render: (v: number) => (v > 0 ? `${Math.round(v)}ms` : "—") },
     ];
 
     return (
@@ -245,6 +281,8 @@ export default function Dashboard() {
                                 <Statistic title="Cost (USD)" value={totals?.cost || 0} precision={4} prefix={<DollarOutlined />} />
                                 <div style={{ marginTop: 8, fontSize: 13 }}>
                                     <span>local savings ${(totals?.local_savings || 0).toFixed(4)}</span>
+                                    {"  "}
+                                    <span>cache savings ${(totals?.cache_savings || 0).toFixed(4)}</span>
                                 </div>
                             </Card>
                         </Col>
@@ -265,6 +303,16 @@ export default function Dashboard() {
                                     <span>p50 {Math.round(latency?.ttft_p50_ms || 0)}ms</span>
                                     {"  "}
                                     <span>p99 {Math.round(latency?.ttft_p99_ms || 0)}ms</span>
+                                </div>
+                            </Card>
+                        </Col>
+                        <Col xs={12} md={6} xl={4}>
+                            <Card size="small">
+                                <Statistic title="Rescued by Gateway" value={rescued?.total || 0} prefix={<ThunderboltOutlined />} />
+                                <div style={{ marginTop: 8, fontSize: 13 }}>
+                                    <span>breaker trips {rescued?.breaker_trips || 0}</span>
+                                    {"  "}
+                                    <span>overflow cooldowns {rescued?.cloud_overflows || 0}</span>
                                 </div>
                             </Card>
                         </Col>
@@ -302,6 +350,32 @@ export default function Dashboard() {
                             </Card>
                         </Col>
                     </Row>
+                    <Card
+                        title="Summary"
+                        size="small"
+                        style={{ marginBottom: 24 }}
+                        extra={
+                            <Select
+                                value={groupBy}
+                                onChange={setGroupBy}
+                                size="small"
+                                style={{ width: 140 }}
+                                options={[
+                                    { label: "by Model", value: "model" },
+                                    { label: "by Backend", value: "backend" },
+                                    { label: "by Endpoint", value: "endpoint" },
+                                    { label: "by API Key", value: "api_key_name" },
+                                    { label: "by Scenario", value: "scenario" },
+                                ]}
+                            />
+                        }
+                    >
+                        {summary.length === 0 ? (
+                            <Alert type="info" showIcon message="No LLM traffic in this window." />
+                        ) : (
+                            <Table size="small" rowKey="name" pagination={false} columns={summaryColumns} dataSource={summary} />
+                        )}
+                    </Card>
                     <Row gutter={[16, 16]}>
                         <Col xs={24} xl={12}>
                             <Card title="Spend by API Key" size="small" style={{ marginBottom: 24 }} extra={<Typography.Text type="secondary">LLM traffic</Typography.Text>}>

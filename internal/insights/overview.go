@@ -21,6 +21,10 @@ type OverviewTotals struct {
     TotalTokens  int64   `json:"total_tokens"`
     Cost         float64 `json:"cost"`
     LocalSavings float64 `json:"local_savings"`
+    // CacheSavings (#564 P2): cached input tokens priced at the model's
+    // input rate — the spend avoided by prompt-cache hits. Priced models
+    // only; unpriced models contribute 0 (no stored equivalent).
+    CacheSavings float64 `json:"cache_savings"`
 }
 
 // OverviewLatency carries the window's duration/TTFT percentiles (ms).
@@ -232,6 +236,7 @@ func (s *Service) overviewPerModel(ctx context.Context, from, to time.Time, scop
         SELECT model, count(*),
                coalesce(sum(input_tokens), 0),
                coalesce(sum(output_tokens), 0),
+               coalesce(sum(cached_tokens), 0),
                coalesce(sum(total_tokens), 0),
                coalesce(sum(cost), 0)
         FROM fg_request_logs
@@ -245,12 +250,16 @@ func (s *Service) overviewPerModel(ctx context.Context, from, to time.Time, scop
     var out []OverviewModel
     for rows.Next() {
         var m OverviewModel
-        var inTok, outTok, storedCost float64
-        if err := rows.Scan(&m.Name, &m.Requests, &inTok, &outTok, &m.TotalTokens, &storedCost); err != nil {
+        var inTok, outTok, cachedTok, storedCost float64
+        if err := rows.Scan(&m.Name, &m.Requests, &inTok, &outTok, &cachedTok, &m.TotalTokens, &storedCost); err != nil {
             return nil, err
         }
         m.Cost = costFor(table, m.Name, int64(inTok), int64(outTok), storedCost)
         totals.Cost += m.Cost
+        // #564 P2: cached input tokens avoided at the model's input rate.
+        if p, ok := priceFor(table, m.Name); ok && cachedTok > 0 {
+            totals.CacheSavings += cachedTok / 1e6 * p.InputPerMTok
+        }
         out = append(out, m)
     }
     if err := rows.Err(); err != nil {

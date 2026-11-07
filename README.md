@@ -1007,6 +1007,8 @@ dedicated read pool with a 10s `statement_timeout` and are window-guarded
 | GET | `/admin/api/insights/overview` | Dashboard rollup: KPI totals, latency percentiles, gateway cache hit rates, top models/backends, trend series. `scope=llm` (default) aggregates product LLM endpoints only; `scope=all` includes non-LLM traffic (#564) |
 | GET | `/admin/api/insights/errors` | PG error aggregation: endpoint × status_code × message groups, count desc (replaces the deprecated in-memory analytics/errors surface); `scope`, `limit` (#564) |
 | GET | `/admin/api/insights/spend` | per-API-key spend: requests/errors/success rate/tokens/cost, priced at read time from `pricing.model_pricing`; `scope`, `limit` (#564) |
+| GET | `/admin/api/insights/summary` | any-dimension group-by (Portkey-style Summary tab): requests/errors/success rate/tokens/priced cost/duration p95 per group; `group_by=model\|backend\|endpoint\|api_key_name\|scenario`, `scope`, `limit` (#564) |
+| GET | `/admin/api/insights/rescued` | gateway strategy interventions in the window: breaker trips + cloud-overflow cooldowns from `fg_gateway_events` (#564) |
 | POST | `/admin/api/insights/logs/search` | Explorer DSL: time window, `q` (model/error/request-id substring), endpoint/backend/model/project/key/status/stream/success/min-duration, paging (limit ≤ 200) |
 | GET | `/admin/api/insights/logs/{id}/payload` | captured request/response payload for one log row (jsonb + raw columns) |
 | GET | `/admin/api/insights/logs/{id}/chunks` | per-SSE-chunk timing rows from `fg_stream_chunks` (empty list = chunk capture was off, not an error) |
