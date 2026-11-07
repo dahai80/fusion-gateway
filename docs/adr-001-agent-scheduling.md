@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "ADR-001 Agent 调度归属", en: "ADR-001 agent scheduling ownership" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/adr-001-agent-scheduling.md
+---
+
 # ADR-001: Agent Scheduling Ownership (Issue #97)
 
 **Status**: Accepted

@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "产品目录 API 契约", en: "Product catalog API contract" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/catalog-api.md
+---
+
 # Product Catalog API Contract (#488)
 
 Type: contract · Status: stable · Introduced: v0.9.117

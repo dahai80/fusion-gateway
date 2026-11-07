@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/changelog
+product: fusion-gateway
+class: core
+entry: service
+doc_type: changelog
+title: { zh: "更新日志", en: "Changelog" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - CHANGELOG.md
+---
+
 # Changelog
 
 All notable changes to Fusion-Gateway are documented in this file.

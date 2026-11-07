@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "GUI 设计方案", en: "GUI design plan" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/GUI-DESIGN.md
+---
+
 # Fusion-Gateway GUI 设计方案
 
 > 版本: v1.0 | 日期: 2026-07-31

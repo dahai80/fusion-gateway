@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/readme
+product: fusion-gateway
+class: core
+entry: service
+doc_type: readme
+title: { zh: "Fusion-Gateway", en: "Fusion-Gateway" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # Fusion-Gateway
 
 **[English](README.md) | 中文**
@@ -269,7 +285,7 @@ web_shell:
 - **Manifest 注册中心** — 模块经 `POST /api/v1/shell/manifests` 自注册(按 id 幂等 upsert,fg-key 鉴权);心跳保活;心跳过期标记 `unreachable`(菜单置灰,不删除);静态兜底保证菜单非空。动态注册持久化到 `store.data_dir/shell_manifests.json`(原子写,0600,#230),启动时回载 — 重启不再丢失已注册模块;回载保留原心跳时间戳,过期条目重启后仍为 `unreachable`,离线标记继续生效。不再满足当前 manifest 规则 / entry 白名单的存量条目跳过并 WARN。注销(#253):`DELETE /api/v1/shell/manifests/{id}`(同 admin-plane 鉴权)删除动态注册并持久化存储;未知 id 404,config 静态条目与网关内建 `fusion-admin` 拒绝 409 `manifest_static`(不属于 API 管辖)。
 - **Manifest 列表按权限过滤**(#229)— `GET /api/v1/shell/manifests` 仅返回会话已授权的 manifest 子集(`*` 见全部;空权限看不到任何条目,fail-closed),受限会话无法枚举无权访问的模块 id/标题/健康 URL。宿主菜单无需再客户端过滤。
 - **Schema v1 扩展字段**(#250)— manifest(静态兜底或动态注册)可携带 `searchProviders` / `pages` / `notifications`(shell#24):shell 宿主的 ⌘K 跨模块搜索、子页面深链、通知中心轮询源。endpoint/页面 route 必须为网关绝对路径 `/...`(拒绝穿越、拒绝 `#`),通知 kind 限定 `approvals|runs|engine`,每个数组上限 32 条;非法形状在注册时 403 拒绝,而非在 shell 加载时静默丢弃。列表 API 原样透传已校验字段(不含任何密钥)。JSON 线上键为驼峰(`searchProviders`、`pages`、`notifications`,与 shell 宿主 DTO 一致);config.yaml 静态条目用蛇形(`search_providers`、`pages`、`notifications`)。**Permissions-Policy 委托**(shell#66):manifest 还可声明 `permissionsPolicy`(线上键)/ `permissions_policy`(config)— shell 宿主渲染为 iframe `allow` 属性的特性列表,注册与心跳刷新均按网关白名单(`microphone`、`camera`)校验;缺省 = 不委托(默认)。
-- **Schema v2 菜单分组**(#297)— manifest 可携带 `group` / `group_title` / `group_title_en` / `sort`:仅供 shell 宿主两级菜单的展示聚合(如 fusion-office 五个应用收进一个 `Fusion Office` 顶级菜单)。`group` 为兄弟模块共享的稳定 id(`^[a-z0-9-]{1,64}$`;留空 = 不分组,按现状顶级渲染 — 完全向后兼容);标题上限 128 字符;`sort` 为组内排序提示(稳定排序,id 决胜)。兄弟模块组标题须一致 — 先注册者生效,不一致输出节流 WARN,绝不拒绝。字段不承载任何组级 RBAC:模块可见性/权限仍按模块执行(#229/#221/#289)。注册与心跳刷新时与其他 manifest 字段一同校验;`List()` 原样透传(仅 `api_key` 置零)。
+- **Schema v2 菜单分组**(#297)— manifest 可携带 `group` / `group_title` / `group_title_en` / `sort`:仅供 shell 宿主两级菜单的展示聚合(如 fusion-office 五个应用收进一个 `Fusion Office` 顶层菜单)。`group` 为兄弟模块共享的稳定 id(`^[a-z0-9-]{1,64}$`;留空 = 不分组,按现状顶层渲染 — 完全向后兼容);标题上限 128 字符;`sort` 为组内排序提示(稳定排序,id 决胜)。兄弟模块组标题须一致 — 先注册者生效,不一致输出节流 WARN,绝不拒绝。字段不承载任何组级 RBAC:模块可见性/权限仍按模块执行(#229/#221/#289)。注册与心跳刷新时与其他 manifest 字段一同校验;`List()` 原样透传(仅 `api_key` 置零)。
 - **会话签发** — `POST /api/v1/shell/session` 校验本地账号表(优先 bcrypt)或首启引导管理员;token 为 HMAC 签名,与管理员 JWT、API key 处于独立密钥空间;`tenant_id` claim 预留(单租户固定 `local`)。
 - **RBAC 账号存储** — 持久账号存储(`store.data_dir/shell_users.json`,仅 bcrypt),支撑 `/api/v1/shell/users` CRUD + 密码重置(需 admin 角色,保护最后一个可用管理员)与 `POST /api/v1/password`(自助改密,清除 `must_change_password`)。config 用户仅作种子数据:存储文件一旦存在即为唯一事实源。
 - **错误信封** — `/shell/{module}/` 代理失败一律返回 `{code, message, module_id, retryable}`(503 `backend_unavailable` / 404 `module_not_found`),宿主据此弹非阻塞 Toast 而非无限 Loading(A5)。
@@ -1774,7 +1790,7 @@ config.example.yaml   示例配置
 
 | # | 条目 | 详情 |
 |---|------|------|
-| 1 | **持久化 Dashboard 恢复顶级菜单项** | 管理后台重新拥有 "Dashboard" 落地页 — 但数据来自 PostgreSQL 而非已移除的内存环形缓冲。`/admin/api/insights/overview`(严格 admin 角色)聚合时间窗口(24h/3d/7d/30d,minute/hour/day 粒度):请求量 + 成功率、输入/输出/缓存/总 token、成本 + 本地节省、duration 与 TTFT p50/p95/p99(`percentile_cont`)、Top-10 模型与后端、请求/token 趋势序列。该页面是 `/admin/` index 路由 + 顶级侧边栏菜单项。 |
+| 1 | **持久化 Dashboard 恢复顶层菜单项** | 管理后台重新拥有 "Dashboard" 落地页 — 但数据来自 PostgreSQL 而非已移除的内存环形缓冲。`/admin/api/insights/overview`(严格 admin 角色)聚合时间窗口(24h/3d/7d/30d,minute/hour/day 粒度):请求量 + 成功率、输入/输出/缓存/总 token、成本 + 本地节省、duration 与 TTFT p50/p95/p99(`percentile_cont`)、Top-10 模型与后端、请求/token 趋势序列。该页面是 `/admin/` index 路由 + 顶层侧边栏菜单项。 |
 | 2 | **上游 prompt-cache token 端到端捕获** | OpenAI `usage.prompt_tokens_details.cached_tokens` 与 Anthropic `usage.cache_read_input_tokens` 现在经适配器流入 `RequestLog.CachedTokens` 与新列 `fg_request_logs.cached_tokens`(增量式 `ALTER TABLE ... IF NOT EXISTS`)。流式路径按上报累计值取 max(provider 上报的是累计值而非增量),OpenAI→Anthropic 响应桥经 `UsageTotals` 透传缓存 token。Dashboard 以 缓存 ÷ 输入 token 展示 prompt-cache 命中率。 |
 | 3 | **网关缓存命中率持久化** | 新表 `fg_cache_stats`(主键 `(ts, cache)`)每 30s 接收 response 与 semantic 缓存的累计计数快照,由 `lifecycle.Worker` 采样器写入(`Sink.Close` join,失败 WARN 尽力而为,同 hw 采样器)。overview 从窗口内首/末样本推导窗口增量;计数回绕(窗口内网关重启)以末样本为基线,只丢重启前那段窗口。 |
 | 4 | **Helm chart 同步** | `deploy/helm/fusion-gateway/Chart.yaml` version/appVersion 升至 0.9.92。 |

@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/readme
+product: fusion-gateway
+class: core
+entry: service
+doc_type: readme
+title: { zh: "Fusion-Gateway", en: "Fusion-Gateway" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README.md
+---
+
 # Fusion-Gateway
 
 **English | [中文](README_CN.md)**
