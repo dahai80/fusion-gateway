@@ -683,6 +683,11 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         if ctx.Err() != nil {
             slog.Info("stream chat establish aborted by client disconnect, skipping failure record and overflow",
                 "provider", provider.Name(), "model", req.Model, "error", err, "ctx_err", ctx.Err())
+            // #568: the aborted request may have been the half-open probe —
+            // release the slot or recovery starves until the window expires.
+            if decision.Backend == router.LocalBackend {
+                s.router.ReleaseProbe(string(decision.Backend))
+            }
             return
         }
         // RR4: ErrLocalSlotFull is an expected diversion (local hard cap
@@ -693,6 +698,8 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
         if errors.Is(err, adapter.ErrLocalSlotFull) && decision.Backend == router.LocalBackend {
             slog.Info("RR4 local slot full, diverting stream chat to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #568: diverted probe neither succeeds nor fails — release the slot.
+            s.router.ReleaseProbe(string(decision.Backend))
             // #389: a multimodal request must not divert to the text-only
             // cloud_default — the local VLM id would be rejected upstream
             // (400 → 502). No cloud VLM configured → clear 503 instead.
@@ -701,6 +708,8 @@ func (s *Server) handleStreamChat(ctx context.Context, w http.ResponseWriter, pr
                 slog.Warn("RR4 local slot full but multimodal request has no cloud VLM, refusing text-only cloud divert",
                     "model", req.Model,
                     "hint", "configure routing.multimodal.cloud_backend + cloud_model or raise routing.local_priority.max_concurrent")
+                // #568: request never reaches local — release the probe slot.
+                s.router.ReleaseProbe(string(decision.Backend))
                 s.stampRouteInfo(ctx, req, decision, provider.Name())
                 http.Error(w, `{"error":{"message":"local slot cap reached and the multimodal request cannot be diverted to the text-only cloud default (routing.fallback.cloud_default); configure routing.multimodal.cloud_backend + cloud_model or raise routing.local_priority.max_concurrent","type":"server_error"}}`, http.StatusServiceUnavailable)
                 return
@@ -1052,6 +1061,11 @@ streamDone:
     // record a stall + RecordFailure below so a repeatedly-dead local trips its
     // breaker. clean completion falls through to usage + [DONE] + success.
     if ctx.Err() != nil || endReason == "write_failed" {
+        // #568: client gone mid-stream — no Record* will pair with the probe
+        // reservation taken at dispatch; release it so recovery is not starved.
+        if decision.Backend == router.LocalBackend {
+            s.router.ReleaseProbe(string(decision.Backend))
+        }
         return
     }
 
@@ -1296,6 +1310,8 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         } else {
             slog.Info("RR4 local slot full, diverting chat to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #568: diverted probe neither succeeds nor fails — release the slot.
+            s.router.ReleaseProbe(string(decision.Backend))
         }
 
         // A4 fix / #301: runtime backend switch fallback — if local fails, try

@@ -133,6 +133,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
         if errors.Is(err, adapter.ErrLocalSlotFull) && decision.Backend == router.LocalBackend {
             slog.Info("RR4 local slot full, diverting embedding to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #568: diverted probe neither succeeds nor fails — release the slot.
+            s.router.ReleaseProbe(string(decision.Backend))
             cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "rr4_slot_full_redirect"}
             cloudProvider := s.resolveCloudProvider(cloudDecision, nil, nil)
             if cloudProvider != nil {
@@ -273,6 +275,8 @@ func (s *Server) handleRerank(w http.ResponseWriter, r *http.Request) {
         if errors.Is(err, adapter.ErrLocalSlotFull) && decision.Backend == router.LocalBackend {
             slog.Info("RR4 local slot full, diverting rerank to cloud",
                 "model", req.Model, "reason", "max_concurrent reached")
+            // #568: diverted probe neither succeeds nor fails — release the slot.
+            s.router.ReleaseProbe(string(decision.Backend))
             cloudDecision := &router.RouteDecision{Backend: router.CloudBackend, Reason: "rr4_slot_full_redirect"}
             cloudProvider := s.resolveCloudProvider(cloudDecision, nil, nil)
             if cloudProvider != nil {

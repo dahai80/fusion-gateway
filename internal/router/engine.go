@@ -627,6 +627,19 @@ func (e *Engine) RecordSuccess(backend string) {
     }
 }
 
+// ReleaseProbe (#568) clears a half-open probe reservation without counting
+// an outcome. A request admitted as the probe at dispatch whose dispatch then
+// diverted (RR4 slot-full, multimodal refusal) or was aborted by a client
+// disconnect never pairs with RecordSuccess/RecordFailure — the slot would
+// stay consumed until the probe window expired, starving recovery.
+func (e *Engine) ReleaseProbe(backend string) {
+    e.breakerMu.RLock()
+    if b, ok := e.breakers[backend]; ok {
+        b.ReleaseProbe()
+    }
+    e.breakerMu.RUnlock()
+}
+
 func (e *Engine) RecordFailure(backend string) {
     // B4 (audit): Record under breakerMu.RLock (see RecordSuccess).
     var state CircuitBreakerState
