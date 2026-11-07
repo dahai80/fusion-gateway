@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "E8 引擎锁拆分设计", en: "E8 engine mutex split design" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/superpowers/specs/2026-08-27-e8-mutex-split-design.md
+---
+
 # E8 — Engine.mu Per-Concern Mutex Split (Design)
 
 Audit E8: "single `Engine.mu` serializes breakers + session affinity + hardware

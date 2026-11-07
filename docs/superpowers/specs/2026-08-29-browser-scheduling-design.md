@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "跨节点浏览器会话调度设计", en: "Cross-node browser session scheduling design" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/superpowers/specs/2026-08-29-browser-scheduling-design.md
+---
+
 # Cross-node Browser-Session Scheduling — Design Spec
 
 **Issue:** [dahai80/fusion-gateway#130](https://github.com/dahai80/fusion-gateway/issues/130)
@@ -119,7 +135,7 @@ it when `browser.enabled`. No edits to `internal/cluster` or
 | `registry.go` | `Registry`: node set + capacity snapshots. Hybrid discovery (static config seed + dial-in register). 5s background poll via `lifecycle.Worker`. Dead-node detection (failure_threshold). |
 | `scheduler.go` | `Scheduler.Pick()`: headroom ranking + global ceiling + dead-node skip. Pure function over registry snapshot (no I/O) — fully unit-testable. |
 | `proxy.go` | `Proxy`: session->node pin map + the five op handlers (Create/Execute/Close/Metrics/Nodes). Holds `*Registry` + `*NodeClient`. Pin map in-memory, evict on close. |
-| `handler.go` | HTTP `Handler` registering `/v1/browser/*` + `/admin/api/browser/nodes`. Translates REST <-> proxy calls. Auth via `withMiddleware` + `withAdminOnly`. |
+| `handler.go` | HTTP `Handler` registering `/v1/browser/*` + `/admin/api/browser/nodes`. Translates REST ↔ proxy calls. Auth via `withMiddleware` + `withAdminOnly`. |
 | `config.go` (or in `internal/config`) | `BrowserConfig` struct + defaults + `Validate`. Namespace `browser.*`. |
 | `*_test.go` | Offline fake-UDS tests (§11). |
 

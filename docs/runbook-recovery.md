@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "故障恢复手册", en: "Recovery runbook" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/runbook-recovery.md
+---
+
 # Fusion-Gateway Recovery Runbook
 
 # R15 (audit): operational recovery runbook. The product-readiness audit found

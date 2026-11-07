@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "网络分层契约", en: "Network tiers contract" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/network-tiers.md
+---
+
 # Network Tiers Contract (#493, phase 1)
 
 Type: contract · Status: stable · Introduced: v0.9.119

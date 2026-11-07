@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "模型策略 API 契约", en: "Model-policy API contract" }
+audience: engineer
+status: draft
+version: 0.9.20
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/model-policy-api.md
+---
+
 # Model-Policy API Contract (#486)
 
 Type: contract · Status: stable · Introduced: v0.9.115
