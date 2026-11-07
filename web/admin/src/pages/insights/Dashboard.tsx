@@ -79,6 +79,7 @@ interface OverviewResponse {
     from: string;
     to: string;
     granularity: string;
+    scope: string;
     totals: OverviewTotals;
     latency: OverviewLatency;
     gateway_caches: OverviewCache[] | null;
@@ -87,7 +88,30 @@ interface OverviewResponse {
     series: OverviewBucket[] | null;
 }
 
-const granularityFor = (hours: number) => (hours <= 24 ? "hour" : "day");
+// #564: per-key spend row (priced at read time from pricing.model_pricing).
+interface SpendRow {
+    key_name: string;
+    requests: number;
+    errors: number;
+    success_rate: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cost: number;
+}
+
+// #564: PG error aggregation row (endpoint × status × message).
+interface ErrorRow {
+    endpoint: string;
+    status_code: number;
+    error_message: string;
+    count: number;
+    last_seen: string;
+}
+
+// #564: auto granularity — minute buckets for the 1h preset, hour for a day,
+// day beyond (keeps the trend chart at a readable bucket count).
+const granularityFor = (hours: number) => (hours <= 1 ? "minute" : hours <= 24 ? "hour" : "day");
 
 const fmtTokens = (n: number) => {
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
@@ -105,20 +129,27 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(true);
     const [unavailable, setUnavailable] = useState(false);
     const [data, setData] = useState<OverviewResponse | null>(null);
+    const [spend, setSpend] = useState<SpendRow[]>([]);
+    const [errors, setErrors] = useState<ErrorRow[]>([]);
     const [period, setPeriod] = useState(24);
 
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
-        client
-            .get("/insights/overview", {
-                params: { ...windowFor(period), granularity: granularityFor(period) },
-            })
-            .then((res) => {
-                if (!cancelled) {
-                    setData(res.data);
-                    setUnavailable(false);
-                }
+        const win = windowFor(period);
+        // #564: overview is LLM-scoped server-side by default; the spend and
+        // error breakdowns use the same window so the page stays coherent.
+        Promise.all([
+            client.get("/insights/overview", { params: { ...win, granularity: granularityFor(period) } }),
+            client.get("/insights/spend", { params: { ...win, limit: 10 } }),
+            client.get("/insights/errors", { params: { ...win, limit: 10 } }),
+        ])
+            .then(([ov, sp, er]) => {
+                if (cancelled) return;
+                setData(ov.data);
+                setSpend(sp.data?.spend || []);
+                setErrors(er.data?.errors || []);
+                setUnavailable(false);
             })
             .catch((err) => {
                 if (!cancelled) setUnavailable(isUnavailable(err));
@@ -142,6 +173,21 @@ export default function Dashboard() {
         { title: "Requests", dataIndex: "requests", key: "requests", sorter: (a: OverviewModel, b: OverviewModel) => a.requests - b.requests, render: (v: number) => v.toLocaleString() },
         { title: "Tokens", dataIndex: "total_tokens", key: "total_tokens", render: (v: number) => fmtTokens(v) },
         { title: "Cost", dataIndex: "cost", key: "cost", render: (v: number) => `$${v.toFixed(4)}` },
+    ];
+    const spendColumns = [
+        { title: "API Key", dataIndex: "key_name", key: "key_name", ellipsis: true, render: (v: string) => v || "(no key)" },
+        { title: "Requests", dataIndex: "requests", key: "requests", render: (v: number) => v.toLocaleString() },
+        { title: "Errors", dataIndex: "errors", key: "errors", render: (v: number) => v.toLocaleString() },
+        { title: "Success", dataIndex: "success_rate", key: "success_rate", render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: "Tokens", dataIndex: "total_tokens", key: "total_tokens", render: (v: number) => fmtTokens(v) },
+        { title: "Cost", dataIndex: "cost", key: "cost", sorter: (a: SpendRow, b: SpendRow) => a.cost - b.cost, render: (v: number) => `$${v.toFixed(4)}` },
+    ];
+    const errorColumns = [
+        { title: "Endpoint", dataIndex: "endpoint", key: "endpoint", ellipsis: true },
+        { title: "Status", dataIndex: "status_code", key: "status_code", width: 70 },
+        { title: "Message", dataIndex: "error_message", key: "error_message", ellipsis: true, render: (v: string) => v || "(no message)" },
+        { title: "Count", dataIndex: "count", key: "count", sorter: (a: ErrorRow, b: ErrorRow) => a.count - b.count, render: (v: number) => v.toLocaleString() },
+        { title: "Last Seen", dataIndex: "last_seen", key: "last_seen", ellipsis: true },
     ];
 
     return (
@@ -244,7 +290,7 @@ export default function Dashboard() {
                             </ResponsiveContainer>
                         )}
                     </Card>
-                    <Row gutter={[16, 16]}>
+                    <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
                         <Col xs={24} xl={12}>
                             <Card title="Top Models" size="small">
                                 <Table size="small" rowKey="name" pagination={false} columns={topColumns} dataSource={data?.top_models || []} />
@@ -253,6 +299,26 @@ export default function Dashboard() {
                         <Col xs={24} xl={12}>
                             <Card title="Top Backends" size="small">
                                 <Table size="small" rowKey="name" pagination={false} columns={topColumns} dataSource={data?.top_backends || []} />
+                            </Card>
+                        </Col>
+                    </Row>
+                    <Row gutter={[16, 16]}>
+                        <Col xs={24} xl={12}>
+                            <Card title="Spend by API Key" size="small" style={{ marginBottom: 24 }} extra={<Typography.Text type="secondary">LLM traffic</Typography.Text>}>
+                                {spend.length === 0 ? (
+                                    <Alert type="info" showIcon message="No keyed LLM traffic in this window." />
+                                ) : (
+                                    <Table size="small" rowKey="key_name" pagination={false} columns={spendColumns} dataSource={spend} />
+                                )}
+                            </Card>
+                        </Col>
+                        <Col xs={24} xl={12}>
+                            <Card title="Errors" size="small" style={{ marginBottom: 24 }} extra={<Typography.Text type="secondary">LLM traffic</Typography.Text>}>
+                                {errors.length === 0 ? (
+                                    <Alert type="success" showIcon message="No errors in this window." />
+                                ) : (
+                                    <Table size="small" rowKey={(r: ErrorRow) => `${r.endpoint}|${r.status_code}|${r.error_message}`} pagination={false} columns={errorColumns} dataSource={errors} />
+                                )}
                             </Card>
                         </Col>
                     </Row>

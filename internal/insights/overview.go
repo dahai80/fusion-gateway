@@ -72,6 +72,7 @@ type OverviewResponse struct {
     From          string          `json:"from"`
     To            string          `json:"to"`
     Granularity   string          `json:"granularity"`
+    Scope         string          `json:"scope"`
     Totals        OverviewTotals  `json:"totals"`
     Latency       OverviewLatency `json:"latency"`
     GatewayCaches []OverviewCache `json:"gateway_caches"`
@@ -81,9 +82,11 @@ type OverviewResponse struct {
 }
 
 // Overview aggregates the window in five targeted queries (totals+latency,
-// cache deltas, top models, top backends, series) — same map-merge economy
-// as Timeline, no mega-JOIN.
-func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*OverviewResponse, error) {
+// cache deltas, per-model, top backends, series) — same map-merge economy
+// as Timeline, no mega-JOIN. The scope parameter filters the request-log
+// aggregates: "llm" (default) excludes non-LLM traffic, "all" keeps every
+// row. Gateway-cache deltas are counters, not request rows — never scoped.
+func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran, scope string) (*OverviewResponse, error) {
     from, to, err := windowBounds(fromStr, toStr)
     if err != nil {
         return nil, err
@@ -96,9 +99,13 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
         From:        from.Format(time.RFC3339),
         To:          to.Format(time.RFC3339),
         Granularity: unit,
+        Scope:       scopeLabel(scope),
     }
+    scoped := scopeClause(scope)
 
-    // Totals + latency percentiles in one pass.
+    // Totals + latency percentiles in one pass. Cost is NOT summed here —
+    // it is priced per model below (read-time pricing, #564); a stored-cost
+    // sum would double-count nothing but would stay 0 for unpriced writes.
     row := s.pool.QueryRow(ctx, `
         SELECT count(*),
                count(*) FILTER (WHERE is_success),
@@ -107,7 +114,6 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
                coalesce(sum(output_tokens), 0),
                coalesce(sum(cached_tokens), 0),
                coalesce(sum(total_tokens), 0),
-               coalesce(sum(cost), 0),
                coalesce(sum(local_savings), 0),
                coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE duration_ms > 0), 0),
                coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE duration_ms > 0), 0),
@@ -116,10 +122,10 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
                coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms) FILTER (WHERE ttft_ms > 0), 0),
                coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY ttft_ms) FILTER (WHERE ttft_ms > 0), 0)
         FROM fg_request_logs
-        WHERE ts >= $1 AND ts < $2`, from, to)
+        WHERE ts >= $1 AND ts < $2`+scoped, from, to)
     if err := row.Scan(&resp.Totals.Requests, &resp.Totals.Successes, &resp.Totals.Errors,
         &resp.Totals.InputTokens, &resp.Totals.OutputTokens, &resp.Totals.CachedTokens,
-        &resp.Totals.TotalTokens, &resp.Totals.Cost, &resp.Totals.LocalSavings,
+        &resp.Totals.TotalTokens, &resp.Totals.LocalSavings,
         &resp.Latency.DurationP50, &resp.Latency.DurationP95, &resp.Latency.DurationP99,
         &resp.Latency.TTFTP50, &resp.Latency.TTFTP95, &resp.Latency.TTFTP99); err != nil {
         return nil, err
@@ -176,11 +182,13 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
     }
     sort.Slice(resp.GatewayCaches, func(i, j int) bool { return resp.GatewayCaches[i].Cache < resp.GatewayCaches[j].Cache })
 
-    resp.TopModels, err = s.overviewTopN(ctx, from, to, `model`)
+    // Per-model rollup: prices cost (read-time pricing #564), sums into the
+    // totals, and seeds the top-models table — one group-by instead of three.
+    resp.TopModels, err = s.overviewPerModel(ctx, from, to, scoped, &resp.Totals)
     if err != nil {
         return nil, err
     }
-    resp.TopBackends, err = s.overviewTopN(ctx, from, to, `backend`)
+    resp.TopBackends, err = s.overviewTopN(ctx, from, to, scoped, `backend`)
     if err != nil {
         return nil, err
     }
@@ -194,7 +202,7 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
                coalesce(sum(output_tokens), 0),
                coalesce(sum(cached_tokens), 0)
         FROM fg_request_logs
-        WHERE ts >= $2 AND ts < $3
+        WHERE ts >= $2 AND ts < $3`+scoped+`
         GROUP BY 1`, unit, from, to)
     if err != nil {
         return nil, err
@@ -216,12 +224,51 @@ func (s *Service) Overview(ctx context.Context, fromStr, toStr, gran string) (*O
     return resp, nil
 }
 
+// overviewPerModel aggregates one row per model in the window, prices each
+// (pricing entry beats the stored cost column), sums the priced cost into
+// the totals, and returns the top 10 by request volume.
+func (s *Service) overviewPerModel(ctx context.Context, from, to time.Time, scoped string, totals *OverviewTotals) ([]OverviewModel, error) {
+    rows, err := s.pool.Query(ctx, `
+        SELECT model, count(*),
+               coalesce(sum(input_tokens), 0),
+               coalesce(sum(output_tokens), 0),
+               coalesce(sum(total_tokens), 0),
+               coalesce(sum(cost), 0)
+        FROM fg_request_logs
+        WHERE ts >= $1 AND ts < $2`+scoped+`
+        GROUP BY 1`, from, to)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    table := s.pricingTable()
+    var out []OverviewModel
+    for rows.Next() {
+        var m OverviewModel
+        var inTok, outTok, storedCost float64
+        if err := rows.Scan(&m.Name, &m.Requests, &inTok, &outTok, &m.TotalTokens, &storedCost); err != nil {
+            return nil, err
+        }
+        m.Cost = costFor(table, m.Name, int64(inTok), int64(outTok), storedCost)
+        totals.Cost += m.Cost
+        out = append(out, m)
+    }
+    if err := rows.Err(); err != nil {
+        return nil, err
+    }
+    sort.Slice(out, func(i, j int) bool { return out[i].Requests > out[j].Requests })
+    if len(out) > 10 {
+        out = out[:10]
+    }
+    return out, nil
+}
+
 // overviewTopN ranks models or backends by request volume, top 10.
-func (s *Service) overviewTopN(ctx context.Context, from, to time.Time, col string) ([]OverviewModel, error) {
+func (s *Service) overviewTopN(ctx context.Context, from, to time.Time, scoped, col string) ([]OverviewModel, error) {
     rows, err := s.pool.Query(ctx, `
         SELECT `+col+`, count(*), coalesce(sum(total_tokens), 0), coalesce(sum(cost), 0)
         FROM fg_request_logs
-        WHERE ts >= $1 AND ts < $2
+        WHERE ts >= $1 AND ts < $2`+scoped+`
         GROUP BY 1
         ORDER BY count(*) DESC
         LIMIT 10`, from, to)

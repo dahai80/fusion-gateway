@@ -866,6 +866,23 @@ type CostMarkupConfig struct {
     GlobalMarkup float64 `mapstructure:"global_markup"`
 }
 
+// ModelPrice is one pricing.* entry: USD per million tokens. Either side may
+// be omitted (defaults 0) — e.g. local models priced only on input.
+type ModelPrice struct {
+    InputPerMTok  float64 `mapstructure:"input_per_mtok"`
+    OutputPerMTok float64 `mapstructure:"output_per_mtok"`
+}
+
+// PricingConfig is the pricing.* namespace (#564): per-model USD prices used
+// at READ time by the insights aggregations (overview cost, spend by key).
+// Keys are model-name prefixes, longest-prefix match wins (e.g. "glm" beats
+// "glm-5" ordering does not matter — length does). Unmatched models fall
+// back to the stored per-request cost column. Prices are read-only analytics
+// input: no request path, no billing side effect.
+type PricingConfig struct {
+    ModelPricing map[string]ModelPrice `mapstructure:"model_pricing"`
+}
+
 type BatchConfig struct {
     Enabled       bool          `mapstructure:"enabled"`
     MaxBatchSize  int           `mapstructure:"max_batch_size"`
@@ -1086,6 +1103,10 @@ type Config struct {
     // per-(app, scenario, model) cost threshold checks with webhook
     // notification. Default off.
     UsageAlerts     UsageAlertsConfig       `mapstructure:"usage_alerts"`
+    // Pricing is the pricing.* namespace (#564): read-time per-model USD
+    // prices for the insights aggregations. Default empty — cost falls back
+    // to the stored per-request column.
+    Pricing         PricingConfig           `mapstructure:"pricing"`
 }
 
 // ServiceRouteConfig is one /svc/<name>/ upstream: where to dial and how to
@@ -2010,6 +2031,14 @@ func validate(cfg *Config) error {
     }
     if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
         return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
+    }
+
+    // #564: pricing sanity — negative USD prices are always a config typo,
+    // never a discount.
+    for name, p := range cfg.Pricing.ModelPricing {
+        if p.InputPerMTok < 0 || p.OutputPerMTok < 0 {
+            return fmt.Errorf("pricing.model_pricing[%s] rates must be >= 0, got input=%v output=%v", name, p.InputPerMTok, p.OutputPerMTok)
+        }
     }
 
     // G3: try_quota budget window sanity.

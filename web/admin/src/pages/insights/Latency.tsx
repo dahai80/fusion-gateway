@@ -44,7 +44,7 @@ interface AnomalyMark {
     severity: string;
 }
 
-const granularityFor = (hours: number) => (hours <= 24 ? "hour" : "day");
+const granularityFor = (hours: number) => (hours <= 1 ? "minute" : hours <= 24 ? "hour" : "day");
 
 export default function Latency() {
     const [loading, setLoading] = useState(true);

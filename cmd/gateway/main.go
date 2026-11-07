@@ -513,6 +513,9 @@ func run(configPath string) error {
 			return fmt.Errorf("insights service init failed: %w", err)
 		}
 		srv.SetInsightsService(insightsSvc)
+		// #564: read-time pricing for the insights aggregations, hot-reload
+		// aware (557 lesson: startup-built config features need a reload path).
+		insightsSvc.SetPricing(snap.Config.Pricing.ModelPricing)
 		// P3b (plan §15.4): 30s hardware snapshots into fg_hw_samples, and
 		// the gateway lifecycle stamp into fg_gateway_events.
 		sink.StartHWSampler(context.Background(), hwCollector.Latest)
@@ -743,6 +746,10 @@ func run(configPath string) error {
 		}
 		// M1 fix: rebuild middleware chain on reload
 		srv.RebuildMiddlewareChain(newSnap)
+	// #564: re-apply insights pricing so price edits take effect on reload.
+	if insightsSvc != nil {
+		insightsSvc.SetPricing(newSnap.Config.Pricing.ModelPricing)
+	}
 		// #453: converge the shell manifest registry's static fallback list —
 		// without this a module added to web_shell.manifests at runtime was
 		// proxy-reachable but absent from the sidebar until a restart.

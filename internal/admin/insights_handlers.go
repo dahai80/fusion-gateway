@@ -78,7 +78,8 @@ func (h *Handler) handleInsightsTimeline(w http.ResponseWriter, r *http.Request)
 // handleInsightsOverview — GET /admin/api/insights/overview (#421)
 // Persistent Dashboard rollup: KPI totals, latency percentiles, gateway
 // cache hit rates, top models/backends, trend series.
-// Params: from,to (RFC3339, default 24h), granularity (minute|hour|day).
+// Params: from,to (RFC3339, default 24h), granularity (minute|hour|day),
+// scope (llm default | all — raw audit view).
 func (h *Handler) handleInsightsOverview(w http.ResponseWriter, r *http.Request) {
     if h.insights == nil {
         h.insightsUnavailable(w)
@@ -86,13 +87,54 @@ func (h *Handler) handleInsightsOverview(w http.ResponseWriter, r *http.Request)
     }
     q := r.URL.Query()
     resp, err := h.insights.Overview(r.Context(),
-        q.Get("from"), q.Get("to"), q.Get("granularity"))
+        q.Get("from"), q.Get("to"), q.Get("granularity"), q.Get("scope"))
     if err != nil {
         slog.Warn("insights overview query failed", "error", err)
         writeError(w, http.StatusBadRequest, err.Error())
         return
     }
     writeJSON(w, http.StatusOK, resp)
+}
+
+// handleInsightsErrors — GET /admin/api/insights/errors (#564)
+// PG error aggregation (replaces the deprecated in-memory analytics/errors
+// surface): endpoint × status_code × message groups, count desc.
+// Params: from,to (RFC3339, default 24h), scope (llm|all), limit (20, 100).
+func (h *Handler) handleInsightsErrors(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    limit, _ := strconv.Atoi(q.Get("limit"))
+    rows, err := h.insights.ErrorBreakdown(r.Context(),
+        q.Get("from"), q.Get("to"), q.Get("scope"), limit)
+    if err != nil {
+        slog.Warn("insights error breakdown failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"errors": rows, "total": len(rows)})
+}
+
+// handleInsightsSpend — GET /admin/api/insights/spend (#564)
+// Per-API-key spend (priced at read time from pricing.model_pricing).
+// Params: from,to (RFC3339, default 24h), scope (llm|all), limit (20, 100).
+func (h *Handler) handleInsightsSpend(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    limit, _ := strconv.Atoi(q.Get("limit"))
+    rows, err := h.insights.SpendByKey(r.Context(),
+        q.Get("from"), q.Get("to"), q.Get("scope"), limit)
+    if err != nil {
+        slog.Warn("insights spend query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"spend": rows, "total": len(rows)})
 }
 
 // handleInsightsCompare — GET /admin/api/insights/compare

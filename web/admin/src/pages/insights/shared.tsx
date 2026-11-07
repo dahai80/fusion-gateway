@@ -12,9 +12,10 @@ export const UnavailableAlert = () => (
     />
 );
 
+// #564: operator time presets (1h / 1d / 7d / 30d) — hours back from now.
 export const PERIOD_OPTIONS = [
+    { label: "1 Hour", value: 1 },
     { label: "24 Hours", value: 24 },
-    { label: "3 Days", value: 72 },
     { label: "7 Days", value: 168 },
     { label: "30 Days", value: 720 },
 ];

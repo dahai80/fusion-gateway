@@ -1004,6 +1004,9 @@ dedicated read pool with a 10s `statement_timeout` and are window-guarded
 |---|---|---|
 | GET | `/admin/api/insights/latency` | TTFT/TPOT p50/p95/p99 timeseries; `granularity=minute\|hour\|day`, filters `backend`/`model`/`project_id` |
 | GET | `/admin/api/insights/compare` | per backend×model side-by-side: latency percentiles, success rate, tokens/sec, cost |
+| GET | `/admin/api/insights/overview` | Dashboard rollup: KPI totals, latency percentiles, gateway cache hit rates, top models/backends, trend series. `scope=llm` (default) aggregates product LLM endpoints only; `scope=all` includes non-LLM traffic (#564) |
+| GET | `/admin/api/insights/errors` | PG error aggregation: endpoint × status_code × message groups, count desc (replaces the deprecated in-memory analytics/errors surface); `scope`, `limit` (#564) |
+| GET | `/admin/api/insights/spend` | per-API-key spend: requests/errors/success rate/tokens/cost, priced at read time from `pricing.model_pricing`; `scope`, `limit` (#564) |
 | POST | `/admin/api/insights/logs/search` | Explorer DSL: time window, `q` (model/error/request-id substring), endpoint/backend/model/project/key/status/stream/success/min-duration, paging (limit ≤ 200) |
 | GET | `/admin/api/insights/logs/{id}/payload` | captured request/response payload for one log row (jsonb + raw columns) |
 | GET | `/admin/api/insights/logs/{id}/chunks` | per-SSE-chunk timing rows from `fg_stream_chunks` (empty list = chunk capture was off, not an error) |
@@ -1284,6 +1287,29 @@ Built-in cost tracking with per-model pricing:
 - Per-key cost breakdown with `?key=<name>` filter
 - JSON export via `Tracker.ExportJSON()`
 - **Budget blocking**: Per-key monthly spend limits (`budget_limit`) enforced before request execution
+
+### Dashboard pricing (`pricing.*`, #564)
+
+The insights Dashboard prices aggregates at **read time** — no migration, applies
+retroactively to existing rows, hot-reload aware:
+
+```yaml
+pricing:
+  model_pricing:
+    glm-4.5:
+      input_per_mtok: 0.6     # USD per 1M input tokens
+      output_per_mtok: 2.2    # USD per 1M output tokens
+    glm:                      # prefix fallback — longest prefix wins
+      input_per_mtok: 0.5
+      output_per_mtok: 1.5
+```
+
+- Keys are model-name prefixes; the **longest prefix** matches (order in the map
+  does not matter). Unmatched models fall back to the stored per-request cost
+  column.
+- Dashboard defaults aggregate **LLM endpoints only** (`scope=llm` — the same
+  surface the try-quota gate meters); `scope=all` returns the raw audit view.
+- Negative rates are rejected by config validation.
 
 ## Stream Options
 

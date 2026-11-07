@@ -8,6 +8,7 @@ import (
     "context"
     "fmt"
     "log/slog"
+    "sync/atomic"
     "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,9 @@ type Service struct {
     // reportDir is the file-copy destination registered by
     // StartReportsWorker (before serving); WriteReportFile no-ops on empty.
     reportDir string
+    // pricing holds the atomic read-time pricing snapshot (#564), swapped by
+    // SetPricing on startup and config hot reload.
+    pricing atomic.Pointer[pricingSnapshot]
 }
 
 // New connects a read pool with a statement-level timeout (plan §8 guard:
