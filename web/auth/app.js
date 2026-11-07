@@ -25,6 +25,15 @@
             "btn-register": "Create account",
             "btn-tenant": "Register team",
             "btn-verify": "Verify email",
+            "link-forgot": "Forgot password?",
+            "link-back-signin": "Back to sign in",
+            "btn-forgot": "Send reset link",
+            "btn-reset": "Set new password",
+            "hint-forgot": "Enter the account email. If it exists, a reset link is sent — the response is identical either way.",
+            "hint-reset": "Enter the token from the reset email and a new password.",
+            "ok-forgot": "If the address belongs to an account, a reset link has been sent.",
+            "ok-reset": "Password updated. You can sign in now.",
+            "err-reset-mismatch": "Passwords do not match.",
             "hint-verify": "We will send a verification email. Address verification is required before sign-in.",
             "hint-tenant": "The team activates immediately; token usage is capped by the plan quota.",
             "hint-verify-sent": "Verification sent. Enter the token from the email link.",
@@ -53,6 +62,15 @@
             "btn-register": "创建账号",
             "btn-tenant": "注册团队",
             "btn-verify": "验证邮箱",
+            "link-forgot": "忘记密码？",
+            "link-back-signin": "返回登录",
+            "btn-forgot": "发送重置链接",
+            "btn-reset": "设置新密码",
+            "hint-forgot": "输入账号邮箱。若邮箱存在，将发送重置链接——响应内容始终一致。",
+            "hint-reset": "输入重置邮件中的令牌和新密码。",
+            "ok-forgot": "若该邮箱属于某账号，重置链接已发送。",
+            "ok-reset": "密码已更新，现在可以登录。",
+            "err-reset-mismatch": "两次输入的密码不一致。",
             "hint-verify": "我们将发送验证邮件，验证邮箱后才能登录。",
             "hint-tenant": "团队立即激活，令牌消耗受套餐配额限制。",
             "hint-verify-sent": "验证邮件已发送，请输入邮件链接中的令牌。",
@@ -245,6 +263,48 @@
         }).catch(function () { say(t("err-generic")); }).finally(function () { busy(f, false); });
     });
 
+    // #549: password recovery panes. "Forgot password?" is a plain link (no
+    // tab — recovery is a rare path, not a first-class mode); the reset pane
+    // prefills the token when the landing URL carries ?reset=<token>.
+    document.getElementById("forgot-link").addEventListener("click", function () { bindTab("forgot"); });
+    document.getElementById("forgot-back").addEventListener("click", function () { bindTab("login"); });
+
+    document.getElementById("form-forgot").addEventListener("submit", function (e) {
+        e.preventDefault();
+        clearMsg();
+        var f = e.target;
+        busy(f, true);
+        // Identity returns the same envelope regardless of account existence
+        // (no enumeration); surface it verbatim.
+        postJSON("/auth/api/identity/api/v1/auth/password/forgot", {
+            email: f.email.value.trim()
+        }).then(function (r) {
+            if (!r.ok) { say(errMsg(r)); return; }
+            say(t("ok-forgot"), "ok");
+            f.reset();
+        }).catch(function () { say(t("err-generic")); }).finally(function () { busy(f, false); });
+    });
+
+    document.getElementById("form-reset").addEventListener("submit", function (e) {
+        e.preventDefault();
+        clearMsg();
+        var f = e.target;
+        if (f.password.value !== f.password_confirm.value) {
+            say(t("err-reset-mismatch"));
+            return;
+        }
+        busy(f, true);
+        postJSON("/auth/api/identity/api/v1/auth/password/reset", {
+            token: f.token.value.trim(),
+            new_password: f.password.value
+        }).then(function (r) {
+            if (!r.ok) { say(errMsg(r)); return; }
+            say(t("ok-reset"), "ok");
+            f.reset();
+            bindTab("login");
+        }).catch(function () { say(t("err-generic")); }).finally(function () { busy(f, false); });
+    });
+
     // Email links land here as /auth/?verify=<token>.
     var verifyToken = params.get("verify");
     if (verifyToken) {
@@ -254,6 +314,13 @@
         vf.classList.add("active");
         vf.token.value = verifyToken;
         document.getElementById("form-login").classList.remove("active");
+    }
+
+    // #549: /auth/?reset=<token> prefills the reset pane.
+    var resetToken = params.get("reset");
+    if (resetToken) {
+        bindTab("reset");
+        document.getElementById("form-reset").token.value = resetToken;
     }
 
     applyLang();
