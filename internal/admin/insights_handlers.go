@@ -137,6 +137,45 @@ func (h *Handler) handleInsightsSpend(w http.ResponseWriter, r *http.Request) {
     writeJSON(w, http.StatusOK, map[string]any{"spend": rows, "total": len(rows)})
 }
 
+// handleInsightsSummary — GET /admin/api/insights/summary (#564 P2)
+// Portkey-style any-dimension group-by: requests/errors/success/tokens/
+// priced-cost/p95 per group. Params: from,to, group_by (model|backend|
+// endpoint|api_key_name|scenario), scope (llm|all), limit.
+func (h *Handler) handleInsightsSummary(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    limit, _ := strconv.Atoi(q.Get("limit"))
+    rows, err := h.insights.Summary(r.Context(),
+        q.Get("from"), q.Get("to"), q.Get("group_by"), q.Get("scope"), limit)
+    if err != nil {
+        slog.Warn("insights summary query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"summary": rows, "total": len(rows), "group_by": q.Get("group_by")})
+}
+
+// handleInsightsRescued — GET /admin/api/insights/rescued (#564 P2)
+// Gateway strategy interventions: breaker trips + cloud-overflow cooldowns.
+// Params: from,to.
+func (h *Handler) handleInsightsRescued(w http.ResponseWriter, r *http.Request) {
+    if h.insights == nil {
+        h.insightsUnavailable(w)
+        return
+    }
+    q := r.URL.Query()
+    counts, err := h.insights.Rescued(r.Context(), q.Get("from"), q.Get("to"))
+    if err != nil {
+        slog.Warn("insights rescued query failed", "error", err)
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    writeJSON(w, http.StatusOK, counts)
+}
+
 // handleInsightsCompare — GET /admin/api/insights/compare
 // Params: from,to,project_id, input_min,input_max (prompt-length bucket,
 // <=0 unbounded), overlap=true (only hourly buckets where every group has
