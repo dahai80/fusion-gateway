@@ -67,11 +67,12 @@ func TestShellChatCompletions_TenantModelPolicyDefaults(t *testing.T) {
         return rec.Code
     }
 
-    if code := post("cloud/glm-5"); code == http.StatusForbidden {
-        t.Fatalf("no allowlist configured: model must not be rejected by the policy gate")
+    // Fail-closed: with no policy for the tenant, no model is allowed at all.
+    if code := post("cloud/glm-5"); code != http.StatusForbidden {
+        t.Fatalf("no allowlist configured: chat must be denied (fail-closed), got %d", code)
     }
 
-    if err := s.modelPolicies.SetPolicy("local", modelpolicy.Policy{PrivacyMode: modelpolicy.PrivacyModeLocalOnly}); err != nil {
+    if err := s.modelPolicies.SetPolicy("local", modelpolicy.Policy{PrivacyMode: modelpolicy.PrivacyModeLocalOnly, UserAllowlist: []string{"cloud/glm-5"}}); err != nil {
         t.Fatalf("SetPolicy: %v", err)
     }
     if code := post("cloud/glm-5"); code != http.StatusForbidden {
