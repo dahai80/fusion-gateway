@@ -49,6 +49,8 @@ type CircuitBreaker struct {
     // — every probe was admitted and diverted without a Record* — so the
     // breaker force-closes instead of wedging local-exclusive traffic forever.
     halfOpenSince time.Time
+    // #577: backend identity for transition logs (set via newNamedBreaker).
+    backend string
 }
 
 func NewCircuitBreaker(cfg config.CircuitBreakerConfig) *CircuitBreaker {
@@ -74,6 +76,7 @@ func (cb *CircuitBreaker) State() CircuitBreakerState {
             cb.successCount = 0
             cb.halfOpenSince = time.Now()
             slog.Info("circuit breaker transitioned to half_open",
+                "backend", cb.backend,
                 "timeout", cb.cfg.Timeout,
                 "reason", cb.tripReason,
             )
@@ -124,6 +127,7 @@ func (cb *CircuitBreaker) Admit() bool {
             cb.successCount = 0
             cb.halfOpenSince = time.Now()
             slog.Info("circuit breaker transitioned to half_open",
+                "backend", cb.backend,
                 "timeout", cb.cfg.Timeout,
                 "reason", cb.tripReason,
             )
@@ -142,6 +146,15 @@ func (cb *CircuitBreaker) Admit() bool {
         cb.probeDeadline = now.Add(cb.probeWindow())
         return true
     }
+}
+
+// newNamedBreaker builds a breaker tagged with its backend identity so every
+// state transition logs which backend tripped (#577) — during the r36 outage
+// the transitions were invisible without a backend attribution.
+func newNamedBreaker(backend string, cfg config.CircuitBreakerConfig) *CircuitBreaker {
+    cb := NewCircuitBreaker(cfg)
+    cb.backend = backend
+    return cb
 }
 
 // maybeUnwedgeLocked (#568) force-closes a half_open episode that outlived
@@ -163,6 +176,7 @@ func (cb *CircuitBreaker) maybeUnwedgeLocked() {
     cb.probeDeadline = time.Time{}
     cb.halfOpenSince = time.Time{}
     slog.Error("circuit breaker half_open wedged past 10x probe window with no close path; forcing closed",
+        "backend", cb.backend,
         "trip_reason", cb.tripReason,
         "half_open_age", age.String(),
         "hint", "if this repeats, the probe reservations are being diverted after admission",
@@ -179,7 +193,7 @@ func (cb *CircuitBreaker) ReleaseProbe() {
     defer cb.mu.Unlock()
     if cb.state == StateHalfOpen && cb.probeInFlight {
         cb.probeInFlight = false
-        slog.Info("half-open probe slot released without outcome")
+        slog.Info("half-open probe slot released without outcome", "backend", cb.backend)
     }
 }
 
@@ -196,7 +210,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
             cb.failureCount = 0
             cb.successCount = 0
             cb.halfOpenSince = time.Time{}
-            slog.Info("circuit breaker transitioned to closed", "reason", cb.tripReason)
+            slog.Info("circuit breaker transitioned to closed", "backend", cb.backend, "reason", cb.tripReason)
         }
     case StateClosed:
         cb.failureCount = 0
@@ -221,6 +235,7 @@ func (cb *CircuitBreaker) RecordFailure() {
             cb.state = StateOpen
             cb.lastFailureTime = time.Now()
             slog.Warn("circuit breaker opened due to failures",
+                "backend", cb.backend,
                 "failure_count", cb.failureCount,
                 "threshold", cb.cfg.FailureThreshold,
             )
@@ -230,7 +245,7 @@ func (cb *CircuitBreaker) RecordFailure() {
         cb.state = StateOpen
         cb.lastFailureTime = time.Now()
         cb.halfOpenSince = time.Time{}
-        slog.Warn("circuit breaker reopened from half_open")
+        slog.Warn("circuit breaker reopened from half_open", "backend", cb.backend, "reason", cb.tripReason)
     case StateOpen:
         // B6 (audit): failures observed while open (racing requests that were
         // already admitted) must refresh lastFailureTime — the old code left
@@ -247,7 +262,7 @@ func (cb *CircuitBreaker) Trip(reason string) {
     cb.lastFailureTime = time.Now()
     cb.tripReason = reason
     cb.halfOpenSince = time.Time{}
-    slog.Warn("circuit breaker force tripped", "reason", reason)
+    slog.Warn("circuit breaker force tripped", "backend", cb.backend, "reason", reason)
 }
 
 func (cb *CircuitBreaker) IsOpen() bool {
@@ -263,7 +278,7 @@ func (cb *CircuitBreaker) ResetToHalfOpen() {
     cb.probeInFlight = false
     cb.probeDeadline = time.Time{}
     cb.halfOpenSince = time.Now()
-    slog.Info("circuit breaker reset to half_open for warmup")
+    slog.Info("circuit breaker reset to half_open for warmup", "backend", cb.backend)
 }
 
 // BreakerSnapshot captures the trip-relevant state of a CircuitBreaker so a

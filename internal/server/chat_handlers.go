@@ -1295,6 +1295,21 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
 
     resp, err := chatFn(ctx, req)
     if err != nil {
+        // #577: caller-side timeout/cancel is not a backend fault. The client
+        // ctx dying (deadline or disconnect) cancels the in-flight upstream
+        // call; recording it as a RecordFailure lets N caller timeouts trip
+        // the breaker on a healthy local backend and 503 every other seat
+        // behind it (pipeline round 36). Mirror of the stream-establish #363
+        // guard: no Record*, no cloud overflow (work nobody is waiting on),
+        // and release the probe slot if this request was the half-open probe.
+        if ctx.Err() != nil {
+            slog.Info("chat aborted by client cancel/deadline, skipping breaker failure record and overflow",
+                "provider", provider.Name(), "model", req.Model, "error", err, "ctx_err", ctx.Err())
+            if decision.Backend == router.LocalBackend {
+                s.router.ReleaseProbe(string(decision.Backend))
+            }
+            return
+        }
         // RR4: ErrLocalSlotFull from the adapter is an expected diversion
         // (local hard cap reached), NOT a backend failure. Skip the breaker
         // failure record + ERROR log that the generic failure path applies,
