@@ -206,10 +206,11 @@ type routeSnapshot struct {
 }
 
 func NewEngine(cfg *config.ConfigSnapshot, hwCollector *hardware.Collector) *Engine {
+    // #577: breakers carry their backend identity so transitions log it.
     breakers := map[string]*CircuitBreaker{
-        "local":  NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
-        "cloud":  NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
-        "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
+        "local":   newNamedBreaker("local", cfg.Config.Routing.CircuitBreaker),
+        "cloud":   newNamedBreaker("cloud", cfg.Config.Routing.CircuitBreaker),
+        "cluster": newNamedBreaker("cluster", cfg.Config.Routing.CircuitBreaker),
     }
 
     e := &Engine{
@@ -414,10 +415,11 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     for nodeID := range e.nodeBreakers {
         inheritedNodes[nodeID] = snapshotBreakerLocked(e.nodeBreakers, nodeID)
     }
+    // #577: same backend tagging on the hot-reload rebuild.
     e.breakers = map[string]*CircuitBreaker{
-        "local":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
-        "cloud":   NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
-        "cluster": NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker),
+        "local":   newNamedBreaker("local", cfg.Config.Routing.CircuitBreaker),
+        "cloud":   newNamedBreaker("cloud", cfg.Config.Routing.CircuitBreaker),
+        "cluster": newNamedBreaker("cluster", cfg.Config.Routing.CircuitBreaker),
     }
     e.breakers["local"].InheritSnapshot(inheritedLocal)
     e.breakers["cloud"].InheritSnapshot(inheritedCloud)
@@ -427,7 +429,7 @@ func (e *Engine) DrainAndApply(cfg *config.ConfigSnapshot) {
     // still seen as bad right after reload, not rediscovered by failure.
     e.nodeBreakers = make(map[string]*CircuitBreaker, len(inheritedNodes))
     for nodeID, snap := range inheritedNodes {
-        nb := NewCircuitBreaker(cfg.Config.Routing.CircuitBreaker)
+        nb := newNamedBreaker("node:"+nodeID, cfg.Config.Routing.CircuitBreaker)
         nb.InheritSnapshot(snap)
         e.nodeBreakers[nodeID] = nb
     }
@@ -670,7 +672,7 @@ func (e *Engine) RecordFailure(backend string) {
 func (e *Engine) nodeBreakerLocked(nodeID string, cbCfg config.CircuitBreakerConfig) *CircuitBreaker {
     b, ok := e.nodeBreakers[nodeID]
     if !ok {
-        b = NewCircuitBreaker(cbCfg)
+        b = newNamedBreaker("node:"+nodeID, cbCfg)
         e.nodeBreakers[nodeID] = b
     }
     return b
