@@ -138,6 +138,23 @@
 
     function errMsg(r) {
         var detail = (r.data && (r.data.detail || r.data.message)) || "";
+        // #571: identity returns an OBJECT detail on 409 tenant_ambiguous —
+        // {"error":"tenant_ambiguous","tenants":[{tenant_id,...},...]} is the
+        // documented picker contract. Render a picker prompt (and pre-fill
+        // the login tenant field with the first option) instead of coercing
+        // the object to "[object Object]".
+        if (detail && typeof detail === "object") {
+            if (detail.error === "tenant_ambiguous" && Array.isArray(detail.tenants) && detail.tenants.length > 0) {
+                var ids = detail.tenants.map(function (x) { return x.tenant_id; });
+                var form = document.getElementById("form-login");
+                var field = form ? form.elements.tenant_id : null;
+                if (field && !field.value.trim() && ids[0]) {
+                    field.value = ids[0];
+                }
+                return "This account is active in multiple tenants (" + ids.join(", ") + "). The tenant field has been pre-filled with the first one — sign in again to continue, or replace it with another tenant from the list.";
+            }
+            return JSON.stringify(detail);
+        }
         if (detail === "tenant_mismatch") {
             return "This account does not belong to the selected tenant. Leave the tenant field empty or use the tenant you registered under.";
         }
