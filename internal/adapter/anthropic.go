@@ -473,40 +473,128 @@ func (p *AnthropicProvider) parseAnthropicSSE(ctx context.Context, body io.Reade
                     msgID = event.Message.ID
                     outputTokens = event.Message.Usage.OutputTokens
                 }
-            case "content_block_delta":
-                var delta struct {
-                    Type string `json:"type"`
-                    Text string `json:"text,omitempty"`
-                }
-                if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.Type == "text_delta" {
+            case "content_block_start":
+                // #580: tool_use blocks were silently dropped — streamed
+                // tool-use requests produced a text preface and zero
+                // delta.tool_calls while the non-stream path returned them
+                // intact. Emit the OpenAI tool_calls delta start; a block
+                // carrying a complete `input` (upstreams that skip
+                // input_json_delta) seeds the arguments directly.
+                if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
+                    args := ""
+                    if s := string(event.ContentBlock.Input); s != "" && s != "{}" && s != "null" {
+                        args = s
+                    }
                     chunk := StreamChunk{
                         ID:      msgID,
                         Object:  "chat.completion.chunk",
                         Created: time.Now().Unix(),
                         Model:   model,
                         Choices: []ChoiceDelta{{
-                            Index: event.Index,
-                            Delta: map[string]string{"role": "assistant", "content": delta.Text},
+                            Index: 0,
+                            Delta: map[string]any{"tool_calls": []map[string]any{{
+                                "index": event.Index,
+                                "id":    event.ContentBlock.ID,
+                                "type":  "function",
+                                "function": map[string]any{
+                                    "name":      event.ContentBlock.Name,
+                                    "arguments": args,
+                                },
+                            }}},
                         }},
                     }
                     select {
                     case ch <- chunk:
                     case <-ctx.Done():
-                        slog.Warn("anthropic sse content_block_delta send aborted: client canceled", "error", ctx.Err())
+                        slog.Warn("anthropic sse content_block_start send aborted: client canceled", "error", ctx.Err())
                         return
+                    }
+                }
+            case "content_block_delta":
+                var delta struct {
+                    Type        string `json:"type"`
+                    Text        string `json:"text,omitempty"`
+                    PartialJSON string `json:"partial_json,omitempty"`
+                }
+                if err := json.Unmarshal(event.Delta, &delta); err == nil {
+                    // #580: input_json_delta appends streamed tool arguments.
+                    if delta.Type == "text_delta" {
+                        chunk := StreamChunk{
+                            ID:      msgID,
+                            Object:  "chat.completion.chunk",
+                            Created: time.Now().Unix(),
+                            Model:   model,
+                            Choices: []ChoiceDelta{{
+                                Index: event.Index,
+                                Delta: map[string]string{"role": "assistant", "content": delta.Text},
+                            }},
+                        }
+                        select {
+                        case ch <- chunk:
+                        case <-ctx.Done():
+                            slog.Warn("anthropic sse content_block_delta send aborted: client canceled", "error", ctx.Err())
+                            return
+                        }
+                    } else if delta.Type == "input_json_delta" && delta.PartialJSON != "" {
+                        chunk := StreamChunk{
+                            ID:      msgID,
+                            Object:  "chat.completion.chunk",
+                            Created: time.Now().Unix(),
+                            Model:   model,
+                            Choices: []ChoiceDelta{{
+                                Index: 0,
+                                Delta: map[string]any{"tool_calls": []map[string]any{{
+                                    "index": event.Index,
+                                    "function": map[string]any{
+                                        "arguments": delta.PartialJSON,
+                                    },
+                                }}},
+                            }},
+                        }
+                        select {
+                        case ch <- chunk:
+                        case <-ctx.Done():
+                            slog.Warn("anthropic sse input_json_delta send aborted: client canceled", "error", ctx.Err())
+                            return
+                        }
                     }
                 }
             case "message_delta":
                 if event.Usage != nil {
                     outputTokens = event.Usage.OutputTokens
                 }
+                // #580: the Anthropic SSE spec puts stop_reason INSIDE the
+                // delta object ("delta":{"stop_reason":"tool_use"}) — the old
+                // code read only the top-level field, which real upstreams
+                // never set, so every finish_reason degraded to "stop".
+                // Prefer the delta value, fall back to the top-level field
+                // (tolerates non-conforming relays that hoist it).
                 stopReason := event.StopReason
-                if stopReason == "end_turn" {
-                    stopReason = "stop"
+                if event.Delta != nil {
+                    var md struct {
+                        StopReason string `json:"stop_reason"`
+                    }
+                    if err := json.Unmarshal(event.Delta, &md); err == nil && md.StopReason != "" {
+                        stopReason = md.StopReason
+                    }
                 }
-                fr := stopReason
-                if fr == "" {
+                // Anthropic stop_reason → OpenAI finish_reason. tool_use maps
+                // to tool_calls so clients honor the pending tool call
+                // instead of treating the turn as finished; max_tokens is
+                // OpenAI's truncation marker (length); anything else is a
+                // plain stop.
+                fr := "stop"
+                switch stopReason {
+                case "tool_use":
+                    fr = "tool_calls"
+                case "max_tokens":
+                    fr = "length"
+                case "end_turn", "stop_sequence":
                     fr = "stop"
+                case "":
+                    fr = "stop"
+                default:
+                    fr = stopReason
                 }
                 chunk := StreamChunk{
                     ID:      msgID,
