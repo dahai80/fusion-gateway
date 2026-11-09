@@ -40,6 +40,14 @@ var (
 	commit  = "unknown"
 )
 
+// versionString (#582) is the one canonical binary identity string, used by
+// the --version flag and the startup log line. Deploy scripts assert it
+// against the artifact they just built so a path mismatch (bin/gateway vs
+// ./fusion-gateway) can never again silently serve a stale binary.
+func versionString(v, c string) string {
+	return "fusion-gateway " + v + " (commit " + c + ")"
+}
+
 // safeGo launches a goroutine with panic recovery to prevent process crash
 func safeGo(name string, fn func()) {
 	go func() {
@@ -304,7 +312,13 @@ func (s adapterIndexRefresherShim) Refresh() error {
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	checkConfig := flag.Bool("check-config", false, "validate the config file and exit (0 ok, 78 config-fatal)")
+	showVersion := flag.Bool("version", false, "print the binary version and exit (#582: lets deploy scripts assert the running artifact)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString(version, commit))
+		return
+	}
 
 	if *checkConfig {
 		if _, err := config.LoadWithRecovery(*configPath); err != nil {
@@ -365,6 +379,10 @@ func run(configPath string) error {
 		"token_threshold", snap.Config.Routing.TokenThreshold,
 		"cluster_enabled", snap.Config.Cluster.Enabled,
 		"version", snap.Version,
+		// #582: the first boot line must identify the BINARY, not just the
+		// config — journalctl is then the fastest stale-deploy detector.
+		"binary_version", version,
+		"commit", commit,
 	)
 
 	// #129 Gap 1: advisory shared-port safety warn for local mode without the
