@@ -55,6 +55,15 @@ func (s *Server) setupShell() {
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     // #587: the failed-login lockout state lives with the session subsystem.
     s.shellLoginThrottle = newShellLoginThrottle()
+    // #592: single-use SVG challenges for the login plane (off = store not
+    // built; the endpoint answers disabled and the gate is skipped).
+    if cfg.Shell.Captcha.Enabled {
+        ttl := cfg.Shell.Captcha.TTL
+        if ttl <= 0 {
+            ttl = 5 * time.Minute
+        }
+        s.shellCaptcha = newShellCaptchaStore(ttl)
+    }
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
     // #478: feed the static proxy upstream map into the registry so a
     // self-registered upstream that disagrees with web_shell.modules WARNs
@@ -273,6 +282,9 @@ func (s *Server) setupShellUsers(cfg *config.Config) {
 //     session Bearer token; user management additionally requires admin role
 func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("POST /api/v1/shell/session", s.handleShellSessionIssue)
+    // #592: challenge issuance is unauthenticated by contract (the shell
+    // frontend fetches it before any session exists) and must never be cached.
+    mux.HandleFunc("GET /api/v1/shell/session/captcha", s.handleShellCaptchaChallenge)
     // #517: identity SSO ticket exchange → shell session (no second login).
     mux.HandleFunc("POST /api/v1/shell/session/sso", s.handleShellSessionSSO)
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
@@ -464,6 +476,32 @@ func bearerToken(r *http.Request) string {
 // handleShellSessionIssue: POST /api/v1/shell/session {username,password}.
 // Constant-time credential check against config users (bcrypt preferred) or
 // the in-memory bootstrap admin. Issues a signed session token.
+// handleShellCaptchaChallenge (#592) serves a fresh single-use SVG challenge
+// for the login plane. Unauthenticated by contract; always no-store.
+func (s *Server) handleShellCaptchaChallenge(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Cache-Control", "no-store")
+    if s.shellSessions == nil {
+        shell.WriteEnvelope(w, http.StatusNotFound, "shell_disabled", "shell subsystem is not enabled", "", false)
+        return
+    }
+    if s.shellCaptcha == nil {
+        // Captcha disabled: the shell frontend probes and degrades when the
+        // plane is absent — answer a stable shape that says "no gate".
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+        return
+    }
+    id, code := s.shellCaptcha.issue()
+    ttl := s.shellCaptcha.ttl
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "captcha_id":   id,
+        "image":        renderSVG(code),
+        "ttl_seconds":  int(ttl.Seconds()),
+        "enabled":      true,
+    })
+}
+
 func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request) {
     if s.shellSessions == nil {
         shell.WriteEnvelope(w, http.StatusNotFound, "shell_disabled", "shell subsystem is not enabled", "", false)
@@ -471,8 +509,10 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
     }
     body := http.MaxBytesReader(w, r.Body, maxShellBody)
     var req struct {
-        Username string `json:"username"`
-        Password string `json:"password"`
+        Username    string `json:"username"`
+        Password    string `json:"password"`
+        CaptchaID   string `json:"captcha_id"`
+        CaptchaCode string `json:"captcha_code"`
     }
     if err := json.NewDecoder(body).Decode(&req); err != nil || req.Username == "" {
         shell.WriteEnvelope(w, http.StatusBadRequest, "invalid_request", "body must be JSON with username and password", "", false)
@@ -496,6 +536,24 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
                 "/api/v1/shell/session", shell.AuditOutcomeDenied, 0)
         }
         return
+    }
+
+    // #592: the CAPTCHA gate runs BEFORE credential verification — a wrong
+    // or missing challenge never reveals whether the password would have
+    // matched. Any captcha_* failure is audit-logged but does NOT feed the
+    // #587 login-lockout counters (a challenge guess is not a password
+    // guess; feeding it would let a bot farm lockouts cheaply).
+    if s.shellCaptcha != nil {
+        if vCode := s.shellCaptcha.verify(req.CaptchaID, req.CaptchaCode); vCode != "" {
+            slog.Warn("shell login captcha rejected", "code", vCode, "ip", ip, "username", req.Username)
+            if s.shellAudit != nil {
+                _ = s.shellAudit.Record(req.Username, "", shell.AuditClassAuth, http.MethodPost,
+                    "/api/v1/shell/session", shell.AuditOutcomeDenied, 0)
+            }
+            shell.WriteEnvelope(w, http.StatusBadRequest, vCode,
+                "captcha verification failed; request a new challenge", "", true)
+            return
+        }
     }
 
     user, ok := s.resolveShellUser(req.Username)

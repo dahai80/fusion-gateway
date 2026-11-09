@@ -1282,6 +1282,21 @@ type ShellConfig struct {
     // (#216) — without this gate any shell session (and every web app mounted
     // in the shell) drives unlimited inference spend.
     RateLimit ShellRateLimitConfig `mapstructure:"rate_limit"`
+    // Captcha (#592) gates the public login endpoint with a server-rendered
+    // SVG challenge (contract for fusion-web-shell #139). Off = login plane
+    // behaves exactly as before (back-compat); on = POST /api/v1/shell/session
+    // requires a live challenge id + code BEFORE credential verification.
+    Captcha ShellCaptchaConfig `mapstructure:"captcha"`
+}
+
+// ShellCaptchaConfig (#592) configures the login CAPTCHA plane. No external
+// CAPTCHA service — challenges are server-rendered SVG.
+type ShellCaptchaConfig struct {
+    // Enabled turns the challenge gate on. Off = no captcha required.
+    Enabled bool `mapstructure:"enabled"`
+    // TTL is how long a challenge stays valid. Required > 0 when enabled
+    // (fail closed); default 5m.
+    TTL time.Duration `mapstructure:"ttl"`
 }
 
 // ShellRateLimitConfig (#586) holds the per-shell-user usage caps. All values
@@ -2548,6 +2563,15 @@ func validate(cfg *Config) error {
         if cfg.Shell.RateLimit.RPM < 0 || cfg.Shell.RateLimit.TPM < 0 || cfg.Shell.RateLimit.DailyTokens < 0 {
             return fmt.Errorf("web_shell.rate_limit values must be non-negative (0 disables a dimension)")
         }
+        // #592: an enabled captcha gate with no challenge lifetime fails
+        // closed — a zero TTL would expire every challenge instantly and
+        // brick the login plane.
+        if cfg.Shell.Captcha.Enabled && cfg.Shell.Captcha.TTL <= 0 {
+            return fmt.Errorf("web_shell.captcha.enabled is true but web_shell.captcha.ttl is %s; set a positive ttl (the gate fails closed rather than defaulting)", cfg.Shell.Captcha.TTL)
+        }
+        if cfg.Shell.Captcha.TTL < 0 {
+            return fmt.Errorf("web_shell.captcha.ttl must be non-negative")
+        }
         // #243: a misconfigured AdminKey would 401 module self-registration
         // after the auth chain with no explanation — surface it at load time.
         // Store-issued keys (created via the admin UI, hashed at rest) cannot
@@ -3081,6 +3105,9 @@ func DefaultConfig() Config {
             Session: ShellSessionConfig{
                 TTL:    12 * time.Hour,
                 Tenant: "local",
+            },
+            Captcha: ShellCaptchaConfig{
+                TTL: 5 * time.Minute,
             },
         },
         Persistence: defaultPersistenceConfig(),
