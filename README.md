@@ -64,6 +64,8 @@ go build -o fusion-gateway ./cmd/gateway
 ./fusion-gateway --config config.yaml
 ```
 
+**Single canonical artifact path (#582):** always build to and run from the repo root `./fusion-gateway` — `start.sh` builds, runs, and rebuilds (`source newer than binary`) that exact path. Building to any other path (e.g. `bin/gateway`) and pointing a systemd `ExecStart` at it creates two divergent copies of the same artifact; restarting the unit then silently keeps serving a stale binary while every file-hash check looks green. Deploy hygiene: `./fusion-gateway --version` prints the build identity (`fusion-gateway <version> (commit <sha>)`) — assert it matches the artifact you just built before restarting, and the first `journalctl` boot line carries `binary_version` + `commit` so a stale deploy is visible immediately.
+
 The gateway listens on **port 11432** by default. With `auto_start.enabled: true`, it automatically launches fusion-mlx on port 11434 and waits for it to become healthy before serving requests.
 
 ### Service lifecycle (`start.sh`, #344)
