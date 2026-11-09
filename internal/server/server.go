@@ -78,6 +78,9 @@ type Server struct {
     // shellDaily (#586): the shell chat plane's per-user daily token ledger
     // (the shared rateLimiter only has RPM/TPM windows).
     shellDaily      *shellDailyTokens
+    // shellLoginThrottle (#587): failed-login lockout state for the public
+    // shell session endpoint (per source IP + per username).
+    shellLoginThrottle *shellLoginThrottle
     cache           *cache.Cache
     // R2: coalesces concurrent same-key non-stream chat fetches to prevent
     // cold-key cache stampede (N misses → N upstream calls). nil-safe: the
