@@ -53,6 +53,8 @@ func (s *Server) setupShell() {
         slog.Info("shell session secret derived from master_key (domain-separated digest)")
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
+    // #587: the failed-login lockout state lives with the session subsystem.
+    s.shellLoginThrottle = newShellLoginThrottle()
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
     // #478: feed the static proxy upstream map into the registry so a
     // self-registered upstream that disagrees with web_shell.modules WARNs
@@ -477,8 +479,28 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         return
     }
 
+    // #587: the login endpoint is the only public auth oracle — throttle
+    // failed logins per source IP + per username. The lockout check runs
+    // BEFORE credential verification so a locked source gets 429 even for a
+    // correct password (no oracle left at all during lockout).
+    ip := loginClientIP(r)
+    if s.shellLoginThrottle == nil {
+        s.shellLoginThrottle = newShellLoginThrottle()
+    }
+    if okLock, wait := s.shellLoginThrottle.allowed("ip:"+ip, "user:"+req.Username); !okLock {
+        slog.Warn("shell login throttled: source locked out", "ip", ip, "username", req.Username, "retry_after", wait.String())
+        shell.WriteEnvelope(w, http.StatusTooManyRequests, "rate_limited",
+            "too many failed logins; retry later", "", true)
+        if s.shellAudit != nil {
+            _ = s.shellAudit.Record(req.Username, "", shell.AuditClassAuth, http.MethodPost,
+                "/api/v1/shell/session", shell.AuditOutcomeDenied, 0)
+        }
+        return
+    }
+
     user, ok := s.resolveShellUser(req.Username)
     if !ok || !checkShellPassword(user, req.Password) {
+        s.shellLoginThrottle.recordFailure(ip, req.Username)
         slog.Warn("shell session login failed", "username", req.Username, "remote", r.RemoteAddr)
         if s.shellAudit != nil {
             _ = s.shellAudit.Record(req.Username, "", shell.AuditClassAuth, http.MethodPost,
@@ -508,6 +530,11 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         return
     }
     slog.Info("shell session issued", "username", user.username, "roles", user.roles)
+    // #587: a successful login clears the source's failure counters so a
+    // legitimate user's occasional typo never accumulates into a lockout.
+    if s.shellLoginThrottle != nil {
+        s.shellLoginThrottle.recordSuccess(loginClientIP(r), user.username)
+    }
     if s.shellAudit != nil {
         role := ""
         if len(user.roles) > 0 {
