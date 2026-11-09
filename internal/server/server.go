@@ -75,6 +75,9 @@ type Server struct {
     startTime       time.Time
     realtimeProxy   *realtime.Proxy
     rateLimiter     *middleware.RateLimiter
+    // shellDaily (#586): the shell chat plane's per-user daily token ledger
+    // (the shared rateLimiter only has RPM/TPM windows).
+    shellDaily      *shellDailyTokens
     cache           *cache.Cache
     // R2: coalesces concurrent same-key non-stream chat fetches to prevent
     // cold-key cache stampede (N misses → N upstream calls). nil-safe: the
@@ -721,6 +724,7 @@ func New(
         startTime:         time.Now(),
         realtimeProxy:     rp,
         rateLimiter:       middleware.NewRateLimiter(),
+        shellDaily:        newShellDailyTokens(),
         cache:             cache.New(cfg.Config.Cache),
         fetchCoalescer:    newCoalescer(),
         costTracker:       cost.NewTracker(10000),

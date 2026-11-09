@@ -1276,6 +1276,29 @@ type ShellConfig struct {
     // (:11430 vite proxy) keeps working unchanged. Points at the built
     // apps/shell dist from fusion-web-shell.
     SpaDir string `mapstructure:"spa_dir"`
+    // RateLimit (#586) caps per-shell-user inference usage on the
+    // /api/v1/shell/chat/completions plane. Shell sessions carry no API key,
+    // so the /v1 key-plane rate-limit middleware deliberately skips them
+    // (#216) — without this gate any shell session (and every web app mounted
+    // in the shell) drives unlimited inference spend.
+    RateLimit ShellRateLimitConfig `mapstructure:"rate_limit"`
+}
+
+// ShellRateLimitConfig (#586) holds the per-shell-user usage caps. All values
+// are per user per tenant; zero for a disabled dimension is fine, but
+// enabling the gate with rpm <= 0 is a config error (fail closed — an
+// "unlimited by typo" default is exactly the footgun #586 reports).
+type ShellRateLimitConfig struct {
+    // Enabled turns the shell usage gate on. Off = unlimited (back-compat).
+    Enabled bool `mapstructure:"enabled"`
+    // RPM caps chat requests per shell user per minute. Required > 0 when
+    // enabled.
+    RPM int `mapstructure:"rpm"`
+    // TPM caps estimated input tokens per shell user per minute. 0 = off.
+    TPM int `mapstructure:"tpm"`
+    // DailyTokens caps total input tokens per shell user per UTC day
+    // (in-memory, resets on restart and at UTC midnight). 0 = off.
+    DailyTokens int `mapstructure:"daily_tokens"`
 }
 
 type ShellSessionConfig struct {
@@ -2352,6 +2375,20 @@ func validate(cfg *Config) error {
         if k.DailyBudgetLimit < 0 {
             return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
         }
+        // #586: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
+        // semantics — AllowRPM/AllowTPM return true for rpm<=0). That is a
+        // dangerous silent default: a typo or omission disables capping
+        // instead of failing closed. Never rejected (existing deployments
+        // rely on it), but every such key is surfaced at load so an
+        // unlimited key is always a visible operator decision.
+        if cfg.Auth.Enabled {
+            if k.RPM <= 0 {
+                slog.Warn("auth key has rpm<=0: NO request-rate cap applies (0 = unlimited, #586)", "key", k.Name)
+            }
+            if k.TPM <= 0 {
+                slog.Warn("auth key has tpm<=0: NO token-rate cap applies (0 = unlimited, #586)", "key", k.Name)
+            }
+        }
     }
 
     // R7/C2 (audit P1): encryption.master_key protects OAuth2 connector tokens
@@ -2501,6 +2538,15 @@ func validate(cfg *Config) error {
         }
         if cfg.Shell.Session.TTL <= 0 {
             return fmt.Errorf("web_shell.session.ttl must be positive when shell enabled, got %s", cfg.Shell.Session.TTL)
+        }
+        // #586: fail closed on an "unlimited by typo" gate — enabling the
+        // shell rate limit without an RPM cap enforces nothing while making
+        // the operator believe it does.
+        if cfg.Shell.RateLimit.Enabled && cfg.Shell.RateLimit.RPM <= 0 {
+            return fmt.Errorf("web_shell.rate_limit.enabled is true but web_shell.rate_limit.rpm is %d; set a positive rpm (the gate fails closed rather than defaulting to unlimited)", cfg.Shell.RateLimit.RPM)
+        }
+        if cfg.Shell.RateLimit.RPM < 0 || cfg.Shell.RateLimit.TPM < 0 || cfg.Shell.RateLimit.DailyTokens < 0 {
+            return fmt.Errorf("web_shell.rate_limit values must be non-negative (0 disables a dimension)")
         }
         // #243: a misconfigured AdminKey would 401 module self-registration
         // after the auth chain with no explanation — surface it at load time.
