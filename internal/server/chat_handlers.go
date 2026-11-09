@@ -165,6 +165,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         inputTokens = len(textContent) / 4
     }
 
+    // #586: shell sessions carry no API key so the /v1 rate-limit middleware
+    // skips them (#216) — without this gate a shell user (and every web app
+    // mounted in the shell) drives unlimited inference. Enforce the
+    // web_shell.rate_limit caps (RPM/TPM/daily tokens) per shell user +
+    // tenant; 429 rate_limit_error / 402 insufficient_quota, same error
+    // vocabulary the key plane surfaces. Read the snapshot so hot-reloaded
+    // caps apply on the next request.
+    if shellClaimsFrom(ctx).Sub != "" {
+        if !s.enforceShellRateLimit(w, r, s.cfg, inputTokens) {
+            return
+        }
+    }
+
     budget := s.tokEngine.EstimateBudget(inputTokens, req.MaxTokens, req.Model, req.Tools != nil, req.Stream)
     ctx = tokenizer.WithTokenBudget(ctx, budget)
 
