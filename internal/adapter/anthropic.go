@@ -705,20 +705,50 @@ func OpenAIToAnthropic(req *ChatRequest) *AnthropicRequest {
 
     var systemTexts []string
     var messages []AnthropicMessage
+    // #583: OpenAI role:"tool" result messages have no Anthropic equivalent —
+    // they must ride in a following "user" message as tool_result blocks
+    // (consecutive tool messages merge into ONE user message; Anthropic
+    // enforces alternating roles). Buffer them and flush before the next
+    // non-tool message so transcript order is preserved.
+    var pendingToolResults []AnthropicContentBlock
+    flushToolResults := func() {
+        if len(pendingToolResults) > 0 {
+            messages = append(messages, AnthropicMessage{Role: "user", Content: pendingToolResults})
+            pendingToolResults = nil
+        }
+    }
     for _, msg := range req.Messages {
         if msg.Role == "system" {
             systemTexts = append(systemTexts, contentToString(msg.Content))
             continue
         }
+        if msg.Role == "tool" {
+            pendingToolResults = append(pendingToolResults, AnthropicContentBlock{
+                Type:      "tool_result",
+                ToolUseID: msg.ToolCallID,
+                ACContent: msg.Content,
+            })
+            continue
+        }
+        flushToolResults()
         antMsg := AnthropicMessage{
             Role:    msg.Role,
             Content: convertContentToBlocks(msg.Content),
         }
-        if msg.Role == "assistant" && len(antMsg.Content) == 0 {
+        // #583: the assistant turn's top-level OpenAI tool_calls field carries
+        // the model's previous tool invocations; without them the upstream
+        // model never sees its own prior actions and tool loops replan forever.
+        // Parse through JSON so both wire shapes ([]any of map) and in-process
+        // shapes ([]map[string]any) are handled identically.
+        if msg.Role == "assistant" {
+            antMsg.Content = append(antMsg.Content, openAIToolCallsToBlocks(msg.ToolCalls)...)
+        }
+        if len(antMsg.Content) == 0 {
             antMsg.Content = []AnthropicContentBlock{{Type: "text", Text: contentToString(msg.Content)}}
         }
         messages = append(messages, antMsg)
     }
+    flushToolResults()
     antReq.Messages = messages
     if len(systemTexts) > 0 {
         antReq.System = strings.Join(systemTexts, "\n\n")
@@ -747,6 +777,45 @@ func OpenAIToAnthropic(req *ChatRequest) *AnthropicRequest {
     }
     if req.ToolChoice != nil { antReq.ToolChoice = openAIToolChoiceToAnthropic(req.ToolChoice) }
     return antReq
+}
+
+// openAIToolCallsToBlocks converts an OpenAI assistant message's top-level
+// tool_calls field ([{id, type:"function", function:{name, arguments}}]) into
+// Anthropic tool_use content blocks (#583). The value arrives as []any of
+// map[string]any from the JSON wire, or []map[string]any / typed slices from
+// in-process callers — marshal+unmarshal normalizes all shapes. Invalid or
+// empty arguments become {} rather than an absent input (Anthropic requires
+// input to be an object).
+func openAIToolCallsToBlocks(toolCalls interface{}) []AnthropicContentBlock {
+    if toolCalls == nil {
+        return nil
+    }
+    raw, err := json.Marshal(toolCalls)
+    if err != nil {
+        slog.Warn("anthropic request conversion: tool_calls marshal failed, dropping blocks", "error", err)
+        return nil
+    }
+    var calls []struct {
+        ID       string `json:"id"`
+        Type     string `json:"type"`
+        Function struct {
+            Name      string `json:"name"`
+            Arguments string `json:"arguments"`
+        } `json:"function"`
+    }
+    if err := json.Unmarshal(raw, &calls); err != nil {
+        slog.Warn("anthropic request conversion: tool_calls shape unrecognized, dropping blocks", "error", err)
+        return nil
+    }
+    var blocks []AnthropicContentBlock
+    for _, c := range calls {
+        input := json.RawMessage(c.Function.Arguments)
+        if len(input) == 0 {
+            input = json.RawMessage("{}")
+        }
+        blocks = append(blocks, AnthropicContentBlock{Type: "tool_use", ID: c.ID, Name: c.Function.Name, Input: input})
+    }
+    return blocks
 }
 
 func AnthropicToOpenAI(resp *AnthropicResponse) *ChatResponse {
