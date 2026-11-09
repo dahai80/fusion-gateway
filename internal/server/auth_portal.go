@@ -73,6 +73,12 @@ type authPortal struct {
     codes   map[string]*authCodeGrant
     hitsMu  sync.Mutex
     hits    map[string][]time.Time
+
+    // #590: failed-login lockout for the portal login proxy — the portal is
+    // now the primary public auth oracle and only had a flat per-IP rate
+    // limit. Reuses the #587 throttle (5 fails / 5 min per IP+username →
+    // 60s lockout, success clears).
+    loginThrottle *shellLoginThrottle
 }
 
 // registerAuthPortalRoutes mounts /auth (SPA), /auth/api/identity/<path>
@@ -112,8 +118,9 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
         cfg:        cfg,
         identity:   target,
         httpClient: &http.Client{Timeout: 15 * time.Second},
-        codes:      make(map[string]*authCodeGrant),
-        hits:       make(map[string][]time.Time),
+        codes:         make(map[string]*authCodeGrant),
+        hits:          make(map[string][]time.Time),
+        loginThrottle: newShellLoginThrottle(),
     }
     if len(cfg.RedirectURIs) == 0 {
         // Allowlist empty: SPA serves, but code issuance always refuses
@@ -239,6 +246,12 @@ func (p *authPortal) handleIdentityProxy(w http.ResponseWriter, r *http.Request)
             "no such auth endpoint", "auth_portal", false)
         return
     }
+    // #590: the login proxy is a credential oracle — route it through the
+    // failed-login lockout before the upstream round-trip.
+    if key == "POST|/api/v1/auth/login" {
+        p.handlePortalLogin(w, r, upstreamPath)
+        return
+    }
     p.proxyIdentity(w, r, upstreamPath)
 }
 
@@ -250,11 +263,53 @@ func (p *authPortal) proxyIdentity(w http.ResponseWriter, r *http.Request, upstr
             "unreadable request body", "auth_portal", false)
         return
     }
+    p.forwardIdentity(w, r, upstreamPath, body)
+}
+
+// handlePortalLogin wraps the login proxy with the #587-style lockout: the
+// lockout check runs BEFORE the upstream call so a locked source gets 429
+// even for a correct password (no oracle left during lockout). Upstream 401
+// (bad credentials) and 422 (malformed credentials) count as failures; 200
+// clears the counters so a legitimate user's typo never accumulates.
+func (p *authPortal) handlePortalLogin(w http.ResponseWriter, r *http.Request, upstreamPath string) {
+    body, err := io.ReadAll(io.LimitReader(r.Body, authPortalMaxBody))
+    if err != nil {
+        shell.WriteEnvelope(w, http.StatusBadRequest, "bad_request",
+            "unreadable request body", "auth_portal", false)
+        return
+    }
+    var req struct {
+        Username string `json:"username"`
+    }
+    _ = json.Unmarshal(body, &req)
+    ip := clientIPFromRequest(r)
+    if p.loginThrottle == nil {
+        p.loginThrottle = newShellLoginThrottle()
+    }
+    if ok, wait := p.loginThrottle.allowed("ip:"+ip, "user:"+req.Username); !ok {
+        slog.Warn("auth portal login throttled: source locked out", "ip", ip, "username", req.Username, "retry_after", wait.String())
+        shell.WriteEnvelope(w, http.StatusTooManyRequests, "rate_limited",
+            "too many failed logins; retry later", "auth_portal", true)
+        return
+    }
+    status := p.forwardIdentity(w, r, upstreamPath, body)
+    switch status {
+    case http.StatusOK:
+        p.loginThrottle.recordSuccess(ip, req.Username)
+    case http.StatusUnauthorized, http.StatusUnprocessableEntity:
+        p.loginThrottle.recordFailure(ip, req.Username)
+    }
+}
+
+// forwardIdentity performs the upstream round-trip with an in-memory body
+// and writes the upstream response through; returns the upstream status so
+// callers can react to credential outcomes (#590).
+func (p *authPortal) forwardIdentity(w http.ResponseWriter, r *http.Request, upstreamPath string, body []byte) int {
     req, err := http.NewRequestWithContext(r.Context(), r.Method, p.identity.String()+upstreamPath, strings.NewReader(string(body)))
     if err != nil {
         shell.WriteEnvelope(w, http.StatusInternalServerError, "proxy_error",
             "auth upstream request failed", "auth_portal", false)
-        return
+        return http.StatusInternalServerError
     }
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("X-Forwarded-For", clientIPFromRequest(r))
@@ -263,18 +318,19 @@ func (p *authPortal) proxyIdentity(w http.ResponseWriter, r *http.Request, upstr
         slog.Warn("auth portal upstream error", "path", upstreamPath, "error", err)
         shell.WriteEnvelope(w, http.StatusServiceUnavailable, "upstream_unavailable",
             "identity service unreachable; retry shortly", "auth_portal", true)
-        return
+        return http.StatusServiceUnavailable
     }
     defer resp.Body.Close()
     respBody, err := io.ReadAll(io.LimitReader(resp.Body, authPortalMaxBody))
     if err != nil {
         shell.WriteEnvelope(w, http.StatusBadGateway, "upstream_error",
             "identity response unreadable", "auth_portal", true)
-        return
+        return http.StatusBadGateway
     }
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(resp.StatusCode)
     _, _ = w.Write(respBody)
+    return resp.StatusCode
 }
 
 type issueCodeRequest struct {

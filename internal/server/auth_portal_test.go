@@ -224,3 +224,75 @@ func TestAuthPortalProxyPasswordRecoveryAllowlist(t *testing.T) {
         }
     }
 }
+
+// #590: the portal login proxy must lock out a source after repeated failed
+// logins (same policy as the shell plane, #587): 5 failures inside the
+// window lock both the IP and the username key, the lockout 429s even a
+// correct password (no oracle during lockout), and a successful login
+// clears the counters.
+func TestAuthPortalLoginLockout(t *testing.T) {
+    loginFails := 5
+    mux := http.NewServeMux()
+    mux.HandleFunc("/api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+        if loginFails > 0 {
+            loginFails--
+            w.WriteHeader(http.StatusUnauthorized)
+            _ = json.NewEncoder(w).Encode(map[string]string{"code": "invalid_credentials"})
+            return
+        }
+        w.WriteHeader(http.StatusOK)
+        _ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"})
+    })
+    upstream := httptest.NewServer(mux)
+    t.Cleanup(upstream.Close)
+    target, err := url.Parse(upstream.URL)
+    if err != nil {
+        t.Fatalf("parse upstream url: %v", err)
+    }
+    p := &authPortal{
+        cfg: config.AuthPortalConfig{
+            Enabled:    true,
+            RatePerMin: 1000,
+        },
+        identity:      target,
+        httpClient:    upstream.Client(),
+        codes:         make(map[string]*authCodeGrant),
+        hits:          make(map[string][]time.Time),
+        loginThrottle: newShellLoginThrottle(),
+    }
+    login := func(body string) *httptest.ResponseRecorder {
+        req := httptest.NewRequest(http.MethodPost, "/auth/api/identity/api/v1/auth/login", strings.NewReader(body))
+        rec := httptest.NewRecorder()
+        p.handleIdentityProxy(rec, req)
+        return rec
+    }
+
+    for i := 0; i < 5; i++ {
+        rec := login(`{"username":"alice","password":"wrong"}`)
+        if rec.Code != http.StatusUnauthorized {
+            t.Fatalf("attempt %d: want 401, got %d", i+1, rec.Code)
+        }
+    }
+    // 6th attempt: locked out before the upstream is consulted — even a
+    // correct password must not reveal anything.
+    rec := login(`{"username":"alice","password":"correct"}`)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("locked attempt: want 429, got %d", rec.Code)
+    }
+    if body := rec.Body.String(); !strings.Contains(body, "rate_limited") {
+        t.Fatalf("lockout envelope: want rate_limited, got %s", body)
+    }
+    // A different username from the same IP is still inside the lockout —
+    // the IP key engages too.
+    rec = login(`{"username":"bob","password":"correct"}`)
+    if rec.Code != http.StatusTooManyRequests {
+        t.Fatalf("ip-keyed lockout: want 429, got %d", rec.Code)
+    }
+
+    // Success clears both keys.
+    p.loginThrottle.recordSuccess("192.0.2.1", "alice")
+    rec = login(`{"username":"alice","password":"correct"}`)
+    if rec.Code != http.StatusOK {
+        t.Fatalf("post-clear login: want 200, got %d", rec.Code)
+    }
+}
