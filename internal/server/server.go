@@ -81,6 +81,9 @@ type Server struct {
     // shellLoginThrottle (#587): failed-login lockout state for the public
     // shell session endpoint (per source IP + per username).
     shellLoginThrottle *shellLoginThrottle
+    // shellCaptcha (#592): single-use SVG challenges gating the public shell
+    // login endpoint. nil when shell disabled.
+    shellCaptcha *shellCaptchaStore
     cache           *cache.Cache
     // R2: coalesces concurrent same-key non-stream chat fetches to prevent
     // cold-key cache stampede (N misses → N upstream calls). nil-safe: the
