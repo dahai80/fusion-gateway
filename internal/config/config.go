@@ -17,6 +17,7 @@ import (
 
     "github.com/fsnotify/fsnotify"
     "github.com/spf13/viper"
+    "gopkg.in/yaml.v3"
     "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
@@ -1758,6 +1759,63 @@ func logMasterKeySource(effective string) {
     slog.Info("auth.master_key resolved", "source", source, "fingerprint", "sha256:"+hex.EncodeToString(sum[:8]))
 }
 
+// secretFingerprint returns the short non-secret fingerprint used by the
+// master-key source logs (#536, #611).
+func secretFingerprint(v string) string {
+    sum := sha256.Sum256([]byte(v))
+    return "sha256:" + hex.EncodeToString(sum[:8])
+}
+
+// fileMasterKey (#611): the auth.master_key literal exactly as the config
+// file carries it, env-free — viper's view is already env-tainted by
+// bindSecretEnv, so the conflict check reads the file bytes directly.
+// Unreadable/unparseable files yield "" (no conflict verdict possible; the
+// load itself fails elsewhere).
+func fileMasterKey(path string) string {
+    raw, err := os.ReadFile(path)
+    if err != nil {
+        return ""
+    }
+    var doc struct {
+        Auth struct {
+            MasterKey string `yaml:"master_key"`
+        } `yaml:"auth"`
+    }
+    if err := yaml.Unmarshal(raw, &doc); err != nil {
+        return ""
+    }
+    return strings.TrimSpace(doc.Auth.MasterKey)
+}
+
+// warnMasterKeyOverrideConflict (#611): FUSION_ADMIN_KEY / FG_MASTER_KEY
+// silently override a non-empty auth.master_key in config.yaml. Tooling that
+// mints shell-session tokens from the FILE value (the documented derivation
+// in scripts/shell-serve.mjs) then 401s with no visible cause. Warn loudly
+// naming both fingerprints and the winning env var. Deliberately a WARN, not
+// an error: the env override is the canonical deployment mechanism (Helm
+// secretKeyRef), and production boots depend on env winning even when the
+// file carries a stale literal. Skipped when the file value is empty or the
+// documented ${VAR} injection form (the placeholder is expected to differ
+// from the injected secret).
+func warnMasterKeyOverrideConflict(path, effective string) {
+    fileKey := fileMasterKey(path)
+    if fileKey == "" || strings.HasPrefix(fileKey, "${") {
+        return
+    }
+    if fileKey == effective {
+        return
+    }
+    winner := "FG_MASTER_KEY"
+    if os.Getenv("FUSION_ADMIN_KEY") != "" {
+        winner = "FUSION_ADMIN_KEY"
+    }
+    slog.Warn("auth.master_key override conflict: env value wins over the yaml literal; tooling minting shell-session tokens from the yaml value will 401",
+        "winner", "env "+winner,
+        "file_fingerprint", secretFingerprint(fileKey),
+        "effective_fingerprint", secretFingerprint(effective),
+    )
+}
+
 // fusionMLXKeyEnvs (#412) returns the two env values relevant to the
 // fusion-mlx backend credential. FUSION_MLX_API_KEY is the deliberate
 // operator-injection name (the only one viper binds — see bindSecretEnv).
@@ -1899,6 +1957,7 @@ func Load(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("validate config: %w", err)
     }
     logMasterKeySource(cfg.Auth.MasterKey)
+    warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
 
     // N4 (audit): decrypt backends[*].api_key stored as "enc:" ciphertext.
     // Runs after validate (master_key placeholder refusal) and before the
@@ -2013,6 +2072,7 @@ func Reload(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("validate config: %w", err)
     }
     logMasterKeySource(cfg.Auth.MasterKey)
+    warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
 
     ver := configVersion.Add(1)
     newSnap := &ConfigSnapshot{
