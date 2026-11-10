@@ -171,6 +171,31 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
     sort.Slice(aliases, func(i, j int) bool { return aliases[i].ID < aliases[j].ID })
     models = append(models, aliases...)
 
+    // #597: per-key catalog filtering. A restricted key (allowed_models set)
+    // must not see models it can never call — the list is an information
+    // surface (model inventory, embedded model names) and keys baked into
+    // publicly downloadable bundles hold it. Uses the SAME matcher as the
+    // inference path (CheckModelAllowlist) so listed ⇒ callable and a
+    // 403-model is never listed. Master and unrestricted keys keep the full
+    // list; shell-session principals carry no KeyConfig and are unaffected.
+    if p := middleware.PrincipalFromContext(r.Context()); p != nil && !p.IsMaster && p.KeyConfig != nil && len(p.KeyConfig.AllowedModels) > 0 {
+        filtered := make([]adapter.ModelInfo, 0, len(models))
+        for _, m := range models {
+            id := m.ID
+            // An alias is callable when its RESOLUTION TARGET is allowed,
+            // not the alias spelling itself.
+            if m.OwnedBy == "alias" && m.QualifiedID != "" {
+                id = m.QualifiedID
+            }
+            if middleware.CheckModelAllowlist(r, id) {
+                filtered = append(filtered, m)
+            }
+        }
+        slog.Debug("models endpoint: filtered by key allowlist",
+            "key", p.KeyConfig.Name, "before", len(models), "after", len(filtered))
+        models = filtered
+    }
+
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
         "object": "list",

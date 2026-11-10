@@ -111,6 +111,16 @@ func (s *Store) Policy(tenant string) Policy {
     return Policy{}
 }
 
+// HasPolicy reports whether an explicit policy was ever PUT for the tenant
+// (#599): callers that need to distinguish "no policy" from "empty policy"
+// (the global-default fallback chain) ask this instead of guessing from the
+// zero value.
+func (s *Store) HasPolicy(tenant string) bool {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+    return s.policies[tenant] != nil
+}
+
 // SetPolicy validates and stores the tenant policy. Hot-applies: the next
 // Resolve call sees it. The "" tenant is valid — it is the isolated default
 // namespace for principals with no tenant binding (#499: an admin JWT

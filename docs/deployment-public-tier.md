@@ -90,3 +90,14 @@ server {
 7. Health probes `/healthz` `/readyz` `/livez` stay anonymous for LB checks;
    every other surface requires a credential by the lan guard (which stays
    active — public tier runs the same gate as lan).
+
+## Model-Policy Persistence (#598)
+
+Tenant model policies (`PUT /v1/model-policy`) persist to
+`<store.data_dir>/model_policy.json` and are loaded at boot — a gateway
+restart no longer re-breaks tenant chat until an admin re-applies policy.
+Volume-backed deployments: keep `store.data_dir` on a persistent volume,
+or policies reset to empty on container replacement (boot logs a loud WARN
+when `data_dir` is unset — the store is then memory-only). Config
+hot-reload never touches the policy store; in-memory policies always win
+and are rewritten to disk on the next `PUT`.
