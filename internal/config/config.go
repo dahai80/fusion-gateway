@@ -147,6 +147,11 @@ type AuthKeyConfig struct {
     // /v1/* paths. Bootstrap credential for client-side / sub-app
     // integrations that should never hold a long-lived full-plane key.
     ExchangeOnly     bool              `mapstructure:"exchange_only"`
+    // RolloutTap (#608): per-key override for the rollout tap mirror —
+    // explicit false DENIES even when the tenant is allowlisted (deny beats
+    // allow); explicit true ALLOWS even when the tenant is not listed; nil
+    // (unset) inherits the tenant/global tap decision.
+    RolloutTap       *bool             `mapstructure:"rollout_tap"`
 }
 
 type AuthConfig struct {
@@ -177,6 +182,28 @@ type TokenExchangeConfig struct {
     // MaxTTL caps the requested token lifetime on every exchange. Minted
     // tokens also never outlive the bootstrap credential's own expiry.
     MaxTTL time.Duration `mapstructure:"max_ttl"`
+}
+
+// RolloutTapConfig (#608): chat-traffic mirroring into the rollout sink.
+// Routes are fixed (both /v1/chat/completions and /v1/completions); the
+// opt-in matrix lives on tenants + the per-key rollout_tap override.
+type RolloutTapConfig struct {
+    Enabled bool `mapstructure:"enabled"`
+    // SinkPath is the local JSONL file (100% offline, no egress). Required
+    // when enabled.
+    SinkPath string `mapstructure:"sink_path"`
+    // ContentMode: "redact" (default) drops message content keeping the
+    // shape/length; "raw" stores verbatim content — explicit opt-in only.
+    ContentMode string `mapstructure:"content_mode"`
+    // Tenants allowlists the tapped tenants; empty = all tenants when the
+    // plane is enabled.
+    Tenants []string `mapstructure:"tenants"`
+    // MaxQueue bounds the async write queue; overflow drops records loudly
+    // (isolation contract: the sink never slows the hot path).
+    MaxQueue int `mapstructure:"max_queue"`
+    // CaptureMaxBytes bounds the response capture buffer per request; a
+    // larger response is skipped (logged), never buffered unbounded.
+    CaptureMaxBytes int `mapstructure:"capture_max_bytes"`
 }
 
 type RateLimitConfig struct {
@@ -1111,6 +1138,12 @@ type Config struct {
     // meter; over-budget new requests get 429. Default off — no behavior
     // change until try_quota.enabled=true.
     TryQuota        TryQuotaConfig          `mapstructure:"try_quota"`
+    // RolloutTap mirrors chat traffic into a JSONL rollout sink for
+    // fusion-trainer RFT/GRPO datasets (#608, agent-lightning pattern).
+    // Default off for everything; opt-in per tenant (allowlist) with a
+    // per-API-key override (deny beats allow). Content is redacted by
+    // default (PII gate); `raw` needs an explicit opt-in.
+    RolloutTap      RolloutTapConfig        `mapstructure:"rollout_tap"`
     // ServiceRoutes wires the /svc/<name>/ platform-service proxy
     // (config-conventions §1/§5): business apps call platform services
     // (rag/identity/drawing-parser…) exclusively through the gateway with
@@ -2459,6 +2492,21 @@ func validate(cfg *Config) error {
         }
     }
 
+    // #608 rollout tap: sink path required; PII gate mode restricted.
+    if cfg.RolloutTap.Enabled {
+        if cfg.RolloutTap.SinkPath == "" {
+            return fmt.Errorf("rollout_tap.enabled requires rollout_tap.sink_path (the sink is a local JSONL file; no default for safety) (#608)")
+        }
+        switch cfg.RolloutTap.ContentMode {
+        case "", rolloutContentModeRedact, rolloutContentModeRaw:
+        default:
+            return fmt.Errorf("rollout_tap.content_mode %q is invalid: must be \"redact\" (default) or \"raw\" (#608)", cfg.RolloutTap.ContentMode)
+        }
+        if cfg.RolloutTap.MaxQueue < 0 || cfg.RolloutTap.CaptureMaxBytes < 0 {
+            return fmt.Errorf("rollout_tap.max_queue and capture_max_bytes must be non-negative (#608)")
+        }
+    }
+
     // R7/C2 (audit P1): encryption.master_key protects OAuth2 connector tokens
     // at rest (data/connections.json). Without it, tokens persist PLAINTEXT to
     // disk. Audit C2 grades this a release-blocking MUST ("不满足 C1 或 C2 不得
@@ -3174,3 +3222,9 @@ func DefaultConfig() Config {
         FileLog:     defaultFileLogConfig(),
     }
 }
+
+// Content modes for RolloutTapConfig (#608) — mirrored in internal/rollout.
+const (
+    rolloutContentModeRedact = "redact"
+    rolloutContentModeRaw    = "raw"
+)

@@ -401,6 +401,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         ctx = withSemanticCacheOptOut(ctx)
     }
 
+    // #608 rollout tap: decide once per request; on allow, mirror the
+    // response bytes through a capped capture writer. Tenant for the record
+    // prefers the real gateway tenant (key→team binding, identity lease),
+    // falling back to the auth-key name, then shell session claims, then
+    // "anonymous". /v1/completions converts to a chat request and re-uses
+    // this handler, so one tap point covers both routes.
+    var tapCap *rolloutTapCapture
+    if s.rolloutTap != nil && s.rolloutTap.Enabled() {
+        tapTenant := adapter.TenantFromContext(r.Context())
+        if tapTenant == "" {
+            if claims := shellClaimsFrom(r.Context()); claims.TenantID != "" {
+                tapTenant = claims.TenantID
+            }
+        }
+        if tapTenant == "" {
+            tapTenant = tenant
+        }
+        var keyOverride *bool
+        if kc := middleware.GetAuthKeyConfig(r.Context()); kc != nil {
+            keyOverride = kc.RolloutTap
+        }
+        if s.rolloutTap.Allows(tapTenant, keyOverride) {
+            tapCap = newRolloutTapCapture(w, s.cfg.Config.RolloutTap.CaptureMaxBytes, tapTenant)
+            w = tapCap
+        }
+    }
+
     if req.Stream {
         // R10 (audit): global concurrent-stream cap. Reject with 429 when the
         // pool is full so a request burst cannot exhaust goroutines/FDs against
@@ -426,6 +453,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         s.handleStreamChat(streamCtx, w, provider, &req, decision, budget, start)
     } else {
         s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
+    }
+    if tapCap != nil {
+        s.emitRolloutTapRecord(&req, tapCap, start)
     }
 }
 

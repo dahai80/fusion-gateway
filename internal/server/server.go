@@ -41,6 +41,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/insights"
     "github.com/fusion-gateway/fusion-gateway/internal/persist"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
+    "github.com/fusion-gateway/fusion-gateway/internal/rollout"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
     redisstore "github.com/fusion-gateway/fusion-gateway/internal/store/redis"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
@@ -85,6 +86,10 @@ type Server struct {
     // shellCaptcha (#592): single-use SVG challenges gating the public shell
     // login endpoint. nil when shell disabled.
     shellCaptcha *shellCaptchaStore
+    // rolloutTap (#608): mirrors production chat traffic into a local JSONL
+    // sink for fusion-trainer RL datasets. nil when the plane is disabled —
+    // every touchpoint is nil-safe.
+    rolloutTap *rollout.Tap
     cache           *cache.Cache
     // R2: coalesces concurrent same-key non-stream chat fetches to prevent
     // cold-key cache stampede (N misses → N upstream calls). nil-safe: the
@@ -788,6 +793,18 @@ func New(
     // unconditionally (not gated on web_shell.enabled) so policies survive
     // restarts regardless of which surfaces are active.
     srv.initModelPolicyStore()
+    // #608: rollout tap plane. nil tap when disabled — decision + record
+    // paths are nil-safe, and the sink only opens when enabled.
+    if cfg.Config.RolloutTap.Enabled {
+        srv.rolloutTap = rollout.NewTap(rollout.TapConfig{
+            Enabled:     cfg.Config.RolloutTap.Enabled,
+            ContentMode: cfg.Config.RolloutTap.ContentMode,
+            Tenants:     cfg.Config.RolloutTap.Tenants,
+            SinkPath:    cfg.Config.RolloutTap.SinkPath,
+            MaxQueue:    cfg.Config.RolloutTap.MaxQueue,
+        })
+        slog.Info("rollout tap plane wired (#608)", "sink_path", cfg.Config.RolloutTap.SinkPath, "content_mode", cfg.Config.RolloutTap.ContentMode, "tenants", len(cfg.Config.RolloutTap.Tenants))
+    }
     // #157: build the fusion-identity gRPC control-plane client. NewClient
     // returns nil on empty endpoint (caller convention: nil = disabled,
     // IdentityAuth middleware pass-through). The local APIKeyAuthWithStore
