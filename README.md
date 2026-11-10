@@ -1299,6 +1299,31 @@ curl -s -X POST http://127.0.0.1:11432/auth/api/token/exchange \
 - **Bootstrap credentials**: static/store API keys (exchange happens through the key plane — a disabled/expired key cannot mint), or a shell session token. TTL is min(requested, `max_ttl`, bootstrap credential's own remaining life).
 - **Revocation**: disable or expire the bootstrap key — minted tokens remain stateless until their own exp, so keep `max_ttl` short.
 
+### Rollout Tap (`rollout_tap`, #608)
+
+Mirror production chat traffic into an append-only JSONL sink that fusion-trainer consumes as RL data (`ft datasets from-rollouts`) — the proxy-side collection pattern, mapped onto the existing `:11432` choke point with no second proxy:
+
+```yaml
+rollout_tap:
+    enabled: true
+    sink_path: ~/.fusion-gateway/rollouts.jsonl   # required when enabled; no default for safety
+    content_mode: redact                          # redact (default) | raw
+    tenants: [team-a, team-b]                     # empty = all tenants
+    max_queue: 1024                               # bounded async queue
+    capture_max_bytes: 524288                     # per-response mirror cap
+auth:
+    api_keys:
+        - key: fk-trainer-b64...
+          name: trainer-key
+          rollout_tap: false   # per-key override; deny beats allow
+```
+
+- **Record schema v1** (fusion-trainer `docs/rollout-tap.md`): `{schema_version, rollout_id: "ro-<hex>", tenant_id, source, model, created_at, messages[], finish_reason, latency_ms}`. Outcome is backfilled by app-observable producers directly in the sink file — the tap never writes it.
+- **PII gate**: `redact` mode (default) drops message content but keeps the shape/length as `[redacted:N]` so prompt-size analytics still work; `raw` stores verbatim content and is an explicit per-config opt-in.
+- **Decision matrix** (deny beats allow): globally disabled → deny; per-API-key `rollout_tap: false` → deny even if the tenant is allowlisted; `true` → allow; otherwise the tenant allowlist decides (empty = every tenant).
+- **Coverage**: `/v1/chat/completions` and `/v1/completions` (the legacy route converts to a chat request and re-uses the same handler, so one tap point covers both).
+- **Isolation contract**: the tap never blocks, fails, or slows the proxied request — the sink write is asynchronous (bounded queue, drop-on-full with a throttled warning every 100th drop) and a sink write failure degrades to a log line. Capture is capped per response (`capture_max_bytes`); the real response bytes always flow untouched.
+
 ### MasterKey
 The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.
 
