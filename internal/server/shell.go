@@ -564,6 +564,7 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
         Roles:              user.roles,
         Modules:            user.modules,
         TenantID:           tenant,
+        Origin:             shell.OriginLocal,
         MustChangePassword: user.mustChange,
     })
     if err != nil {
