@@ -141,7 +141,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         }
         if !s.modelPolicyAllowsModel(tenant, req.Model) {
             msg := "Model not allowed by the tenant model policy"
-            if s.modelPolicies == nil || len(s.modelPolicies.Policy(tenant).UserAllowlist) == 0 {
+            // #599: the "no policy at all" message only when neither the
+            // tenant NOR the global default ("" namespace) is configured —
+            // a tenant falling back to a configured global policy is a
+            // normal deny, not a misconfiguration.
+            tenantConfigured := s.modelPolicies != nil && (s.modelPolicies.HasPolicy(tenant) || s.modelPolicies.HasPolicy(""))
+            if !tenantConfigured {
                 msg = "AI chat is not enabled for this account: no model policy is configured for its tenant. Contact the administrator."
             }
             slog.Warn("model not allowed by tenant model policy", "model", req.Model, "tenant", tenant, "user", claims.Sub)

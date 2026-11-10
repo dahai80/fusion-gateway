@@ -59,19 +59,13 @@ func (s *Server) setupShellAdminSurfaces(cfg *config.Config) {
         slog.Error("shell audit store load failed — starting fresh", "error", err)
         s.shellAudit = shell.NewAuditLog(join("shell_audit.json"))
     }
-    // #486 model-policy plane: policy store + hash-chained audit log. Load
-    // failure degrades to memory-only (hot-apply still works this process).
-    s.modelPolicies = modelpolicy.NewStore()
-    if p := join("model_policy.json"); p != "" {
-        s.modelPolicies.SetPersistence(p)
-        if err := s.modelPolicies.Load(); err != nil {
-            slog.Error("model policy store load failed — starting empty", "error", err)
-        }
-    }
+    // #486 model-policy plane: policy store + hash-chained audit log. The
+    // STORE itself is constructed in initModelPolicyStore (#598 — outside
+    // the shell gate, so the policy plane survives restarts even when
+    // web_shell is disabled); this surface only owns the audit log.
     s.modelPolicyAudit = shell.NewAuditLog(join("model_policy_audit.json"))
     if err := s.modelPolicyAudit.Load(); err != nil {
         slog.Error("model policy audit load failed — starting fresh", "error", err)
-        s.modelPolicyAudit = shell.NewAuditLog(join("model_policy_audit.json"))
     }
     s.shellRoles = shell.NewRoleStore(join("shell_roles.json"))
     if err := s.shellRoles.Load(); err != nil {
@@ -82,6 +76,26 @@ func (s *Server) setupShellAdminSurfaces(cfg *config.Config) {
     if err := s.shellMenus.Load(); err != nil {
         slog.Error("shell menu permissions load failed — starting empty", "error", err)
         s.shellMenus = shell.NewMenuPermissions(join("shell_menu_permissions.json"))
+    }
+}
+
+// initModelPolicyStore constructs + loads the tenant model-policy store
+// (#598). Runs unconditionally at boot — NOT gated on web_shell.enabled —
+// so a restart cannot re-break every tenant's chat until an admin re-PUTs
+// the policy. Persistence lives at <store.data_dir>/model_policy.json;
+// an empty data_dir keeps the store memory-only (previous behavior) with a
+// loud WARN. A corrupt file degrades to an empty store (the next SetPolicy
+// rewrite heals it) — the boot must not crash.
+func (s *Server) initModelPolicyStore() {
+    s.modelPolicies = modelpolicy.NewStore()
+    dataDir := s.cfg.Config.Store.DataDir
+    if dataDir == "" {
+        slog.Warn("store.data_dir empty — model policies are memory-only and will be lost on restart (#598)")
+        return
+    }
+    s.modelPolicies.SetPersistence(filepath.Join(config.ExpandPath(dataDir), "model_policy.json"))
+    if err := s.modelPolicies.Load(); err != nil {
+        slog.Error("model policy store load failed — starting empty (#598)", "error", err)
     }
 }
 

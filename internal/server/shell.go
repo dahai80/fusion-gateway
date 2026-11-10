@@ -886,7 +886,15 @@ func (s *Server) handleShellManifestUpsert(w http.ResponseWriter, r *http.Reques
     }
     if err := s.shellRegistry.Upsert(m); err != nil {
         slog.Warn("shell manifest upsert rejected", "id", m.ID, "error", err)
-        shell.WriteEnvelope(w, http.StatusForbidden, "manifest_rejected", err.Error(), m.ID, false)
+        // #601: schema-validation failures are client payload errors — 400,
+        // not 403 (auth already passed; the caller fixed nothing by retrying
+        // with different credentials). The A7 entry-origin allowlist
+        // rejection stays 403: it is a policy denial, not a malformed body.
+        status := http.StatusBadRequest
+        if errors.Is(err, shell.ErrEntryOriginNotAllowed) {
+            status = http.StatusForbidden
+        }
+        shell.WriteEnvelope(w, status, "manifest_rejected", err.Error(), m.ID, false)
         return
     }
     if m.APIKey != "" {

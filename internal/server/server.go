@@ -784,6 +784,10 @@ func New(
     if srv.managedSettingsSigner != nil {
         slog.Info("managed-settings signing endpoint wired")
     }
+    // #598: tenant model-policy store is constructed + loaded at boot
+    // unconditionally (not gated on web_shell.enabled) so policies survive
+    // restarts regardless of which surfaces are active.
+    srv.initModelPolicyStore()
     // #157: build the fusion-identity gRPC control-plane client. NewClient
     // returns nil on empty endpoint (caller convention: nil = disabled,
     // IdentityAuth middleware pass-through). The local APIKeyAuthWithStore

@@ -635,6 +635,11 @@ func (r *Registry) HeartbeatWithManifest(id string, m *config.ShellManifest) err
 var (
     ErrManifestNotFound = errors.New("shell manifest not registered")
     ErrManifestStatic   = errors.New("static manifest is config-owned and cannot be deleted via the API")
+    // ErrEntryOriginNotAllowed marks the A7 policy rejection: the manifest
+    // entry origin is outside shell.entry_origin_allowlist. The upsert
+    // handler maps it to 403 (policy denial), while schema-validation
+    // failures map to 400 (#601).
+    ErrEntryOriginNotAllowed = errors.New("manifest entry origin not in shell.entry_origin_allowlist")
 )
 
 // Remove drops a dynamic registration and persists the store file (#253) —
@@ -910,7 +915,7 @@ func (r *Registry) checkEntryAllowlist(entryURL string) error {
             return nil
         }
     }
-    return fmt.Errorf("manifest entry origin %q is not in shell.entry_origin_allowlist", origin)
+    return fmt.Errorf("manifest entry origin %q: %w", origin, ErrEntryOriginNotAllowed)
 }
 
 // validateUpstreamURL gates the optional #232 dynamic routing fields: an

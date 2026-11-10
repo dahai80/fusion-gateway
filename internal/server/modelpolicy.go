@@ -49,6 +49,16 @@ func (s *Server) handleModelPolicy(w http.ResponseWriter, r *http.Request) {
         return
     }
     tenant := adapter.TenantFromContext(r.Context())
+    // #599: a PUT/GET that names a tenant the credential does not resolve
+    // to used to be a silent mis-write (admin JWT with no team binding
+    // always landed in the "" namespace). Fail loud instead.
+    if reqTenant := r.URL.Query().Get("tenant"); reqTenant != "" && reqTenant != tenant {
+        slog.Warn("model policy tenant mismatch", "resolved", tenant, "requested", reqTenant, "method", r.Method)
+        writeJSON(w, http.StatusBadRequest, map[string]string{
+            "error": "tenant mismatch: credential resolves to " + tenant + ", request named " + reqTenant,
+        })
+        return
+    }
     switch r.Method {
     case http.MethodGet:
         writeJSON(w, http.StatusOK, map[string]any{"tenant": tenant, "policy": s.modelPolicies.Policy(tenant)})
@@ -140,22 +150,28 @@ func (s *Server) modelPolicyFallback() string {
 }
 
 // modelPolicyAllowsModel reports whether the tenant model policy permits
-// calling chat with the given model directly (issue #11): a non-empty
-// user_allowlist must contain it, and privacy_mode local_only must not
-// route it to a cloud backend. Fail-closed: a tenant without an explicit
-// non-empty allowlist (or a disabled policy store) permits no model at all —
-// an unconfigured tenant must never widen to the full catalog.
+// calling chat with the given model directly (issue #11). #599 fallback
+// chain: tenant policy → global default policy (the "" namespace) → deny.
+// A tenant with no configured policy no longer hard-denies everything — it
+// degrades to the global default, so a newly created tenant works without
+// an admin hand-configuring it first. Match semantics are parity with the
+// key-plane allowed_models matcher: exact (case-insensitive) or trailing-*
+// prefix, so `user_allowlist: ["*"]` means "allow all" instead of silently
+// matching nothing.
 func (s *Server) modelPolicyAllowsModel(tenant, model string) bool {
     if s.modelPolicies == nil {
         return false
     }
     policy := s.modelPolicies.Policy(tenant)
+    if !s.modelPolicies.HasPolicy(tenant) {
+        policy = s.modelPolicies.Policy("")
+    }
     if len(policy.UserAllowlist) == 0 {
         return false
     }
     found := false
     for _, allowed := range policy.UserAllowlist {
-        if strings.EqualFold(allowed, model) {
+        if allowlistPatternMatches(allowed, model) {
             found = true
             break
         }
@@ -167,6 +183,22 @@ func (s *Server) modelPolicyAllowsModel(tenant, model string) bool {
         return false
     }
     return true
+}
+
+// allowlistPatternMatches is the #599 pattern matcher shared by the
+// model-policy user_allowlist: case-insensitive exact match, or a
+// trailing-`*` prefix match — the same shape as the key-plane
+// allowed_models matcher (middleware.CheckModelAllowlist).
+func allowlistPatternMatches(allowed, model string) bool {
+    allowedLower := strings.ToLower(allowed)
+    modelLower := strings.ToLower(model)
+    if allowedLower == "*" {
+        return true
+    }
+    if strings.HasSuffix(allowedLower, "*") {
+        return strings.HasPrefix(modelLower, allowedLower[:len(allowedLower)-1])
+    }
+    return allowedLower == modelLower
 }
 
 // handleShellModelPolicy serves GET /api/v1/shell/model-policy (and the
