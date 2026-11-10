@@ -12,10 +12,21 @@ import (
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/exchange"
     "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
+
+// ExchangePath is the token-exchange endpoint (#595). An exchange-only key is
+// valid on exactly this path and nowhere else.
+const ExchangePath = "/auth/api/token/exchange"
+
+// TokenVerifier validates a gateway-minted exchange token (#595). Satisfied
+// by *exchange.Signer; nil when auth.token_exchange is disabled.
+type TokenVerifier interface {
+    Verify(token string) (*exchange.Claims, error)
+}
 
 type keyLookupStore interface {
     GetKeyByHash(hash string) (*store.APIKeyEntry, error)
@@ -41,10 +52,10 @@ type BackendKeyMatcher func(key string) *config.AuthKeyConfig
 var invalidKeyLogThrottle = logthrottle.New(5 * time.Minute)
 
 func APIKeyAuth(cfg *config.AuthConfig) func(http.Handler) http.Handler {
-    return APIKeyAuthWithStore(cfg, nil)
+    return APIKeyAuthWithStore(cfg, nil, nil)
 }
 
-func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...BackendKeyMatcher) func(http.Handler) http.Handler {
+func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, verifier TokenVerifier, matchers ...BackendKeyMatcher) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             ctx, p := EnsurePrincipal(r.Context())
@@ -88,6 +99,26 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...
             }
 
             var matchedKey *config.AuthKeyConfig
+            // #595: a credential in JWS compact form (two dots) that is not
+            // any configured key is tried against the gateway's own exchange
+            // signer. On success the minted claims become the effective key:
+            // model allowlist, rate caps, and tenant are exactly the minting
+            // key's, frozen at exchange time — a short-lived scoped token can
+            // never widen its parent's scope.
+            if verifier != nil && strings.Count(key, ".") == 2 {
+                if claims, err := verifier.Verify(key); err == nil {
+                    slog.Info("exchange token authenticated", "path", r.URL.Path, "sub", claims.Subject)
+                    matchedKey = &config.AuthKeyConfig{
+                        Key:           "",
+                        Name:          claims.Subject,
+                        AllowedModels: claims.Models,
+                        RPM:           claims.RPM,
+                        TPM:           claims.TPM,
+                        TeamID:        claims.Tenant,
+                    }
+                }
+            }
+
             for i := range cfg.APIKeys {
                 if subtle.ConstantTimeCompare([]byte(cfg.APIKeys[i].Key), []byte(key)) == 1 {
                     matchedKey = &cfg.APIKeys[i]
@@ -140,6 +171,18 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...
                 return
             }
 
+            // #595: exchange-only credentials are valid on the exchange
+            // endpoint and nowhere else. Enforced here (the single choke
+            // point every authenticated /v1/* path flows through) so a
+            // bootstrap credential cannot be replayed as a full-plane key.
+            if matchedKey.ExchangeOnly && r.URL.Path != ExchangePath {
+                slog.Warn("exchange-only key rejected on non-exchange path",
+                    "key", matchedKey.Name, "path", r.URL.Path)
+                observability.RecordAuthInvalidKey("exchange-only")
+                http.Error(w, `{"error":{"message":"exchange-only credential is valid only for POST /auth/api/token/exchange","type":"auth_error"}}`, http.StatusUnauthorized)
+                return
+            }
+
             if matchedKey.ExpiresAt != "" {
                 expiresAt, err := time.Parse(time.RFC3339, matchedKey.ExpiresAt)
                 if err != nil {
@@ -175,9 +218,12 @@ func APIKeyAuthWithStore(cfg *config.AuthConfig, st keyLookupStore, matchers ...
                 // #159: carry the tenant's Tier tag so the 3-tier priority
                 // queue can admit by tenant priority class. Best-effort: a
                 // store miss leaves Tier empty (defaults to general via the
-                // coarse-intent heuristic).
-                if team, terr := st.GetTeamByKey(key); terr == nil && team != nil {
-                    ti.Tier = team.Tier
+                // coarse-intent heuristic). #595: minted exchange tokens
+                // carry a TeamID claim without a store (st may be nil).
+                if st != nil {
+                    if team, terr := st.GetTeamByKey(key); terr == nil && team != nil {
+                        ti.Tier = team.Tier
+                    }
                 }
                 p.Team = ti
             }

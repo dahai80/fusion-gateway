@@ -513,7 +513,7 @@ func TestAPIKeyAuthWithStore_HashLookupSuccess(t *testing.T) {
     }
     cfg := &config.AuthConfig{Enabled: true}
     called := false
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         called = true
         p := PrincipalFromContext(r.Context())
         if p == nil || p.KeyConfig == nil || p.KeyConfig.Name != "managed-key" {
@@ -548,7 +548,7 @@ func TestAPIKeyAuthWithStore_TenantResolvedFromKeyBinding(t *testing.T) {
     }
     cfg := &config.AuthConfig{Enabled: true}
     var gotTeam, gotCtxTenant, gotKeyTeamID string
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
         if p.Team != nil {
             gotTeam = p.Team.ID
@@ -591,7 +591,7 @@ func TestAPIKeyAuthWithStore_NoTeamBindingOmitsTenant(t *testing.T) {
     cfg := &config.AuthConfig{Enabled: true}
     var ctxTenant string
     var principalTeam *TeamInfo
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         p := PrincipalFromContext(r.Context())
         principalTeam = p.Team
         ctxTenant = adapter.TenantFromContext(r.Context())
@@ -624,7 +624,7 @@ func TestAPIKeyAuthWithStore_DisabledKeyRejected(t *testing.T) {
         },
     }
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("revoked key must not reach handler")
     }))
     req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -646,7 +646,7 @@ func TestAPIKeyAuthWithStore_StoreErrorFailClosed(t *testing.T) {
     rawKey := "sk-store-down-test-key"
     st := &mockKeyLookupStore{err: errors.New("redis connection refused")}
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("handler must NOT be called when store lookup errors (fail-closed)")
     }))
     req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -666,7 +666,7 @@ func TestAPIKeyAuthWithStore_StaticKeyWins(t *testing.T) {
         APIKeys: []config.AuthKeyConfig{{Key: "fg-static-key", Name: "static"}},
     }
     called := false
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         called = true
         p := PrincipalFromContext(r.Context())
         if p.KeyConfig.Name != "static" {
@@ -748,7 +748,7 @@ func TestFinalizeAndAppendLog_EntryStampWins(t *testing.T) {
 
 func TestAPIKeyAuthShellSessionPrincipalSkipsKeyResolution(t *testing.T) {
     cfg := &config.AuthConfig{Enabled: true, MasterKey: "mk"}
-    h := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    h := APIKeyAuthWithStore(cfg, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
     }))
     ctx := ContextWithPrincipal(context.Background(), &Principal{AuthMethod: "shell-session", Role: RoleAdmin})
@@ -772,7 +772,7 @@ func TestAPIKeyAuth_BackendKeyMatcher(t *testing.T) {
         return nil
     }
     var called bool
-    handler := APIKeyAuthWithStore(cfg, nil, matcher)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, nil, nil, matcher)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         called = true
         p := PrincipalFromContext(r.Context())
         if p == nil || p.KeyConfig == nil || p.KeyConfig.Name != "backend:fusion-mlx" {

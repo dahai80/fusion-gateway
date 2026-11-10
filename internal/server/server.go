@@ -32,6 +32,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/identity"
     pb "github.com/fusion-gateway/fusion-gateway/internal/identity/pb"
+    "github.com/fusion-gateway/fusion-gateway/internal/exchange"
     "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
     "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "github.com/fusion-gateway/fusion-gateway/internal/mcp"
@@ -246,6 +247,10 @@ type Server struct {
     // nil when try_quota.enabled=false — the gate middleware is then a
     // pass-through and finalize accounting is a no-op.
     tryQuotaMeter *tryquota.Store
+    // #595: exchange-plane signer (RS256, persisted keypair). nil when
+    // auth.token_exchange.enabled=false — no exchange route, no JWKS route,
+    // and the middleware accepts no minted tokens.
+    tokenSigner *exchange.Signer
     // #506: auth-portal janitor (expired codes + stale rate windows); a
     // lifecycle worker so Shutdown cancels + joins it (bare-goroutine gate).
     authPortalWorker *lifecycle.Worker
@@ -761,6 +766,18 @@ func New(
     // Governance dashboard: cooldown arm/clear land in fg_gateway_events
     // via the persistence sink (no-op log-only when persistence is off).
     cs.SetEventHook(srv.recordGovernanceEvent)
+    // #595: build the exchange-plane signer when token exchange is enabled.
+    // The RSA keypair is generated on first boot and persisted in the store
+    // data dir so minted tokens survive restarts.
+    if cfg.Config.Auth.TokenExchange.Enabled {
+        signer, err := exchange.NewSigner(cfg.Config.Store.DataDir)
+        if err != nil {
+            slog.Error("token exchange enabled but signer init failed; exchange plane disabled (#595)", "error", err)
+        } else {
+            srv.tokenSigner = signer
+            slog.Info("token exchange plane wired (#595)", "data_dir", cfg.Config.Store.DataDir, "max_ttl", cfg.Config.Auth.TokenExchange.MaxTTL)
+        }
+    }
     // #151: build the managed-settings Ed25519 signer when enabled. nil when
     // disabled — routes are not registered below in that case.
     srv.managedSettingsSigner = newManagedSettingsSigner(cfg.Config.ManagedSettings)
@@ -1023,6 +1040,14 @@ func (s *Server) Start() error {
     mux.HandleFunc("/readyz", s.handleReadyz)
     mux.HandleFunc("/livez", s.handleLivez)
     mux.HandleFunc("/v1/status", s.withMiddleware(s.handleStatus))
+
+    // #595: token exchange plane. The exchange endpoint sits behind the
+    // standard middleware chain (bootstrap credential resolves there); the
+    // JWKS endpoint is public-read (public keys only) so downstream
+    // verifiers validate minted tokens offline. Both 404 when
+    // auth.token_exchange.enabled=false (signer nil).
+    mux.HandleFunc("POST /auth/api/token/exchange", s.withMiddleware(s.handleTokenExchange))
+    mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 
     // #163: cluster-wide admission + shared circuit-breaker visibility for
     // multi-node MLX clients (fusion-code). Read-only, fg-key auth. Returns
@@ -1638,7 +1663,7 @@ func (s *Server) buildMiddlewareChain() {
         // backend's api_key (e.g. fusion-mlx fg-admin-key) as a full-access
         // credential. Built per-chain (rebuilt on reload) so backend key
         // changes take effect without a restart.
-        middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store, s.backendKeyMatcher()),
+        middleware.APIKeyAuthWithStore(&s.cfg.Config.Auth, s.store, s.exchangeVerifier(), s.backendKeyMatcher()),
         // #157: identity gRPC control-plane sits AFTER local key auth (needs
         // the resolved plaintext key in p.KeyConfig.Key) and BEFORE RBAC so
         // the identity-derived tenant is authoritative for downstream role
