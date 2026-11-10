@@ -1219,6 +1219,7 @@ Each API key supports fine-grained access control:
 | `name` | Human-readable key identifier |
 | `rpm` | Requests per minute (0 = unlimited) |
 | `tpm` | Tokens per minute (0 = unlimited) |
+| `unlimited` | Explicit opt-in to unlimited caps for a NON-admin entry (#594): a static `auth.api_keys` entry whose `name` is not `admin` and that has `rpm: 0` or `tpm: 0` **fails gateway startup** unless this flag is set — copy-pasting an admin-style entry no longer silently mints an unlimited key. The `admin` entry keeps back-compat unlimited semantics with a load-time WARN. |
 | `allowed_models` | Model allowlist with wildcard support (e.g., `gpt-4o*`, `*`) |
 | `allowed_backends` | Backend allowlist — requests routed to non-whitelisted backends get 403. Wildcard `*` allows all |
 | `expires_at` | RFC3339 expiry timestamp |

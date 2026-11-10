@@ -193,7 +193,7 @@ func TestValidate_APIKey_EmptyKeyOKWhenAuthDisabled(t *testing.T) {
 func TestValidate_APIKey_NonEmptyKeyAccepted(t *testing.T) {
     cfg := DefaultConfig()
     cfg.Auth.Enabled = true
-    cfg.Auth.APIKeys = []AuthKeyConfig{{Name: "real-key", Key: "sk-real-key-value"}}
+    cfg.Auth.APIKeys = []AuthKeyConfig{{Name: "real-key", Key: "sk-real-key-value", RPM: 60, TPM: 100000}}
     if err := validate(&cfg); err != nil {
         t.Fatalf("non-empty api_keys entry should pass: %v", err)
     }

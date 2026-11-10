@@ -33,6 +33,8 @@ auth:
     api_keys:
         - key: ak-test-0123456789abcdef
           name: n1
+          rpm: 60
+          tpm: 100000
 server:
     enable_pprof: false
 route:

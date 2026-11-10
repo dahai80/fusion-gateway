@@ -125,6 +125,12 @@ type AuthKeyConfig struct {
     ModelModules    []string          `mapstructure:"model_modules"`
     RPM             int               `mapstructure:"rpm"`
     TPM             int               `mapstructure:"tpm"`
+    // Unlimited (#594) is the explicit opt-in to the key plane's
+    // "rpm/tpm 0 = unlimited" back-compat semantics for a NON-admin entry.
+    // Without it a zero cap fails gateway startup with the entry named —
+    // copy-pasting an admin-style entry no longer silently mints an
+    // unlimited key.
+    Unlimited       bool              `mapstructure:"unlimited"`
     ExpiresAt        string            `mapstructure:"expires_at"`
     BudgetLimit      float64           `mapstructure:"budget_limit"`
     DailyBudgetLimit float64           `mapstructure:"daily_budget_limit"`
@@ -2390,18 +2396,29 @@ func validate(cfg *Config) error {
         if k.DailyBudgetLimit < 0 {
             return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
         }
-        // #586: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
+        // #586/#594: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
         // semantics — AllowRPM/AllowTPM return true for rpm<=0). That is a
         // dangerous silent default: a typo or omission disables capping
-        // instead of failing closed. Never rejected (existing deployments
-        // rely on it), but every such key is surfaced at load so an
-        // unlimited key is always a visible operator decision.
+        // instead of failing closed. #594 escalates it for NON-admin entries:
+        // they fail startup unless the operator sets unlimited: true — an
+        // explicit, greppable decision. The admin entry keeps the WARN
+        // (existing deployments rely on its unlimited semantics).
         if cfg.Auth.Enabled {
-            if k.RPM <= 0 {
-                slog.Warn("auth key has rpm<=0: NO request-rate cap applies (0 = unlimited, #586)", "key", k.Name)
-            }
-            if k.TPM <= 0 {
-                slog.Warn("auth key has tpm<=0: NO token-rate cap applies (0 = unlimited, #586)", "key", k.Name)
+            if k.RPM <= 0 || k.TPM <= 0 {
+                dims := []string{}
+                if k.RPM <= 0 {
+                    dims = append(dims, "rpm=0")
+                }
+                if k.TPM <= 0 {
+                    dims = append(dims, "tpm=0")
+                }
+                if k.Name == "admin" {
+                    slog.Warn("admin key has uncapped rate dimensions (0 = unlimited, back-compat)", "dims", dims)
+                } else if !k.Unlimited {
+                    return fmt.Errorf("auth key %q has %s: 0 means UNLIMITED on the key plane; set a numeric cap, or add explicit unlimited: true to opt in deliberately (#594)", k.Name, strings.Join(dims, ", "))
+                } else {
+                    slog.Warn("auth key is explicitly unlimited (unlimited: true, #594)", "key", k.Name, "dims", dims)
+                }
             }
         }
     }

@@ -155,7 +155,7 @@ func TestC1_APIKeyPlaceholderRejected(t *testing.T) {
     cfg := DefaultConfig()
     cfg.Auth.Enabled = true
     cfg.Auth.APIKeys = []AuthKeyConfig{
-        {Name: "demo", Key: "fg-demo-key-change-me"},
+        {Name: "demo", Key: "fg-demo-key-change-me", RPM: 60, TPM: 100000},
     }
     if err := validate(&cfg); err == nil {
         t.Fatal("C1: expected validate to reject placeholder api_key, got nil")
