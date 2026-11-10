@@ -18,6 +18,8 @@
             "err-password-mismatch": "Passwords do not match.",
             "f-tenant": "Tenant",
             "f-optional": "(optional)",
+            "f-captcha": "Verification code",
+            "btn-captcha-refresh": "Refresh",
             "f-email": "Email",
             "f-team": "Team name",
             "f-token": "Verification token",
@@ -55,6 +57,8 @@
             "err-password-mismatch": "两次输入的密码不一致。",
             "f-tenant": "租户",
             "f-optional": "（可选）",
+            "f-captcha": "验证码",
+            "btn-captcha-refresh": "换一张",
             "f-email": "邮箱",
             "f-team": "团队名称",
             "f-token": "验证令牌",
@@ -138,6 +142,10 @@
 
     function errMsg(r) {
         var detail = (r.data && (r.data.detail || r.data.message)) || "";
+        // #603: captcha rejections surface a plain message, not a JSON blob.
+        if (r.data && typeof r.data.code === "string" && r.data.code.indexOf("captcha_") === 0) {
+            return "Verification code incorrect or expired. A new code has been loaded — try again.";
+        }
         // #571: identity returns an OBJECT detail on 409 tenant_ambiguous —
         // {"error":"tenant_ambiguous","tenants":[{tenant_id,...},...]} is the
         // documented picker contract. Render a picker prompt (and pre-fill
@@ -185,6 +193,28 @@
         }).catch(function () { say(t("err-generic")); });
     }
 
+    // #603: portal login CAPTCHA — the same single-use challenge contract
+    // as the shell login. The challenge probes on load; a disabled plane
+    // keeps the row hidden and the login posts without captcha fields.
+    var captchaId = "";
+    function loadCaptcha() {
+        fetch("/auth/api/captcha").then(function (res) {
+            return res.json();
+        }).then(function (data) {
+            var row = document.getElementById("captcha-row");
+            if (!data || data.enabled !== true) { row.hidden = true; captchaId = ""; return; }
+            row.hidden = false;
+            captchaId = data.captcha_id;
+            document.getElementById("captcha-img").src = data.image;
+            var f = document.getElementById("form-login");
+            if (f.elements.captcha_code) { f.elements.captcha_code.value = ""; }
+        }).catch(function () {
+            document.getElementById("captcha-row").hidden = true;
+            captchaId = "";
+        });
+    }
+    document.getElementById("captcha-refresh").addEventListener("click", loadCaptcha);
+
     function bindTab(name) {
         document.querySelectorAll(".tab").forEach(function (tab) {
             tab.classList.toggle("active", tab.getAttribute("data-tab") === name);
@@ -213,8 +243,20 @@
         // user's memberships server-side; pinning "default" rejected every
         // user registered under another tenant (401 tenant_mismatch).
         if (f.tenant_id.value.trim()) payload.tenant_id = f.tenant_id.value.trim();
+        // #603: attach the challenge when the plane is enabled.
+        if (captchaId) {
+            payload.captcha_id = captchaId;
+            payload.captcha_code = f.elements.captcha_code.value;
+        }
         postJSON("/auth/api/identity/api/v1/auth/login", payload).then(function (r) {
-            if (!r.ok) { say(errMsg(r)); return; }
+            if (!r.ok) {
+                // A rejected challenge is burned (single-use) — load a fresh one.
+                if (r.data && typeof r.data.code === "string" && r.data.code.indexOf("captcha_") === 0) {
+                    loadCaptcha();
+                }
+                say(errMsg(r));
+                return;
+            }
             if (r.data.mfa_required) { say("MFA code required is not supported here yet."); return; }
             finishLogin({
                 access_token: r.data.access_token,
@@ -341,4 +383,5 @@
     }
 
     applyLang();
+    loadCaptcha();
 })();

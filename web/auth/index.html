@@ -29,6 +29,14 @@
         <input name="username" required autocomplete="username">
         <label data-i18n="f-password">Password</label>
         <input name="password" type="password" required autocomplete="current-password">
+        <div id="captcha-row" hidden>
+            <label data-i18n="f-captcha">Verification code</label>
+            <div class="captcha-line">
+                <img id="captcha-img" alt="captcha" height="48">
+                <button type="button" id="captcha-refresh" class="linkbtn" data-i18n="btn-captcha-refresh">Refresh</button>
+            </div>
+            <input name="captcha_code" autocomplete="off" maxlength="8">
+        </div>
         <label data-i18n="f-tenant">Tenant <span class="opt" data-i18n="f-optional">(optional)</span></label>
         <input name="tenant_id" autocomplete="off">
         <button type="submit" class="primary" data-i18n="btn-login">Sign in</button>

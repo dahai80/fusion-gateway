@@ -23,14 +23,18 @@ import (
     "encoding/binary"
     "encoding/hex"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log/slog"
     "math/big"
+    "net"
     "net/http"
     "net/url"
+    "os"
     "strings"
     "sync"
+    "sync/atomic"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
@@ -44,7 +48,40 @@ const (
     authPortalJWKSRefresh = 10 * time.Minute
     authPortalMaxBody     = 64 * 1024
     authPortalCodeBytes   = 32
+
+    // #602: bounds for the identity hop. identityProxyTimeout keeps the
+    // round-trip under the 15s Client.Timeout; identityBreakerThreshold
+    // consecutive timeouts open the breaker for identityBreakerCooldown.
+    identityProxyTimeout      = 15 * time.Second
+    identityBreakerThreshold  = 3
+    identityBreakerCooldown   = 30 * time.Second
 )
+
+// newIdentityHTTPClient builds the dedicated client for the identity hop
+// (#602). The portal previously used &http.Client{Timeout: 15s} with a nil
+// Transport — i.e. the SHARED http.DefaultTransport — so identity's stall
+// left half-dead keep-alive connections in a pool every other gateway
+// component dials through: each reused conn hung until client timeout even
+// after identity recovered, and only a gateway restart drained the pool.
+// A dedicated transport with short idle timeout + response-header bound
+// contains the blast radius; forwardIdentity drops idle conns and retries
+// once on a fresh connection when a round-trip fails.
+func newIdentityHTTPClient() *http.Client {
+    return &http.Client{
+        Timeout: identityProxyTimeout,
+        Transport: &http.Transport{
+            Proxy:                 http.ProxyFromEnvironment,
+            DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+            MaxIdleConns:          20,
+            MaxIdleConnsPerHost:   8,
+            MaxConnsPerHost:       16,
+            IdleConnTimeout:       30 * time.Second,
+            ResponseHeaderTimeout: 5 * time.Second,
+            TLSHandshakeTimeout:   5 * time.Second,
+            ExpectContinueTimeout: time.Second,
+        },
+    }
+}
 
 // authCodeGrant is one outstanding one-time code.
 type authCodeGrant struct {
@@ -79,6 +116,20 @@ type authPortal struct {
     // limit. Reuses the #587 throttle (5 fails / 5 min per IP+username →
     // 60s lockout, success clears).
     loginThrottle *shellLoginThrottle
+
+    // #603: the shared single-use CAPTCHA store (shell.captcha config gates
+    // it). Nil = plane disabled, the portal login forwards without a
+    // challenge (the shell frontend contract).
+    captcha *shellCaptchaStore
+
+    // #602: tiny fail-fast breaker for the identity hop. identityBreakerFails
+    // counts consecutive timeout-class failures; at identityBreakerThreshold
+    // the breaker opens for identityBreakerCooldown and login attempts get an
+    // immediate 503 instead of queueing on a hung upstream. Any success
+    // closes it. UnixNano of the reopen instant (0 = closed), atomic so the
+    // read path needs no lock.
+    identityBreakerFails    atomic.Int64
+    identityBreakerOpenUntil atomic.Int64
 }
 
 // registerAuthPortalRoutes mounts /auth (SPA), /auth/api/identity/<path>
@@ -117,10 +168,11 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
     portal := &authPortal{
         cfg:        cfg,
         identity:   target,
-        httpClient: &http.Client{Timeout: 15 * time.Second},
+        httpClient: newIdentityHTTPClient(),
         codes:         make(map[string]*authCodeGrant),
         hits:          make(map[string][]time.Time),
         loginThrottle: newShellLoginThrottle(),
+        captcha:       s.shellCaptcha,
     }
     if len(cfg.RedirectURIs) == 0 {
         // Allowlist empty: SPA serves, but code issuance always refuses
@@ -138,6 +190,9 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
     mux.Handle("/auth/api/identity/", portal.guard(portal.handleIdentityProxy))
     mux.Handle("/auth/api/code", portal.guard(portal.handleIssueCode))
     mux.Handle("/auth/api/code/exchange", portal.guard(portal.handleExchangeCode))
+    // #603: challenge issuance for the portal login form — unauthenticated
+    // by contract (fetched before any session exists), always no-store.
+    mux.Handle("GET /auth/api/captcha", http.HandlerFunc(portal.handleAuthPortalCaptcha))
 
     s.authPortalWorker = lifecycle.Start(context.Background(), "auth_portal_janitor", portal.janitor)
     slog.Info("auth portal registered", "static_dir", staticDir, "identity", identityURL, "code_ttl_secs", ttl, "redirect_uris", len(cfg.RedirectURIs))
@@ -282,6 +337,23 @@ func (p *authPortal) handlePortalLogin(w http.ResponseWriter, r *http.Request, u
         Username string `json:"username"`
     }
     _ = json.Unmarshal(body, &req)
+    // #603: verify the challenge BEFORE the lockout counter and the
+    // upstream credential check — a captcha failure is a bot signal, so it
+    // must not consume a lockout attempt (#592: never feed the counter) and
+    // must not reach identity at all.
+    if p.captcha != nil {
+        var cap struct {
+            CaptchaID   string `json:"captcha_id"`
+            CaptchaCode string `json:"captcha_code"`
+        }
+        _ = json.Unmarshal(body, &cap)
+        if res := p.captcha.verify(cap.CaptchaID, cap.CaptchaCode); res != "" {
+            slog.Warn("auth portal login captcha rejected", "code", res, "username", req.Username)
+            shell.WriteEnvelope(w, http.StatusBadRequest, res,
+                "captcha verification failed; refresh and retry", "auth_portal", true)
+            return
+        }
+    }
     ip := clientIPFromRequest(r)
     if p.loginThrottle == nil {
         p.loginThrottle = newShellLoginThrottle()
@@ -301,36 +373,102 @@ func (p *authPortal) handlePortalLogin(w http.ResponseWriter, r *http.Request, u
     }
 }
 
+// identityTimeoutErr reports whether the round-trip failed with a
+// timeout/connection class error — the poisoned-keep-alive shape from
+// #602 (peer accepts but never responds) as opposed to a local bug.
+func identityTimeoutErr(err error) bool {
+    if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+        return true
+    }
+    var ne net.Error
+    if errors.As(err, &ne) && ne.Timeout() {
+        return true
+    }
+    msg := err.Error()
+    return strings.Contains(msg, "connection reset") ||
+        strings.Contains(msg, "broken pipe") ||
+        strings.Contains(msg, "EOF")
+}
+
+// identityBreakerTripped reports (and lazily clears) an open breaker.
+func (p *authPortal) identityBreakerTripped() bool {
+    until := p.identityBreakerOpenUntil.Load()
+    if until == 0 {
+        return false
+    }
+    if time.Now().UnixNano() >= until {
+        p.identityBreakerOpenUntil.Store(0)
+        p.identityBreakerFails.Store(0)
+        return false
+    }
+    return true
+}
+
 // forwardIdentity performs the upstream round-trip with an in-memory body
 // and writes the upstream response through; returns the upstream status so
 // callers can react to credential outcomes (#590).
+//
+// #602 hardening: a timeout/reset-class failure on the first attempt drops
+// the transport's idle connections (the half-dead keep-alive pool that
+// survived identity's recovery) and retries ONCE on a fresh connection.
+// Timeout-class final failures surface as 504 and count toward the
+// fail-fast breaker; other transport failures stay 503.
 func (p *authPortal) forwardIdentity(w http.ResponseWriter, r *http.Request, upstreamPath string, body []byte) int {
-    req, err := http.NewRequestWithContext(r.Context(), r.Method, p.identity.String()+upstreamPath, strings.NewReader(string(body)))
-    if err != nil {
-        shell.WriteEnvelope(w, http.StatusInternalServerError, "proxy_error",
-            "auth upstream request failed", "auth_portal", false)
-        return http.StatusInternalServerError
-    }
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("X-Forwarded-For", clientIPFromRequest(r))
-    resp, err := p.httpClient.Do(req)
-    if err != nil {
-        slog.Warn("auth portal upstream error", "path", upstreamPath, "error", err)
+    if p.identityBreakerTripped() {
+        slog.Warn("auth portal identity breaker open — failing fast", "path", upstreamPath)
         shell.WriteEnvelope(w, http.StatusServiceUnavailable, "upstream_unavailable",
-            "identity service unreachable; retry shortly", "auth_portal", true)
+            "identity temporarily unavailable; retry shortly", "auth_portal", true)
         return http.StatusServiceUnavailable
     }
-    defer resp.Body.Close()
-    respBody, err := io.ReadAll(io.LimitReader(resp.Body, authPortalMaxBody))
-    if err != nil {
-        shell.WriteEnvelope(w, http.StatusBadGateway, "upstream_error",
-            "identity response unreadable", "auth_portal", true)
-        return http.StatusBadGateway
+    for attempt := 1; ; attempt++ {
+        req, err := http.NewRequestWithContext(r.Context(), r.Method, p.identity.String()+upstreamPath, strings.NewReader(string(body)))
+        if err != nil {
+            shell.WriteEnvelope(w, http.StatusInternalServerError, "proxy_error",
+                "auth upstream request failed", "auth_portal", false)
+            return http.StatusInternalServerError
+        }
+        req.Header.Set("Content-Type", "application/json")
+        req.Header.Set("X-Forwarded-For", clientIPFromRequest(r))
+        resp, err := p.httpClient.Do(req)
+        if err != nil {
+            slog.Warn("auth portal upstream error", "path", upstreamPath, "attempt", attempt, "error", err)
+            if attempt == 1 && identityTimeoutErr(err) {
+                // Drop the poisoned idle pool, then retry on a fresh conn.
+                if tr, ok := p.httpClient.Transport.(interface{ CloseIdleConnections() }); ok {
+                    tr.CloseIdleConnections()
+                }
+                continue
+            }
+            status := http.StatusServiceUnavailable
+            code := "upstream_unavailable"
+            if identityTimeoutErr(err) {
+                status = http.StatusGatewayTimeout
+                code = "upstream_timeout"
+                fails := p.identityBreakerFails.Add(1)
+                if fails >= identityBreakerThreshold {
+                    p.identityBreakerOpenUntil.Store(time.Now().Add(identityBreakerCooldown).UnixNano())
+                    p.identityBreakerFails.Store(0)
+                    slog.Warn("auth portal identity breaker opened", "consecutive_timeouts", fails, "cooldown", identityBreakerCooldown.String())
+                }
+            }
+            shell.WriteEnvelope(w, status, code,
+                "identity service unreachable; retry shortly", "auth_portal", true)
+            return status
+        }
+        defer resp.Body.Close()
+        respBody, err := io.ReadAll(io.LimitReader(resp.Body, authPortalMaxBody))
+        if err != nil {
+            shell.WriteEnvelope(w, http.StatusBadGateway, "upstream_error",
+                "identity response unreadable", "auth_portal", true)
+            return http.StatusBadGateway
+        }
+        p.identityBreakerFails.Store(0)
+        p.identityBreakerOpenUntil.Store(0)
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(resp.StatusCode)
+        _, _ = w.Write(respBody)
+        return resp.StatusCode
     }
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(resp.StatusCode)
-    _, _ = w.Write(respBody)
-    return resp.StatusCode
 }
 
 type issueCodeRequest struct {
@@ -587,4 +725,11 @@ func newOneTimeCode() (string, error) {
         return "", err
     }
     return hex.EncodeToString(buf), nil
+}
+
+// handleAuthPortalCaptcha (#603): GET /auth/api/captcha — challenge issuance
+// for the portal login form, same store and shape as the shell plane (#592).
+// Unauthenticated by contract (fetched before any session exists).
+func (p *authPortal) handleAuthPortalCaptcha(w http.ResponseWriter, r *http.Request) {
+    serveCaptchaChallenge(w, p.captcha)
 }

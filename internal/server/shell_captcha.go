@@ -2,10 +2,12 @@ package server
 
 import (
     "crypto/rand"
+    "encoding/json"
     "encoding/base64"
     "fmt"
     "log/slog"
     "math/big"
+    "net/http"
     "strings"
     "sync"
     "time"
@@ -103,7 +105,11 @@ func (c *shellCaptchaStore) verify(id, code string) string {
     if !ch.expires.After(c.now()) {
         return "captcha_expired"
     }
-    if ch.code != code {
+    // #604: compare case-insensitively — the mixed-case charset rendered as
+    // rotated SVG glyphs makes case unreadable, so a correct reading fails
+    // ~50% per ambiguous char under an exact match. Entropy loss is
+    // negligible for a single-use 5-minute challenge behind the #587 lockout.
+    if !strings.EqualFold(ch.code, code) {
         return "captcha_mismatch"
     }
     return ""
@@ -142,4 +148,25 @@ func renderSVG(code string) string {
 func escapeSVGText(s string) string {
     r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;")
     return r.Replace(s)
+}
+
+// serveCaptchaChallenge writes the shared single-use challenge shape (shell
+// login #592, portal #603). Nil store = plane disabled: a stable
+// {"enabled":false} the frontends probe and degrade on. Always no-store —
+// a cached challenge is a burned challenge.
+func serveCaptchaChallenge(w http.ResponseWriter, st *shellCaptchaStore) {
+    w.Header().Set("Cache-Control", "no-store")
+    if st == nil {
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+        return
+    }
+    id, code := st.issue()
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "captcha_id":   id,
+        "image":        renderSVG(code),
+        "ttl_seconds":  int(st.ttl.Seconds()),
+        "enabled":      true,
+    })
 }

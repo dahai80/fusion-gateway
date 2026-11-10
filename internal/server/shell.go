@@ -479,27 +479,11 @@ func bearerToken(r *http.Request) string {
 // handleShellCaptchaChallenge (#592) serves a fresh single-use SVG challenge
 // for the login plane. Unauthenticated by contract; always no-store.
 func (s *Server) handleShellCaptchaChallenge(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Cache-Control", "no-store")
     if s.shellSessions == nil {
         shell.WriteEnvelope(w, http.StatusNotFound, "shell_disabled", "shell subsystem is not enabled", "", false)
         return
     }
-    if s.shellCaptcha == nil {
-        // Captcha disabled: the shell frontend probes and degrades when the
-        // plane is absent — answer a stable shape that says "no gate".
-        w.Header().Set("Content-Type", "application/json")
-        _ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
-        return
-    }
-    id, code := s.shellCaptcha.issue()
-    ttl := s.shellCaptcha.ttl
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]any{
-        "captcha_id":   id,
-        "image":        renderSVG(code),
-        "ttl_seconds":  int(ttl.Seconds()),
-        "enabled":      true,
-    })
+    serveCaptchaChallenge(w, s.shellCaptcha)
 }
 
 func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request) {
