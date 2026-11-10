@@ -117,3 +117,17 @@ input:focus { outline: none; border-color: var(--ink); }
 .msg.err { background: #fbeae9; color: var(--danger); }
 .msg.ok { background: #e8f4ee; color: var(--ok); }
 .foot { margin-top: 22px; text-align: center; font-size: 11px; color: var(--ink-soft); }
+
+/* #603: portal login CAPTCHA row — challenge image + refresh beside the
+   code input. The SVG carries its own light background, so it stays
+   readable in dark mode without filtering. */
+.captcha-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.captcha-line img {
+    border-radius: 8px;
+    border: 1px solid rgba(127, 127, 127, 0.25);
+}

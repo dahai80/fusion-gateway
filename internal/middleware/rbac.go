@@ -24,6 +24,11 @@ const (
     RoleEditor    Role = "editor"
     RoleViewer    Role = "viewer"
     RoleInference Role = "inference"
+    // RoleTenantAdmin (#606): an identity-derived tenant admin, scoped to
+    // exactly one identity tenant by the bridge that attaches it. IsAdmin is
+    // FALSE for this role — it authorizes only the handler that explicitly
+    // accepts it (/v1/model-policy), never the general admin plane.
+    RoleTenantAdmin Role = "tenant_admin"
 )
 
 type TeamInfo struct {

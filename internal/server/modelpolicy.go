@@ -43,16 +43,33 @@ func (s *Server) handleModelPolicy(w http.ResponseWriter, r *http.Request) {
     // withAdminOnly).
     r = s.bridgeShellSession(bridgeAdminJWT(r, s.adminAuth))
     if !middleware.IsAdmin(r.Context()) {
+        // #606: identity-derived shell sessions with an admin-class role
+        // (tenant_admin at SSO time) bridge to RoleTenantAdmin, scoped to
+        // their own identity tenant. Fail-closed: without the bridge the
+        // IsAdmin check below denies as before.
+        r = s.bridgeIdentityTenantAdmin(r)
+    }
+    if !middleware.IsAdmin(r.Context()) && middleware.GetRBACRole(r.Context()) != middleware.RoleTenantAdmin {
         slog.Warn("model policy rejected for non-admin principal", "method", r.Method, "path", r.URL.Path,
             "subject", middleware.GetOIDCSubject(r.Context()))
         writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role required for model policy"})
         return
     }
+    tenantAdminScoped := !middleware.IsAdmin(r.Context())
     tenant := adapter.TenantFromContext(r.Context())
     // #599: a PUT/GET that names a tenant the credential does not resolve
     // to used to be a silent mis-write (admin JWT with no team binding
     // always landed in the "" namespace). Fail loud instead.
     if reqTenant := r.URL.Query().Get("tenant"); reqTenant != "" && reqTenant != tenant {
+        // #606: for a tenant-scoped admin a foreign tenant is a scope
+        // violation (403), not a namespace confusion (400).
+        if tenantAdminScoped {
+            slog.Warn("model policy tenant-admin scope violation", "scoped", tenant, "requested", reqTenant, "method", r.Method)
+            writeJSON(w, http.StatusForbidden, map[string]string{
+                "error": "tenant-scoped admin may only administer tenant " + tenant,
+            })
+            return
+        }
         slog.Warn("model policy tenant mismatch", "resolved", tenant, "requested", reqTenant, "method", r.Method)
         writeJSON(w, http.StatusBadRequest, map[string]string{
             "error": "tenant mismatch: credential resolves to " + tenant + ", request named " + reqTenant,
@@ -287,4 +304,59 @@ func (s *Server) recordModelPolicyAudit(r *http.Request, role middleware.Role, a
         slog.Warn("model policy audit record failed", "action", action, "error", err)
     }
     slog.Info("model policy change", "action", action, "tenant", tenant, "detail", detail, "status", status)
+}
+
+// bridgeIdentityTenantAdmin (#606): an identity SSO shell session whose
+// identity role is admin-class (mapIdentityRoleToShell landed "admin" in the
+// session claims at ticket-exchange time) bridges to
+// Principal{Role:RoleTenantAdmin} scoped to the session's tenant. Scope
+// rules, fail-closed:
+//   - the session token must validate (TTL-bounded trust, the same contract
+//     every other shell-session surface uses);
+//   - the session must carry the "admin" role — a member/operator/viewer
+//     session never elevates;
+//   - the session tenant must be a real identity tenant (non-empty, not
+//     "local") — the local and "" namespaces stay full-admin-only, so a
+//     local shell user can never ride this bridge;
+//   - the attached role authorizes ONLY this handler (it checks
+//     RoleTenantAdmin explicitly); IsAdmin stays false, so no other admin
+//     surface accepts it.
+//
+// A shell-store admin session is elevated earlier by bridgeShellSession
+// (full RoleAdmin) and therefore never reaches this bridge.
+func (s *Server) bridgeIdentityTenantAdmin(r *http.Request) *http.Request {
+    if s.shellSessions == nil || middleware.PrincipalFromContext(r.Context()) != nil {
+        return r
+    }
+    token := bearerToken(r)
+    if token == "" {
+        if c, err := r.Cookie(shellSessionCookieName); err == nil {
+            token = c.Value
+        }
+    }
+    if token == "" {
+        return r
+    }
+    claims, err := s.shellSessions.Validate(token)
+    if err != nil {
+        return r
+    }
+    if !hasAnyRole(claims.Roles, "admin") {
+        slog.Debug("identity tenant-admin bridge skipped: session lacks admin-class role",
+            "path", r.URL.Path, "user", claims.Sub, "roles", claims.Roles)
+        return r
+    }
+    if claims.TenantID == "" || claims.TenantID == "local" {
+        slog.Debug("identity tenant-admin bridge skipped: session tenant is not an identity tenant",
+            "path", r.URL.Path, "user", claims.Sub, "tenant", claims.TenantID)
+        return r
+    }
+    ctx := middleware.ContextWithPrincipal(r.Context(), &middleware.Principal{
+        AuthMethod: "shell-session",
+        Role:       middleware.RoleTenantAdmin,
+        IsMaster:   false,
+    })
+    ctx = adapter.WithTenant(ctx, claims.TenantID)
+    slog.Info("identity tenant-admin bridged for model policy", "path", r.URL.Path, "user", claims.Sub, "tenant", claims.TenantID)
+    return r.WithContext(ctx)
 }
