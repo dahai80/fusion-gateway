@@ -49,8 +49,18 @@ func (s *Server) setupShell() {
     // configured-user setup never inherits a stale bootstrap admin.
     s.shellBootstrap = nil
     secret := buildShellSessionSecret(&cfg)
-    if cfg.Shell.Session.Secret == "" {
-        slog.Info("shell session secret derived from master_key (domain-separated digest)")
+    // #611: log the secret SOURCE in both branches — tooling that mints
+    // session tokens must be able to tell from the log which value to derive
+    // from, especially with FUSION_ADMIN_KEY overriding auth.master_key.
+    sum := sha256.Sum256(secret)
+    fp := "sha256:" + hex.EncodeToString(sum[:8])
+    if cfg.Shell.Session.Secret != "" {
+        slog.Info("shell session secret resolved", "source", "config file", "fingerprint", fp)
+    } else {
+        slog.Info("shell session secret resolved",
+            "source", "derived from auth.master_key (domain-separated digest)",
+            "note", "the effective master_key source is logged at boot as auth.master_key resolved",
+            "fingerprint", fp)
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     // #587: the failed-login lockout state lives with the session subsystem.
