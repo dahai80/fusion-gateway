@@ -14,6 +14,15 @@ import (
     "time"
 )
 
+// Session origin constants (#606): classify how a session was issued so
+// elevation rules can distinguish local password logins from identity SSO
+// exchanges. Legacy tokens issued before the field existed decode with an
+// empty Origin and are classified by user-store lookup at bridge time.
+const (
+    OriginLocal    = "local"
+    OriginIdentity = "identity"
+)
+
 // SessionClaims ride inside the signed token (PRD §4.1): user, roles, the
 // authorized module id list, and the reserved tenant_id (fixed "local" in
 // the single-tenant v1).
@@ -22,6 +31,7 @@ type SessionClaims struct {
     Roles     []string `json:"roles"`
     Modules   []string `json:"permissions"`
     TenantID  string   `json:"tenant_id"`
+    Origin    string   `json:"origin,omitempty"`
     MustChangePassword bool `json:"must_change_password,omitempty"`
     Exp       int64    `json:"exp"`
 }

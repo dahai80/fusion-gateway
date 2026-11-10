@@ -10,6 +10,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/admin"
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
+    "github.com/fusion-gateway/fusion-gateway/internal/shell"
     "github.com/fusion-gateway/fusion-gateway/internal/store"
 )
 
@@ -101,23 +102,64 @@ func (s *Server) bridgeShellSession(r *http.Request) *http.Request {
     if err != nil {
         return r
     }
-    account, ok := s.shellUsers.Get(claims.Sub)
-    if !ok || account.Disabled || !hasAnyRole(account.Roles, "admin") {
-        slog.Warn("admin endpoint rejected shell session (account not admin)",
-            "path", r.URL.Path, "user", claims.Sub, "roles", account.Roles, "disabled", account.Disabled)
+    // #606: identity SSO sessions are governed by their signed claims, NOT
+    // the local user store — an identity sub that collides with a local
+    // username must never inherit the local account's elevation. Legacy
+    // tokens issued before the origin field carry "" and are classified by
+    // store lookup (a known sub = local path, an unknown sub falls through
+    // to the identity rules below).
+    if claims.Origin != shell.OriginIdentity {
+        account, ok := s.shellUsers.Get(claims.Sub)
+        if ok {
+            if account.Disabled || !hasAnyRole(account.Roles, "admin") {
+                slog.Warn("admin endpoint rejected shell session (account not admin)",
+                    "path", r.URL.Path, "user", claims.Sub, "roles", account.Roles, "disabled", account.Disabled)
+                return r
+            }
+            ctx := middleware.ContextWithPrincipal(r.Context(), &middleware.Principal{
+                AuthMethod: "shell-session",
+                Role:       middleware.RoleAdmin,
+                IsMaster:   false,
+            })
+            // Tenant-scoped handlers (/v1/model-policy PUT) resolve the tenant from
+            // the context, not the claims; without this the bridged admin wrote the
+            // policy under tenant "" while the shell plane read tenant "local" and
+            // never saw it.
+            ctx = adapter.WithTenant(ctx, claims.TenantID)
+            slog.Debug("shell session bridged to admin Principal", "path", r.URL.Path, "user", claims.Sub)
+            return r.WithContext(ctx)
+        }
+    }
+    // #606: identity-derived tenant admin (tenant_admin at SSO time, mapped
+    // to the shell "admin" role by mapIdentityRoleToShell) bridges to
+    // RoleTenantAdmin scoped to the session's own identity tenant. The
+    // elevation happens HERE — before withMiddleware — so the preset
+    // principal (AuthMethod "shell-session") short-circuits the API-key
+    // middleware and the request reaches the handler instead of dying with
+    // 401. Fail-closed rules (enforced again inside handleModelPolicy):
+    //   - only admin-class session roles elevate;
+    //   - the "" and "local" namespaces stay full-admin-only — a session
+    //     pinned to tenant local (local password logins) never elevates;
+    //   - the role authorizes only tenant-scoped surfaces; IsAdmin stays
+    //     false so withAdminOnly routes keep rejecting it.
+    if !hasAnyRole(claims.Roles, "admin") {
+        slog.Debug("shell session bridge skipped: no admin-class role",
+            "path", r.URL.Path, "user", claims.Sub, "roles", claims.Roles)
+        return r
+    }
+    if claims.TenantID == "" || claims.TenantID == "local" {
+        slog.Debug("shell session bridge skipped: tenant is not an identity tenant",
+            "path", r.URL.Path, "user", claims.Sub, "tenant", claims.TenantID)
         return r
     }
     ctx := middleware.ContextWithPrincipal(r.Context(), &middleware.Principal{
         AuthMethod: "shell-session",
-        Role:       middleware.RoleAdmin,
+        Role:       middleware.RoleTenantAdmin,
         IsMaster:   false,
     })
-    // Tenant-scoped handlers (/v1/model-policy PUT) resolve the tenant from
-    // the context, not the claims; without this the bridged admin wrote the
-    // policy under tenant "" while the shell plane read tenant "local" and
-    // never saw it.
     ctx = adapter.WithTenant(ctx, claims.TenantID)
-    slog.Debug("shell session bridged to admin Principal", "path", r.URL.Path, "user", claims.Sub)
+    slog.Info("identity tenant-admin session bridged",
+        "path", r.URL.Path, "user", claims.Sub, "tenant", claims.TenantID)
     return r.WithContext(ctx)
 }
 

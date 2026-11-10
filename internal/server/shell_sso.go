@@ -178,10 +178,11 @@ func (s *Server) handleShellSessionSSO(w http.ResponseWriter, r *http.Request) {
     }
 
     token, err := s.shellSessions.Issue(shell.SessionClaims{
-        Sub:       claims.Sub,
-        Roles:     []string{shellRole},
-        Modules:   modules,
-        TenantID:  claims.TID,
+        Sub:      claims.Sub,
+        Roles:    []string{shellRole},
+        Modules:  modules,
+        TenantID: claims.TID,
+        Origin:   shell.OriginIdentity,
     })
     if err != nil {
         slog.Error("shell sso session issue failed", "sub", claims.Sub, "error", err)
