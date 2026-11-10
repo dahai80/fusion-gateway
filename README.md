@@ -1224,6 +1224,7 @@ Each API key supports fine-grained access control:
 | `allowed_backends` | Backend allowlist — requests routed to non-whitelisted backends get 403. Wildcard `*` allows all |
 | `expires_at` | RFC3339 expiry timestamp |
 | `budget_limit` | Monthly spend limit in USD (0 = unlimited) |
+| `exchange_only` | Bootstrap credential for the token exchange plane (#595): valid ONLY on `POST /auth/api/token/exchange`, rejected 401 on every other path. Use for client-side / sub-app integrations that should never hold a full-plane key. |
 
 Keys come from **two sources**, both honored at the auth layer:
 
@@ -1266,9 +1267,41 @@ Gateway-issued `fk-` credentials for external callers — self-service scope gra
 - **Backend keys** (#327, opt-in): `auth.accept_backend_keys: true` also accepts a LOCAL backend's `api_key` (e.g. fusion-mlx's admin key) as a full-access gateway credential, so same-machine clients (fusion-bench gateway-default mode) can reuse the key fusion-mlx itself accepts. Only local backends qualify — cloud provider keys never match. Default off: a backend key grants full gateway access, so it stays operator-explicit.
 - **Revocation is soft**: keys are never hard-deleted (audit + preserve-keys policy); a `revoked` status fails auth immediately.
 
-### MasterKey
+### Token Exchange (`/auth/api/token/exchange`, #595)
 
+Swap a bootstrap credential for a short-lived scoped token — the credential a client-side or sub-app integration actually holds:
+
+```yaml
+auth:
+    enabled: true
+    token_exchange:
+        enabled: true        # default false
+        max_ttl: 1h          # hard cap on every minted token's life
+    api_keys:
+        - key: fk-office-b64...
+          name: office-standalone
+          exchange_only: true   # this key ONLY mints tokens, never hits /v1/*
+          rpm: 30
+          tpm: 20000
+          allowed_models: [glm5.2]
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:11432/auth/api/token/exchange \
+    -H "Authorization: Bearer fk-office-b64..." \
+    -d '{"ttl_seconds": 600}'
+# {"access_token":"eyJ...","token_type":"Bearer","expires_in":600,...}
+```
+
+- **Minted tokens** are RS256 JWTs (issuer `fusion-gateway`) carrying the minting credential's model allowlist, rpm/tpm caps, and tenant — frozen at exchange time. Accepted on `/v1/*` wherever an API key is; expired tokens fail closed.
+- **Scope can only shrink**: a minted token can never widen its parent's caps, and re-exchanging a minted token is rejected (403) — a leaked short-lived token cannot extend its own life.
+- **Signing key**: generated on first boot, persisted at `<store.data_dir>/token_signing_key.pem` (0600); minted tokens survive restarts. Public keys served at `GET /.well-known/jwks.json` (RFC 7517) so downstream verifiers check tokens offline.
+- **Bootstrap credentials**: static/store API keys (exchange happens through the key plane — a disabled/expired key cannot mint), or a shell session token. TTL is min(requested, `max_ttl`, bootstrap credential's own remaining life).
+- **Revocation**: disable or expire the bootstrap key — minted tokens remain stateless until their own exp, so keep `max_ttl` short.
+
+### MasterKey
 The `master_key` bypasses all rate limits and model allowlists. Use for internal services only.
+
 
 ### Sliding Window Rate Limiting
 

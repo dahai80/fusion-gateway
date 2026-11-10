@@ -142,6 +142,11 @@ type AuthKeyConfig struct {
     // Scopes (#262 K2): module×action grants for /v1/* enforcement. Populated
     // from the store entry at auth time; config-file keys rarely carry it.
     Scopes           []string          `mapstructure:"scopes"`
+    // ExchangeOnly (#595): the credential works ONLY to mint short-lived
+    // scoped tokens at POST /auth/api/token/exchange — it is rejected on
+    // /v1/* paths. Bootstrap credential for client-side / sub-app
+    // integrations that should never hold a long-lived full-plane key.
+    ExchangeOnly     bool              `mapstructure:"exchange_only"`
 }
 
 type AuthConfig struct {
@@ -160,6 +165,18 @@ type AuthConfig struct {
     // grants full gateway access (cloud routing included), so it stays
     // operator-explicit.
     AcceptBackendKeys bool `mapstructure:"accept_backend_keys"`
+    // TokenExchange (#595): mint short-lived scoped RS256 JWTs from a
+    // bootstrap credential (API key or shell session token). Disabled by
+    // default; when enabled the gateway generates + persists an RSA signing
+    // key in data_dir and serves its JWKS at /.well-known/jwks.json.
+    TokenExchange TokenExchangeConfig `mapstructure:"token_exchange"`
+}
+
+type TokenExchangeConfig struct {
+    Enabled bool `mapstructure:"enabled"`
+    // MaxTTL caps the requested token lifetime on every exchange. Minted
+    // tokens also never outlive the bootstrap credential's own expiry.
+    MaxTTL time.Duration `mapstructure:"max_ttl"`
 }
 
 type RateLimitConfig struct {
@@ -2396,6 +2413,12 @@ func validate(cfg *Config) error {
         if k.DailyBudgetLimit < 0 {
             return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
         }
+        // #595: an exchange-only key with 0 caps mints tokens that inherit
+        // those caps — require the same explicitness as #594. Checked before
+        // the generic #594 rule so the message names the exchange plane.
+        if cfg.Auth.Enabled && k.ExchangeOnly && k.Name != "admin" && (k.RPM <= 0 || k.TPM <= 0) && !k.Unlimited {
+            return fmt.Errorf("auth key %q is exchange_only with zero rate caps: minted tokens inherit these caps; set numeric caps or unlimited: true (#595)", k.Name)
+        }
         // #586/#594: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
         // semantics — AllowRPM/AllowTPM return true for rpm<=0). That is a
         // dangerous silent default: a typo or omission disables capping
@@ -2420,6 +2443,19 @@ func validate(cfg *Config) error {
                     slog.Warn("auth key is explicitly unlimited (unlimited: true, #594)", "key", k.Name, "dims", dims)
                 }
             }
+        }
+    }
+
+    // #595: token exchange plane fail-closed validation.
+    if cfg.Auth.TokenExchange.Enabled {
+        if !cfg.Auth.Enabled {
+            return fmt.Errorf("auth.token_exchange.enabled requires auth.enabled (the exchange endpoint authenticates bootstrap credentials through the key plane) (#595)")
+        }
+        if cfg.Auth.TokenExchange.MaxTTL <= 0 {
+            return fmt.Errorf("auth.token_exchange.max_ttl must be positive when token exchange is enabled (got %s); minted tokens must be short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
+        }
+        if cfg.Auth.TokenExchange.MaxTTL > 24*time.Hour {
+            return fmt.Errorf("auth.token_exchange.max_ttl %s exceeds the 24h ceiling; minted tokens are bootstrap-credential replacements and must stay short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
         }
     }
 
@@ -2946,6 +2982,13 @@ func DefaultConfig() Config {
             GracefulShutdownTimeout: 30,
             MaxRequestBodySize:     5242880,
             ProxyMaxBodySize:       256 << 20,
+        },
+        Auth: AuthConfig{
+            // #595: default TTL cap for minted tokens; exchange stays
+            // disabled until the operator turns it on.
+            TokenExchange: TokenExchangeConfig{
+                MaxTTL: time.Hour,
+            },
         },
         Routing: RoutingConfig{
             Mode:                      "hybrid",

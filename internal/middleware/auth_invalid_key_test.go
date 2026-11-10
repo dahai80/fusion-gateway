@@ -25,7 +25,7 @@ func TestAPIKeyAuthWithStore_InvalidKeySurfacesHashPrefix(t *testing.T) {
     wantPrefix := hex.EncodeToString(sum[:])[:8]
 
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("invalid key must not reach downstream handler")
     }))
     req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -67,7 +67,7 @@ func TestAPIKeyAuthWithStore_InvalidKeySurfacesHashPrefix(t *testing.T) {
 // no key_hash_prefix field.
 func TestAPIKeyAuthWithStore_MissingKeyNoPrefix(t *testing.T) {
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("missing key must not reach downstream handler")
     }))
     req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -91,7 +91,7 @@ func TestAPIKeyAuthWithStore_InvalidKeyThrottleKeeps401(t *testing.T) {
     wantPrefix := hex.EncodeToString(sum[:])[:8]
 
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         t.Fatal("invalid key must not reach downstream handler")
     }))
     for i := 0; i < 3; i++ {

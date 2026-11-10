@@ -29,7 +29,7 @@ func TestAPIKeyAuthWithStore_RotationGrace(t *testing.T) {
     run := func(entry *store.APIKeyEntry, present string) int {
         st := &mockKeyLookupStore{entry: entry}
         cfg := &config.AuthConfig{Enabled: true}
-        handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+        handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
         req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
         req.Header.Set("Authorization", "Bearer "+present)
         rec := httptest.NewRecorder()
@@ -70,7 +70,7 @@ func TestAPIKeyAuthWithStore_RotationGrace(t *testing.T) {
     t.Run("configured_grace_window", func(t *testing.T) {
         st := &mockKeyLookupStore{entry: baseEntry(&now)}
         cfg := &config.AuthConfig{Enabled: true, KeyRotationGrace: time.Minute}
-        handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+        handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
         req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
         req.Header.Set("Authorization", "Bearer "+oldKey)
         rec := httptest.NewRecorder()
@@ -89,7 +89,7 @@ func TestAPIKeyAuthWithStore_RevokedKeyRejected(t *testing.T) {
         KeyHash:  hashOf(t, raw),
     }}
     cfg := &config.AuthConfig{Enabled: true}
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
     req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
     req.Header.Set("Authorization", "Bearer "+raw)
     rec := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestAPIKeyAuthWithStore_PrincipalPropagated(t *testing.T) {
     }}
     cfg := &config.AuthConfig{Enabled: true}
     var outbound http.Request
-    handler := APIKeyAuthWithStore(cfg, st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    handler := APIKeyAuthWithStore(cfg, st, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         outbound = http.Request{Header: http.Header{}}
         adapter.InjectFusionHeaders(r.Context(), &outbound)
     }))
