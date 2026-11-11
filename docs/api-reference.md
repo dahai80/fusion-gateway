@@ -46,6 +46,8 @@ Base URL `http://127.0.0.1:11432`。鉴权：`Authorization: Bearer <key>` 或 `
 | `POST /admin/gc` / `POST /admin/config/reload` | admin JWT | 运维动作 |
 | `GET /debug/pprof/*` | master_key + `server.enable_pprof` | 性能剖析 |
 
+> master_key 生效值来源优先级：env `FG_MASTER_KEY` / `FUSION_ADMIN_KEY` > config.yaml `auth.master_key`（env 存在时覆盖文件值，boot 日志 `auth.master_key resolved` 行带非秘密指纹可核对；被拒请求的日志会带 presented_fingerprint 供比对）。
+
 ## 管理面
 
 | 端点组 | 说明 |

@@ -3,6 +3,8 @@ package server
 import (
     "bytes"
     "context"
+    "crypto/sha256"
+    "encoding/hex"
     "fmt"
     "io"
     "net"
@@ -1885,6 +1887,13 @@ func (s *Server) snapshot() *config.ConfigSnapshot {
     return s.cfg
 }
 
+// shortSecretFingerprint is the short non-secret credential fingerprint used
+// by the #625 deny logs (same shape as config.secretFingerprint).
+func shortSecretFingerprint(v string) string {
+    sum := sha256.Sum256([]byte(v))
+    return "sha256:" + hex.EncodeToString(sum[:8])
+}
+
 // withMasterKey wraps handler to require master_key authentication
 func (s *Server) withMasterKey(handler http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1896,7 +1905,16 @@ func (s *Server) withMasterKey(handler http.HandlerFunc) http.HandlerFunc {
         }
         apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
         if subtle.ConstantTimeCompare([]byte(apiKey), []byte(masterKey)) != 1 {
-            slog.Warn("invalid master_key for protected endpoint", "path", r.URL.Path, "remote", r.RemoteAddr)
+            // #625: log a short non-secret fingerprint of the presented
+            // credential and point at the boot-time resolve line — the usual
+            // cause of a "correct-looking" key being rejected is the env
+            // override (FG_MASTER_KEY / FUSION_ADMIN_KEY beats the
+            // config-file value, #611), and diffing the two fingerprints
+            // makes that visible without echoing any secret.
+            slog.Warn("invalid master_key for protected endpoint",
+                "path", r.URL.Path, "remote", r.RemoteAddr,
+                "presented_fingerprint", shortSecretFingerprint(apiKey),
+                "hint", "diff against the boot log line 'auth.master_key resolved' — an env override (FG_MASTER_KEY / FUSION_ADMIN_KEY) beats the config-file value")
             http.Error(w, `{"error":{"message":"Unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
             return
         }
