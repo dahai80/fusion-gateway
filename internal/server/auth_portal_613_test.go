@@ -49,6 +49,25 @@ func newPortalUpstream613(t *testing.T) *portalUpstream613 {
             }},
         })
     })
+    // Identity login endpoint: mints the same RS256 token pair the real
+    // identity issues, so the chain starts at the portal login proxy
+    // exactly as the issue's live trace does.
+    mux.HandleFunc("/api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+        tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+            "sub": "usr_portal", "tid": "default", "role": "tenant_admin",
+            "exp": time.Now().Add(time.Hour).Unix(),
+        })
+        tok.Header["kid"] = "test-kid"
+        signed, err := tok.SignedString(key)
+        if err != nil {
+            w.WriteHeader(http.StatusInternalServerError)
+            return
+        }
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "access_token": signed, "refresh_token": "rt_login", "expires_in": 3600,
+            "username": "usr_portal",
+        })
+    })
     ts := httptest.NewServer(mux)
     t.Cleanup(ts.Close)
     return &portalUpstream613{ts: ts, key: key}
@@ -96,7 +115,22 @@ func Test613_ExchangeEstablishesShellSession_FullChain(t *testing.T) {
     up := newPortalUpstream613(t)
     _, h := portalServer613(t, up)
 
-    tok := up.sign(t, "usr_portal", "tenant_admin", "default")
+    // Step 1 — portal login through the identity proxy (issue evidence step
+    // 1): credentials go in, the identity token pair comes back.
+    login := postJSON613(t, h, "/auth/api/identity/api/v1/auth/login",
+        `{"username":"usr_portal","password":"pw"}`)
+    if login.Code != http.StatusOK {
+        t.Fatalf("portal login: %d %s", login.Code, login.Body.String())
+    }
+    var pair struct {
+        AccessToken string `json:"access_token"`
+    }
+    if err := json.Unmarshal(login.Body.Bytes(), &pair); err != nil || pair.AccessToken == "" {
+        t.Fatalf("login response: %v %s", err, login.Body.String())
+    }
+    tok := pair.AccessToken
+
+    // Step 2 — one-time code issuance (issue evidence step 2).
     issue := postJSON613(t, h, "/auth/api/code",
         `{"access_token":`+jsonString613(tok)+`,"redirect_uri":`+jsonString613(portalRedirect613)+`}`)
     if issue.Code != http.StatusOK {
@@ -109,17 +143,18 @@ func Test613_ExchangeEstablishesShellSession_FullChain(t *testing.T) {
         t.Fatalf("issue response: %v %s", err, issue.Body.String())
     }
 
+    // Step 3 — exchange (issue evidence step 4).
     ex := postJSON613(t, h, "/auth/api/code/exchange",
         `{"code":`+jsonString613(granted.Code)+`,"redirect_uri":`+jsonString613(portalRedirect613)+`}`)
     if ex.Code != http.StatusOK {
         t.Fatalf("exchange: %d %s", ex.Code, ex.Body.String())
     }
-    var pair map[string]any
-    if err := json.Unmarshal(ex.Body.Bytes(), &pair); err != nil {
+    var exchange map[string]any
+    if err := json.Unmarshal(ex.Body.Bytes(), &exchange); err != nil {
         t.Fatalf("exchange decode: %v", err)
     }
-    accessToken, _ := pair["access_token"].(string)
-    identityToken, _ := pair["identity_access_token"].(string)
+    accessToken, _ := exchange["access_token"].(string)
+    identityToken, _ := exchange["identity_access_token"].(string)
     // Shell frontend contract: access_token goes into the shell-session
     // slot, so it MUST be a shell session token, not the identity RS256 JWT.
     if accessToken == "" {
@@ -143,8 +178,8 @@ func Test613_ExchangeEstablishesShellSession_FullChain(t *testing.T) {
         t.Fatal("session cookie must be HttpOnly")
     }
 
-    // Full-chain acceptance: the returned access_token must authenticate
-    // the shell session plane.
+    // Step 4 — shell /me with the exchange access_token (issue evidence
+    // step 5, the exact 401 that failed before the fix).
     me := httptest.NewRequest(http.MethodGet, "/api/v1/shell/me", nil)
     me.Header.Set("Authorization", "Bearer "+accessToken)
     me.RemoteAddr = "127.0.0.1:51001"
