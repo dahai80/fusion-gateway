@@ -122,6 +122,12 @@ type authPortal struct {
     // challenge (the shell frontend contract).
     captcha *shellCaptchaStore
 
+    // #617: live enabled-ness for the challenge plane — reads the current
+    // config snapshot on every challenge/login so a reload flips the plane
+    // without a restart. Nil (tests constructing the portal directly) falls
+    // back to the boot-time `captcha` field.
+    captchaLive func() *shellCaptchaStore
+
     // #613: shell session plane wiring. The code exchange mints a REAL shell
     // session (HMAC token + HttpOnly cookie) so the access_token slot the
     // shell SPA stores carries a token withShellSession accepts — the old
@@ -183,6 +189,7 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
         captcha:       s.shellCaptcha,
         sessions:      s.shellSessions,
         ssoModules:    s.cfg.Config.Shell.SSOModules,
+        captchaLive:   s.captchaStoreLive,
     }
     if len(cfg.RedirectURIs) == 0 {
         // Allowlist empty: SPA serves, but code issuance always refuses
@@ -351,13 +358,13 @@ func (p *authPortal) handlePortalLogin(w http.ResponseWriter, r *http.Request, u
     // upstream credential check — a captcha failure is a bot signal, so it
     // must not consume a lockout attempt (#592: never feed the counter) and
     // must not reach identity at all.
-    if p.captcha != nil {
+    if st := p.captchaStore(); st != nil {
         var cap struct {
             CaptchaID   string `json:"captcha_id"`
             CaptchaCode string `json:"captcha_code"`
         }
         _ = json.Unmarshal(body, &cap)
-        if res := p.captcha.verify(cap.CaptchaID, cap.CaptchaCode); res != "" {
+        if res := st.verify(cap.CaptchaID, cap.CaptchaCode); res != "" {
             slog.Warn("auth portal login captcha rejected", "code", res, "username", req.Username)
             shell.WriteEnvelope(w, http.StatusBadRequest, res,
                 "captcha verification failed; refresh and retry", "auth_portal", true)
@@ -801,5 +808,15 @@ func newOneTimeCode() (string, error) {
 // for the portal login form, same store and shape as the shell plane (#592).
 // Unauthenticated by contract (fetched before any session exists).
 func (p *authPortal) handleAuthPortalCaptcha(w http.ResponseWriter, r *http.Request) {
-    serveCaptchaChallenge(w, p.captcha)
+    serveCaptchaChallenge(w, p.captchaStore())
+}
+
+// captchaStore (#617) resolves the effective challenge store: the live
+// config snapshot when wired (captchaLive), the boot-time field otherwise
+// (direct-constructed portals in tests). Nil = plane disabled.
+func (p *authPortal) captchaStore() *shellCaptchaStore {
+    if p.captchaLive != nil {
+        return p.captchaLive()
+    }
+    return p.captcha
 }

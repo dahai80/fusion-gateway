@@ -65,9 +65,11 @@ func (s *Server) setupShell() {
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     // #587: the failed-login lockout state lives with the session subsystem.
     s.shellLoginThrottle = newShellLoginThrottle()
-    // #592: single-use SVG challenges for the login plane (off = store not
-    // built; the endpoint answers disabled and the gate is skipped).
-    if cfg.Shell.Captcha.Enabled {
+    // #592: single-use SVG challenges for the login plane. The store is
+    // ALWAYS built (#617): the enabled flag is consulted live from the
+    // config snapshot on every challenge/login, so a reload can flip the
+    // plane without a restart. TTL stays boot-time (store-level).
+    {
         ttl := cfg.Shell.Captcha.TTL
         if ttl <= 0 {
             ttl = 5 * time.Minute
@@ -493,7 +495,22 @@ func (s *Server) handleShellCaptchaChallenge(w http.ResponseWriter, r *http.Requ
         shell.WriteEnvelope(w, http.StatusNotFound, "shell_disabled", "shell subsystem is not enabled", "", false)
         return
     }
-    serveCaptchaChallenge(w, s.shellCaptcha)
+    serveCaptchaChallenge(w, s.captchaStoreLive())
+}
+
+// captchaStoreLive (#617) resolves the login-plane challenge store against
+// the LIVE config snapshot: nil when the plane is disabled by the current
+// config, so the challenge endpoints answer disabled and the login gates
+// skip verification without a restart. The store itself is always built at
+// setup (see setupShell) so an off→on reload arms the gate immediately.
+func (s *Server) captchaStoreLive() *shellCaptchaStore {
+    s.cfgMu.RLock()
+    enabled := s.cfg.Config.Shell.Captcha.Enabled
+    s.cfgMu.RUnlock()
+    if !enabled || s.shellCaptcha == nil {
+        return nil
+    }
+    return s.shellCaptcha
 }
 
 func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request) {
@@ -537,8 +554,8 @@ func (s *Server) handleShellSessionIssue(w http.ResponseWriter, r *http.Request)
     // matched. Any captcha_* failure is audit-logged but does NOT feed the
     // #587 login-lockout counters (a challenge guess is not a password
     // guess; feeding it would let a bot farm lockouts cheaply).
-    if s.shellCaptcha != nil {
-        if vCode := s.shellCaptcha.verify(req.CaptchaID, req.CaptchaCode); vCode != "" {
+    if st := s.captchaStoreLive(); st != nil {
+        if vCode := st.verify(req.CaptchaID, req.CaptchaCode); vCode != "" {
             slog.Warn("shell login captcha rejected", "code", vCode, "ip", ip, "username", req.Username)
             if s.shellAudit != nil {
                 _ = s.shellAudit.Record(req.Username, "", shell.AuditClassAuth, http.MethodPost,
