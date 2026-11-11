@@ -98,6 +98,30 @@ service_routes:
     }
 }
 
+// Faithful prod repro: main.go registers an OnReload handler that swaps
+// s.cfg inside Reload — the handler here mimics that wiring. Before the
+// capture-order fix, handleConfigReload read s.cfg AFTER Reload and compared
+// the new snapshot against itself (flag never fired, caught live on
+// v0.9.164). The registered handler stays for the rest of the package test
+// run but only mutates THIS server instance.
+func Test623_ReloadWithCfgSwapHandler_FlagFires(t *testing.T) {
+    s := newTestServer()
+    config.OnReload(func(old, new *config.ConfigSnapshot) {
+        s.cfgMu.Lock()
+        s.cfg = new
+        s.cfgMu.Unlock()
+    })
+    resp := reload623(t, s, `
+service_routes:
+  ad4probe:
+    url: "http://127.0.0.1:11461"
+    upstream_auth: user
+`)
+    if _, present := resp["restart_required"]; !present {
+        t.Fatalf("restart_required missing when s.cfg is swapped inside Reload (prod wiring): %v", resp)
+    }
+}
+
 func Test623_ServiceRoutesChanged_Table(t *testing.T) {
     base := map[string]config.ServiceRouteConfig{
         "a": {URL: "http://u1", UpstreamAuth: "user"},

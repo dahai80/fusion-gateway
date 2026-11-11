@@ -340,6 +340,16 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
         return
     }
+    // #623: the service-route table mounts on the mux once at boot (ServeMux
+    // cannot unregister), so a reload that touched service_routes never
+    // serves the new set — report it as restart-required instead of acking a
+    // green reload with silent 404s. MUST capture the old routes BEFORE
+    // ReloadWithRecovery: the OnReload handlers (main.go wires the s.cfg
+    // swap) fire inside it, so reading s.cfg afterwards compares the new
+    // snapshot against itself and the diff is always false (caught live on
+    // v0.9.164 — the unit tests missed it because they ran without any
+    // OnReload handler registered).
+    oldServiceRoutes := s.cfg.Config.ServiceRoutes
     snap, err := config.ReloadWithRecovery(s.cfgPath)
     if err != nil {
         slog.Error("admin config reload failed", "path", s.cfgPath, "error", err)
@@ -347,18 +357,13 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         return
     }
     slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
-    // #623: the service-route table mounts on the mux once at boot (ServeMux
-    // cannot unregister), so a reload that touched service_routes never
-    // serves the new set — report it as restart-required instead of acking a
-    // green reload with silent 404s. Captured BEFORE Reload: the OnReload
-    // handlers fire (and swap s.cfg) inside ReloadWithRecovery.
     resp := map[string]any{
         "status":  "reloaded",
         "version": snap.Version,
         "path":    s.cfgPath,
     }
-    if serviceRoutesChanged(s.cfg.Config.ServiceRoutes, snap.Config.ServiceRoutes) {
-        changed := changedServiceNames(s.cfg.Config.ServiceRoutes, snap.Config.ServiceRoutes)
+    if serviceRoutesChanged(oldServiceRoutes, snap.Config.ServiceRoutes) {
+        changed := changedServiceNames(oldServiceRoutes, snap.Config.ServiceRoutes)
         slog.Warn("service_routes changed on reload but the route table is boot-only; restart the gateway for the new routes to serve",
             "changed_services", changed, "config_version", snap.Version)
         resp["restart_required"] = []string{"service_routes"}
