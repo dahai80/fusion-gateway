@@ -176,6 +176,15 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
                 next.ServeHTTP(w, r)
                 return
             }
+            // #619 live-verify: a server booted without try_quota has a nil
+            // meter (the store used to be built at boot only when enabled).
+            // Hot-reload enabling the gate must degrade to a logged
+            // pass-through, never a nil-receiver panic on every gated call.
+            if meter == nil {
+                slog.Warn("try-quota: gate enabled but no meter store built (try_quota was absent at boot), passing through unmetered — restart or boot with try_quota to meter")
+                next.ServeHTTP(w, r)
+                return
+            }
             // Admin/master-key principals are operational traffic, not
             // product users — never metered, never gated.
             if IsMasterKey(r.Context()) {
