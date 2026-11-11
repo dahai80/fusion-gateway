@@ -122,6 +122,14 @@ type authPortal struct {
     // challenge (the shell frontend contract).
     captcha *shellCaptchaStore
 
+    // #613: shell session plane wiring. The code exchange mints a REAL shell
+    // session (HMAC token + HttpOnly cookie) so the access_token slot the
+    // shell SPA stores carries a token withShellSession accepts — the old
+    // identity-JWT passthrough 401'd every shell call. Nil = shell disabled:
+    // legacy identity-token-pair response (nothing to authenticate against).
+    sessions   *shell.Manager
+    ssoModules []string
+
     // #602: tiny fail-fast breaker for the identity hop. identityBreakerFails
     // counts consecutive timeout-class failures; at identityBreakerThreshold
     // the breaker opens for identityBreakerCooldown and login attempts get an
@@ -173,6 +181,8 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
         hits:          make(map[string][]time.Time),
         loginThrottle: newShellLoginThrottle(),
         captcha:       s.shellCaptcha,
+        sessions:      s.shellSessions,
+        ssoModules:    s.cfg.Config.Shell.SSOModules,
     }
     if len(cfg.RedirectURIs) == 0 {
         // Allowlist empty: SPA serves, but code issuance always refuses
@@ -590,12 +600,72 @@ func (p *authPortal) handleExchangeCode(w http.ResponseWriter, r *http.Request) 
         return
     }
     slog.Info("auth portal code exchanged", "redirect", grant.RedirectURI)
+    // #613: mint a real shell session from the grant's verified identity
+    // claims. grant.AccessToken was RS256-verified against the identity JWKS
+    // at issue time (handleIssueCode), so reading its payload here is the
+    // same trust level as the SSO ticket path. The shell SPA stores
+    // access_token into its shell-session slot — that slot must carry an
+    // HMAC token withShellSession accepts, with the identity tokens kept
+    // under dedicated keys for metering.
+    if p.sessions == nil {
+        // Shell disabled: no session plane exists, keep the legacy
+        // identity-pair response so non-shell portal clients still work.
+        slog.Info("auth portal exchange: shell sessions disabled, returning identity pair")
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]interface{}{
+            "access_token":  grant.AccessToken,
+            "refresh_token": grant.RefreshToken,
+            "expires_in":    grant.ExpiresIn,
+            "username":      grant.Username,
+        })
+        return
+    }
+    claims := decodeIdentityClaims(grant.AccessToken)
+    if claims.Sub == "" {
+        slog.Error("auth portal exchange: identity token carries no sub")
+        shell.WriteEnvelope(w, http.StatusUnauthorized, "invalid_code",
+            "code is unknown, expired, or already used", "auth_portal", false)
+        return
+    }
+    shellRole := mapIdentityRoleToShell(claims.Role)
+    modules := p.ssoModules
+    if len(modules) == 0 {
+        modules = []string{"*"}
+    }
+    sessionToken, err := p.sessions.Issue(shell.SessionClaims{
+        Sub:      claims.Sub,
+        Roles:    []string{shellRole},
+        Modules:  modules,
+        TenantID: claims.TID,
+        Origin:   shell.OriginIdentity,
+    })
+    if err != nil {
+        slog.Error("auth portal exchange: shell session issue failed", "sub", claims.Sub, "error", err)
+        shell.WriteEnvelope(w, http.StatusInternalServerError, "session_issue_failed",
+            "failed to issue session token", "auth_portal", true)
+        return
+    }
+    slog.Info("shell session issued via portal code exchange", "sub", claims.Sub,
+        "tenant", claims.TID, "role", shellRole)
+    // Same HttpOnly session cookie as the SSO/password paths (#220) so
+    // iframe navigation authenticates; identity JWTs ride the BODY only.
+    http.SetCookie(w, &http.Cookie{
+        Name:     shellSessionCookieName,
+        Value:    sessionToken,
+        Path:     "/",
+        MaxAge:   int(p.sessions.TTL().Seconds()),
+        HttpOnly: true,
+        Secure:   r.TLS != nil,
+        SameSite: http.SameSiteStrictMode,
+    })
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(map[string]interface{}{
-        "access_token":  grant.AccessToken,
-        "refresh_token": grant.RefreshToken,
-        "expires_in":    grant.ExpiresIn,
-        "username":      grant.Username,
+        "access_token":           sessionToken,
+        "identity_access_token":  grant.AccessToken,
+        "identity_refresh_token": grant.RefreshToken,
+        "expires_in":             grant.ExpiresIn,
+        "username":               claims.Sub,
+        "roles":                  []string{shellRole},
     })
 }
 
