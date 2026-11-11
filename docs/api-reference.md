@@ -41,6 +41,7 @@ Base URL `http://127.0.0.1:11432`。鉴权：`Authorization: Bearer <key>` 或 `
 | `POST /v1/models/{id}/load` / `unload` | key | 经 model-hub serve 装卸 |
 | `POST /v1/admin/models/{name}/load` | admin | 直连 MLX 加载 |
 | `GET /v1/hardware` / `GET /stats` / `GET /v1/cost` | key | 硬件/MLX 统计/成本 |
+| `GET /v1/usage/report` | key | 逐调用用量台账（`?key=&since=&until=&offset=&limit=`，自带窗口汇总与 /v1/cost 对账）；/v1/cost 与本端点均按最小权限收敛：非特权 key 只能读自己（`?key=<其它 key>` 403），master key 可读任意 key |
 | `GET /v1/recommend` / `v1/analyze[-batch]` / `v1/migration-level` / `v1/convert` / `v1/quantize*` / `v1/benchmarks` | key | 模型工具面 |
 | `GET /metrics` | **master_key** | Prometheus |
 | `POST /admin/gc` / `POST /admin/config/reload` | admin JWT | 运维动作 |
