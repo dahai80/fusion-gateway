@@ -635,13 +635,16 @@ func New(
     adapter.SetCloudOutcomeRecorder(cs)
 
     // #514: identity-keyed daily token quota meter (cloud-try Phase 1).
-    // nil when disabled — the gate middleware and finalize accounting are
-    // nil-safe pass-throughs.
-    var quotaMeter *tryquota.Store
+    // Built UNCONDITIONALLY (#619 live-verify): the gate's enabled flag is
+    // read hot-reload, but a boot-time-only store meant enabling try_quota
+    // via /admin/config/reload left a nil meter and panicked every gated
+    // request (#617-class boot-time-state trap). With empty state_path the
+    // store is memory-only and idle while disabled — cheap. The gate and
+    // finalize accounting stay nil-safe regardless.
+    quotaMeter := tryquota.NewStore(cfg.Config.TryQuota.StatePath)
+    // G3: honor the configured reset window from the first request.
+    quotaMeter.SetWindow(cfg.Config.TryQuota.ResetWindow)
     if cfg.Config.TryQuota.Enabled {
-        quotaMeter = tryquota.NewStore(cfg.Config.TryQuota.StatePath)
-        // G3: honor the configured reset window from the first request.
-        quotaMeter.SetWindow(cfg.Config.TryQuota.ResetWindow)
         slog.Info("try-quota meter enabled", "daily_token_budget", cfg.Config.TryQuota.DailyTokenBudget, "state_path", cfg.Config.TryQuota.StatePath, "reset_window", cfg.Config.TryQuota.ResetWindow)
     }
 

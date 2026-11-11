@@ -70,6 +70,30 @@ func Test619_NoPrincipalNoToken_Still401(t *testing.T) {
     }
 }
 
+// #619 live-verify follow-up: try_quota enabled via HOT RELOAD on a server
+// booted with try_quota absent left s.tryQuotaMeter nil (the store was built
+// at boot only when enabled — same #617-class boot-time-state trap). The
+// gate then called BudgetOverride on the nil receiver and panicked on every
+// gated request (500). The gate must degrade to a logged pass-through when
+// no meter exists — a panic is never acceptable metering.
+func Test619_NilMeterEnabledGate_NoPanic_Passes(t *testing.T) {
+    ran := false
+    h := tqHandler(tqCfgSrc(true, 1000), nil, func(w http.ResponseWriter, r *http.Request) {
+        ran = true
+        w.WriteHeader(http.StatusOK)
+    })
+    rec, entry := tq619RoundTrip(t, h, "daemon")
+    if !ran {
+        t.Fatalf("nil meter must degrade to pass-through, got %d %s", rec.Code, rec.Body.String())
+    }
+    if rec.Code != http.StatusOK {
+        t.Fatalf("code = %d, want 200", rec.Code)
+    }
+    if entry.TryQuotaSub != "" {
+        t.Fatalf("no meter: entry must not claim a metering sub, got %q", entry.TryQuotaSub)
+    }
+}
+
 func Test619_BudgetStillEnforcedForKeySub(t *testing.T) {
     meter := tryquota.NewStore("")
     meter.Record("key:daemon", 1000, tryquota.CallDetail{}, time.Now())
