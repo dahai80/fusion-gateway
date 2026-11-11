@@ -183,17 +183,33 @@ func TryQuota(cfgSrc TryQuotaConfigSource, meter *tryquota.Store, estimate func(
                 return
             }
             token := identityToken(r)
+            var sub string
             if token == "" {
-                writeTryQuotaError(w, http.StatusUnauthorized, "identity token required",
-                    0, budget, 0)
-                return
-            }
-            sub, err := verifier.Verify(token, time.Now())
-            if err != nil {
-                slog.Info("try-quota: identity token rejected", "error", err)
-                writeTryQuotaError(w, http.StatusUnauthorized, "invalid identity token",
-                    0, budget, 0)
-                return
+                // #619: a RECOGNIZED static API key (the auth chain already
+                // validated it and stamped Principal.KeyConfig) is a machine
+                // caller — local daemons hold no identity JWT and with an
+                // empty master key there is no exempt path, so the old
+                // unconditional 401 broke every downstream daemon LLM call.
+                // Meter the request under a stable key-derived sub instead of
+                // rejecting: metering is preserved (never silently unmetered)
+                // and the key's own budget applies like any other principal.
+                if p := PrincipalFromContext(r.Context()); p != nil && p.KeyConfig != nil && p.KeyConfig.Name != "" {
+                    sub = "key:" + p.KeyConfig.Name
+                    slog.Info("try-quota: static key caller metered without identity token", "sub", sub)
+                } else {
+                    writeTryQuotaError(w, http.StatusUnauthorized, "identity token required",
+                        0, budget, 0)
+                    return
+                }
+            } else {
+                var err error
+                sub, err = verifier.Verify(token, time.Now())
+                if err != nil {
+                    slog.Info("try-quota: identity token rejected", "error", err)
+                    writeTryQuotaError(w, http.StatusUnauthorized, "invalid identity token",
+                        0, budget, 0)
+                    return
+                }
             }
             if b, ok := meter.BudgetOverride(sub); ok {
                 budget = b

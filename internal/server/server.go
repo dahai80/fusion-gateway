@@ -1706,6 +1706,15 @@ func (s *Server) buildMiddlewareChain() {
         // No-op when try_quota.enabled=false.
         middleware.TryQuota(s.tryQuotaConfigSource, s.tryQuotaMeter, s.estimateRequestTokens),
     }
+    // #619: with the gate on and no master key configured, the ONLY exempt
+    // path is gone — identity-less callers ride the static-key metering
+    // fallback ("key:<name>"). That is a coherent state, but an empty master
+    // key is also how a misconfigured deployment looks; make it loud so the
+    // operator can tell which one they are in.
+    if s.cfg.Config.TryQuota.Enabled && s.cfg.Config.Auth.MasterKey == "" {
+        slog.Warn("try_quota.enabled with an EMPTY auth.master_key: identity-less callers meter under their static key name (key:<name>); set auth.master_key (or FUSION_ADMIN_KEY) if a master exemption is intended",
+            "try_quota_enabled", true)
+    }
 
     s.middlewareChainMu.Lock()
     var combined func(http.Handler) http.Handler
