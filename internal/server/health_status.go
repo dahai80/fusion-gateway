@@ -347,17 +347,33 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
         return
     }
     slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
+    // #623: the service-route table mounts on the mux once at boot (ServeMux
+    // cannot unregister), so a reload that touched service_routes never
+    // serves the new set — report it as restart-required instead of acking a
+    // green reload with silent 404s. Captured BEFORE Reload: the OnReload
+    // handlers fire (and swap s.cfg) inside ReloadWithRecovery.
+    resp := map[string]any{
+        "status":  "reloaded",
+        "version": snap.Version,
+        "path":    s.cfgPath,
+    }
+    if serviceRoutesChanged(s.cfg.Config.ServiceRoutes, snap.Config.ServiceRoutes) {
+        changed := changedServiceNames(s.cfg.Config.ServiceRoutes, snap.Config.ServiceRoutes)
+        slog.Warn("service_routes changed on reload but the route table is boot-only; restart the gateway for the new routes to serve",
+            "changed_services", changed, "config_version", snap.Version)
+        resp["restart_required"] = []string{"service_routes"}
+    }
     // P3b (plan §15.4): structured lifecycle audit — every hot reload lands
     // in fg_gateway_events, not just stdout. Optional interface: no-op when
     // persistence is off.
     if rec, ok := s.persistSink.(pg.EventRecorder); ok {
-        rec.RecordEvent("info", "config_reloaded", map[string]any{"version": snap.Version})
+        detail := map[string]any{"version": snap.Version}
+        if rr, ok := resp["restart_required"]; ok {
+            detail["restart_required"] = rr
+        }
+        rec.RecordEvent("info", "config_reloaded", detail)
     }
-    writeJSON(w, http.StatusOK, map[string]any{
-        "status":  "reloaded",
-        "version": snap.Version,
-        "path":    s.cfgPath,
-    })
+    writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) buildBackendStatus(ctx context.Context, skipModelHub ...bool) map[string]interface{} {

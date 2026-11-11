@@ -80,6 +80,46 @@ func (s *Server) handleServiceRoute(name string, route config.ServiceRouteConfig
 	}
 }
 
+// serviceRoutesChanged reports whether the reloaded service_routes map
+// differs from the boot-applied one (#623): the route table mounts on the
+// mux once at boot and ServeMux cannot unregister, so a reload that touches
+// service_routes can never serve the new set — the operator must be told to
+// restart, not acked into a green 404. Credential values are compared but
+// never logged by callers.
+func serviceRoutesChanged(old, new map[string]config.ServiceRouteConfig) bool {
+    if len(old) != len(new) {
+        return true
+    }
+    for name, nr := range new {
+        or, ok := old[name]
+        if !ok {
+            return true
+        }
+        if or.URL != nr.URL || or.Prefix != nr.Prefix || or.UpstreamAuth != nr.UpstreamAuth ||
+            or.UpstreamToken != nr.UpstreamToken || or.UpstreamTokenFile != nr.UpstreamTokenFile {
+            return true
+        }
+    }
+    return false
+}
+
+// changedServiceNames lists the services whose definition differs between
+// the two maps (added, removed, or modified) — for the #623 operator log.
+func changedServiceNames(old, new map[string]config.ServiceRouteConfig) []string {
+    var names []string
+    for name, nr := range new {
+        if or, ok := old[name]; !ok || or != nr {
+            names = append(names, name)
+        }
+    }
+    for name := range old {
+        if _, ok := new[name]; !ok {
+            names = append(names, name)
+        }
+    }
+    return names
+}
+
 // registerServiceRoutes mounts /svc/<name>/ for every configured route.
 // Auth: the standard middleware chain (client keys / admin keys), mirroring
 // the /v1/* LLM surface. Unconfigured names 404 via ServeMux.
