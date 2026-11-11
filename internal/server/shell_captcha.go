@@ -115,10 +115,61 @@ func (c *shellCaptchaStore) verify(id, code string) string {
     return ""
 }
 
+// captchaGlyphs (#614): 5x7 dot-matrix bitmaps for the challenge charset.
+// The SVG must carry NO text nodes — a <text>-based captcha was extracted
+// with one string match on the decoded markup. Glyphs render as stroke
+// paths only. Lowercase code characters draw their uppercase glyph: the
+// verify path is EqualFold (#604), so displayed case is cosmetic, and the
+// glyph table halves. Charset rows: 5 columns, 'X' = stroke cell.
+var captchaGlyphs = map[rune][7]string{
+    '2': {".XXX.", "X...X", "....X", "...X.", "..X..", ".X...", "XXXXX"},
+    '3': {"XXXXX", "....X", "...X.", "..X..", "...X.", "....X", "XXXXX"},
+    '4': {"...X.", "..XX.", ".X.X.", "X..X.", "XXXXX", "...X.", "...X."},
+    '5': {"XXXXX", "X....", "XXXX.", "....X", "....X", "X...X", ".XXX."},
+    '6': {"..XX.", ".X...", "X....", "XXXX.", "X...X", "X...X", ".XXX."},
+    '7': {"XXXXX", "....X", "...X.", "..X..", ".X...", ".X...", ".X..."},
+    '8': {".XXX.", "X...X", "X...X", ".XXX.", "X...X", "X...X", ".XXX."},
+    '9': {".XXX.", "X...X", "X...X", ".XXXX", "....X", "...X.", ".XX.."},
+    'A': {".XXX.", "X...X", "X...X", "XXXXX", "X...X", "X...X", "X...X"},
+    'B': {"XXXX.", "X...X", "X...X", "XXXX.", "X...X", "X...X", "XXXX."},
+    'C': {".XXXX", "X....", "X....", "X....", "X....", "X....", ".XXXX"},
+    'D': {"XXXX.", "X...X", "X...X", "X...X", "X...X", "X...X", "XXXX."},
+    'E': {"XXXXX", "X....", "X....", "XXXX.", "X....", "X....", "XXXXX"},
+    'F': {"XXXXX", "X....", "X....", "XXXX.", "X....", "X....", "X...."},
+    'G': {".XXX.", "X...X", "X....", "X.XXX", "X...X", "X...X", ".XXX."},
+    'H': {"X...X", "X...X", "X...X", "XXXXX", "X...X", "X...X", "X...X"},
+    'J': {"....X", "....X", "....X", "....X", "X...X", "X...X", ".XXX."},
+    'K': {"X...X", "X..X.", "X.X..", "XX...", "X.X..", "X..X.", "X...X"},
+    'M': {"X...X", "XX.XX", "X.X.X", "X.X.X", "X...X", "X...X", "X...X"},
+    'N': {"X...X", "XX..X", "X.X.X", "X..XX", "X...X", "X...X", "X...X"},
+    'P': {"XXXX.", "X...X", "X...X", "XXXX.", "X....", "X....", "X...."},
+    'Q': {".XXX.", "X...X", "X...X", "X...X", "X.X.X", "X..X.", ".XX.X"},
+    'R': {"XXXX.", "X...X", "X...X", "XXXX.", "X.X..", "X..X.", "X...X"},
+    'S': {".XXXX", "X....", "X....", ".XXX.", "....X", "....X", "XXXX."},
+    'T': {"XXXXX", "..X..", "..X..", "..X..", "..X..", "..X..", "..X.."},
+    'U': {"X...X", "X...X", "X...X", "X...X", "X...X", "X...X", ".XXX."},
+    'V': {"X...X", "X...X", "X...X", "X...X", "X...X", ".X.X.", "..X.."},
+    'W': {"X...X", "X...X", "X...X", "X.X.X", "X.X.X", "XX.XX", "X...X"},
+    'X': {"X...X", "X...X", ".X.X.", "..X..", ".X.X.", "X...X", "X...X"},
+    'Y': {"X...X", "X...X", ".X.X.", "..X..", "..X..", "..X..", "..X.."},
+    'Z': {"XXXXX", "....X", "...X.", "..X..", ".X...", "X....", "XXXXX"},
+}
+
+// captchaGlyphFor maps a code character to its glyph: lowercase draws the
+// uppercase shape (verify is EqualFold, #604).
+func captchaGlyphFor(ch rune) ([7]string, bool) {
+    upper := []rune(strings.ToUpper(string(ch)))[0]
+    g, ok := captchaGlyphs[upper]
+    return g, ok
+}
+
 // renderSVG draws the challenge as a self-contained SVG document: the code
-// as per-character jittered text on a fixed light background (readable on
-// any UI theme) plus noise strokes against trivial OCR. Returns the base64
-// data URI the shell frontend drops straight into an <img src>.
+// as per-character jittered dot-matrix stroke paths on a fixed light
+// background plus noise strokes against trivial OCR. NO text nodes, NO
+// character data — the decoded markup must not carry a machine-recoverable
+// code (#614: the <text>-based rendering was extractable with one string
+// match). Returns the base64 data URI the shell frontend drops straight
+// into an <img src>.
 func renderSVG(code string) string {
     var sb strings.Builder
     sb.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="48" viewBox="0 0 140 48">`)
@@ -133,21 +184,48 @@ func renderSVG(code string) string {
             `<path d="M0,%d Q35,%d 70,%d T140,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.6"/>`,
             8+jitter(30), jitter(40), 8+jitter(30), jitter(40)))
     }
+    const (
+        cell = 3.0        // glyph cell size in SVG units
+        rowStep = 3.2     // slight vertical stretch for readability
+        originY = 12.0
+    )
     for i, ch := range code {
-        x := 16 + i*24 + jitter(5)
-        y := 32 + jitter(7)
+        glyph, ok := captchaGlyphFor(ch)
+        if !ok {
+            // Charset guarantees a glyph exists; a miss renders a bar so a
+            // future charset edit fails visibly instead of dropping a char.
+            glyph = [7]string{"X...X", "X...X", "X...X", "X...X", "X...X", "X...X", "X...X"}
+        }
+        gx := float64(14+i*24) + float64(jitter(5))
         rot := jitter(30) - 15
-        sb.WriteString(fmt.Sprintf(
-            `<text x="%d" y="%d" font-family="monospace" font-size="24" font-weight="bold" fill="#334155" transform="rotate(%d %d %d)">%s</text>`,
-            x, y, rot, x, y, escapeSVGText(string(ch))))
+        cx := gx + 7.5
+        cy := originY + 10.5
+        sb.WriteString(fmt.Sprintf(`<g transform="rotate(%d %.1f %.1f)">`, rot, cx, cy))
+        // Horizontal run-length strokes: contiguous cells in a row join into
+        // one path segment, so verticals stay crisp without per-cell dots.
+        for r, row := range glyph {
+            c := 0
+            for c < len(row) {
+                if row[c] != 'X' {
+                    c++
+                    continue
+                }
+                start := c
+                for c < len(row) && row[c] == 'X' {
+                    c++
+                }
+                x0 := gx + float64(start)*cell
+                x1 := gx + float64(c-1)*cell
+                y := originY + float64(r)*rowStep
+                sb.WriteString(fmt.Sprintf(
+                    `<path d="M%.1f %.1f L%.1f %.1f" stroke="#334155" stroke-width="2.2" stroke-linecap="round" fill="none"/>`,
+                    x0, y, x1, y))
+            }
+        }
+        sb.WriteString(`</g>`)
     }
     sb.WriteString(`</svg>`)
     return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(sb.String()))
-}
-
-func escapeSVGText(s string) string {
-    r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;")
-    return r.Replace(s)
 }
 
 // serveCaptchaChallenge writes the shared single-use challenge shape (shell
