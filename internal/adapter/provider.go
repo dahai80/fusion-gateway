@@ -30,6 +30,17 @@ var fusionPassthroughHeaders = []string{
     // forwarded to every upstream so gateway/rag/speech calls correlate under
     // one trace. Echoed back to the client in withMiddleware.
     "X-Fusion-Trace",
+    // #654 (W6 OTel spine, cowork#464): fusion-cowork stamps every LLM call
+    // with a W3C traceparent (run-execution trace) plus its own
+    // x-fusion-trace-id. Forward both verbatim so one trace spans
+    // workflow span → gateway → MLX inference. Verbatim is the fallback path:
+    // when the observability middleware started a recording span,
+    // InjectFusionHeaders re-writes traceparent below with the gateway span id
+    // (same trace-id, fresh span) — the client's original traceparent only
+    // survives when OTel tracing is off, which is exactly the zero-config
+    // case cowork relies on.
+    "X-Fusion-Trace-Id",
+    "Traceparent",
 }
 
 func WithFusionHeaders(ctx context.Context, r *http.Request) context.Context {
