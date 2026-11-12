@@ -1990,6 +1990,10 @@ func Load(path string) (*ConfigSnapshot, error) {
     }
     loadModelsNamespace(&cfg, rawCfg)
 
+    // Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
+    // "kimi-k2"), so re-derive Backends from the raw file bytes.
+    fixDottedBackendNames(&cfg, rawCfg)
+
     // §13.3: api_key_env resolution + vendor base_url/timeout fill, before
     // validate so downstream checks see the normalized entries.
     normalizeBackends(&cfg)
@@ -2103,6 +2107,10 @@ func Reload(path string) (*ConfigSnapshot, error) {
         return nil, fmt.Errorf("read config for models.*: %w", err)
     }
     loadModelsNamespace(&cfg, rawCfg)
+
+    // Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
+    // "kimi-k2"), so re-derive Backends from the raw file bytes.
+    fixDottedBackendNames(&cfg, rawCfg)
 
     // §13.3: same normalization as Load — hot-reloaded entries get
     // api_key_env resolution + vendor defaults fill.
