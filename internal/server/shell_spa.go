@@ -88,6 +88,7 @@ func spaFallbackRequest(r *http.Request) bool {
 // ServeMux precedence is longest-pattern-wins regardless of order, but a
 // last-position read keeps the catch-all obvious.
 func (s *Server) registerShellSPA(mux *http.ServeMux) bool {
+    s.spaRegistered = false
     dir := strings.TrimSpace(s.cfg.Config.Shell.SpaDir)
     if dir == "" {
         return false
@@ -99,6 +100,7 @@ func (s *Server) registerShellSPA(mux *http.ServeMux) bool {
         return false
     }
     mux.Handle("/", spa)
+    s.spaRegistered = true
     slog.Info("union-web shell SPA hosted at gateway root",
         "dir", dir, "namespaces_reserved", "/v1/*,/shell/*,/admin/*,/api/*,/gateway/*,/health*")
     return true
