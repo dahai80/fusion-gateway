@@ -1603,6 +1603,7 @@ identity:
     fallback_to_local: false         # true = degrade to local auth on identity outage
     breaker_threshold: 5             # consecutive failures to open the breaker
     breaker_open_sec: 30             # open duration before a half-open probe
+    service_token_file: "/etc/fusion-gateway/identity_service_token"  # 0600 secret; REQUIRED for fusion-identity >= #72 (enforcement on every RPC)
 ```
 
 When enabled, the inference hot path runs through `IdentityAuth` (after local key auth, before RBAC):
@@ -1614,6 +1615,8 @@ When enabled, the inference hot path runs through `IdentityAuth` (after local ke
 4. **VRAM priority + KV cache-tag isolation** — the lease's `priority` (1=low, 2=normal, 3=high) and `max_allowed_tokens` are forwarded to fusion-mlx as `X-Fusion-Priority` + `X-Fusion-Max-Tokens` headers on every outbound upstream request. The gateway is non-invasive (no allocator or KV cache here); these headers are the signal contract for fusion-mlx to apply P0-preempts/P2-idle-queues scheduling and `tenant:{tenant_id}:` prefix-cache isolation on its side.
 
 Admin-JWT and master-key requests bypass the identity control plane (the admin surface is not inference-tenant-scoped). The local key-store fallback is kept as a graceful-degrade path, not a replacement — identity is the tenant-context source of truth when enabled.
+
+**Service token (#630)** — fusion-identity ≥ #72 rejects every RPC lacking the `x-fusion-service-token` metadata (`UNAUTHENTICATED`), so the gateway attaches the token read from `identity.service_token_file` (trimmed file contents, 0600) to each call via a unary interceptor; the server compares it constant-time. An unreadable/empty token file logs an error at client construction and every RPC then fails authentication — in strict mode that is a loud 503, not a silent bypass. The client also warms the lazy gRPC channel at construction (`Connect()`), so the first hot-path RPC after boot or reload no longer pays the connect handshake inside the 10ms deadline. On config reload the client is swapped BEFORE the middleware chain is rebuilt (the chain captures the client pointer at build time) and the old channel closes after a 60s grace window, so in-flight requests never hit a closing channel.
 
 ## Auth Portal Resilience (#602)
 

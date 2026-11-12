@@ -2,19 +2,66 @@ package identity
 
 import (
     "context"
+    "crypto/sha256"
+    "encoding/hex"
     "log/slog"
+    "os"
+    "strings"
     "sync"
     "sync/atomic"
     "time"
 
     "google.golang.org/grpc"
     "google.golang.org/grpc/backoff"
+    "google.golang.org/grpc/connectivity"
     "google.golang.org/grpc/credentials/insecure"
     "google.golang.org/grpc/keepalive"
+    "google.golang.org/grpc/metadata"
 
     pb "github.com/fusion-gateway/fusion-gateway/internal/identity/pb"
     "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
+
+// ServiceTokenMetadataKey is the gRPC metadata key identity#72's
+// ServiceTokenInterceptor compares (constant-time, server-side).
+const ServiceTokenMetadataKey = "x-fusion-service-token"
+
+// ResolveServiceToken reads a 0600 secret file and returns its trimmed
+// contents. Empty path → "" (token plane off). Unreadable file → "" + a loud
+// error: strict-mode deployments will 503 on UNAUTHENTICATED, and this log
+// line is the one that names the cause.
+func ResolveServiceToken(path string) string {
+    if path == "" {
+        return ""
+    }
+    b, err := os.ReadFile(path)
+    if err != nil {
+        slog.Error("identity service_token_file unreadable — RPCs will be rejected UNAUTHENTICATED by identity#72+",
+            "service_token_file", path, "error", err)
+        return ""
+    }
+    tok := strings.TrimSpace(string(b))
+    if tok == "" {
+        slog.Error("identity service_token_file is empty — RPCs will be rejected UNAUTHENTICATED by identity#72+",
+            "service_token_file", path)
+        return ""
+    }
+    return tok
+}
+
+// serviceTokenUnaryInterceptor attaches the service token to every unary RPC.
+// Extracted (vs inline closure) so it is unit-testable without a live server.
+func serviceTokenUnaryInterceptor(token string) grpc.UnaryClientInterceptor {
+    return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+        ctx = metadata.AppendToOutgoingContext(ctx, ServiceTokenMetadataKey, token)
+        return invoker(ctx, method, req, reply, cc, opts...)
+    }
+}
+
+func tokenFingerprint(token string) string {
+    sum := sha256.Sum256([]byte(token))
+    return hex.EncodeToString(sum[:])[:12]
+}
 
 // Client is the long-lived fusion-identity gRPC control-plane client (#157).
 // It owns one gRPC channel (keepalive, reconnect) + a circuit breaker. The
@@ -36,13 +83,16 @@ type Client struct {
 
 // NewClient dials the identity gRPC server. Returns nil if endpoint empty
 // (caller treats nil = identity disabled, same as cfg.Identity.Enabled=false).
-func NewClient(endpoint string, deadlineMS, keepAliveSec, breakerThreshold, breakerOpenSec int, fallback bool) *Client {
+// serviceTokenFile is a 0600 secret file carrying the identity#72 service
+// token; when it resolves non-empty, every unary RPC carries it as metadata.
+func NewClient(endpoint string, deadlineMS, keepAliveSec, breakerThreshold, breakerOpenSec int, fallback bool, serviceTokenFile string) *Client {
     if endpoint == "" {
         return nil
     }
     deadline := time.Duration(deadlineMS) * time.Millisecond
     ka := time.Duration(keepAliveSec) * time.Second
-    conn, err := grpc.NewClient(endpoint,
+    serviceToken := ResolveServiceToken(serviceTokenFile)
+    dialOpts := []grpc.DialOption{
         grpc.WithTransportCredentials(insecure.NewCredentials()),
         grpc.WithConnectParams(grpc.ConnectParams{
             MinConnectTimeout: 2 * time.Second,
@@ -58,7 +108,11 @@ func NewClient(endpoint string, deadlineMS, keepAliveSec, breakerThreshold, brea
             Timeout:             ka,
             PermitWithoutStream: true,
         }),
-    )
+    }
+    if serviceToken != "" {
+        dialOpts = append(dialOpts, grpc.WithChainUnaryInterceptor(serviceTokenUnaryInterceptor(serviceToken)))
+    }
+    conn, err := grpc.NewClient(endpoint, dialOpts...)
     if err != nil {
         // grpc.NewClient is lazy — it does not dial immediately, so an error
         // here is a config/option error, not a connection error. Log + nil so
@@ -67,6 +121,12 @@ func NewClient(endpoint string, deadlineMS, keepAliveSec, breakerThreshold, brea
             "endpoint", endpoint, "error", err)
         return nil
     }
+    // Warm the lazy channel immediately: grpc.NewClient connects on first
+    // RPC, so the very first AuthorizeAndAcquire after boot/reload paid the
+    // full connect handshake inside its (tight, hot-path) deadline and
+    // flaked DeadlineExceeded on cold start (#630 secondary). Connect() only
+    // kicks the state machine — it does not block.
+    conn.Connect()
     c := &Client{
         conn:     conn,
         stub:     pb.NewIdentityServiceClient(conn),
@@ -76,7 +136,9 @@ func NewClient(endpoint string, deadlineMS, keepAliveSec, breakerThreshold, brea
         endpoint: endpoint,
     }
     slog.Info("identity gRPC client connected",
-        "endpoint", endpoint, "deadline", deadline, "fallback_to_local", fallback)
+        "endpoint", endpoint, "deadline", deadline, "fallback_to_local", fallback,
+        "service_token_attached", serviceToken != "",
+        "service_token_fingerprint", tokenFingerprint(serviceToken))
     return c
 }
 
@@ -214,6 +276,15 @@ func (c *Client) Close() error {
         return nil
     }
     return c.conn.Close()
+}
+
+// IsClosed reports whether the underlying channel has been torn down. Used by
+// the #630 reload test to prove the old client survives the swap window.
+func (c *Client) IsClosed() bool {
+    if c == nil || c.conn == nil {
+        return true
+    }
+    return c.conn.GetState() == connectivity.Shutdown
 }
 
 // FallbackToLocal reports whether the client is configured to fall back to

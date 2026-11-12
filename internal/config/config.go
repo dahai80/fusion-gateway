@@ -1561,6 +1561,13 @@ type IdentityConfig struct {
     BreakerThreshold int `mapstructure:"breaker_threshold"`
     // BreakerOpenSec breaker open duration before half-open probe (seconds).
     BreakerOpenSec int `mapstructure:"breaker_open_sec"`
+    // ServiceTokenFile: 0600 secret file whose trimmed contents are attached
+    // as the x-fusion-service-token gRPC metadata on every RPC. identity#72
+    // enforces the service token server-side (ServiceTokenInterceptor,
+    // constant-time compare) on ALL RPCs — without it every call is rejected
+    // UNAUTHENTICATED and, in strict mode, every inference call 503s (#630).
+    // Empty = no token attached (pre-#72 identity servers).
+    ServiceTokenFile string `mapstructure:"service_token_file"`
 }
 
 type ConfigSnapshot struct {

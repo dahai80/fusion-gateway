@@ -253,7 +253,7 @@ func TestClient_ReportUsage_BestEffort(t *testing.T) {
 }
 
 func TestNewClient_NilOnEmptyEndpoint(t *testing.T) {
-    if c := NewClient("", 10, 30, 5, 30, false); c != nil {
+    if c := NewClient("", 10, 30, 5, 30, false, ""); c != nil {
         t.Fatalf("expected nil client for empty endpoint")
     }
 }

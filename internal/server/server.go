@@ -88,6 +88,9 @@ type Server struct {
     // shellCaptcha (#592): single-use SVG challenges gating the public shell
     // login endpoint. nil when shell disabled.
     shellCaptcha *shellCaptchaStore
+    // #451: true when the union-web shell SPA is hosted at gateway root —
+    // gates the anonymous /shell/* navigation redirect to /login?return=...
+    spaRegistered bool
     // rolloutTap (#608): mirrors production chat traffic into a local JSONL
     // sink for fusion-trainer RL datasets. nil when the plane is disabled —
     // every touchpoint is nil-safe.
@@ -822,6 +825,7 @@ func New(
         cfg.Config.Identity.BreakerThreshold,
         cfg.Config.Identity.BreakerOpenSec,
         cfg.Config.Identity.FallbackToLocal,
+        cfg.Config.Identity.ServiceTokenFile,
     )
     if srv.identityClient != nil {
         slog.Info("identity control-plane client wired", "endpoint", cfg.Config.Identity.Endpoint)
@@ -1786,6 +1790,23 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     if s.tryQuotaMeter != nil {
         s.tryQuotaMeter.SetWindow(newCfg.Config.TryQuota.ResetWindow)
     }
+    // #157/#630: rebuild the identity control-plane client BEFORE
+    // buildMiddlewareChain — the chain captures the client pointer at build
+    // time, so swapping after the build left the fresh chain holding the OLD
+    // client while its channel was then closed inline: every new request
+    // after a reload failed with "grpc: the client connection is closing".
+    // A disable (endpoint empty) → new client is nil → IdentityAuth
+    // pass-through.
+    oldIdentityClient := s.identityClient
+    s.identityClient = identity.NewClient(
+        newCfg.Config.Identity.Endpoint,
+        newCfg.Config.Identity.DeadlineMS,
+        newCfg.Config.Identity.KeepAliveSec,
+        newCfg.Config.Identity.BreakerThreshold,
+        newCfg.Config.Identity.BreakerOpenSec,
+        newCfg.Config.Identity.FallbackToLocal,
+        newCfg.Config.Identity.ServiceTokenFile,
+    )
     s.buildMiddlewareChain()
     // #129 Gap 3: propagate managed-MCP tool allowlist changes on hot-reload
     // so toggling mcp.managed_tool_allowlist takes effect without a restart.
@@ -1800,23 +1821,28 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     // browser/mcp toggle behavior documented on browserHandler. A nil signer
     // is the disabled state.
     s.managedSettingsSigner = newManagedSettingsSigner(newCfg.Config.ManagedSettings)
-    // #157: rebuild the identity control-plane client on reload so an endpoint
-    // change or enable/disable takes effect without a restart. Close the prior
-    // client first (tear down its gRPC channel) before swapping in the new one.
-    // A disable (endpoint empty) → new client is nil → IdentityAuth pass-through.
-    if s.identityClient != nil {
-        _ = s.identityClient.Close()
+    // #630: in-flight requests hold middleware closures over the OLD client —
+    // closing its channel inline made those requests fail mid-flight. Close
+    // it after a grace window instead (long enough for any in-flight RPC to
+    // drain; new requests already see the new client).
+    if oldIdentityClient != nil && oldIdentityClient != s.identityClient {
+        delay := time.Duration(identityReloadGraceCloseDelay.Load())
+        safego.Go("identity.graceClose", func() {
+            time.Sleep(delay)
+            _ = oldIdentityClient.Close()
+            slog.Info("identity client from pre-reload chain closed after grace window",
+                "grace_ms", delay.Milliseconds())
+        })
     }
-    s.identityClient = identity.NewClient(
-        newCfg.Config.Identity.Endpoint,
-        newCfg.Config.Identity.DeadlineMS,
-        newCfg.Config.Identity.KeepAliveSec,
-        newCfg.Config.Identity.BreakerThreshold,
-        newCfg.Config.Identity.BreakerOpenSec,
-        newCfg.Config.Identity.FallbackToLocal,
-    )
     slog.Info("middleware chain rebuilt on config reload")
 }
+
+// identityReloadGraceCloseDelay is how long a replaced identity gRPC client's
+// channel stays open after a reload swap (#630). Atomic so tests can shrink
+// it without racing the grace-close goroutine.
+var identityReloadGraceCloseDelay atomic.Int64
+
+func init() { identityReloadGraceCloseDelay.Store(int64(60 * time.Second)) }
 
 // estimateRequestTokens approximates the prompt token count for the TPM rate
 // limiter (audit A4: the middleware was wired with a nil estimator, so
