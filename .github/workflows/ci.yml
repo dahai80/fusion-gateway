@@ -6,9 +6,39 @@ on:
   pull_request:
     branches: [main]
 
+# issue #637 (fusion#2 checklist): cancel superseded runs on the same
+# branch/PR — repeated push does not queue another full run behind the
+# previous one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # issue #637: docs/comments-only changes skip the heavy jobs. Job-level
+  # conditional (not `paths-ignore`) so the required checks still report
+  # (skipped = success for branch protection) instead of never appearing.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'scripts/**'
+              - 'config.container.yaml'
+              - '.github/workflows/ci.yml'
+
   build-test:
     name: Build, Vet, Test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # fusion-gateway is Apple-Silicon local-first: internal/hardware uses
     # macOS-only IOKit (purego) and sysctl swap-page counters with no
     # cross-platform stubs. CI runs on macOS to match the real deployment
@@ -40,12 +70,16 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # A5 CI gate: -race catches the concurrency bugs the audit flagged
-      # (RWMutex-across-I/O, circuit-breaker lazy half_open, slot double-
-      # release). macOS runners support -race. -count=1 disables test result
-      # caching so a previously-passing-but-racy run re-runs fresh.
-      - name: Test (race)
-        run: go test ./... -count=1 -race
+      # issue #637 tiered gate: the PR pass runs the full suite WITHOUT
+      # -race (the race detector roughly doubles runtime on a 41-package
+      # suite). The authoritative -race pass moved to the nightly workflow
+      # (.github/workflows/nightly.yml), which runs the full suite fresh on
+      # every push it observes — race regressions surface there within a
+      # day, before they can ship (release builds come from tagged commits,
+      # and the nightly result gates the next PR's confidence, not the
+      # release itself).
+      - name: Test
+        run: go test ./... -count=1
 
   # Enterprise SCA gate: govulncheck scans the 56 direct + transitive Go
   # dependencies against the Go vulnerability database (https://vuln.go.dev).
@@ -56,6 +90,8 @@ jobs:
   # itself is platform-agnostic but keeps a single runner class.
   vuln-scan:
     name: govulncheck (SCA)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
