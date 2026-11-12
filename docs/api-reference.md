@@ -42,6 +42,8 @@ Base URL `http://127.0.0.1:11432`。鉴权：`Authorization: Bearer <key>` 或 `
 | `POST /v1/admin/models/{name}/load` | admin | 直连 MLX 加载 |
 | `GET /v1/hardware` / `GET /stats` / `GET /v1/cost` | key | 硬件/MLX 统计/成本 |
 | `GET /v1/usage/report` | key | 逐调用用量台账（`?key=&since=&until=&offset=&limit=`，自带窗口汇总与 /v1/cost 对账）；/v1/cost 与本端点均按最小权限收敛：非特权 key 只能读自己（`?key=<其它 key>` 403），master key 可读任意 key |
+| `GET /admin/api/billing/summary` | admin | #633 计费资费概览：牌价、预付套餐目录、各 key 令牌余额、账单额 vs 实际成本毛利视图 |
+| `POST /admin/api/billing/topup` | admin | #633 给 key 充值预付令牌余额（`{"key","tokens","order_ref"}`）；未知 key 拒绝 400（防隐形信用）；identity 订单面上线前为手工执行器 |
 | `GET /v1/recommend` / `v1/analyze[-batch]` / `v1/migration-level` / `v1/convert` / `v1/quantize*` / `v1/benchmarks` | key | 模型工具面 |
 | `GET /metrics` | **master_key** | Prometheus |
 | `POST /admin/gc` / `POST /admin/config/reload` | admin JWT | 运维动作 |

@@ -328,7 +328,7 @@ cannot be left with no upstream.
 | `/v1/completions` | POST | Legacy completions (auto-converted to chat format) |
 | `/v1/embeddings` | POST | Text embeddings (local-first, cluster sharding for batch) |
 | `/v1/rerank` | POST | Rerank documents (cloud-default, local when model available) |
-| `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter) |
+| `/v1/cost` | GET | Cost tracking summary (optional `?key=<name>` filter); also carries billable rollups (`total_billable_usd`, `by_key_billable`) when `billing.enabled` (#633) |
 | `/v1/catalog` | GET | Three-source product catalog merge view (#488): static catalog + live manifest registry + supervisor health. Entries carry `installable` (#518) — `false` means the repo URL is a local-only product with no remote; install clients (e.g. `fusion install`) must reject those with a "local-only" message instead of a clone error. Absent flag = installable |
 | `/v1/realtime` | WebSocket | Realtime API proxy (bidirectional WebSocket relay) |
 | `/v1/models` | GET | List available models (concurrent per-provider fetch, 3s timeout each, failures skipped; `routing.mode: local` lists only local providers). Each model carries a `loaded` flag — `true` only when the model id is in fusion-mlx's resident `loaded_models` set, so downstream consumers can distinguish "registered" from "servable" (#59). |
@@ -359,6 +359,8 @@ cannot be left with no upstream.
 | `/admin/config/reload` | POST | Config reload notification |
 | `/admin/api/config/backends` | GET/POST | List providers (masked keys) / create a provider backend. Create validates name, registered type, base URL, timeout, and supports `api_key` or `api_key_env`; writes config atomically and reloads. |
 | `/admin/api/config/backends/{name}` | GET/PUT/DELETE | Read, update (base URL, key, timeout, models, enabled), or delete a provider. Deleting the last enabled backend is refused with 409. |
+| `/admin/api/billing/summary` | GET | Billing rate-plan overview (#633): configured list price, prepaid bucket catalog, per-key token balances, and the billable-vs-cost margin rollup |
+| `/admin/api/billing/topup` | POST | Fund a key's prepaid token balance (#633): `{"key","tokens","order_ref"}`. Fail-closed — unknown key names are rejected with 400 (no invisible credit). Manual executor until the identity order plane ships (upstream issue filed) |
 | `/admin/teams` | GET/POST | List/create teams (admin-only) |
 | `/admin/teams/{id}` | GET/PUT/DELETE | Team CRUD (admin-only) |
 | `/admin/orgs` | GET/POST | List/create organizations (admin-only) |
@@ -1353,6 +1355,40 @@ Built-in cost tracking with per-model pricing:
 - Per-key cost breakdown with `?key=<name>` filter
 - JSON export via `Tracker.ExportJSON()`
 - **Budget blocking**: Per-key monthly spend limits (`budget_limit`) enforced before request execution
+
+### Prepaid billing rate plan (`billing.*`, #633)
+
+Value-based prepaid billing, decoupled from real cost telemetry: balances are
+denominated in TOKENS, and the single list price
+(`billing.list_price_per_1k_tokens_usd`) converts consumption into billable USD
+for reporting. Enabling billing does not change what cost tracking records.
+
+```yaml
+billing:
+  enabled: true
+  list_price_per_1k_tokens_usd: 2.0     # anchor: top-tier model unit cost x100
+  prepaid_buckets:                       # catalog surfaced via /admin/api/billing/summary
+    - { name: starter, tokens: 100000, price_usd: 10.0 }
+    - { name: pro, tokens: 1000000, price_usd: 80.0 }
+```
+
+- **Enforcement** (hot path, after quota gate): keys with a ledger entry and a
+  balance ≤ 0 get `429 BILLING_EXHAUSTED`. Keys without an entry (postpaid /
+  config plane) are never blocked. Balance checks are in-memory — no identity
+  round-trip.
+- **Deduction** happens at request finalize with the REAL token counts; a
+  concurrent burst may push a balance slightly negative before the next request
+  is rejected (documented v1 trade-off, no reservation protocol).
+- **Persistence**: `<data_dir>/billing_balances.json` (0600, atomic rename,
+  debounced ≥1 flush/sec); corrupt file degrades to empty + error log, never a
+  crash.
+- **Top-up**: `POST /admin/api/billing/topup {"key","tokens","order_ref"}` —
+  manual executor until fusion-identity ships an order plane (upstream issue
+  filed); fail-closed on unknown key names.
+- **Reporting**: `/admin/api/billing/summary` (rate + buckets + balances +
+  billable-vs-cost margin view) and billable rollups on `/v1/cost`.
+- Free-tier note: identity-side `daily_token_limit` remains the per-request
+  free-tier executor; the prepaid plane is independent and both can coexist.
 
 ### Dashboard pricing (`pricing.*`, #564)
 

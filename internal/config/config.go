@@ -947,6 +947,35 @@ type StoreConfig struct {
     Redis   RedisConfig `mapstructure:"redis"`
 }
 
+// BillingBucket is a purchasable prepaid token tier (#633). Catalog-only in
+// v1: the purchase flow consumes an identity-issued order once fusion-identity
+// ships an order plane (upstream issue); balances are provisioned via the
+// admin billing API in the meantime.
+type BillingBucket struct {
+    Name     string  `mapstructure:"name"`
+    Tokens   int64   `mapstructure:"tokens"`
+    PriceUSD float64 `mapstructure:"price_usd"`
+}
+
+// BillingConfig is the value-based rate plan layer (#633) — SEPARATE from
+// cost telemetry: /v1/cost keeps recording real per-model cost (internal
+// truth), while billing applies ONE list price per 1K tokens to every model
+// (owner decision: anchor = most expensive model's unit token cost x 100;
+// margin floats with the model actually served). `enabled: false` = no
+// billable amounts computed, no balance enforcement.
+type BillingConfig struct {
+    Enabled bool `mapstructure:"enabled"`
+    // ListPricePer1KTokensUSD is the single list rate. Hot-reloadable: the
+    // request path syncs it into the cost tracker per request, so an Owner
+    // edit + config reload takes effect on the next billed request without
+    // redeploy.
+    ListPricePer1KTokensUSD float64 `mapstructure:"list_price_per_1k_tokens_usd"`
+    // PrepaidBuckets is the purchasable tier catalog (100K/500K/2M...).
+    // Bulk discounts allowed WITHIN the x100 anchor; never below cost x floor
+    // margin — that is a pricing-policy constraint for whoever fills this in.
+    PrepaidBuckets []BillingBucket `mapstructure:"prepaid_buckets"`
+}
+
 // BrowserConfig is the gateway-side configuration for the cross-node
 // browser-session scheduling subsystem (#130). Namespace `browser.*` in
 // config.yaml, mirroring the `mcp.*`/`cluster.*` convention. Default-off:
@@ -1118,6 +1147,11 @@ type Config struct {
     SemanticCache SemanticCacheConfig      `mapstructure:"semantic_cache"`
     PromptInjection PromptInjectionConfig  `mapstructure:"prompt_injection"`
     CostMarkup    CostMarkupConfig         `mapstructure:"cost_markup"`
+    // Billing is the value-based rate-plan layer (#633): one list price per
+    // 1K tokens on top of real cost telemetry, prepaid token buckets, and
+    // live balance enforcement. Default off — zero behavior change until
+    // billing.enabled=true.
+    Billing       BillingConfig            `mapstructure:"billing"`
     Batch         BatchConfig              `mapstructure:"batch"`
     Store         StoreConfig              `mapstructure:"store"`
     Encryption    *EncryptionConfig        `mapstructure:"encryption"`

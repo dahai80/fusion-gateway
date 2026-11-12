@@ -29,6 +29,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/browser"
     "github.com/fusion-gateway/fusion-gateway/internal/cluster"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
+    "github.com/fusion-gateway/fusion-gateway/internal/billing"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
@@ -101,6 +102,11 @@ type Server struct {
     // fetch path skips coalescing when this is nil (e.g. cache disabled).
     fetchCoalescer  *coalescer
     costTracker     *cost.Tracker
+    // billingLedger (#633): prepaid token balances per key. Built
+    // unconditionally in New (idle cost ≈ 0) so billing can be enabled via
+    // hot reload without a restart — same boot-state rule as the try-quota
+    // meter (#619).
+    billingLedger   *billing.Ledger
     // #301: runtime cloud-overflow state (cooldown window + daily cost
     // counter). Policy knobs live in routing.fallback.overflow config.
     overflow        overflowState
@@ -420,6 +426,7 @@ func (s *Server) recordAndCharge(ctx context.Context, backend, model string, pro
     // billed request (same mechanism as the router's Decide).
     if snap := config.SnapshotFromContext(ctx); snap != nil {
         s.costTracker.SyncConfigMarkup(snap.Config.CostMarkup.Enabled, snap.Config.CostMarkup.GlobalMarkup)
+        s.costTracker.SyncConfigBilling(snap.Config.Billing.Enabled, snap.Config.Billing.ListPricePer1KTokensUSD)
     }
     keyName := "anonymous"
     teamID := ""
@@ -435,6 +442,49 @@ func (s *Server) recordAndCharge(ctx context.Context, backend, model string, pro
 
 func (s *Server) Cache() *cache.Cache {
     return s.cache
+}
+
+// billingGate is the #633 hot-path admission check for prepaid keys: a key
+// with a ledger entry whose balance is exhausted gets 429 BILLING_EXHAUSTED.
+// Keys without an entry are not balance-enforced (postpaid plane). In-memory
+// map read — no per-request identity round-trip (issue constraint). Inserted
+// after BudgetBlock in the chain so fully-authenticated requests pay the
+// check exactly once.
+func (s *Server) billingGate() func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if s.billingLedger != nil && s.cfg.Config.Billing.Enabled {
+                keyCfg := middleware.GetAuthKeyConfig(r.Context())
+                if keyCfg != nil && keyCfg.Name != "" && s.billingLedger.HasBalance(keyCfg.Name) {
+                    if s.billingLedger.Balance(keyCfg.Name) <= 0 {
+                        slog.Warn("billing balance exhausted, rejecting request (#633)",
+                            "key", keyCfg.Name, "path", r.URL.Path)
+                        w.Header().Set("Content-Type", "application/json")
+                        w.WriteHeader(http.StatusTooManyRequests)
+                        _, _ = w.Write([]byte(`{"error":{"message":"prepaid token balance exhausted — top up to continue","type":"billing_error","code":"BILLING_EXHAUSTED"}}`))
+                        return
+                    }
+                }
+            }
+            next.ServeHTTP(w, r)
+        })
+    }
+}
+
+// deductBilling records the request's REAL token count against the prepaid
+// balance at request end (outer wrapper; entry is the only channel that
+// carries final token counts + key name out of the middleware chain).
+func (s *Server) deductBilling(entry *store.RequestLog) {
+    if s.billingLedger == nil || entry == nil || entry.APIKeyName == "" {
+        return
+    }
+    tokens := float64(entry.InputTokens + entry.OutputTokens)
+    if tokens <= 0 {
+        return
+    }
+    if s.billingLedger.HasBalance(entry.APIKeyName) {
+        s.billingLedger.Deduct(entry.APIKeyName, tokens)
+    }
 }
 
 func (s *Server) SemanticCache() *cache.SemanticCache {
@@ -830,6 +880,9 @@ func New(
     if srv.identityClient != nil {
         slog.Info("identity control-plane client wired", "endpoint", cfg.Config.Identity.Endpoint)
     }
+    // #633: prepaid-bucket balances. Built unconditionally (a nil-ledger hot
+    // reload would panic the gate) — idle cost is a map + one JSON file read.
+    srv.billingLedger = billing.NewLedger(cfg.Config.Store.DataDir)
     // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
     // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
     if n := cfg.Config.Routing.Stream.MaxConcurrentStreams; n > 0 {
@@ -1159,6 +1212,11 @@ func (s *Server) Start() error {
         // Governance report (LiteLLM-gap dashboard wave) — exact pattern
         // wins over the admin handler's /admin/api/reports/ prefix.
         mux.HandleFunc("/admin/api/reports/governance", s.withAdminOnly(s.handleGovernanceReport))
+        // #633: billing rate-plan admin surface — rate/catalog summary +
+        // prepaid balance top-up (manual executor until the identity order
+        // plane lands upstream).
+        mux.HandleFunc("/admin/api/billing/summary", s.withAdminOnly(s.handleBillingSummary))
+        mux.HandleFunc("/admin/api/billing/topup", s.withAdminOnly(s.handleBillingTopUp))
         // #30: proxy fusion-mlx admin fine-tune API through the gateway so
         // fusion-trainer can target :11432 exclusively. Registered before the
         // /admin/ SPA catch-all so it takes precedence; shares the /v1/*
@@ -1417,6 +1475,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
     if s.tryQuotaMeter != nil {
         s.tryQuotaMeter.Flush()
     }
+    // #633: flush prepaid balances so a graceful restart never loses
+    // deductions from the last second.
+    s.billingLedger.Flush()
     return err
 }
 
@@ -1625,6 +1686,9 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         // #514: account real usage against the identity-keyed daily quota
         // after finalize (entry carries the metering key stamped by the gate).
         middleware.TryQuotaFinalize(entry, s.tryQuotaMeter)
+        // #633: deduct the request's real token count from the key's prepaid
+        // balance (bucket users only — ledger entries are the opt-in).
+        s.deductBilling(entry)
         if s.persistSink != nil && snap.Config.Persistence.Enabled {
             s.enqueuePersistEntry(entry, r, rec, snap.Config.Persistence, start)
         }
@@ -1728,6 +1792,10 @@ func (s *Server) buildMiddlewareChain() {
         // checked only after the request is fully authenticated + scoped.
         // No-op when try_quota.enabled=false.
         middleware.TryQuota(s.tryQuotaConfigSource, s.tryQuotaMeter, s.estimateRequestTokens),
+        // #633: prepaid-bucket balance gate — last admission check, after
+        // auth/budget/rate-limit. Pass-through unless billing.enabled and the
+        // key carries a ledger entry.
+        s.billingGate(),
     }
     // #619: with the gate on and no master key configured, the ONLY exempt
     // path is gone — identity-less callers ride the static-key metering
