@@ -882,6 +882,8 @@ func New(
     }
     // #633: prepaid-bucket balances. Built unconditionally (a nil-ledger hot
     // reload would panic the gate) — idle cost is a map + one JSON file read.
+    // NewLedger expands the tilde in data_dir itself (config values carry a
+    // literal `~/` Go's os package does not expand).
     srv.billingLedger = billing.NewLedger(cfg.Config.Store.DataDir)
     // R10 (audit): size the global concurrent-stream semaphore. 0 disables the
     // cap (streamSem stays nil → acquireStreamSlot is a no-op, back-compat).
