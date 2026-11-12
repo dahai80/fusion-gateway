@@ -13,6 +13,7 @@ import (
     "log/slog"
     "net/http"
     "net/url"
+    "os"
     "path/filepath"
     "strings"
     "time"
@@ -27,15 +28,48 @@ import (
 )
 
 // buildShellSessionSecret derives the session signing secret: the explicit
+// buildShellSessionSecret derives the session signing secret: the explicit
 // shell.session.secret wins; otherwise a domain-separated digest of the
-// master_key (never the raw master key itself). Config validate guarantees
-// at least one source when shell.enabled.
-func buildShellSessionSecret(cfg *config.Config) []byte {
+// master_key (never the raw master key itself). #643: the derived digest is
+// PERSISTED to <data_dir>/shell_session_secret (0600) on first boot and
+// reloaded from the file afterwards — the effective master_key can flip
+// between the env override (FUSION_ADMIN_KEY) and config.yaml across restart
+// paths (fusion-sv sets the env; a direct start.sh does not), which silently
+// changed the digest and invalidated every live session mid-walkthrough
+// (signature errors, not TTL). The persisted value keeps sessions valid
+// across such source flips; genuine key rotation means setting
+// shell.session.secret explicitly (the config branch wins over the file).
+// dataDir "" (tests / non-persistent setups) skips persistence entirely.
+func buildShellSessionSecret(dataDir string, cfg *config.Config) ([]byte, string) {
     if s := strings.TrimSpace(cfg.Shell.Session.Secret); s != "" {
-        return []byte(s)
+        return []byte(s), "config file"
     }
-    sum := sha256.Sum256([]byte(cfg.Auth.MasterKey + ":shell-session-v1"))
-    return []byte(hex.EncodeToString(sum[:]))
+    derived := func() []byte {
+        sum := sha256.Sum256([]byte(cfg.Auth.MasterKey + ":shell-session-v1"))
+        return []byte(hex.EncodeToString(sum[:]))
+    }
+    if dataDir == "" {
+        return derived(), "derived from auth.master_key (domain-separated digest)"
+    }
+    dir := config.ExpandPath(dataDir)
+    path := filepath.Join(dir, "shell_session_secret")
+    if b, err := os.ReadFile(path); err == nil {
+        if trimmed := bytes.TrimSpace(b); len(trimmed) > 0 {
+            return trimmed, "persisted file"
+        }
+    }
+    secret := derived()
+    if err := os.MkdirAll(dir, 0700); err != nil {
+        slog.Warn("shell session secret persist skipped (mkdir failed; per-boot digest in use — restarts with a flipped master_key source will invalidate live sessions, issue #643)",
+            "path", path, "error", err)
+        return secret, "derived from auth.master_key (domain-separated digest)"
+    }
+    if err := os.WriteFile(path, secret, 0600); err != nil {
+        slog.Warn("shell session secret persist failed (per-boot digest in use — restarts with a flipped master_key source will invalidate live sessions, issue #643)",
+            "path", path, "error", err)
+        return secret, "derived from auth.master_key (domain-separated digest)"
+    }
+    return secret, "derived from auth.master_key (persisted to file, stable across restarts)"
 }
 
 // setupShell constructs the shell subsystem (#215) when shell.enabled. A
@@ -49,17 +83,17 @@ func (s *Server) setupShell() {
     // Reset any prior construction (tests / re-setup) before rebuilding so a
     // configured-user setup never inherits a stale bootstrap admin.
     s.shellBootstrap = nil
-    secret := buildShellSessionSecret(&cfg)
-    // #611: log the secret SOURCE in both branches — tooling that mints
+    secret, secretSource := buildShellSessionSecret(cfg.Store.DataDir, &cfg)
+    // #611: log the secret SOURCE in every branch — tooling that mints
     // session tokens must be able to tell from the log which value to derive
     // from, especially with FUSION_ADMIN_KEY overriding auth.master_key.
     sum := sha256.Sum256(secret)
     fp := "sha256:" + hex.EncodeToString(sum[:8])
-    if cfg.Shell.Session.Secret != "" {
-        slog.Info("shell session secret resolved", "source", "config file", "fingerprint", fp)
+    if secretSource == "config file" {
+        slog.Info("shell session secret resolved", "source", secretSource, "fingerprint", fp)
     } else {
         slog.Info("shell session secret resolved",
-            "source", "derived from auth.master_key (domain-separated digest)",
+            "source", secretSource,
             "note", "the effective master_key source is logged at boot as auth.master_key resolved",
             "fingerprint", fp)
     }
