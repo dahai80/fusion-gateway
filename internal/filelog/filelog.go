@@ -8,6 +8,7 @@ package filelog
 import (
     "context"
     "fmt"
+    "io"
     "log/slog"
     "os"
     "path/filepath"
@@ -201,13 +202,53 @@ func Setup(cfg config.FileLogConfig, fallbackLevel string) func() {
     w := &dailyWriter{dir: dir, prefix: "gateway", retainDays: cfg.RetainDays}
     stderrH := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(fallbackLevel)})
     fileH := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: parseLevel(level)})
-    slog.SetDefault(slog.New(&fanoutHandler{hs: []slog.Handler{stderrH, fileH}}))
+    current = &fanoutHandler{hs: []slog.Handler{stderrH, fileH}}
+    slog.SetDefault(slog.New(current))
     slog.Info("filelog enabled", "dir", dir, "level", level, "retain_days", cfg.RetainDays)
     return func() {
         if err := w.Close(); err != nil {
             slog.Warn("filelog close failed", "error", err)
         }
     }
+}
+
+// current holds the fanout installed by Setup so AddSink can extend it.
+// Guarded by curMu: the swap is copy-on-write (build a new fanout, never
+// mutate the old one's slice) because in-flight log calls may be iterating
+// the old fanout's handlers concurrently.
+var (
+    curMu   sync.Mutex
+    current *fanoutHandler
+)
+
+// AddSink appends w as an extra text sink to the installed fanout and
+// re-publishes it as the slog default. It exists because server setupLogging
+// used to call slog.SetDefault directly, silently REPLACING the filelog
+// fanout — after server.New() the daily JSON file only ever captured the
+// startup block, and request/shutdown lines ("shutting down", stream
+// summaries) vanished from gateway-YYYY-MM-DD.log. #649: that gap made
+// graceful SIGTERM shutdowns look like silent process deaths, because the
+// operator-visible file sink went quiet the moment the server came up.
+//
+// Returns false when filelog.Setup never ran (file_log.enabled=false); the
+// caller keeps its own SetDefault fallback in that case.
+func AddSink(w io.Writer, fallbackLevel string) bool {
+    if !installed.Load() {
+        return false
+    }
+    curMu.Lock()
+    defer curMu.Unlock()
+    if current == nil {
+        return false
+    }
+    h := slog.NewTextHandler(w, &slog.HandlerOptions{Level: parseLevel(fallbackLevel)})
+    hs := make([]slog.Handler, 0, len(current.hs)+1)
+    hs = append(hs, current.hs...)
+    hs = append(hs, h)
+    next := &fanoutHandler{hs: hs}
+    slog.SetDefault(slog.New(next))
+    current = next
+    return true
 }
 
 // sortedDayFilenames is a test helper: the day files currently in dir,
