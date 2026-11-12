@@ -396,3 +396,26 @@ func tenantFromRequest(r *http.Request) string {
     }
     return p.Team.ID
 }
+
+// TestIdentityAuth_LeaseStampedOnRequestLog (#630): the lease context value
+// lives only in IdentityAuth's derived ctx — the outer withMiddleware defer
+// reads the ORIGINAL request ctx and can never see it (same trap that made
+// every request log "anonymous" before StampAPIKeyName). The lease must also
+// land on the request-log entry so ReleaseLease/ReportUsage fire at request end.
+func TestIdentityAuth_LeaseStampedOnRequestLog(t *testing.T) {
+    f := &fakeIdentityServer{}
+    f.allow.Store(true)
+    f.leaseID = "lease-630"
+    f.tenantID = "tenant-630"
+    c, cleanup := newIdentityClient(t, f, false)
+    defer cleanup()
+    cfg := &config.IdentityConfig{Enabled: true}
+    r := principalRequest("k")
+    r = WithRequestLogContext(r, InitRequestLog(r))
+    h := IdentityAuth(c, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+    h.ServeHTTP(httptest.NewRecorder(), r)
+    entry := GetRequestLog(r.Context())
+    if entry == nil || entry.IdentityLeaseID != "lease-630" || entry.IdentityTenantID != "tenant-630" {
+        t.Fatalf("lease not stamped on entry: %+v", entry)
+    }
+}

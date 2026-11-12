@@ -1652,9 +1652,20 @@ func (s *Server) releaseIdentityLease(ctx context.Context, entry *store.RequestL
     if s.identityClient == nil {
         return
     }
+    // #630: read the lease off the entry, not the request ctx — IdentityAuth
+    // stamps it into its DERIVED ctx, which this outer defer can never see
+    // (context propagation is inward-only). The ctx value still feeds the
+    // in-handler paths (adapter lease signals); the entry is the end-of-
+    // request channel, same pattern as TryQuotaSub.
     lease := middleware.IdentityLeaseFromContext(ctx)
-    if lease == nil || lease.LeaseID == "" {
-        return
+    leaseID := entry.IdentityLeaseID
+    tenantID := entry.IdentityTenantID
+    if leaseID == "" {
+        if lease == nil || lease.LeaseID == "" {
+            return
+        }
+        leaseID = lease.LeaseID
+        tenantID = lease.TenantID
     }
     status := pb.InferenceStatus_SUCCESS
     switch {
@@ -1671,10 +1682,10 @@ func (s *Server) releaseIdentityLease(ctx context.Context, entry *store.RequestL
     } else if status == pb.InferenceStatus_FAILED {
         reason = "inference-failed"
     }
-    s.identityClient.ReleaseLease(lease.LeaseID, lease.TenantID, reason)
+    s.identityClient.ReleaseLease(leaseID, tenantID, reason)
     s.identityClient.ReportUsage(identity.UsageReport{
-        LeaseID:          lease.LeaseID,
-        TenantID:         lease.TenantID,
+        LeaseID:          leaseID,
+        TenantID:         tenantID,
         ModelName:        entry.Model,
         PromptTokens:     int32(entry.InputTokens),
         CompletionTokens: int32(entry.OutputTokens),
@@ -1682,7 +1693,7 @@ func (s *Server) releaseIdentityLease(ctx context.Context, entry *store.RequestL
         Status:           status,
     })
     slog.Debug("identity lease released",
-        "lease_id", lease.LeaseID, "tenant", lease.TenantID,
+        "lease_id", leaseID, "tenant", tenantID,
         "status", status, "input", entry.InputTokens, "output", entry.OutputTokens)
 }
 

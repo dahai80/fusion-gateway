@@ -143,6 +143,14 @@ func IdentityAuth(client *identity.Client, cfg *config.IdentityConfig) func(http
                     Priority:         ar.Priority,
                     MaxAllowedTokens: ar.MaxAllowedTokens,
                 })
+                // #630: the lease ctx value is invisible to the outer
+                // withMiddleware defer (derived ctx, same trap as the
+                // anonymous-key bug StampAPIKeyName fixed) — stamp the entry
+                // too so ReleaseLease/ReportUsage actually fire at request end.
+                if entry := GetRequestLog(ctx); entry != nil {
+                    entry.IdentityLeaseID = ar.LeaseID
+                    entry.IdentityTenantID = ar.TenantID
+                }
                 // #157 items 2+3: thread the scheduling signals onto ctx so
                 // InjectFusionHeaders stamps X-Fusion-Priority +
                 // X-Fusion-Max-Tokens on the outbound upstream request. The
