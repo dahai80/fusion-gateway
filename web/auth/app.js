@@ -44,7 +44,10 @@
             "ok-tenant": "Team registered and active. You can sign in now.",
             "ok-verify": "Email verified. You can sign in now.",
             "ok-login": "Signed in.",
-            "err-generic": "Request failed. Try again shortly."
+            "err-generic": "Request failed. Try again shortly.",
+            "err-field-required": "\"{field}\" is required.",
+            "err-field-minlength": "\"{field}\" needs at least {n} characters.",
+            "err-field-email": "\"{field}\" must be a valid email address."
         },
         zh: {
             "title": "登录 Fusion",
@@ -83,7 +86,10 @@
             "ok-tenant": "团队已注册并激活，现在可以登录。",
             "ok-verify": "邮箱已验证，现在可以登录。",
             "ok-login": "登录成功。",
-            "err-generic": "请求失败，请稍后重试。"
+            "err-generic": "请求失败，请稍后重试。",
+            "err-field-required": "\"{field}\" 必填。",
+            "err-field-minlength": "\"{field}\" 至少需要 {n} 个字符。",
+            "err-field-email": "\"{field}\" 必须是有效的邮箱地址。"
         }
     };
 
@@ -126,6 +132,33 @@
     function busy(form, on) {
         var btn = form.querySelector("button[type=submit]");
         btn.disabled = on;
+    }
+
+    // #642: forms carry novalidate — native constraint blocking fired NO
+    // submit event, so the button looked dead (no request, no message). Every
+    // handler validates here first: the first invalid field surfaces as an
+    // inline message (same area as server errors), always visible.
+    function fieldLabel(input) {
+        var label = input.closest("form").querySelector('label[for="' + input.name + '"]');
+        if (!label) {
+            var prev = input.parentElement.querySelector("label");
+            if (prev) label = prev;
+        }
+        var text = label ? label.textContent.trim() : input.name;
+        var i18n = label && label.getAttribute("data-i18n");
+        return i18n ? t(i18n) : text;
+    }
+
+    function validateForm(form) {
+        if (form.checkValidity()) return true;
+        var bad = form.querySelector(":invalid");
+        if (bad) {
+            if (bad.validity.valueMissing) say(t("err-field-required").replace("{field}", fieldLabel(bad)));
+            else if (bad.validity.typeMismatch || bad.validity.patternMismatch) say(t("err-field-email").replace("{field}", fieldLabel(bad)));
+            else if (bad.validity.tooShort) say(t("err-field-minlength").replace("{field}", fieldLabel(bad)).replace("{n}", String(bad.minLength)));
+            else say(t("err-field-required").replace("{field}", fieldLabel(bad)));
+        }
+        return false;
     }
 
     function postJSON(url, body) {
@@ -234,6 +267,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         busy(f, true);
         var payload = {
             username: f.username.value.trim(),
@@ -271,6 +305,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         if (f.password.value !== f.password_confirm.value) {
             say(t("err-password-mismatch"));
             return;
@@ -291,6 +326,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         if (f.admin_password.value !== f.admin_password_confirm.value) {
             say(t("err-password-mismatch"));
             return;
@@ -312,6 +348,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         busy(f, true);
         postJSON("/auth/api/identity/api/v1/auth/verify-email", {
             token: f.token.value.trim()
@@ -332,6 +369,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         busy(f, true);
         // Identity returns the same envelope regardless of account existence
         // (no enumeration); surface it verbatim.
@@ -348,6 +386,7 @@
         e.preventDefault();
         clearMsg();
         var f = e.target;
+        if (!validateForm(f)) return;
         if (f.password.value !== f.password_confirm.value) {
             say(t("err-reset-mismatch"));
             return;
