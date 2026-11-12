@@ -43,6 +43,14 @@ type RequestLog struct {
     // outer withMiddleware defer) — same entry-pointer pattern as
     // StampAPIKeyName, since the middleware's derived ctx is invisible there.
     TryQuotaSub  string `json:"try_quota_sub,omitempty"`
+
+    // IdentityLeaseID/IdentityTenantID (#630): lease acquired by IdentityAuth.
+    // Stamped on the entry for the same reason as TryQuotaSub — the lease
+    // context value lives only in the middleware's derived ctx, which the
+    // outer withMiddleware defer can never read, so ReleaseLease/ReportUsage
+    // previously never fired (leaked leases, zero usage metering).
+    IdentityLeaseID   string `json:"identity_lease_id,omitempty"`
+    IdentityTenantID  string `json:"identity_tenant_id,omitempty"`
     TryQuotaEst  int    `json:"try_quota_est,omitempty"`
 
     InputTokens  int `json:"input_tokens"`
