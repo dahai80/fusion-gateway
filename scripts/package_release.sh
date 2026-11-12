@@ -103,4 +103,4 @@ shasum -a 256 fusion-gateway-"${VERSION}"-darwin-arm64.dmg \
     > native-checksums.txt
 
 log "done:"
-ls -lh "$OUT" | awk 'NR>1 {print "  " $5 "  " $9}'
+ls -lh "$REPO_ROOT/$OUT" | awk 'NR>1 {print "  " $5 "  " $9}'

@@ -89,6 +89,20 @@ docker run -p 11432:11432 fusion-gateway
 curl http://127.0.0.1:11432/healthz   # -> 200
 ```
 
+### Native packages (dmg / exe / deb)
+
+`scripts/package_release.sh <version> [out-dir]` cross-compiles the gateway and builds the native release formats (#647). Requires `hdiutil` (built into macOS) and `dpkg-deb` (`brew install dpkg`):
+
+```bash
+scripts/package_release.sh v0.9.175          # -> dist/release-pkg/
+# fusion-gateway-v0.9.175-darwin-arm64.dmg   (binary + README, UDZO)
+# fusion-gateway-v0.9.175-windows-amd64.exe  (CGO_ENABLED=0)
+# fusion-gateway_0.9.175_linux-amd64.deb     (+ arm64; /usr/bin, config example, systemd unit)
+# native-checksums.txt                       (sha256)
+```
+
+The deb ships `/etc/fusion-gateway/config.yaml.example` and `fusion-gateway.service`; install with `dpkg -i`, then edit the config and `systemctl enable --now fusion-gateway`. The DMG bundles the arm64 binary — copy it anywhere on the PATH. Windows support targets the routing/proxy plane: hardware swap counters return a tagged unsupported error, so collection-error protection (P0.5) handles them like the containerized linux build.
+
 The image ships a minimal `config.container.yaml` (auth off, `auto_start` off, `host: 0.0.0.0`) baked at `/etc/fusion-gateway/config.yaml`. Runtime env overrides (highest precedence, via `viper.BindEnv`):
 
 | Env | Config key | Default | Purpose |
