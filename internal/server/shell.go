@@ -12,6 +12,7 @@ import (
     "io"
     "log/slog"
     "net/http"
+    "net/url"
     "path/filepath"
     "strings"
     "time"
@@ -443,9 +444,25 @@ func hashShellPassword(password string) (string, error) {
     return string(hash), nil
 }
 
+// shellLoginRedirect (#451) bounces an anonymous / expired-session browser
+// navigation to the SPA login with a same-origin return path. A customer
+// arriving from the marketing site has no session and no fetch interceptor
+// to translate the JSON 401 envelope, so a navigation-shaped request must
+// never receive raw JSON. API-shaped calls (fetch/XHR, service keys) keep
+// the envelope — the SPA intercepts those.
+func (s *Server) shellLoginRedirect(w http.ResponseWriter, r *http.Request) {
+    returnPath := r.URL.RequestURI()
+    if strings.HasPrefix(returnPath, "//") {
+        returnPath = "/"
+    }
+    target := "/login?return=" + url.QueryEscape(returnPath)
+    http.Redirect(w, r, target, http.StatusFound)
+}
+
 // withShellSession guards a handler behind a valid shell session Bearer
 // token. 401 with the standardized envelope — the shell host intercepts 401
-// and bounces to the login page (PRD §4.1.4).
+// and bounces to the login page (PRD §4.1.4). Browser navigations (#451)
+// get a same-origin 302 to /login?return=... instead of the envelope.
 func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         if s.shellSessions == nil {
@@ -462,6 +479,11 @@ func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
             }
         }
         if token == "" {
+            if s.spaRegistered && spaFallbackRequest(r) {
+                slog.Info("shell anonymous navigation redirected to login", "path", r.URL.Path)
+                s.shellLoginRedirect(w, r)
+                return
+            }
             w.Header().Set("WWW-Authenticate", `Bearer realm="fusion-shell"`)
             shell.WriteEnvelope(w, http.StatusUnauthorized, "session_required", "shell session token required", "", false)
             return
@@ -469,6 +491,10 @@ func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
         claims, err := s.shellSessions.Validate(token)
         if err != nil {
             slog.Info("shell session rejected", "path", r.URL.Path, "error", err)
+            if s.spaRegistered && spaFallbackRequest(r) {
+                s.shellLoginRedirect(w, r)
+                return
+            }
             w.Header().Set("WWW-Authenticate", `Bearer realm="fusion-shell", error="invalid_token"`)
             shell.WriteEnvelope(w, http.StatusUnauthorized, "session_invalid", err.Error(), "", false)
             return

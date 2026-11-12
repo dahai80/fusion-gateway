@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "net/http"
     "net/http/httptest"
+    "net/url"
     "strings"
     "sync/atomic"
     "testing"
@@ -147,6 +148,55 @@ func TestShellSession_MissingTokenEnvelope(t *testing.T) {
     }
     if !strings.Contains(w.Body.String(), `"code":"session_required"`) {
         t.Fatalf("body = %s", w.Body.String())
+    }
+}
+
+// #451: an anonymous browser navigation to /shell/<module>/ must land on the
+// SPA login with a same-origin return path, not a raw JSON envelope.
+func TestShellSession_AnonymousNavigationRedirectsToLogin(t *testing.T) {
+    s := newShellTestServer(t, false)
+    s.spaRegistered = true
+    req := httptest.NewRequest(http.MethodGet, "/shell/fusion-cowork/", nil)
+    req.Header.Set("Accept", "text/html,application/xhtml+xml")
+    w := httptest.NewRecorder()
+    s.withShellSession(s.handleShellMe)(w, req)
+    if w.Code != http.StatusFound {
+        t.Fatalf("navigation code = %d, want 302", w.Code)
+    }
+    loc := w.Header().Get("Location")
+    want := "/login?return=" + url.QueryEscape("/shell/fusion-cowork/")
+    if loc != want {
+        t.Fatalf("Location = %q, want %q", loc, want)
+    }
+    if strings.Contains(w.Body.String(), "session_required") {
+        t.Fatalf("navigation got JSON envelope: %s", w.Body.String())
+    }
+}
+
+// #451: API-shaped anonymous calls keep the JSON envelope (SPA intercepts
+// 401 on fetch); SPA-less deployments keep the envelope for navigations too.
+func TestShellSession_AnonymousAPICallKeepsEnvelope(t *testing.T) {
+    s := newShellTestServer(t, false)
+    s.spaRegistered = true
+    req := httptest.NewRequest(http.MethodGet, "/shell/fusion-cowork/api/runs", nil)
+    req.Header.Set("Accept", "application/json")
+    w := httptest.NewRecorder()
+    s.withShellSession(s.handleShellMe)(w, req)
+    if w.Code != http.StatusUnauthorized {
+        t.Fatalf("api code = %d, want 401", w.Code)
+    }
+    if !strings.Contains(w.Body.String(), `"code":"session_required"`) {
+        t.Fatalf("body = %s", w.Body.String())
+    }
+
+    s2 := newShellTestServer(t, false)
+    s2.spaRegistered = false
+    req2 := httptest.NewRequest(http.MethodGet, "/shell/fusion-cowork/", nil)
+    req2.Header.Set("Accept", "text/html")
+    w2 := httptest.NewRecorder()
+    s2.withShellSession(s2.handleShellMe)(w2, req2)
+    if w2.Code != http.StatusUnauthorized {
+        t.Fatalf("spa-less navigation code = %d, want 401", w2.Code)
     }
 }
 
