@@ -24,7 +24,7 @@
         <button type="button" data-tab="tenant" class="tab" data-i18n="tab-tenant">Register a team</button>
     </nav>
 
-    <form id="form-login" class="pane active" autocomplete="on">
+    <form novalidate id="form-login" class="pane active" autocomplete="on">
         <label data-i18n="f-username">Username</label>
         <input name="username" required autocomplete="username">
         <label data-i18n="f-password">Password</label>
@@ -43,7 +43,7 @@
         <button type="button" id="forgot-link" class="linkbtn" data-i18n="link-forgot">Forgot password?</button>
     </form>
 
-    <form id="form-forgot" class="pane">
+    <form novalidate id="form-forgot" class="pane">
         <p class="hint" data-i18n="hint-forgot">Enter the account email. If it exists, a reset link is sent — the response is identical either way.</p>
         <label data-i18n="f-email">Email</label>
         <input name="email" type="email" required autocomplete="email">
@@ -51,7 +51,7 @@
         <button type="button" id="forgot-back" class="linkbtn" data-i18n="link-back-signin">Back to sign in</button>
     </form>
 
-    <form id="form-reset" class="pane">
+    <form novalidate id="form-reset" class="pane">
         <p class="hint" data-i18n="hint-reset">Enter the token from the reset email and a new password.</p>
         <label data-i18n="f-token">Reset token</label>
         <input name="token" required>
@@ -62,7 +62,7 @@
         <button type="submit" class="primary" data-i18n="btn-reset">Set new password</button>
     </form>
 
-    <form id="form-register" class="pane">
+    <form novalidate id="form-register" class="pane">
         <label data-i18n="f-username">Username</label>
         <input name="username" required minlength="3" autocomplete="username">
         <label data-i18n="f-email">Email</label>
@@ -75,7 +75,7 @@
         <button type="submit" class="primary" data-i18n="btn-register">Create account</button>
     </form>
 
-    <form id="form-tenant" class="pane">
+    <form novalidate id="form-tenant" class="pane">
         <label data-i18n="f-team">Team name</label>
         <input name="tenant_display_name" required maxlength="128">
         <label data-i18n="f-username">Username</label>
@@ -90,7 +90,7 @@
         <button type="submit" class="primary" data-i18n="btn-tenant">Register team</button>
     </form>
 
-    <form id="form-verify" class="pane">
+    <form novalidate id="form-verify" class="pane">
         <p class="hint" id="verify-msg" data-i18n="hint-verify-sent">Verification sent. Enter the token from the email link.</p>
         <label data-i18n="f-token">Verification token</label>
         <input name="token" required>
