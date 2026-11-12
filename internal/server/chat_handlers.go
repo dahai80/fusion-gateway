@@ -1213,6 +1213,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                 stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
                     float64(time.Since(start))/float64(time.Millisecond))
             }
+            s.meterCachedServed(ctx, cached, string(decision.Backend), req.Model)
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -1250,6 +1251,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                 stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
                     float64(time.Since(start))/float64(time.Millisecond))
             }
+            s.meterCachedServed(ctx, cached, string(decision.Backend), req.Model)
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Semantic-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -1328,6 +1330,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                 stampTimingMetrics(logEntry, nil, logEntry.OutputTokens,
                     float64(time.Since(start))/float64(time.Millisecond))
             }
+            s.meterCachedServed(ctx, cached, string(decision.Backend), req.Model)
             w.Header().Set("Content-Type", "application/json")
             w.Header().Set("X-Cache", "HIT")
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
@@ -1714,6 +1717,26 @@ func stampCachedUsage(ctx context.Context, cached []byte) {
     logEntry.OutputTokens = resp.Usage.CompletionTokens
     logEntry.TotalTokens = resp.Usage.TotalTokens
     logEntry.CachedTokens = resp.Usage.CachedTokenCount()
+}
+
+// meterCachedServed charges a non-stream response served from a cache path
+// (#639): the fetch tail's recordAndCharge is unreachable on the three
+// early-return cache-serve paths (exact hit, semantic hit, coalesced
+// re-check), and the coalescer is always wired — so with the default cache
+// config EVERY non-stream request recorded zero usage in the cost tracker.
+// Usage comes from the cached body (the same counts stampCachedUsage lands
+// on the log entry). Serving a response is billable regardless of whether
+// it was freshly generated, so the quota charge applies on hits too —
+// matching the stream path, which never serves from cache.
+func (s *Server) meterCachedServed(ctx context.Context, cached []byte, backend, model string) {
+    if s.costTracker == nil || len(cached) == 0 {
+        return
+    }
+    var resp adapter.ChatResponse
+    if err := json.Unmarshal(cached, &resp); err != nil {
+        return
+    }
+    s.recordAndCharge(ctx, backend, model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 }
 
 // cacheWorthyChatResponse reports whether a successful response carries
