@@ -1,0 +1,46 @@
+name: Nightly
+
+on:
+  schedule:
+    # 21:00 UTC = 05:00 CST — runs before the workday starts so a red race
+    # suite is visible when the owner checks the board in the morning.
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+# issue #637: one nightly run at a time; a manual dispatch cancels a
+# still-running scheduled run instead of queueing behind it.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  # Authoritative -race pass (issue #637 tiered gate, fusion#2 checklist):
+  # the race detector roughly doubles the runtime of the 41-package suite,
+  # so it ran nightly instead of on every PR. PR CI keeps build + vet +
+  # bare-goroutine gate + the full suite without -race; this job keeps the
+  # concurrency guarantees the audit demanded (RWMutex-across-I/O,
+  # circuit-breaker lazy half_open, slot double-release).
+  race-suite:
+    name: Test (race, authoritative)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # -count=1 disables test result caching so a previously-passing-but-
+      # racy run re-runs fresh. Bare-goroutine gate re-armed here too: the
+      # nightly is the last line before a race bug ships, keep the same
+      # invariant set as the PR gate.
+      - name: Bare-goroutine gate
+        run: bash scripts/check_bare_goroutines.sh
+
+      - name: Test (race)
+        run: go test ./... -count=1 -race
