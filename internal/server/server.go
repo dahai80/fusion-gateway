@@ -32,6 +32,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/billing"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
+    "github.com/fusion-gateway/fusion-gateway/internal/filelog"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
     "github.com/fusion-gateway/fusion-gateway/internal/identity"
     pb "github.com/fusion-gateway/fusion-gateway/internal/identity/pb"
@@ -315,6 +316,12 @@ func (s *Server) SetVersion(version, commit string) {
 // rotation knobs were dead config and logs grew unbounded on stderr. Call once
 // at startup; unknown levels fall back to Info with a warning so a typo never
 // silently disables logging. An empty logFile keeps the stderr-only behavior.
+//
+// When filelog.Setup already installed its fanout (file_log.enabled=true),
+// this MUST extend it via filelog.AddSink instead of SetDefault: a plain
+// SetDefault here replaces the fanout and the daily JSON file goes silent
+// right after boot — request and shutdown lines never reach it (#649 made
+// graceful SIGTERM shutdowns look like silent process deaths).
 func setupLogging(logLevel, logFile string, maxSize, maxBackups int) {
     level, known := parseLevel(logLevel)
     if !known {
@@ -335,6 +342,9 @@ func setupLogging(logLevel, logFile string, maxSize, maxBackups int) {
             "file", logFile,
             "max_size_mb", maxSize,
             "max_backups", maxBackups)
+    }
+    if filelog.AddSink(w, logLevel) {
+        return
     }
     handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
     slog.SetDefault(slog.New(handler))
