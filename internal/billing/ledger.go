@@ -14,6 +14,8 @@ import (
     "path/filepath"
     "sync"
     "time"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
 // entry is one prepaid key's balance state. OrderRef records the last
@@ -42,6 +44,10 @@ type Ledger struct {
 
 func NewLedger(dataDir string) *Ledger {
     l := &Ledger{balances: make(map[string]*entry)}
+    // ExpandPath: config data_dir values carry a literal `~/` that Go's os
+    // package does NOT expand — without this every persist fails with a
+    // tmp-write error against a literal "~/.fusion-gateway/..." path.
+    dataDir = config.ExpandPath(dataDir)
     if dataDir != "" {
         l.path = filepath.Join(dataDir, "billing_balances.json")
         if b, err := os.ReadFile(l.path); err == nil {

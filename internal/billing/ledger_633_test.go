@@ -97,3 +97,23 @@ func Test633_DebouncedFlushWritesWithinBudget(t *testing.T) {
     }
     t.Fatal("debounced flush never wrote the balances file")
 }
+
+func Test633_LedgerExpandsTildeDataDir(t *testing.T) {
+    // Regression: a literal `~/...` data_dir must be expanded, or every
+    // persist fails against a path Go's os package cannot resolve.
+    home, _ := os.UserHomeDir()
+    if err := os.MkdirAll(filepath.Join(home, ".fusion-gateway-test-633"), 0700); err != nil {
+        t.Fatal(err)
+    }
+    l := NewLedger("~/.fusion-gateway-test-633")
+    if _, err := l.TopUp("k1", 5, ""); err != nil {
+        t.Fatal(err)
+    }
+    if l.path == "" || l.path[0] == '~' {
+        t.Fatalf("ledger path not expanded: %q", l.path)
+    }
+    if _, err := os.Stat(l.path); err != nil {
+        t.Fatalf("persist file missing after flush: %v", err)
+    }
+    os.RemoveAll(filepath.Dir(l.path))
+}
