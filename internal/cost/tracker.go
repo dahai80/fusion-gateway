@@ -17,6 +17,11 @@ type UsageRecord struct {
     CompletionTokens int       `json:"completion_tokens"`
     TotalTokens      int       `json:"total_tokens"`
     CostUSD          float64   `json:"cost_usd"`
+    // BillableUSD (#633) is the rate-plan amount: total tokens x the single
+    // list price (billing.list_price_per_1k_tokens_usd), snapshotted at
+    // record time. Distinct from CostUSD (real per-model cost telemetry) —
+    // governance reads the delta as margin. 0 while billing disabled.
+    BillableUSD      float64   `json:"billable_usd,omitempty"`
 }
 
 type Tracker struct {
@@ -26,6 +31,11 @@ type Tracker struct {
     totalCost   float64
     markup      float64
     keyMarkups map[string]float64
+    // billing plane (#633): one list price per 1K tokens, hot-synced from the
+    // config snapshot on the request path (same mechanism as SyncConfigMarkup).
+    billEnabled bool
+    billPer1K   float64
+    totalBillable float64
 }
 
 func NewTracker(maxRecords int) *Tracker {
@@ -67,6 +77,11 @@ func (t *Tracker) RecordAndReturn(keyName, backend, model string, promptTokens, 
     t.mu.Lock()
     defer t.mu.Unlock()
 
+    // #633: apply the rate-plan list price (hot-synced from config).
+    if t.billEnabled && t.billPer1K > 0 {
+        rec.BillableUSD = float64(rec.TotalTokens) / 1000.0 * t.billPer1K
+        t.totalBillable += rec.BillableUSD
+    }
     t.totalCost += billedCost
     t.records = append(t.records, rec)
     if len(t.records) > t.maxRecords {
@@ -123,6 +138,22 @@ func (t *Tracker) SyncConfigMarkup(enabled bool, globalMarkup float64) {
     t.mu.Unlock()
 }
 
+// SyncConfigBilling propagates the rate-plan plane (#633) into the tracker:
+// one list price per 1K tokens applied to every model's usage. Called from
+// the request path with the live snapshot — an Owner price edit + reload
+// takes effect on the next billed request. Disabled = BillableUSD stays 0.
+func (t *Tracker) SyncConfigBilling(enabled bool, listPer1K float64) {
+    t.mu.Lock()
+    changed := t.billEnabled != enabled || t.billPer1K != listPer1K
+    if changed {
+        slog.Info("billing rate plan synced from config (#633)",
+            "enabled", enabled, "list_price_per_1k_usd", listPer1K)
+        t.billEnabled = enabled
+        t.billPer1K = listPer1K
+    }
+    t.mu.Unlock()
+}
+
 func (t *Tracker) SetKeyMarkup(keyName string, markup float64) {
     t.mu.Lock()
     defer t.mu.Unlock()
@@ -161,6 +192,9 @@ type CostSummary struct {
     ByModel       map[string]float64 `json:"by_model"`
     TotalTokens   int               `json:"total_tokens"`
     TotalRequests int               `json:"total_requests"`
+    // #633: rate-plan amounts (billable vs cost = margin in reports).
+    TotalBillableUSD float64           `json:"total_billable_usd,omitempty"`
+    ByKeyBillable    map[string]float64 `json:"by_key_billable,omitempty"`
 }
 
 func (t *Tracker) Summary() *CostSummary {
@@ -174,6 +208,8 @@ func (t *Tracker) Summary() *CostSummary {
         ByModel:       make(map[string]float64),
         TotalTokens:   0,
         TotalRequests: len(t.records),
+        TotalBillableUSD: t.totalBillable,
+        ByKeyBillable:    make(map[string]float64),
     }
 
     for _, r := range t.records {
@@ -181,6 +217,9 @@ func (t *Tracker) Summary() *CostSummary {
         s.ByBackend[r.Backend] += r.CostUSD
         s.ByModel[r.Model] += r.CostUSD
         s.TotalTokens += r.TotalTokens
+        if r.BillableUSD > 0 {
+            s.ByKeyBillable[r.KeyName] += r.BillableUSD
+        }
     }
 
     return s
@@ -191,9 +230,10 @@ func (t *Tracker) SummaryByKey(keyName string) *CostSummary {
     defer t.mu.RUnlock()
 
     s := &CostSummary{
-        ByKey:     make(map[string]float64),
-        ByBackend: make(map[string]float64),
-        ByModel:   make(map[string]float64),
+        ByKey:         make(map[string]float64),
+        ByBackend:     make(map[string]float64),
+        ByModel:       make(map[string]float64),
+        ByKeyBillable: make(map[string]float64),
     }
 
     for _, r := range t.records {
@@ -206,6 +246,10 @@ func (t *Tracker) SummaryByKey(keyName string) *CostSummary {
         s.ByModel[r.Model] += r.CostUSD
         s.TotalTokens += r.TotalTokens
         s.TotalRequests++
+        if r.BillableUSD > 0 {
+            s.TotalBillableUSD += r.BillableUSD
+            s.ByKeyBillable[r.KeyName] += r.BillableUSD
+        }
     }
 
     return s
@@ -266,9 +310,10 @@ func (t *Tracker) WindowSummary(keyName string, since, until time.Time) *CostSum
     defer t.mu.RUnlock()
 
     s := &CostSummary{
-        ByKey:     make(map[string]float64),
-        ByBackend: make(map[string]float64),
-        ByModel:   make(map[string]float64),
+        ByKey:         make(map[string]float64),
+        ByBackend:     make(map[string]float64),
+        ByModel:       make(map[string]float64),
+        ByKeyBillable: make(map[string]float64),
     }
     for _, r := range t.records {
         if !ledgerFilter(r, keyName, since, until) {
@@ -280,6 +325,10 @@ func (t *Tracker) WindowSummary(keyName string, since, until time.Time) *CostSum
         s.ByModel[r.Model] += r.CostUSD
         s.TotalTokens += r.TotalTokens
         s.TotalRequests++
+        if r.BillableUSD > 0 {
+            s.TotalBillableUSD += r.BillableUSD
+            s.ByKeyBillable[r.KeyName] += r.BillableUSD
+        }
     }
     return s
 }
