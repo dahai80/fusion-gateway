@@ -65,7 +65,7 @@
     "dependencies": []
   },
   {
-    "id": "fusion-model-hub",
+    "id": "fusion-models-hub",
     "title_en": "Fusion-Model-Hub",
     "title_cn": "模型仓库",
     "category": "platform",
@@ -232,7 +232,7 @@
     ]
   },
   {
-    "id": "fusion-artifacts-engine",
+    "id": "fusion-artifacts",
     "title_en": "Artifacts Engine",
     "title_cn": "产物引擎",
     "category": "application",
@@ -371,7 +371,7 @@
     ]
   },
   {
-    "id": "fusion-multi-node",
+    "id": "fusion-multi-nodes",
     "title_en": "Multi-Node",
     "title_cn": "多机协同",
     "category": "domain",
@@ -414,7 +414,7 @@
     "installable": false
   },
   {
-    "id": "ai-fit",
+    "id": "fusion-fit-ai",
     "title_en": "AI Fit",
     "title_cn": "AI 健身",
     "category": "business",
