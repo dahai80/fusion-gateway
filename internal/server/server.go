@@ -950,6 +950,9 @@ func (s *Server) Start() error {
         mux.HandleFunc("/api/v1/catalog", s.withPrincipalBridge(s.handleCatalog))
     }
     mux.HandleFunc("/v1/cost", s.withMiddleware(s.handleCost))
+    // #628: per-call usage ledger for the site /my/usage page — same
+    // middleware chain (key auth) and same access scoping as /v1/cost.
+    mux.HandleFunc("/v1/usage/report", s.withMiddleware(s.handleUsageReport))
     mux.HandleFunc("/v1/images/generations", s.withMiddleware(s.handleImages))
     mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleAnthropicMessages))
     // #116 resumable SSE: replay endpoint for the local MLX path. Prefix-matched

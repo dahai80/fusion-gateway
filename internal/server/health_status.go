@@ -6,12 +6,14 @@ import (
     "fmt"
     "log/slog"
     "net/http"
+    "strconv"
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/adapter"
     "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/cost"
     "github.com/fusion-gateway/fusion-gateway/internal/hardware"
+    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
     "github.com/fusion-gateway/fusion-gateway/internal/router"
@@ -449,6 +451,27 @@ func (s *Server) buildHardwareStatus(m hardware.HardwareMetrics) map[string]inte
     }
 }
 
+// costAccessScope (#628 ask 2) resolves who may read whose usage. A
+// non-privileged key principal is scoped to its OWN key name — before this,
+// ?key=<other> returned any key's cost data to any valid key, and no key
+// param returned the GLOBAL summary. Only the master-key principal (the
+// admin plane) reads arbitrary keys. Returns (scopedKey, seeAll, ok): ok is
+// false when the caller explicitly asked for a key it may not read (403).
+func costAccessScope(p *middleware.Principal, requested string) (string, bool, bool) {
+    isMaster := p != nil && p.IsMaster
+    callerKey := ""
+    if p != nil && p.KeyConfig != nil {
+        callerKey = p.KeyConfig.Name
+    }
+    if isMaster {
+        return requested, true, true
+    }
+    if requested != "" && requested != callerKey {
+        return "", false, false
+    }
+    return callerKey, false, true
+}
+
 func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
@@ -460,16 +483,102 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    keyName := r.URL.Query().Get("key")
+    requested := r.URL.Query().Get("key")
+    scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
+    if !ok {
+        slog.Warn("cost summary cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
+        http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
+
     var summary *cost.CostSummary
-    if keyName != "" {
-        summary = s.costTracker.SummaryByKey(keyName)
-    } else {
+    if seeAll && scopedKey != "" {
+        summary = s.costTracker.SummaryByKey(scopedKey)
+    } else if seeAll {
         summary = s.costTracker.Summary()
+    } else {
+        summary = s.costTracker.SummaryByKey(scopedKey)
     }
 
     w.Header().Set("Content-Type", "application/json")
     _ = json.NewEncoder(w).Encode(summary)
+}
+
+// handleUsageReport (#628 ask 1) serves the site /my/usage page: a per-call
+// ledger over the same metering /v1/cost aggregates, with time-range +
+// pagination params and a window summary that reconciles with /v1/cost for
+// the same period. Access is scoped like /v1/cost (own key unless master).
+// source:"ring" is the honest data bound — the ledger reads the tracker's
+// bounded ring, so the window is limited by max_records retention.
+func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+        return
+    }
+    if s.costTracker == nil {
+        http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
+        return
+    }
+
+    q := r.URL.Query()
+    requested := q.Get("key")
+    scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
+    if !ok {
+        slog.Warn("usage report cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
+        http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
+        return
+    }
+
+    var since, until time.Time
+    if v := q.Get("since"); v != "" {
+        if t, err := time.Parse(time.RFC3339, v); err == nil {
+            since = t
+        } else {
+            http.Error(w, `{"error":{"message":"invalid since (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+    }
+    if v := q.Get("until"); v != "" {
+        if t, err := time.Parse(time.RFC3339, v); err == nil {
+            until = t
+        } else {
+            http.Error(w, `{"error":{"message":"invalid until (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
+            return
+        }
+    }
+    offset := 0
+    if v := q.Get("offset"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            offset = n
+        }
+    }
+    limit := 100
+    if v := q.Get("limit"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            limit = n
+        }
+    }
+    if limit > 1000 {
+        limit = 1000
+    }
+
+    // seeAll with no explicit key = the master's unscoped view (all keys).
+    ledgerKey := scopedKey
+    if seeAll && requested == "" {
+        ledgerKey = ""
+    }
+    records, total := s.costTracker.Ledger(ledgerKey, since, until, offset, limit)
+    resp := map[string]interface{}{
+        "records": records,
+        "total":   total,
+        "offset":  offset,
+        "limit":   limit,
+        "source":  "ring",
+        "key":     ledgerKey,
+        "summary": s.costTracker.WindowSummary(ledgerKey, since, until),
+    }
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(resp)
 }
 
 func healthStatus(healthy bool) string {

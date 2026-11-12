@@ -211,6 +211,79 @@ func (t *Tracker) SummaryByKey(keyName string) *CostSummary {
     return s
 }
 
+// ledgerFilter matches the #628 report filters: empty keyName = all keys;
+// zero since/until = unbounded on that side.
+func ledgerFilter(r UsageRecord, keyName string, since, until time.Time) bool {
+    if keyName != "" && r.KeyName != keyName {
+        return false
+    }
+    if !since.IsZero() && r.Timestamp.Before(since) {
+        return false
+    }
+    if !until.IsZero() && r.Timestamp.After(until) {
+        return false
+    }
+    return true
+}
+
+// Ledger (#628 ask 1) is the per-call read API behind /v1/usage/report:
+// filtered by key + time range, timestamp-ascending, paginated. Returns the
+// page and the TOTAL matching count (for the site's pager). Reads the same
+// ring the summary aggregates, so a ledger plus WindowSummary for the same
+// window reconciles with SummaryByKey.
+func (t *Tracker) Ledger(keyName string, since, until time.Time, offset, limit int) ([]UsageRecord, int) {
+    t.mu.RLock()
+    defer t.mu.RUnlock()
+
+    matched := make([]UsageRecord, 0, len(t.records))
+    for _, r := range t.records {
+        if ledgerFilter(r, keyName, since, until) {
+            matched = append(matched, r)
+        }
+    }
+    total := len(matched)
+    if offset < 0 {
+        offset = 0
+    }
+    if offset >= total {
+        return []UsageRecord{}, total
+    }
+    if limit <= 0 {
+        limit = 100
+    }
+    end := offset + limit
+    if end > total {
+        end = total
+    }
+    return matched[offset:end], total
+}
+
+// WindowSummary (#628 ask 1) aggregates the same filter as Ledger so the
+// usage page can render the table AND the totals that reconcile with
+// /v1/cost for the same period.
+func (t *Tracker) WindowSummary(keyName string, since, until time.Time) *CostSummary {
+    t.mu.RLock()
+    defer t.mu.RUnlock()
+
+    s := &CostSummary{
+        ByKey:     make(map[string]float64),
+        ByBackend: make(map[string]float64),
+        ByModel:   make(map[string]float64),
+    }
+    for _, r := range t.records {
+        if !ledgerFilter(r, keyName, since, until) {
+            continue
+        }
+        s.TotalCostUSD += r.CostUSD
+        s.ByKey[r.KeyName] += r.CostUSD
+        s.ByBackend[r.Backend] += r.CostUSD
+        s.ByModel[r.Model] += r.CostUSD
+        s.TotalTokens += r.TotalTokens
+        s.TotalRequests++
+    }
+    return s
+}
+
 func (t *Tracker) ExportJSON(path string) error {
     t.mu.RLock()
     defer t.mu.RUnlock()

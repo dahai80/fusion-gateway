@@ -2521,7 +2521,10 @@ func TestCostEndpoint_WithKey(t *testing.T) {
     s := newTestServer()
     s.costTracker = cost.NewTracker(10000)
 
+    // #628: ?key=<name> is now master-only — a caller without a principal
+    // (or with a non-privileged key) may not read another key's summary.
     req := httptest.NewRequest(http.MethodGet, "/v1/cost?key=test-key", nil)
+    req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), &middleware.Principal{IsMaster: true}))
     rec := httptest.NewRecorder()
     s.handleCost(rec, req)
 
