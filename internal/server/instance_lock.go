@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/fusion-gateway/fusion-gateway/internal/config"
 )
@@ -42,7 +41,7 @@ func AcquireInstanceLock(dataDir string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("instance lock: open %s: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flockExclusiveNB(f); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("%w (lock %s): %v", ErrInstanceLockHeld, path, err)
 	}
@@ -51,7 +50,7 @@ func AcquireInstanceLock(dataDir string) (func(), error) {
 	}
 	slog.Info("instance lock acquired", "path", path, "pid", os.Getpid())
 	return func() {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		if err := flockRelease(f); err != nil {
 			slog.Warn("instance lock release failed", "path", path, "error", err)
 		}
 		_ = f.Close()
