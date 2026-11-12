@@ -31,7 +31,9 @@ function useMenuItems() {
         { key: "/admin/", icon: ic(LayoutDashboard), label: t("menu.dashboard") },
         { key: "/admin/keys", icon: ic(KeyRound), label: t("menu.keys") },
         { key: "/admin/config/providers", icon: ic(Server), label: t("menu.providers") },
-        { key: "/admin/channels", icon: ic(Server), label: t("menu.channels") },
+        // #652: Channels menu hidden — the page stays routable (direct URL
+        // /admin/channels still works) but is not advertised in the sidebar.
+        // { key: "/admin/channels", icon: ic(Server), label: t("menu.channels") },
         {
             key: "insights-group",
             icon: ic(ChartLine),
