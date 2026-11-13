@@ -498,7 +498,7 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     // A valid full set passes and surfaces from List.
     ok := validManifest("fusion-x")
     ok.SearchProviders = []config.ShellSearchProvider{{ID: "workflows", Label: "工作流", LabelEn: "Workflows", Endpoint: "/api/cowork/search"}}
-    ok.Pages = []config.ShellPage{{Route: "/runs", Title: "运行", TitleEn: "Runs"}}
+    ok.Pages = []config.ShellPage{{Route: "/runs", Title: "运行", TitleEn: "Runs"}, {Route: "/evals", Title: "评测", Layer: "prod"}}
     ok.Notifications = []config.ShellNotificationSource{{ID: "approvals", Label: "审批", Endpoint: "/api/cowork/notifications", Kind: "approvals"}, {ID: "tasks", Label: "任务", Endpoint: "/api/cowork/tasks", Kind: "tasks"}}
     ok.Home = &config.ShellHome{Cards: []config.ShellHomeCard{{ID: "monthly-close", Title: "月度对账", TitleEn: "Monthly close", Description: "对账并生成报告", DescriptionEn: "Reconcile and report", Route: "/workflows/monthly-close", Chip: true}}, Projects: []config.ShellHomeProject{{ID: "spaces", Label: "空间", LabelEn: "Spaces", Endpoint: "/api/cowork/spaces"}}}
     if err := r.Upsert(ok); err != nil {
@@ -512,8 +512,13 @@ func TestRegistry_ExtFieldValidation(t *testing.T) {
     if len(v.SearchProviders) != 1 || v.SearchProviders[0].Endpoint != "/api/cowork/search" {
         t.Fatalf("search providers lost: %+v", v.SearchProviders)
     }
-    if len(v.Pages) != 1 || v.Pages[0].Route != "/runs" {
+    if len(v.Pages) != 2 || v.Pages[0].Route != "/runs" {
         t.Fatalf("pages lost: %+v", v.Pages)
+    }
+    // #660: layer must survive the upsert→List round trip (E8 two-layer
+    // pages, fusion-web-shell#153). Omitted layer stays empty (omitempty).
+    if v.Pages[1].Route != "/evals" || v.Pages[1].Layer != "prod" {
+        t.Fatalf("#660 layer passthrough broken: %+v", v.Pages[1])
     }
     if len(v.Notifications) != 2 || v.Notifications[1].Kind != "tasks" {
         t.Fatalf("notifications lost: %+v", v.Notifications)
