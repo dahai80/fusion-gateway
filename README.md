@@ -252,6 +252,21 @@ protect the config:
 `config.yaml.lastgood` and `config.yaml.corrupt-*` are gitignored; inspect
 the quarantined copies to find what wrote the bad bytes.
 
+### Admin config mutation lock (#662)
+
+A parallel e2e harness once drove the live gateway's admin config API and
+disabled the auth portal mid-day. `admin.config_mutation_lock: true` refuses
+every admin config-file write (`/admin/api/config/*` PUT/POST/DELETE) before
+the file is touched — the live snapshot keeps serving and the on-disk YAML is
+unchanged. `/admin/config/reload` is deliberately NOT gated: it applies
+on-disk state and cannot corrupt the file, so the unlock path is
+
+1. edit `config.yaml` → set `admin.config_mutation_lock: false`
+2. `POST /admin/config/reload`
+
+Test suites must run their own isolated gateway instance (ephemeral port +
+own config + own data dir), never the supervisor-managed one.
+
 ## Model Identity & Simplified Backends
 
 Same model served by several providers is explicitly distinguishable, and a new backend needs minimal config (`config.simple.yaml` is a complete working example).

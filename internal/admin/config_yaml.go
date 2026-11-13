@@ -39,11 +39,32 @@ func writeYAMLDoc(path string, doc map[string]interface{}) error {
     return atomicWriteFile(path, out, 0600)
 }
 
+// #662: single choke point for every config-file write in the admin plane.
+// When admin.config_mutation_lock is true in the LIVE snapshot, refuse the
+// write before the temp file is created — the caller surfaces the error and
+// the on-disk config is untouched. Unlock path: edit config.yaml directly
+// (set the flag false) and POST /admin/config/reload, which is deliberately
+// not gated (a reload applies on-disk state and cannot corrupt the file).
+func configMutationLocked() bool {
+    snap := config.GetSnapshot()
+    if snap == nil || snap.Config.Admin == nil {
+        return false
+    }
+    return snap.Config.Admin.ConfigMutationLock
+}
+
+var errConfigMutationLocked = fmt.Errorf(
+    "admin config mutation refused: admin.config_mutation_lock is enabled (#662); edit config.yaml to set it false, then POST /admin/config/reload")
+
 // atomicWriteFile writes data to a temp file in the same directory as path,
 // fsyncs it, then renames over path. Same-dir rename is atomic on POSIX
 // filesystems; fsync before rename guarantees the renamed file's bytes are on
 // disk. EI1 hardening against concurrent config.Reload reading mid-write.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+    if configMutationLocked() {
+        slog.Warn("admin config write refused by config_mutation_lock", "path", path)
+        return errConfigMutationLocked
+    }
     dir := filepath.Dir(path)
     f, err := os.CreateTemp(dir, ".cfg-tmp-*")
     if err != nil {
