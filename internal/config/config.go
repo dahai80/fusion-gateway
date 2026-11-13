@@ -867,6 +867,15 @@ type AdminConfig struct {
     Listen    string `mapstructure:"listen"`
     LogMaxLen int    `mapstructure:"log_max_len"`
     JWTSecret string `mapstructure:"jwt_secret"`
+    // #662: when true, every admin config-file mutation (PUT/POST/DELETE on
+    // /admin/api/config/*) is refused with 403 before the file is touched.
+    // Test harnesses with admin credentials must never be able to rewrite a
+    // production-local gateway's config (the /tmp/fc-e2e2 incident swapped
+    // auth portal off and dropped mlx metrics auth mid-day). Unlock by
+    // editing config.yaml and calling /admin/config/reload (reload itself is
+    // deliberately not gated — it applies on-disk state and cannot corrupt
+    // the file).
+    ConfigMutationLock bool `mapstructure:"config_mutation_lock"`
 }
 
 type OIDCConfig struct {
