@@ -431,6 +431,22 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
         // non-active key, so a disabled key fails auth identically to a
         // deleted one, but the record survives for audit/quota forensics and
         // can be re-enabled. Hard delete destroyed recovery + history.
+        //
+        // purge=true opts into an irreversible hard delete (irreversible:
+        // hash-backed record, quota history and re-enable are all gone).
+        // Intended for test-residue cleanup; the UI gates it behind a typed
+        // confirmation. The purge lookup happens first so an absent key 404s
+        // on both paths with the same error shape.
+        if r.URL.Query().Get("purge") == "true" {
+            if err := h.store.DeleteKey(name); err != nil {
+                slog.Error("admin: key purge failed", "key", name, "error", err)
+                writeError(w, http.StatusNotFound, err.Error())
+                return
+            }
+            slog.Info("admin: key purged (hard delete)", "key", name)
+            writeJSON(w, http.StatusNoContent, nil)
+            return
+        }
         key, err := h.store.GetKey(name)
         if err != nil {
             writeError(w, http.StatusNotFound, err.Error())
