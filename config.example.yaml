@@ -724,6 +724,22 @@ web_shell:
     #    icon: Palette
     #    health: http://127.0.0.1:11493/api/health
     #    version: 0.1.18
+    # #667: static fallback manifest for the fusion-k12-teacher module —
+    # domain group per the approved menu taxonomy (sort 39). The k12 service
+    # self-registers dynamically; the static entry keeps the sidebar item
+    # alive across upstream restarts (gray dot per MT-D, the #444 pattern).
+    # modules entry below needs NO api_key (auth via gateway session — the
+    # #448 fusion-design pattern).
+    #  - id: fusion-k12-teacher
+    #    title: K12 教师助手
+    #    title_en: K12 Teacher Assistant
+    #    entry: /shell/fusion-k12-teacher/
+    #    devices: [desktop, mobile-readonly]
+    #    category: domain
+    #    icon: GraduationCap
+    #    health: http://127.0.0.1:11448/api/health
+    #    sort: 39
+    #    version: 2.2.7
     # #296: static proxy wiring for a self-keyed module (e.g. fusion-security).
     # The upstream validates the injected Bearer credential itself — the key
     # must be one of the UPSTREAM's API keys (with whatever tenant/role the
