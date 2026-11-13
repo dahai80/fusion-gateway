@@ -75,6 +75,49 @@ func TestB2_InjectFusionHeaders_NoSpanIsNoOp(t *testing.T) {
     }
 }
 
+// Test654_InboundTraceHeadersForwarded_NoSpan: fusion-cowork (#654, cowork
+// #464 W6) stamps every LLM call with traceparent + x-fusion-trace-id. With
+// OTel tracing off (no recording span) both headers must reach the fusion-mlx
+// upstream verbatim so one W3C trace spans workflow → gateway → inference.
+func Test654_InboundTraceHeadersForwarded_NoSpan(t *testing.T) {
+    otel.SetTracerProvider(sdktrace.NewTracerProvider())
+    otel.SetTextMapPropagator(propagation.TraceContext{})
+
+    inbound := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+    inbound.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+    inbound.Header.Set("X-Fusion-Trace-Id", "fc_0123456789abcdef0123456789abcdef")
+    ctx := WithFusionHeaders(context.Background(), inbound)
+
+    outReq := httptest.NewRequest("POST", "http://fusion-mlx:11434/v1/chat/completions", nil)
+    InjectFusionHeaders(ctx, outReq)
+
+    if got := outReq.Header.Get("Traceparent"); got != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+        t.Fatalf("#654: inbound traceparent not forwarded verbatim, got %q", got)
+    }
+    if got := outReq.Header.Get("X-Fusion-Trace-Id"); got != "fc_0123456789abcdef0123456789abcdef" {
+        t.Fatalf("#654: x-fusion-trace-id not forwarded, got %q", got)
+    }
+}
+
+// Test654_RecordingSpanOverridesInboundTraceparent: when the observability
+// middleware started a recording span, the gateway's own traceparent (same
+// trace-id, gateway span-id) replaces the client's inbound one on the
+// upstream hop.
+func Test654_RecordingSpanOverridesInboundTraceparent(t *testing.T) {
+    ctx := newRecordingTracer(t)
+    inbound := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+    inbound.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+    ctx = WithFusionHeaders(ctx, inbound)
+
+    outReq := httptest.NewRequest("POST", "http://fusion-mlx:11434/v1/chat/completions", nil)
+    InjectFusionHeaders(ctx, outReq)
+
+    got := outReq.Header.Get("Traceparent")
+    if got == "" || got == "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+        t.Fatalf("#654: recording span must rewrite traceparent with gateway span id, got %q", got)
+    }
+}
+
 // TestB2_InjectFusionHeaders_NoHeadersNoSpan: nothing on ctx → no panic, no
 // headers. Guards the early-return + IsRecording guard under an empty ctx.
 func TestB2_InjectFusionHeaders_NoHeadersNoSpan(t *testing.T) {
