@@ -1548,10 +1548,15 @@ type ShellSearchProvider struct {
 
 // ShellPage is a sub-page deep link (shell#24): the shell links to
 // ${entry}#${route}; route is the module-relative /path.
+// #660: Layer passes through the additive delivery-layer tag studio ships
+// (dev|prod, fusion-web-shell#153 E8 two-layer pages); the shell renders
+// prod-layer pages as a labeled subgroup and degrades to the flat list when
+// the field is absent.
 type ShellPage struct {
     Route   string `json:"route" mapstructure:"route"`
     Title   string `json:"title" mapstructure:"title"`
     TitleEn string `json:"title_en,omitempty" mapstructure:"title_en"`
+    Layer   string `json:"layer,omitempty" mapstructure:"layer"`
 }
 
 // ShellNotificationSource is one notification-center poll source (shell#24);
