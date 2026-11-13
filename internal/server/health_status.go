@@ -1,267 +1,267 @@
 package server
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log/slog"
-    "net/http"
-    "strconv"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
 
-    "github.com/fusion-gateway/fusion-gateway/internal/adapter"
-    "github.com/fusion-gateway/fusion-gateway/internal/config"
-    "github.com/fusion-gateway/fusion-gateway/internal/cost"
-    "github.com/fusion-gateway/fusion-gateway/internal/hardware"
-    "github.com/fusion-gateway/fusion-gateway/internal/middleware"
-    "github.com/fusion-gateway/fusion-gateway/internal/observability"
-    "github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
-    "github.com/fusion-gateway/fusion-gateway/internal/router"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
+	"github.com/fusion-gateway/fusion-gateway/internal/adapter"
+	"github.com/fusion-gateway/fusion-gateway/internal/config"
+	"github.com/fusion-gateway/fusion-gateway/internal/cost"
+	"github.com/fusion-gateway/fusion-gateway/internal/hardware"
+	"github.com/fusion-gateway/fusion-gateway/internal/middleware"
+	"github.com/fusion-gateway/fusion-gateway/internal/observability"
+	"github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
+	"github.com/fusion-gateway/fusion-gateway/internal/router"
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-    ctx := adapter.WithFusionHeaders(r.Context(), r)
-    // #381: the hub's /api/v1/system/health subcalls the gateway /health
-    // (its mlx_url defaults to the gateway). Probing the hub from a request
-    // that IS the hub's probe re-enters this handler — a probe cycle that
-    // truncates only on timeouts (hub health took 13-20s live). Skip the
-    // hub backends on the hub's own probe; the skip is reported, not hidden.
-    hubSkip := modelHubSkip(s.pool, r)
-    results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
-    allHealthy := true
-    for _, err := range results {
-        if err != nil {
-            allHealthy = false
-            break
-        }
-    }
+	ctx := adapter.WithFusionHeaders(r.Context(), r)
+	// #381: the hub's /api/v1/system/health subcalls the gateway /health
+	// (its mlx_url defaults to the gateway). Probing the hub from a request
+	// that IS the hub's probe re-enters this handler — a probe cycle that
+	// truncates only on timeouts (hub health took 13-20s live). Skip the
+	// hub backends on the hub's own probe; the skip is reported, not hidden.
+	hubSkip := modelHubSkip(s.pool, r)
+	results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
+	allHealthy := true
+	for _, err := range results {
+		if err != nil {
+			allHealthy = false
+			break
+		}
+	}
 
-    backends := make(map[string]interface{}, len(results))
-    for name, err := range results {
-        if err != nil {
-            backends[name] = map[string]interface{}{"healthy": false, "error": err.Error()}
-        } else {
-            backends[name] = map[string]interface{}{"healthy": true}
-        }
-    }
-    for name := range hubSkip {
-        backends[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
-    }
+	backends := make(map[string]interface{}, len(results))
+	for name, err := range results {
+		if err != nil {
+			backends[name] = map[string]interface{}{"healthy": false, "error": err.Error()}
+		} else {
+			backends[name] = map[string]interface{}{"healthy": true}
+		}
+	}
+	for name := range hubSkip {
+		backends[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
+	}
 
-    // Fusion-mlx gets an authoritative model_loaded block from its /health
-    // endpoint. A live process with no model loaded is process-healthy but
-    // not servable — surface that explicitly so /health is no longer a false
-    // green (#59).
-    if mlxName, mlx := s.pool.FusionMLXName(); mlx != nil {
-        detail := mlx.HealthDetail(ctx)
-        entry := map[string]interface{}{
-            "healthy":       detail.ProcessAlive,
-            "model_loaded":  detail.ModelLoaded,
-            "loaded_models": detail.LoadedModels,
-        }
-        if detail.FetchError != nil {
-            entry["error"] = detail.FetchError.Error()
-        }
-        if backends[mlxName] == nil {
-            backends[mlxName] = entry
-        } else {
-            // merge into the HealthCheckAll result (preserve healthy flag semantics)
-            backends[mlxName] = entry
-        }
-        if !detail.ModelLoaded {
-            allHealthy = false
-            slog.Warn("fusion-mlx health: process alive but no model loaded", "loaded_models", detail.LoadedModels)
-        }
-    }
+	// Fusion-mlx gets an authoritative model_loaded block from its /health
+	// endpoint. A live process with no model loaded is process-healthy but
+	// not servable — surface that explicitly so /health is no longer a false
+	// green (#59).
+	if mlxName, mlx := s.pool.FusionMLXName(); mlx != nil {
+		detail := mlx.HealthDetail(ctx)
+		entry := map[string]interface{}{
+			"healthy":       detail.ProcessAlive,
+			"model_loaded":  detail.ModelLoaded,
+			"loaded_models": detail.LoadedModels,
+		}
+		if detail.FetchError != nil {
+			entry["error"] = detail.FetchError.Error()
+		}
+		if backends[mlxName] == nil {
+			backends[mlxName] = entry
+		} else {
+			// merge into the HealthCheckAll result (preserve healthy flag semantics)
+			backends[mlxName] = entry
+		}
+		if !detail.ModelLoaded {
+			allHealthy = false
+			slog.Warn("fusion-mlx health: process alive but no model loaded", "loaded_models", detail.LoadedModels)
+		}
+	}
 
-    // #438: surface the most recent route error per backend. A wedged backend
-    // (fusion-mlx engine hung under memory pressure) passes the process
-    // healthcheck with models loaded while every request 502s —
-    // last_route_error makes that visible from /health alone.
-    for name, entry := range backends {
-        lastErr, ok := s.lastRouteError(name)
-        if !ok {
-            continue
-        }
-        if m, ok := entry.(map[string]interface{}); ok {
-            m["last_route_error"] = map[string]interface{}{
-                "message": lastErr.Message,
-                "at":      lastErr.At,
-            }
-        }
-    }
+	// #438: surface the most recent route error per backend. A wedged backend
+	// (fusion-mlx engine hung under memory pressure) passes the process
+	// healthcheck with models loaded while every request 502s —
+	// last_route_error makes that visible from /health alone.
+	for name, entry := range backends {
+		lastErr, ok := s.lastRouteError(name)
+		if !ok {
+			continue
+		}
+		if m, ok := entry.(map[string]interface{}); ok {
+			m["last_route_error"] = map[string]interface{}{
+				"message": lastErr.Message,
+				"at":      lastErr.At,
+			}
+		}
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]interface{}{
-        "status":   healthStatus(allHealthy),
-        "backends": backends,
-    })
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   healthStatus(allHealthy),
+		"backends": backends,
+	})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-    // #449: a draining gateway is not serving — report 503 so start.sh and
-    // the supervisor stop treating a shutting-down process as healthy.
-    if s.IsDraining() {
-        writeDraining(w)
-        return
-    }
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprint(w, "ok")
+	// #449: a draining gateway is not serving — report 503 so start.sh and
+	// the supervisor stop treating a shutting-down process as healthy.
+	if s.IsDraining() {
+		writeDraining(w)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "ok")
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-    // #449: draining means not ready, full stop — skip the provider health
-    // checks below (the pool is about to be torn down anyway).
-    if s.IsDraining() {
-        writeDraining(w)
-        return
-    }
-    ctx := adapter.WithFusionHeaders(r.Context(), r)
-    localReady := s.router.CircuitBreakerState("local") != router.StateOpen
-    localReasons := []string{}
+	// #449: draining means not ready, full stop — skip the provider health
+	// checks below (the pool is about to be torn down anyway).
+	if s.IsDraining() {
+		writeDraining(w)
+		return
+	}
+	ctx := adapter.WithFusionHeaders(r.Context(), r)
+	localReady := s.router.CircuitBreakerState("local") != router.StateOpen
+	localReasons := []string{}
 
-    if localReady {
-        if p, ok := s.pool.Get("fusion-mlx"); ok {
-            if err := p.HealthCheck(ctx); err != nil {
-                localReady = false
-                localReasons = append(localReasons, "health_check_failed")
-            }
-        } else {
-            localReady = false
-            localReasons = append(localReasons, "no_local_provider")
-        }
-    }
+	if localReady {
+		if p, ok := s.pool.Get("fusion-mlx"); ok {
+			if err := p.HealthCheck(ctx); err != nil {
+				localReady = false
+				localReasons = append(localReasons, "health_check_failed")
+			}
+		} else {
+			localReady = false
+			localReasons = append(localReasons, "no_local_provider")
+		}
+	}
 
-    // Model-loaded probe: a live fusion-mlx with no resident model cannot
-    // serve generate requests (502), so /readyz must report not_ready even
-    // when the process responds 200 to /health (#59).
-    if localReady {
-        if mlx := s.pool.GetFusionMLX(); mlx != nil {
-            detail := mlx.HealthDetail(ctx)
-            if detail.FetchError != nil || !detail.ProcessAlive {
-                localReady = false
-                localReasons = append(localReasons, "health_check_failed")
-            } else if !detail.ModelLoaded {
-                localReady = false
-                localReasons = append(localReasons, "model_not_loaded")
-                slog.Warn("readyz: fusion-mlx process healthy but no model loaded")
-            }
-        }
-    } else {
-        localReasons = append(localReasons, "circuit_breaker_open")
-    }
+	// Model-loaded probe: a live fusion-mlx with no resident model cannot
+	// serve generate requests (502), so /readyz must report not_ready even
+	// when the process responds 200 to /health (#59).
+	if localReady {
+		if mlx := s.pool.GetFusionMLX(); mlx != nil {
+			detail := mlx.HealthDetail(ctx)
+			if detail.FetchError != nil || !detail.ProcessAlive {
+				localReady = false
+				localReasons = append(localReasons, "health_check_failed")
+			} else if !detail.ModelLoaded {
+				localReady = false
+				localReasons = append(localReasons, "model_not_loaded")
+				slog.Warn("readyz: fusion-mlx process healthy but no model loaded")
+			}
+		}
+	} else {
+		localReasons = append(localReasons, "circuit_breaker_open")
+	}
 
-    // GPU memory availability check
-    if localReady {
-        hwMetrics := s.hwCollector.Latest()
-        if hwMetrics.GPUAllocMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
-            gpuAvail := hwMetrics.GPUAllocMemory - hwMetrics.GPUInUseMemory
-            if gpuAvail < uint64(float64(hwMetrics.GPUAllocMemory)*0.1) {
-                localReady = false
-                localReasons = append(localReasons, "gpu_memory_critical")
-            }
-        }
-        // Inference queue depth check
-        if hwMetrics.MLXInferenceQueueDepth > 0 {
-            maxQueue := s.cfg.Config.Routing.LocalPriority.MaxConcurrent
-            if maxQueue > 0 && hwMetrics.MLXInferenceQueueDepth >= maxQueue {
-                localReady = false
-                localReasons = append(localReasons, "inference_queue_full")
-            }
-        }
-        // Recent success rate check
-        successRate := observability.SuccessRate("local")
-        if successRate < 0.5 {
-            localReady = false
-            localReasons = append(localReasons, fmt.Sprintf("low_success_rate=%.2f", successRate))
-        }
-    }
+	// GPU memory availability check
+	if localReady {
+		hwMetrics := s.hwCollector.Latest()
+		if hwMetrics.GPUAllocMemory > 0 && hwMetrics.GPUInUseMemory > 0 {
+			gpuAvail := hwMetrics.GPUAllocMemory - hwMetrics.GPUInUseMemory
+			if gpuAvail < uint64(float64(hwMetrics.GPUAllocMemory)*0.1) {
+				localReady = false
+				localReasons = append(localReasons, "gpu_memory_critical")
+			}
+		}
+		// Inference queue depth check
+		if hwMetrics.MLXInferenceQueueDepth > 0 {
+			maxQueue := s.cfg.Config.Routing.LocalPriority.MaxConcurrent
+			if maxQueue > 0 && hwMetrics.MLXInferenceQueueDepth >= maxQueue {
+				localReady = false
+				localReasons = append(localReasons, "inference_queue_full")
+			}
+		}
+		// Recent success rate check
+		successRate := observability.SuccessRate("local")
+		if successRate < 0.5 {
+			localReady = false
+			localReasons = append(localReasons, fmt.Sprintf("low_success_rate=%.2f", successRate))
+		}
+	}
 
-    cloudReady := true
-    if s.cfg.Config.Routing.Fallback.CloudDefault != "" {
-        if p, ok := s.pool.Get(s.cfg.Config.Routing.Fallback.CloudDefault); ok {
-            if err := p.HealthCheck(ctx); err != nil {
-                cloudReady = false
-            }
-        }
-    }
+	cloudReady := true
+	if s.cfg.Config.Routing.Fallback.CloudDefault != "" {
+		if p, ok := s.pool.Get(s.cfg.Config.Routing.Fallback.CloudDefault); ok {
+			if err := p.HealthCheck(ctx); err != nil {
+				cloudReady = false
+			}
+		}
+	}
 
-    if !localReady && !cloudReady {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusServiceUnavailable)
-        _ = json.NewEncoder(w).Encode(map[string]interface{}{
-            "status":        "not_ready",
-            "local_reasons": localReasons,
-        })
-        return
-    }
+	if !localReady && !cloudReady {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":        "not_ready",
+			"local_reasons": localReasons,
+		})
+		return
+	}
 
-    mode := "full"
-    if !localReady {
-        mode = "degraded"
-    }
+	mode := "full"
+	if !localReady {
+		mode = "degraded"
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    _ = json.NewEncoder(w).Encode(map[string]interface{}{
-        "status":        "ready",
-        "mode":          mode,
-        "local_reasons": localReasons,
-    })
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":        "ready",
+		"mode":          mode,
+		"local_reasons": localReasons,
+	})
 }
 
 func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprint(w, "alive")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "alive")
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-    hwMetrics := s.hwCollector.Latest()
-    total, local, cloud := observability.Stats()
+	hwMetrics := s.hwCollector.Latest()
+	total, local, cloud := observability.Stats()
 
-    localHitRate := 0.0
-    if total > 0 {
-        localHitRate = float64(local) / float64(total)
-    }
+	localHitRate := 0.0
+	if total > 0 {
+		localHitRate = float64(local) / float64(total)
+	}
 
-    // Plan §9.3 (G5): migration-phase hint bit — true once fusion-mlx enforces
-    // strict auth and direct :11434 calls are expected to be rejected. Read
-    // from the request-context snapshot so hot-reload takes effect without a
-    // restart (SnapshotFromContext falls back to the global snapshot).
-    directCallsBlocked := config.SnapshotFromContext(r.Context()).Config.Server.DirectCallsBlocked
+	// Plan §9.3 (G5): migration-phase hint bit — true once fusion-mlx enforces
+	// strict auth and direct :11434 calls are expected to be rejected. Read
+	// from the request-context snapshot so hot-reload takes effect without a
+	// restart (SnapshotFromContext falls back to the global snapshot).
+	directCallsBlocked := config.SnapshotFromContext(r.Context()).Config.Server.DirectCallsBlocked
 
-    status := map[string]interface{}{
-        "status":         "ok",
-        "uptime_seconds": int(time.Since(s.startTime).Seconds()),
-        "config_version": s.cfg.Version,
-        "direct_calls_blocked": directCallsBlocked,
-        // R4 (audit): surface the running binary version/commit (build-time
-        // ldflags), not just config_version, so operators can confirm the
-        // deployed artifact. Defaults to "dev"/"unknown" on a plain go build.
-        "version":        s.version,
-        "commit":         s.commit,
-        "backends":       s.buildBackendStatus(r.Context(), r.Header.Get("X-Fusion-Source") == "model-hub"),
-        "hardware":       s.buildHardwareStatus(hwMetrics),
-        "circuit_breakers": map[string]string{
-            "local":  s.router.CircuitBreakerState("local").String(),
-            "cloud":  s.router.CircuitBreakerState("cloud").String(),
-            "cluster": s.router.CircuitBreakerState("cluster").String(),
-        },
-        "stats": map[string]interface{}{
-            "total_requests": total,
-            "local_requests": local,
-            "cloud_requests": cloud,
-            "local_hit_rate": localHitRate,
-        },
-    }
+	status := map[string]interface{}{
+		"status":               "ok",
+		"uptime_seconds":       int(time.Since(s.startTime).Seconds()),
+		"config_version":       s.cfg.Version,
+		"direct_calls_blocked": directCallsBlocked,
+		// R4 (audit): surface the running binary version/commit (build-time
+		// ldflags), not just config_version, so operators can confirm the
+		// deployed artifact. Defaults to "dev"/"unknown" on a plain go build.
+		"version":  s.version,
+		"commit":   s.commit,
+		"backends": s.buildBackendStatus(r.Context(), r.Header.Get("X-Fusion-Source") == "model-hub"),
+		"hardware": s.buildHardwareStatus(hwMetrics),
+		"circuit_breakers": map[string]string{
+			"local":   s.router.CircuitBreakerState("local").String(),
+			"cloud":   s.router.CircuitBreakerState("cloud").String(),
+			"cluster": s.router.CircuitBreakerState("cluster").String(),
+		},
+		"stats": map[string]interface{}{
+			"total_requests": total,
+			"local_requests": local,
+			"cloud_requests": cloud,
+			"local_hit_rate": localHitRate,
+		},
+	}
 
-    if s.clusterDiscovery != nil {
-        status["cluster"] = s.clusterDiscovery.Status()
-    }
+	if s.clusterDiscovery != nil {
+		status["cluster"] = s.clusterDiscovery.Status()
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(status)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // handleClusterHealth exposes the gateway's aggregated cluster-wide admission
@@ -271,184 +271,184 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // breaker_state); the summary counts are derived here from that array so the
 // handler stays dumb and no new Discovery method is needed.
 func (s *Server) handleClusterHealth(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet {
-        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
-        return
-    }
-    if s.clusterDiscovery == nil {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusNotFound)
-        _ = json.NewEncoder(w).Encode(map[string]interface{}{
-            "error": map[string]interface{}{
-                "message": "cluster disabled (set cluster.enabled=true to enable)",
-            },
-        })
-        return
-    }
-    nodes := s.clusterDiscovery.Status()
-    var routable, totalInFlight int
-    var maxConcurrent int
-    for _, n := range nodes {
-        if n.Routable {
-            routable++
-        }
-        totalInFlight += int(n.InFlight)
-        if n.MaxConcurrent > maxConcurrent {
-            maxConcurrent = n.MaxConcurrent
-        }
-    }
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]interface{}{
-        "max_concurrent":  maxConcurrent,
-        "total_nodes":     len(nodes),
-        "routable_nodes":  routable,
-        "total_in_flight": totalInFlight,
-        "nodes":           nodes,
-    })
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.clusterDiscovery == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "cluster disabled (set cluster.enabled=true to enable)",
+			},
+		})
+		return
+	}
+	nodes := s.clusterDiscovery.Status()
+	var routable, totalInFlight int
+	var maxConcurrent int
+	for _, n := range nodes {
+		if n.Routable {
+			routable++
+		}
+		totalInFlight += int(n.InFlight)
+		if n.MaxConcurrent > maxConcurrent {
+			maxConcurrent = n.MaxConcurrent
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"max_concurrent":  maxConcurrent,
+		"total_nodes":     len(nodes),
+		"routable_nodes":  routable,
+		"total_in_flight": totalInFlight,
+		"nodes":           nodes,
+	})
 }
 
 func (s *Server) handleAdminGC(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
-        return
-    }
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+		return
+	}
 
-    provider, ok := s.pool.Get("fusion-mlx")
-    if !ok {
-        http.Error(w, `{"error":{"message":"fusion-mlx not configured"}}`, http.StatusNotFound)
-        return
-    }
+	provider, ok := s.pool.Get("fusion-mlx")
+	if !ok {
+		http.Error(w, `{"error":{"message":"fusion-mlx not configured"}}`, http.StatusNotFound)
+		return
+	}
 
-    mlxProvider, ok := provider.(*adapter.FusionMLXProvider)
-    if !ok {
-        http.Error(w, `{"error":{"message":"provider is not fusion-mlx"}}`, http.StatusInternalServerError)
-        return
-    }
+	mlxProvider, ok := provider.(*adapter.FusionMLXProvider)
+	if !ok {
+		http.Error(w, `{"error":{"message":"provider is not fusion-mlx"}}`, http.StatusInternalServerError)
+		return
+	}
 
-    if mlxProvider.InFlight() != 0 {
-        safego.Go("mlx_trigger_gc_when_idle", mlxProvider.TriggerGCWhenIdle)
-        w.WriteHeader(http.StatusAccepted)
-        fmt.Fprintf(w, `{"status":"gc_queued","in_flight":%d,"message":"GC will execute when in-flight requests reach zero"}`, mlxProvider.InFlight())
-        return
-    }
+	if mlxProvider.InFlight() != 0 {
+		safego.Go("mlx_trigger_gc_when_idle", mlxProvider.TriggerGCWhenIdle)
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"status":"gc_queued","in_flight":%d,"message":"GC will execute when in-flight requests reach zero"}`, mlxProvider.InFlight())
+		return
+	}
 
-    safego.Go("mlx_safe_gc", mlxProvider.SafeGC)
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprint(w, `{"status":"gc_triggered"}`)
+	safego.Go("mlx_safe_gc", mlxProvider.SafeGC)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{"status":"gc_triggered"}`)
 }
 
 func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
-        return
-    }
-    // #623: the service-route table mounts on the mux once at boot (ServeMux
-    // cannot unregister), so a reload that touched service_routes never
-    // serves the new set — report it as restart-required instead of acking a
-    // green reload with silent 404s. MUST capture the old routes BEFORE
-    // ReloadWithRecovery: the OnReload handlers (main.go wires the s.cfg
-    // swap) fire inside it, so reading s.cfg afterwards compares the new
-    // snapshot against itself and the diff is always false (caught live on
-    // v0.9.164 — the unit tests missed it because they ran without any
-    // OnReload handler registered).
-    oldServiceRoutes := s.cfg.Config.ServiceRoutes
-    snap, err := config.ReloadWithRecovery(s.cfgPath)
-    if err != nil {
-        slog.Error("admin config reload failed", "path", s.cfgPath, "error", err)
-        http.Error(w, fmt.Sprintf(`{"error":{"message":"config reload failed: %s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
-        return
-    }
-    slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
-    resp := map[string]any{
-        "status":  "reloaded",
-        "version": snap.Version,
-        "path":    s.cfgPath,
-    }
-    if serviceRoutesChanged(oldServiceRoutes, snap.Config.ServiceRoutes) {
-        changed := changedServiceNames(oldServiceRoutes, snap.Config.ServiceRoutes)
-        slog.Warn("service_routes changed on reload but the route table is boot-only; restart the gateway for the new routes to serve",
-            "changed_services", changed, "config_version", snap.Version)
-        resp["restart_required"] = []string{"service_routes"}
-    }
-    // P3b (plan §15.4): structured lifecycle audit — every hot reload lands
-    // in fg_gateway_events, not just stdout. Optional interface: no-op when
-    // persistence is off.
-    if rec, ok := s.persistSink.(pg.EventRecorder); ok {
-        detail := map[string]any{"version": snap.Version}
-        if rr, ok := resp["restart_required"]; ok {
-            detail["restart_required"] = rr
-        }
-        rec.RecordEvent("info", "config_reloaded", detail)
-    }
-    writeJSON(w, http.StatusOK, resp)
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
+		return
+	}
+	// #623: the service-route table mounts on the mux once at boot (ServeMux
+	// cannot unregister), so a reload that touched service_routes never
+	// serves the new set — report it as restart-required instead of acking a
+	// green reload with silent 404s. MUST capture the old routes BEFORE
+	// ReloadWithRecovery: the OnReload handlers (main.go wires the s.cfg
+	// swap) fire inside it, so reading s.cfg afterwards compares the new
+	// snapshot against itself and the diff is always false (caught live on
+	// v0.9.164 — the unit tests missed it because they ran without any
+	// OnReload handler registered).
+	oldServiceRoutes := s.cfg.Config.ServiceRoutes
+	snap, err := config.ReloadWithRecovery(s.cfgPath)
+	if err != nil {
+		slog.Error("admin config reload failed", "path", s.cfgPath, "error", err)
+		http.Error(w, fmt.Sprintf(`{"error":{"message":"config reload failed: %s","type":"server_error"}}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	slog.Info("admin config reload succeeded", "path", s.cfgPath, "version", snap.Version)
+	resp := map[string]any{
+		"status":  "reloaded",
+		"version": snap.Version,
+		"path":    s.cfgPath,
+	}
+	if serviceRoutesChanged(oldServiceRoutes, snap.Config.ServiceRoutes) {
+		changed := changedServiceNames(oldServiceRoutes, snap.Config.ServiceRoutes)
+		slog.Warn("service_routes changed on reload but the route table is boot-only; restart the gateway for the new routes to serve",
+			"changed_services", changed, "config_version", snap.Version)
+		resp["restart_required"] = []string{"service_routes"}
+	}
+	// P3b (plan §15.4): structured lifecycle audit — every hot reload lands
+	// in fg_gateway_events, not just stdout. Optional interface: no-op when
+	// persistence is off.
+	if rec, ok := s.persistSink.(pg.EventRecorder); ok {
+		detail := map[string]any{"version": snap.Version}
+		if rr, ok := resp["restart_required"]; ok {
+			detail["restart_required"] = rr
+		}
+		rec.RecordEvent("info", "config_reloaded", detail)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) buildBackendStatus(ctx context.Context, skipModelHub ...bool) map[string]interface{} {
-    // #381: variadic so existing callers/tests stay unchanged; true = the
-    // caller is the hub's own probe, skip hub backends to break the cycle.
-    var hubSkip map[string]bool
-    if len(skipModelHub) > 0 && skipModelHub[0] {
-        for _, n := range s.pool.ModelHubNames() {
-            if hubSkip == nil {
-                hubSkip = make(map[string]bool)
-            }
-            hubSkip[n] = true
-        }
-    }
-    results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
-    status := make(map[string]interface{})
+	// #381: variadic so existing callers/tests stay unchanged; true = the
+	// caller is the hub's own probe, skip hub backends to break the cycle.
+	var hubSkip map[string]bool
+	if len(skipModelHub) > 0 && skipModelHub[0] {
+		for _, n := range s.pool.ModelHubNames() {
+			if hubSkip == nil {
+				hubSkip = make(map[string]bool)
+			}
+			hubSkip[n] = true
+		}
+	}
+	results := s.pool.HealthCheckAllSkipping(ctx, hubSkip)
+	status := make(map[string]interface{})
 
-    for name, err := range results {
-        entry := map[string]interface{}{
-            "healthy": err == nil,
-        }
-        if err != nil {
-            entry["error"] = err.Error()
-        }
-        if name == "fusion-mlx" {
-            if p, ok := s.pool.Get(name); ok {
-                if mlx, ok := p.(*adapter.FusionMLXProvider); ok {
-                    entry["in_flight"] = mlx.InFlight()
-                }
-            }
-        }
-        status[name] = entry
-    }
-    for name := range hubSkip {
-        status[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
-    }
+	for name, err := range results {
+		entry := map[string]interface{}{
+			"healthy": err == nil,
+		}
+		if err != nil {
+			entry["error"] = err.Error()
+		}
+		if name == "fusion-mlx" {
+			if p, ok := s.pool.Get(name); ok {
+				if mlx, ok := p.(*adapter.FusionMLXProvider); ok {
+					entry["in_flight"] = mlx.InFlight()
+				}
+			}
+		}
+		status[name] = entry
+	}
+	for name := range hubSkip {
+		status[name] = map[string]interface{}{"healthy": true, "skipped": "reentrant_probe"}
+	}
 
-    return status
+	return status
 }
 
 // modelHubSkip returns the hub backend names to skip when the request is the
 // hub's own health probe (X-Fusion-Source: model-hub, the signature the hub
 // sends on its mlx_url subcall). nil = probe everything.
 func modelHubSkip(pool *adapter.Pool, r *http.Request) map[string]bool {
-    if r.Header.Get("X-Fusion-Source") != "model-hub" {
-        return nil
-    }
-    names := pool.ModelHubNames()
-    if len(names) == 0 {
-        return nil
-    }
-    slog.Debug("breaking model-hub health probe cycle: skipping hub backend probe on reentrant /health")
-    skip := make(map[string]bool, len(names))
-    for _, n := range names {
-        skip[n] = true
-    }
-    return skip
+	if r.Header.Get("X-Fusion-Source") != "model-hub" {
+		return nil
+	}
+	names := pool.ModelHubNames()
+	if len(names) == 0 {
+		return nil
+	}
+	slog.Debug("breaking model-hub health probe cycle: skipping hub backend probe on reentrant /health")
+	skip := make(map[string]bool, len(names))
+	for _, n := range names {
+		skip[n] = true
+	}
+	return skip
 }
 
 func (s *Server) buildHardwareStatus(m hardware.HardwareMetrics) map[string]interface{} {
-    return map[string]interface{}{
-        "memory_used_ratio":       m.MemoryUsedRatio,
-        "gpu_device_utilization":  m.GPUDeviceUtilization,
-        "gpu_in_use_memory_bytes": m.GPUInUseMemory,
-        "mlx_active_memory_bytes": m.MLXActiveMemory,
-        "swap_page_in_rate":       m.SwapPageInRate,
-        "collection_error":        errorString(m.CollectionError),
-    }
+	return map[string]interface{}{
+		"memory_used_ratio":       m.MemoryUsedRatio,
+		"gpu_device_utilization":  m.GPUDeviceUtilization,
+		"gpu_in_use_memory_bytes": m.GPUInUseMemory,
+		"mlx_active_memory_bytes": m.MLXActiveMemory,
+		"swap_page_in_rate":       m.SwapPageInRate,
+		"collection_error":        errorString(m.CollectionError),
+	}
 }
 
 // costAccessScope (#628 ask 2) resolves who may read whose usage. A
@@ -458,50 +458,90 @@ func (s *Server) buildHardwareStatus(m hardware.HardwareMetrics) map[string]inte
 // admin plane) reads arbitrary keys. Returns (scopedKey, seeAll, ok): ok is
 // false when the caller explicitly asked for a key it may not read (403).
 func costAccessScope(p *middleware.Principal, requested string) (string, bool, bool) {
-    isMaster := p != nil && p.IsMaster
-    callerKey := ""
-    if p != nil && p.KeyConfig != nil {
-        callerKey = p.KeyConfig.Name
-    }
-    if isMaster {
-        return requested, true, true
-    }
-    if requested != "" && requested != callerKey {
-        return "", false, false
-    }
-    return callerKey, false, true
+	isMaster := p != nil && p.IsMaster
+	callerKey := ""
+	if p != nil && p.KeyConfig != nil {
+		callerKey = p.KeyConfig.Name
+	}
+	if isMaster {
+		return requested, true, true
+	}
+	if requested != "" && requested != callerKey {
+		return "", false, false
+	}
+	return callerKey, false, true
 }
 
 func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet {
-        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
-        return
-    }
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+		return
+	}
 
-    if s.costTracker == nil {
-        http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
-        return
-    }
+	if s.costTracker == nil {
+		http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
+		return
+	}
 
-    requested := r.URL.Query().Get("key")
-    scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
-    if !ok {
-        slog.Warn("cost summary cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
-        http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
-        return
-    }
+	requested := r.URL.Query().Get("key")
+	scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
+	if !ok {
+		slog.Warn("cost summary cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
+		http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
+		return
+	}
 
-    var summary *cost.CostSummary
-    if seeAll && scopedKey != "" {
-        summary = s.costTracker.SummaryByKey(scopedKey)
-    } else if seeAll {
-        summary = s.costTracker.Summary()
-    } else {
-        summary = s.costTracker.SummaryByKey(scopedKey)
-    }
+	var summary *cost.CostSummary
+	if seeAll && scopedKey != "" {
+		summary = s.costTracker.SummaryByKey(scopedKey)
+	} else if seeAll {
+		summary = s.costTracker.Summary()
+	} else {
+		summary = s.costTracker.SummaryByKey(scopedKey)
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(summary)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(summary)
+}
+
+// handleRates (#659, gw#633 follow-up) publishes the machine-readable rate
+// plan for first-party surfaces (fusion-site inline top-up panel). Public —
+// it exposes list prices only, nothing per-key or per-tenant. Reads the live
+// ConfigSnapshot, so a billing config edit + reload is reflected immediately
+// and the version counter lets consumers detect plan changes. 404 while
+// billing.enabled=false: consumers render their "gateway-configured" fallback
+// instead of caching an empty plan. 5-minute cache: the plan changes rarely
+// and the site proxies this same-origin.
+func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+		return
+	}
+	snap := config.GetSnapshot()
+	billing := snap.Config.Billing
+	if !billing.Enabled || len(billing.PrepaidBuckets) == 0 {
+		http.Error(w, `{"error":{"message":"no rate plan published (billing disabled)","type":"invalid_request"}}`, http.StatusNotFound)
+		return
+	}
+	tiers := make([]map[string]any, 0, len(billing.PrepaidBuckets))
+	for i, b := range billing.PrepaidBuckets {
+		tiers = append(tiers, map[string]any{
+			"id":        fmt.Sprintf("bucket-%d", i+1),
+			"name":      b.Name,
+			"tokens":    b.Tokens,
+			"price_usd": b.PriceUSD,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema":                       "fusion.rates.v1",
+		"currency":                     "USD",
+		"list_price_per_1k_tokens_usd": billing.ListPricePer1KTokensUSD,
+		"tiers":                        tiers,
+		"updated_at":                   snap.LoadedAt.UTC().Format(time.RFC3339),
+		"config_version":               snap.Version,
+	})
 }
 
 // handleUsageReport (#628 ask 1) serves the site /my/usage page: a per-call
@@ -511,86 +551,86 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // source:"ring" is the honest data bound — the ledger reads the tracker's
 // bounded ring, so the window is limited by max_records retention.
 func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet {
-        http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
-        return
-    }
-    if s.costTracker == nil {
-        http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
-        return
-    }
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":{"message":"Method not allowed","type":"invalid_request"}}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.costTracker == nil {
+		http.Error(w, `{"error":{"message":"Cost tracking not enabled","type":"invalid_request"}}`, http.StatusNotFound)
+		return
+	}
 
-    q := r.URL.Query()
-    requested := q.Get("key")
-    scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
-    if !ok {
-        slog.Warn("usage report cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
-        http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
-        return
-    }
+	q := r.URL.Query()
+	requested := q.Get("key")
+	scopedKey, seeAll, ok := costAccessScope(middleware.PrincipalFromContext(r.Context()), requested)
+	if !ok {
+		slog.Warn("usage report cross-key read denied", "requested_key", requested, "remote", r.RemoteAddr)
+		http.Error(w, `{"error":{"message":"you may only read your own usage","type":"auth_error"}}`, http.StatusForbidden)
+		return
+	}
 
-    var since, until time.Time
-    if v := q.Get("since"); v != "" {
-        if t, err := time.Parse(time.RFC3339, v); err == nil {
-            since = t
-        } else {
-            http.Error(w, `{"error":{"message":"invalid since (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
-            return
-        }
-    }
-    if v := q.Get("until"); v != "" {
-        if t, err := time.Parse(time.RFC3339, v); err == nil {
-            until = t
-        } else {
-            http.Error(w, `{"error":{"message":"invalid until (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
-            return
-        }
-    }
-    offset := 0
-    if v := q.Get("offset"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            offset = n
-        }
-    }
-    limit := 100
-    if v := q.Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
-    if limit > 1000 {
-        limit = 1000
-    }
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			since = t
+		} else {
+			http.Error(w, `{"error":{"message":"invalid since (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
+			return
+		}
+	}
+	if v := q.Get("until"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			until = t
+		} else {
+			http.Error(w, `{"error":{"message":"invalid until (want RFC3339)","type":"invalid_request"}}`, http.StatusBadRequest)
+			return
+		}
+	}
+	offset := 0
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	limit := 100
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
 
-    // seeAll with no explicit key = the master's unscoped view (all keys).
-    ledgerKey := scopedKey
-    if seeAll && requested == "" {
-        ledgerKey = ""
-    }
-    records, total := s.costTracker.Ledger(ledgerKey, since, until, offset, limit)
-    resp := map[string]interface{}{
-        "records": records,
-        "total":   total,
-        "offset":  offset,
-        "limit":   limit,
-        "source":  "ring",
-        "key":     ledgerKey,
-        "summary": s.costTracker.WindowSummary(ledgerKey, since, until),
-    }
-    w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(resp)
+	// seeAll with no explicit key = the master's unscoped view (all keys).
+	ledgerKey := scopedKey
+	if seeAll && requested == "" {
+		ledgerKey = ""
+	}
+	records, total := s.costTracker.Ledger(ledgerKey, since, until, offset, limit)
+	resp := map[string]interface{}{
+		"records": records,
+		"total":   total,
+		"offset":  offset,
+		"limit":   limit,
+		"source":  "ring",
+		"key":     ledgerKey,
+		"summary": s.costTracker.WindowSummary(ledgerKey, since, until),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func healthStatus(healthy bool) string {
-    if healthy {
-        return "ok"
-    }
-    return "degraded"
+	if healthy {
+		return "ok"
+	}
+	return "degraded"
 }
 
 func errorString(err error) string {
-    if err == nil {
-        return ""
-    }
-    return err.Error()
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

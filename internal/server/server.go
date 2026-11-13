@@ -1137,6 +1137,10 @@ func (s *Server) Start() error {
     mux.HandleFunc("/healthz", s.handleHealthz)
     mux.HandleFunc("/readyz", s.handleReadyz)
     mux.HandleFunc("/livez", s.handleLivez)
+    // #659: public machine-readable rate plan (gw#633 follow-up). No auth
+    // wall — it publishes list prices only, nothing per-key. 404s while
+    // billing is disabled so consumers fall back to placeholder copy.
+    mux.HandleFunc("/v1/rates", s.handleRates)
     mux.HandleFunc("/v1/status", s.withMiddleware(s.handleStatus))
 
     // #595: token exchange plane. The exchange endpoint sits behind the
