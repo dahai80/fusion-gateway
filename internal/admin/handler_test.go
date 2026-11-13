@@ -1070,6 +1070,36 @@ func TestHandleKeyByID(t *testing.T) {
         }
     })
 
+    // purge=true opts into the irreversible hard delete: record + quota
+    // history removed via store.DeleteKey (which cascade-reclaims quota
+    // entries), not merely disabled. Plain DELETE without the param stays
+    // soft (F8) — this test pins both sides of the split.
+    t.Run("delete_key_purge_true_hard_deletes", func(t *testing.T) {
+        ms2 := newMockStore()
+        _ = ms2.CreateKey(&store.APIKeyEntry{Name: "purge-me", Status: "active", KeyHash: "hash-p"})
+        h2 := newTestHandler(t, ms2, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/keys/purge-me?purge=true", nil)
+        rec := httptest.NewRecorder()
+        h2.handleKeyByID(rec, req)
+        if rec.Code != http.StatusNoContent {
+            t.Fatalf("expected 204, got %d; body: %s", rec.Code, rec.Body.String())
+        }
+        if _, err := ms2.GetKey("purge-me"); err == nil {
+            t.Fatal("purged key must be gone, record still exists")
+        }
+    })
+
+    t.Run("delete_key_purge_missing_key_404", func(t *testing.T) {
+        ms2 := newMockStore()
+        h2 := newTestHandler(t, ms2, auth, "")
+        req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/keys/nope?purge=true", nil)
+        rec := httptest.NewRecorder()
+        h2.handleKeyByID(rec, req)
+        if rec.Code != http.StatusNotFound {
+            t.Fatalf("expected 404, got %d", rec.Code)
+        }
+    })
+
     t.Run("delete_key_not_found", func(t *testing.T) {
         req := makeAuthenticatedRequest(t, auth, http.MethodDelete, "/admin/api/keys/nonexistent", nil)
         rec := httptest.NewRecorder()

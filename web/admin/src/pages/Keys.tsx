@@ -68,11 +68,51 @@ export default function Keys() {
     const handleDelete = async (id: number) => {
         try {
             await client.delete(`/keys/${id}`);
-            message.success("Key deleted");
+            message.success("Key deleted (disabled, kept for audit)");
             fetchKeys();
         } catch {
             message.error("Failed to delete key");
         }
+    };
+
+    // Purge = irreversible hard delete (backend ?purge=true). The record,
+    // its hash and quota history are gone for good, so the confirmation
+    // requires typing the exact key name.
+    const handlePurge = (record: ApiKey) => {
+        let typed = "";
+        Modal.confirm({
+            title: "Purge key permanently?",
+            content: (
+                <div>
+                    <p style={{ marginTop: 8 }}>
+                        This irreversibly removes <Typography.Text code>{record.name}</Typography.Text> and its quota
+                        history. A normal Delete keeps the record (disabled) for audit.
+                    </p>
+                    <Input
+                        placeholder={`Type "${record.name}" to confirm`}
+                        onChange={(e) => {
+                            typed = e.target.value;
+                        }}
+                    />
+                </div>
+            ),
+            okText: "Purge",
+            okButtonProps: { danger: true },
+            onOk: async () => {
+                if (typed !== record.name) {
+                    message.error("Key name does not match");
+                    return Promise.reject();
+                }
+                try {
+                    await client.delete(`/keys/${record.id}?purge=true`);
+                    message.success("Key purged");
+                    fetchKeys();
+                } catch {
+                    message.error("Failed to purge key");
+                    return Promise.reject();
+                }
+            },
+        });
     };
 
     const handleSubmit = async () => {
@@ -132,7 +172,7 @@ export default function Keys() {
         {
             title: "Actions",
             key: "actions",
-            width: 150,
+            width: 190,
             render: (_: unknown, record: ApiKey) => (
                 <Space>
                     <Button type="link" size="small" onClick={() => handleEdit(record)}>
@@ -143,6 +183,9 @@ export default function Keys() {
                             Delete
                         </Button>
                     </Popconfirm>
+                    <Button type="link" size="small" danger onClick={() => handlePurge(record)}>
+                        Purge
+                    </Button>
                 </Space>
             ),
         },
