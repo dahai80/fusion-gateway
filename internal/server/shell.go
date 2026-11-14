@@ -174,6 +174,18 @@ func (s *Server) setupShell() {
     // #261 K1: a revoked service key degrades the proxy immediately (503
     // module_key_revoked) instead of forwarding unauthenticated.
     s.shellProxy.SetRevokedChecker(s.shellRegistry.IsServiceKeyRevoked)
+    // #669: when the upstream 401s the injected dynamic credential, adopt
+    // the static web_shell.modules api_key as authoritative — the module
+    // regenerated its own credential across a restart and never consumed
+    // the gateway-issued plaintext, so the "dynamic wins" preference (#294)
+    // is permanently divergent without this self-heal. Guards live in
+    // ConvergeCredential (only the still-authoritative failed key swaps;
+    // static never converges back, so no flip-flop).
+    s.shellProxy.SetCredentialConverger(func(moduleID, failedKey string) {
+        if m, ok := s.cfg.Config.Shell.Modules[moduleID]; ok && m.APIKey != "" {
+            s.shellRegistry.ConvergeCredential(moduleID, failedKey, m.APIKey)
+        }
+    })
     s.setupShellUsers(&cfg)
     s.setupShellAdminSurfaces(&cfg)
     s.autoRegisterAdminModule()
