@@ -898,7 +898,7 @@ func TestRerank_InvalidJSON(t *testing.T) {
 }
 
 func TestRerank_Success(t *testing.T) {
-    doc := "test doc"
+    doc := json.RawMessage(`{"text":"test doc"}`)
     s := newTestServerWithProvider("test-cloud", &mockProvider{
         name:    "test-cloud",
         healthy: true,
@@ -906,7 +906,7 @@ func TestRerank_Success(t *testing.T) {
             ID:    "rerank-1",
             Model: "rerank-model",
             Results: []adapter.RerankResult{
-                {Index: 0, RelevanceScore: 0.95, Document: &doc},
+                {Index: 0, RelevanceScore: 0.95, Document: doc},
             },
             Usage: adapter.UsageResponse{PromptTokens: 10, TotalTokens: 10},
         },

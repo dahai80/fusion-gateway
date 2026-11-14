@@ -395,9 +395,13 @@ type RerankResponse struct {
 }
 
 type RerankResult struct {
-    Index          int     `json:"index"`
-    RelevanceScore float64 `json:"relevance_score"`
-    Document       *string `json:"document,omitempty"`
+    Index          int             `json:"index"`
+    RelevanceScore float64         `json:"relevance_score"`
+    // #671: fusion-mlx emits `document` as null (return_documents=false) or
+    // an object {"text": ...} (true) — never the bare string the old *string
+    // shape assumed, so every decode of a real rerank response failed. No
+    // gateway consumer reads the field: keep it verbatim passthrough.
+    Document json.RawMessage `json:"document,omitempty"`
 }
 
 type ModelInfo struct {

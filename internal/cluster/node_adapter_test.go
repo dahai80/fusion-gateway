@@ -479,12 +479,12 @@ func TestClusterNodeProvider_Rerank_Success(t *testing.T) {
             t.Errorf("decode request: %v", err)
         }
 
-        docStr := "relevant doc"
+        docStr := json.RawMessage(`{"text":"relevant doc"}`)
         resp := adapter.RerankResponse{
             ID:    "rerank-1",
             Model: req.Model,
             Results: []adapter.RerankResult{
-                {Index: 0, RelevanceScore: 0.95, Document: &docStr},
+                {Index: 0, RelevanceScore: 0.95, Document: docStr},
                 {Index: 1, RelevanceScore: 0.3, Document: nil},
             },
             Usage: adapter.UsageResponse{PromptTokens: 5, TotalTokens: 5},
