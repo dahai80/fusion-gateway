@@ -14,8 +14,9 @@ import (
     "sync"
     "time"
 
-    "github.com/fusion-gateway/fusion-gateway/internal/config"
     "github.com/fusion-gateway/fusion-gateway/internal/logthrottle"
+
+    "github.com/fusion-gateway/fusion-gateway/internal/config"
 )
 
 // Status of a manifest entry as surfaced by the list API. online = a dynamic
@@ -788,6 +789,44 @@ func (r *Registry) CredentialFor(id string) (string, bool) {
         return "", false
     }
     return e.manifest.APIKey, true
+}
+
+// convergeCredentialWarn throttles the #669 convergence INFO (1 per 5m per
+// module): divergence is a persistent condition until the upstream stores
+// the gateway-issued key or sends api_key in its registration body, so an
+// unthrottled log would flood on every proxy 401.
+var convergeCredentialWarn = logthrottle.New(5 * time.Minute)
+
+// ConvergeCredential adopts newKey as the module's proxy credential (#669)
+// when — and only when — failedKey is still the authoritative dynamic
+// credential. The proxy calls this after the upstream rejected the injected
+// dynamic credential with 401: the "dynamic wins" preference (#294) is only
+// an assumption that the module holds the gateway-issued key, and a 401 is
+// the one hard signal that the assumption broke (module regenerated its own
+// store across a restart and never consumed the issued plaintext). Failing
+// closed on every guard: no dynamic entry, not the failed credential, or
+// newKey equal to it — no swap, no state churn. The static api_key never
+// converges back to dynamic, so a wrong guess cannot flip-flop.
+func (r *Registry) ConvergeCredential(id, failedKey, newKey string) bool {
+    if newKey == "" || newKey == failedKey {
+        return false
+    }
+    r.mu.Lock()
+    e, ok := r.dynamic[id]
+    if !ok || e.manifest.APIKey != failedKey {
+        r.mu.Unlock()
+        return false
+    }
+    e.manifest.APIKey = newKey
+    r.mu.Unlock()
+    if convergeCredentialWarn.Allow(id + ":converge") {
+        slog.Info("shell proxy credential converged: upstream 401 on dynamic credential; static api_key adopted (#669)",
+            "id", id)
+    }
+    if err := r.save(); err != nil {
+        slog.Error("shell manifest registry save failed after credential convergence", "path", r.path, "error", err)
+    }
+    return true
 }
 
 // ExtRouteFor reports the dynamic registration's own upstream + credential

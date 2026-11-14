@@ -40,9 +40,18 @@ type Proxy struct {
     // key was revoked — the proxy then serves the structured 503
     // module_key_revoked instead of forwarding an unauthenticated request.
     // nil = no revocation surface (revocation disabled / not wired).
-    revokedFn          func(moduleID string) bool
-    transports         sync.Map // "<moduleID>|<upstream>" -> *http.Client (built once per pair)
-    bodyCap            int64
+    revokedFn func(moduleID string) bool
+    // convergeFn (#669) fires when an upstream rejects the injected proxy
+    // credential with 401 — the one hard signal that the "dynamic wins"
+    // preference (#294) handed the proxy a credential the module no longer
+    // accepts (e.g. the module regenerated its own store across a restart
+    // and never consumed the gateway-issued plaintext). The server-side
+    // implementation adopts the static api_key as the authoritative
+    // credential so divergence self-heals instead of wedging every embedded
+    // console call. nil = no convergence surface (behavior unchanged).
+    convergeFn  func(moduleID, failedKey string)
+    transports  sync.Map // "<moduleID>|<upstream>" -> *http.Client (built once per pair)
+    bodyCap     int64
 }
 
 func NewProxy(resolveUpstream upstreamFn) *Proxy {
@@ -58,6 +67,12 @@ func (p *Proxy) SetRevokedChecker(fn func(moduleID string) bool) {
 // without it the proxy behaves exactly as before (one upstream per module).
 func (p *Proxy) SetExtResolver(fn extUpstreamFn) {
     p.resolveExtUpstream = fn
+}
+
+// SetCredentialConverger wires the #669 upstream-401 convergence hook.
+// Optional — without it upstream 401s pass through unchanged.
+func (p *Proxy) SetCredentialConverger(fn func(moduleID, failedKey string)) {
+    p.convergeFn = fn
 }
 
 // moduleClient builds (once) the HTTP client for one module upstream. Goes
@@ -161,6 +176,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         },
         Transport: client.Transport,
         FlushInterval: 100 * time.Millisecond, // stream-friendly
+        ModifyResponse: func(resp *http.Response) error {
+            // #669: an upstream 401 against the injected proxy credential is
+            // the divergence signal — the module no longer accepts the
+            // gateway's "dynamic wins" credential. Fire the convergence hook
+            // (stateful, self-limiting: only the failed credential is ever
+            // replaced, so a wrong guess cannot flip-flop) and pass the 401
+            // through; the next request already carries the adopted key.
+            if resp.StatusCode == http.StatusUnauthorized && apiKey != "" && p.convergeFn != nil {
+                p.convergeFn(moduleID, apiKey)
+            }
+            return nil
+        },
         ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
             // A5: structured degradation, never a bare 502. Distinguish a
             // client cancellation (do not spam ERROR) from a real upstream
