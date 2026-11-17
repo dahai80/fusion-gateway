@@ -1514,6 +1514,14 @@ type ShellManifest struct {
     // on the wire and the mapstructure round-trip.
     ModelCapable   bool   `json:"model_capable,omitempty"   mapstructure:"model_capable"`
     SuggestedModel string `json:"suggested_model,omitempty" mapstructure:"suggested_model"`
+    // Router is the optional deep-link routing mode (fusion-web-shell#169):
+    // "path" = path-form deep links (/site/factory), "hash" = hash-form
+    // (/#/factory). Absent = "hash", the historical default — older
+    // manifests keep working unchanged. Passed through verbatim to the
+    // shell host like the model-policy fields above; validated at
+    // registration (empty|hash|path) so only the two known modes reach
+    // the wire.
+    Router string `json:"router,omitempty" mapstructure:"router"`
 }
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards
@@ -2846,6 +2854,12 @@ func validate(cfg *Config) error {
             }
             if m.Sort <= 0 {
                 return fmt.Errorf("web_shell.manifests[%s]: sort must be an explicit positive value (convention: core 1x / governance 2x / domain 3x / platform 4x)", m.ID)
+            }
+            // #675: same router vocabulary as dynamic registration.
+            switch m.Router {
+            case "", "hash", "path":
+            default:
+                return fmt.Errorf("web_shell.manifests[%s]: router %q must be hash|path", m.ID, m.Router)
             }
         }
         for id, m := range cfg.Shell.Modules {

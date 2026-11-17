@@ -197,19 +197,27 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
         slog.Warn("auth portal: redirect_uris empty — code issuance disabled")
     }
 
+    // #674: the portal is the prod SSO front door — every /auth/* response
+    // carries the containment header set. no-referrer: the portal hands
+    // one-time codes over redirects and must never leak ?redirect= style
+    // query targets via Referer.
+    portalHeaders := func(next http.Handler) http.Handler {
+        return withSecurityHeaders(portalCSP, "no-referrer", "DENY", next)
+    }
+
     // Strip the /auth/ mount so the SPA root serves index.html (and assets
     // resolve relative to /auth/). The /auth/api/* subtrees below win by
     // ServeMux specificity over this catch-all.
     fileServer := http.StripPrefix("/auth/", http.FileServer(http.Dir(staticDir)))
-    mux.Handle("/auth", http.RedirectHandler("/auth/", http.StatusMovedPermanently))
-    mux.Handle("/auth/", portal.guard(fileServer.ServeHTTP))
+    mux.Handle("/auth", portalHeaders(http.RedirectHandler("/auth/", http.StatusMovedPermanently)))
+    mux.Handle("/auth/", portalHeaders(portal.guard(fileServer.ServeHTTP)))
 
-    mux.Handle("/auth/api/identity/", portal.guard(portal.handleIdentityProxy))
-    mux.Handle("/auth/api/code", portal.guard(portal.handleIssueCode))
-    mux.Handle("/auth/api/code/exchange", portal.guard(portal.handleExchangeCode))
+    mux.Handle("/auth/api/identity/", portalHeaders(portal.guard(portal.handleIdentityProxy)))
+    mux.Handle("/auth/api/code", portalHeaders(portal.guard(portal.handleIssueCode)))
+    mux.Handle("/auth/api/code/exchange", portalHeaders(portal.guard(portal.handleExchangeCode)))
     // #603: challenge issuance for the portal login form — unauthenticated
     // by contract (fetched before any session exists), always no-store.
-    mux.Handle("GET /auth/api/captcha", http.HandlerFunc(portal.handleAuthPortalCaptcha))
+    mux.Handle("GET /auth/api/captcha", portalHeaders(http.HandlerFunc(portal.handleAuthPortalCaptcha)))
 
     s.authPortalWorker = lifecycle.Start(context.Background(), "auth_portal_janitor", portal.janitor)
     slog.Info("auth portal registered", "static_dir", staticDir, "identity", identityURL, "code_ttl_secs", ttl, "redirect_uris", len(cfg.RedirectURIs))
