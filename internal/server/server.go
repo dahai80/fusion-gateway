@@ -256,6 +256,9 @@ type Server struct {
     // /shell/<id>/ with the standardized error envelope; pollWorker is the
     // lifecycle-managed health poller (Stop on Shutdown).
     shellSessions *shell.Manager
+    // shellSessionSecret (#679): the raw secret backing shellSessions, kept
+    // so the module proxy can sign upstream identity headers. Never logged.
+    shellSessionSecret []byte
     shellRegistry *shell.Registry
     shellProxy    *shell.Proxy
     shellUsers    *shell.UserStore

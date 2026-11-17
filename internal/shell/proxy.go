@@ -29,6 +29,34 @@ type upstreamFn func(moduleID string) (string, string)
 // keeps the static upstream.
 type extUpstreamFn func(moduleID, path string) (string, string, bool)
 
+// Shell identity headers forwarded to module upstreams (#679). A validated
+// shell session is translated into a signed header pair so a module running
+// behind the proxy (e.g. fusion-site in module mode) can trust the caller
+// identity without seeing the session cookie — the cookie itself is always
+// stripped (see Rewrite below). Sig covers user + request path + timestamp
+// with the shell session secret, so an upstream sharing that secret can
+// verify freshness and path binding.
+const (
+    ShellUserHeader = "X-Fusion-Shell-User"
+    ShellSigHeader  = "X-Fusion-Shell-Sig"
+    ShellTsHeader   = "X-Fusion-Shell-Ts"
+)
+
+// IdentityHeaders is the signed identity triple computed by the server-side
+// injector for one request. Zero value = do not inject.
+type IdentityHeaders struct {
+    User string
+    Ts   string
+    Sig  string
+}
+
+// identityFn resolves the caller identity for one /shell/<module>/ request.
+// Runs after the server-side auth wrap, so a valid session yields claims
+// from the request context and a signed triple; the service-key plane and
+// anonymous requests yield ok=false (nothing injected — the upstream keeps
+// its own gate).
+type identityFn func(r *http.Request) (IdentityHeaders, bool)
+
 // Proxy forwards /shell/<module_id>/... requests to the module's upstream
 // and degrades failures into the standardized error envelope (PRD §7.2):
 // backend down is a 503 envelope with retryable=true, NEVER a bare 502 or a
@@ -50,6 +78,9 @@ type Proxy struct {
     // credential so divergence self-heals instead of wedging every embedded
     // console call. nil = no convergence surface (behavior unchanged).
     convergeFn  func(moduleID, failedKey string)
+    // identityFn (#679): computes the signed shell identity headers for a
+    // validated session. nil = never inject (strip-only behavior).
+    identityFn identityFn
     transports  sync.Map // "<moduleID>|<upstream>" -> *http.Client (built once per pair)
     bodyCap     int64
 }
@@ -73,6 +104,12 @@ func (p *Proxy) SetExtResolver(fn extUpstreamFn) {
 // Optional — without it upstream 401s pass through unchanged.
 func (p *Proxy) SetCredentialConverger(fn func(moduleID, failedKey string)) {
     p.convergeFn = fn
+}
+
+// SetIdentityInjector wires the #679 signed identity header injection.
+// Optional — without it the proxy only strips, never injects.
+func (p *Proxy) SetIdentityInjector(fn identityFn) {
+    p.identityFn = fn
 }
 
 // moduleClient builds (once) the HTTP client for one module upstream. Goes
@@ -158,6 +195,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // #679: resolve the identity triple once, before the proxy runs. The
+    // auth wrap has already validated the session (claims in context) or
+    // authenticated the module service key (no user identity — nothing to
+    // inject; the upstream keeps its own gate).
+    var identity IdentityHeaders
+    if p.identityFn != nil {
+        if id, ok := p.identityFn(r); ok {
+            identity = id
+            slog.Debug("shell proxy identity injected", "module", moduleID, "user", identity.User, "path", r.URL.Path)
+        } else {
+            slog.Debug("shell proxy identity not injected (no valid session)", "module", moduleID, "path", r.URL.Path)
+        }
+    }
+
     target, _ := url.Parse(upstream)
     rp := &httputil.ReverseProxy{
         Rewrite: func(pr *httputil.ProxyRequest) {
@@ -170,6 +221,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
             // per-module static api_key, not the user identity.
             pr.Out.Header.Del("Authorization")
             pr.Out.Header.Del("Cookie")
+            // #679: client-supplied identity headers are NEVER forwarded —
+            // a caller cannot forge shell identity by setting the headers
+            // directly. They are only ever (re)set from the validated
+            // session below.
+            pr.Out.Header.Del(ShellUserHeader)
+            pr.Out.Header.Del(ShellSigHeader)
+            pr.Out.Header.Del(ShellTsHeader)
+            if identity.User != "" {
+                pr.Out.Header.Set(ShellUserHeader, identity.User)
+                pr.Out.Header.Set(ShellTsHeader, identity.Ts)
+                pr.Out.Header.Set(ShellSigHeader, identity.Sig)
+            }
             if apiKey != "" {
                 pr.Out.Header.Set("Authorization", "Bearer "+apiKey)
             }

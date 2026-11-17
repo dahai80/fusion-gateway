@@ -2,6 +2,7 @@ package server
 
 import (
     "bytes"
+    "crypto/hmac"
     "crypto/sha256"
     "crypto/subtle"
     "encoding/hex"
@@ -15,6 +16,7 @@ import (
     "net/url"
     "os"
     "path/filepath"
+    "strconv"
     "strings"
     "time"
 
@@ -98,6 +100,7 @@ func (s *Server) setupShell() {
             "fingerprint", fp)
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
+    s.shellSessionSecret = secret
     // #587: the failed-login lockout state lives with the session subsystem.
     s.shellLoginThrottle = newShellLoginThrottle()
     // #592: single-use SVG challenges for the login plane. The store is
@@ -189,6 +192,10 @@ func (s *Server) setupShell() {
     s.setupShellUsers(&cfg)
     s.setupShellAdminSurfaces(&cfg)
     s.autoRegisterAdminModule()
+    // #679: validated shell sessions become signed identity headers on the
+    // module proxy hop (fusion-site#83) — the upstream auth gate can trust
+    // the caller without the session cookie, which is stripped (#222).
+    s.shellProxy.SetIdentityInjector(s.shellIdentityHeaders)
     slog.Info("shell subsystem initialized",
         "static_manifests", len(cfg.Shell.Manifests),
         "modules", len(cfg.Shell.Modules),
@@ -456,6 +463,29 @@ func (s *Server) withShellModuleAccess(next http.HandlerFunc) http.HandlerFunc {
         }
         next(w, r)
     }
+}
+
+// shellIdentityHeaders (#679) computes the signed identity header triple for
+// the module proxy hop. Called after the auth wrap, so a validated session
+// carries its claims in the request context; the module service-key plane
+// has no user identity and anonymous requests never reach the proxy, so both
+// yield ok=false and nothing is injected. Sig = hex(HMAC-SHA256(secret,
+// user + "\n" + path + "\n" + ts)) with the persisted shell session secret;
+// path is the gateway request path, which for module-mode upstreams
+// (mounted at /shell/<id>/) equals the path the upstream serves.
+func (s *Server) shellIdentityHeaders(r *http.Request) (shell.IdentityHeaders, bool) {
+    claims := shellClaimsFrom(r.Context())
+    if claims.Sub == "" || len(s.shellSessionSecret) == 0 {
+        return shell.IdentityHeaders{}, false
+    }
+    ts := strconv.FormatInt(time.Now().Unix(), 10)
+    mac := hmac.New(sha256.New, s.shellSessionSecret)
+    mac.Write([]byte(claims.Sub + "\n" + r.URL.Path + "\n" + ts))
+    return shell.IdentityHeaders{
+        User: claims.Sub,
+        Ts:   ts,
+        Sig:  hex.EncodeToString(mac.Sum(nil)),
+    }, true
 }
 
 // shellModuleAllowed expands the permission list against one module id.
