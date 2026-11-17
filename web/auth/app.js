@@ -41,6 +41,11 @@
             "hint-verify-sent": "Verification sent. Enter the token from the email link.",
             "foot": "Protected by the fusion gateway · one-time handoff to your app",
             "ok-register": "Account created. Check your inbox for the verification link, then sign in.",
+            // #676: register form links the site's bilingual privacy policy
+            // (PIPL baseline, fusion-site#80 audit).
+            "privacy-notice": "By creating an account you agree to the",
+            "privacy-link": "Privacy Policy",
+            "privacy-tail": ".",
             "ok-tenant": "Team registered and active. You can sign in now.",
             "ok-verify": "Email verified. You can sign in now.",
             "ok-login": "Signed in.",
@@ -79,6 +84,11 @@
             "ok-reset": "密码已更新，现在可以登录。",
             "err-reset-mismatch": "两次输入的密码不一致。",
             "hint-verify": "我们将发送验证邮件，验证邮箱后才能登录。",
+            // #676: register form links the site's bilingual privacy policy
+            // (PIPL baseline, fusion-site#80 audit).
+            "privacy-notice": "创建账号即表示你同意",
+            "privacy-link": "《隐私政策》",
+            "privacy-tail": "。",
             "hint-tenant": "团队立即激活，令牌消耗受套餐配额限制。",
             "hint-verify-sent": "验证邮件已发送，请输入邮件链接中的令牌。",
             "foot": "由 fusion 网关保护 · 一次性交接给你的应用",
