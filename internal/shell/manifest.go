@@ -978,6 +978,12 @@ func validateManifest(m config.ShellManifest) error {
             return fmt.Errorf("manifest %q: permissions_policy feature %q must be microphone|camera", m.ID, f)
         }
     }
+    // #675: deep-link routing mode for the shell host's path router.
+    switch m.Router {
+    case "", "hash", "path":
+    default:
+        return fmt.Errorf("manifest %q: router %q must be hash|path", m.ID, m.Router)
+    }
     if err := validateManifestGroup(m); err != nil {
         return err
     }

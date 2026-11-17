@@ -393,7 +393,11 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // #275: E6 admin surfaces (adapters vault / connectors / config
     // overrides / audit / roles + menu matrix).
     s.registerShellAdminRoutes(mux)
-    mux.HandleFunc("/shell/", s.withShellProxyAuth(s.shellProxy.ServeHTTP))
+    // #674: /shell/* responses carry the containment header set. Permissive
+    // CSP sources (modules own their bundles), SAMEORIGIN framing — the
+    // shell host embeds module iframes from the same origin.
+    mux.Handle("/shell/", withSecurityHeaders(shellCSP, "strict-origin-when-cross-origin", "SAMEORIGIN",
+        s.withShellProxyAuth(s.shellProxy.ServeHTTP)))
     slog.Info("shell routes registered",
         "control_plane", "/api/v1/shell/*",
         "proxy", "/shell/{module_id}/")

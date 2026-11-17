@@ -740,6 +740,20 @@ web_shell:
     #    health: http://127.0.0.1:11448/api/health
     #    sort: 39
     #    version: 2.2.7
+    # #675: optional deep-link routing mode — "path" for Next.js path-router
+    # modules (deep links resolve server-side), "hash" (default) for SPA
+    # hash routers. Only path modules need the field:
+    #  - id: fusion-site
+    #    title: 软件工厂
+    #    title_en: Fusion Site
+    #    entry: /shell/fusion-site/
+    #    devices: [desktop, mobile-ready]
+    #    category: platform
+    #    icon: Factory
+    #    health: http://127.0.0.1:11432/shell/fusion-site/api/experience/health
+    #    router: path
+    #    sort: 35
+    #    version: 0.1.0
     # #296: static proxy wiring for a self-keyed module (e.g. fusion-security).
     # The upstream validates the injected Bearer credential itself — the key
     # must be one of the UPSTREAM's API keys (with whatever tenant/role the
