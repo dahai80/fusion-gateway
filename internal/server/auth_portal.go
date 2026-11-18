@@ -319,6 +319,23 @@ var identityProxyAllowlist = map[string]string{
     "GET|/.well-known/jwks.json":         "jwks",
 }
 
+// #684 (identity#90/#91 via #93): callers that treat the portal prefix as a
+// plain base URL append the identity endpoint path without the redundant
+// /auth segment — e.g. /auth/api/identity/api/v1/password/reset-request
+// instead of /auth/api/identity/api/v1/auth/password/reset-request. Each
+// alias canonicalizes to the real identity route before the allowlist gate;
+// an alias can only reach what its canonical twin already reaches, and the
+// login throttle / bearer rules below keep working because the key is
+// recomputed from the canonical path.
+var identityProxyPathAliases = map[string]string{
+    "POST|/api/v1/password/forgot":        "/api/v1/auth/password/forgot",
+    "POST|/api/v1/password/reset":         "/api/v1/auth/password/reset",
+    "POST|/api/v1/password/reset-request": "/api/v1/auth/password/reset-request",
+    "GET|/api/v1/account/export":          "/api/v1/auth/account/export",
+    "POST|/api/v1/account/delete":         "/api/v1/auth/account/delete",
+    "DELETE|/api/v1/account/delete":       "/api/v1/auth/account/delete",
+}
+
 // identityProxyBearerAllowlist (#682, identity#91): the account-lifecycle
 // plane is user-scoped and carries its OWN bearer JWT — the caller
 // authenticates with a token in the Authorization header, unlike every
@@ -341,6 +358,12 @@ func (p *authPortal) handleIdentityProxy(w http.ResponseWriter, r *http.Request)
         upstreamPath = "/"
     }
     key := r.Method + "|" + upstreamPath
+    // #684: canonicalize the /auth-less alias shape before the gate so the
+    // allowlist, bearer rules and login throttle all see one key shape.
+    if canonical, ok := identityProxyPathAliases[key]; ok {
+        upstreamPath = canonical
+        key = r.Method + "|" + upstreamPath
+    }
     if _, ok := identityProxyAllowlist[key]; !ok {
         slog.Warn("auth portal proxy refused", "method", r.Method, "path", upstreamPath)
         shell.WriteEnvelope(w, http.StatusNotFound, "not_found",
