@@ -308,7 +308,28 @@ var identityProxyAllowlist = map[string]string{
     // handleIdentityProxy applies as everywhere else on this surface.
     "POST|/api/v1/auth/password/forgot": "password-forgot",
     "POST|/api/v1/auth/password/reset":  "password-reset",
-    "GET|/.well-known/jwks.json":        "jwks",
+    // #682 (identity#90): the new alias identity#93 shipped for the same
+    // recovery flow — same credential-shaped body, same enum-free handling.
+    "POST|/api/v1/auth/password/reset-request": "password-reset-request",
+    // #682 (identity#91): the account-lifecycle plane routes through here
+    // too; the bearer flag lives in identityProxyBearerAllowlist below.
+    "GET|/api/v1/auth/account/export":    "account-export",
+    "POST|/api/v1/auth/account/delete":   "account-delete",
+    "DELETE|/api/v1/auth/account/delete": "account-delete",
+    "GET|/.well-known/jwks.json":         "jwks",
+}
+
+// identityProxyBearerAllowlist (#682, identity#91): the account-lifecycle
+// plane is user-scoped and carries its OWN bearer JWT — the caller
+// authenticates with a token in the Authorization header, unlike every
+// other portal route (credentials in the body). The gateway must forward
+// that header to identity instead of dropping it; identity enforces the
+// 401 itself when it is missing or stale. Keys share the "METHOD|path"
+// shape of identityProxyAllowlist; membership there is required too.
+var identityProxyBearerAllowlist = map[string]bool{
+    "GET|/api/v1/auth/account/export":    true,
+    "POST|/api/v1/auth/account/delete":   true,
+    "DELETE|/api/v1/auth/account/delete": true,
 }
 
 // handleIdentityProxy forwards an allowlisted public auth call to identity.
@@ -325,6 +346,19 @@ func (p *authPortal) handleIdentityProxy(w http.ResponseWriter, r *http.Request)
         shell.WriteEnvelope(w, http.StatusNotFound, "not_found",
             "no such auth endpoint", "auth_portal", false)
         return
+    }
+    // #682: bearer-authenticated account plane forwards the caller's
+    // Authorization header to identity. Everything else keeps the
+    // credentials-in-body-only contract — forwardIdentity builds a fresh
+    // request, so the inbound header is simply never copied. The internal
+    // hop header is cleared unconditionally first: a client must never be
+    // able to smuggle its own X-Fusion-Forwarded-Authorization onto a
+    // body-credential route.
+    r.Header.Del("X-Fusion-Forwarded-Authorization")
+    if identityProxyBearerAllowlist[key] {
+        if authz := r.Header.Get("Authorization"); authz != "" {
+            r.Header.Set("X-Fusion-Forwarded-Authorization", authz)
+        }
     }
     // #590: the login proxy is a credential oracle — route it through the
     // failed-login lockout before the upstream round-trip.
@@ -454,6 +488,13 @@ func (p *authPortal) forwardIdentity(w http.ResponseWriter, r *http.Request, ups
         }
         req.Header.Set("Content-Type", "application/json")
         req.Header.Set("X-Forwarded-For", clientIPFromRequest(r))
+        // #682: bearer-authenticated account plane — the caller's token
+        // rides the internal hop header (staged by handleIdentityProxy,
+        // which clears any client-supplied value first) and is applied as
+        // the real Authorization upstream.
+        if fwd := r.Header.Get("X-Fusion-Forwarded-Authorization"); fwd != "" {
+            req.Header.Set("Authorization", fwd)
+        }
         resp, err := p.httpClient.Do(req)
         if err != nil {
             slog.Warn("auth portal upstream error", "path", upstreamPath, "attempt", attempt, "error", err)
