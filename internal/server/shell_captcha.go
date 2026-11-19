@@ -194,19 +194,24 @@ func captchaGlyphFor(ch rune) ([7]string, bool) {
 //   - per-glyph transform gains translate + non-uniform scale
 //     (translate/rotate/scale), so no fixed origin recovers rows;
 //   - every horizontal run renders as a QUADRATIC curve (control point
-//     offset by up to ±1.9 units) with per-run y jitter ±1.2 — straight-line
+//     offset by up to ±0.9 units) with per-run y jitter ±0.9 — straight-line
 //     run-length parsing finds nothing and row buckets blur;
-//   - each glyph carries 1-2 distractor strokes inside its own bounding
-//     box (same color/width as real strokes), polluting any grid
+//   - each glyph carries up to 1 distractor stroke inside its own bounding
+//     box (lighter than real strokes), polluting any grid
 //     reconstruction with cells no glyph bitmap contains;
 //   - stroke widths and background noise are seeded per challenge.
-// Readability keeps: rotations ±16°, jitters well under half the 3.2 row
-// pitch, distractors short. Returns the base64 data URI the shell frontend
-// drops straight into an <img src>.
+// #694 rebalance (human legibility): the original hardening values stacked
+// past what a ~16px glyph cell survives — rotation ±16°, bulge ±1.9 (over
+// half the row pitch) and same-weight distractors made legit challenges
+// unreadable. Now: 200x64 canvas with a 4.0 cell, rotation capped ±8°,
+// jitter under 1/4 of the 4.4 row pitch, distractors short + 0.5 opacity.
+// Anti-decode structure is unchanged: crypto/rand seeding, quadratic
+// curves, translate+rotate transform, no text nodes. Returns the base64
+// data URI the shell frontend drops straight into an <img src>.
 func renderSVG(code string) string {
     var sb strings.Builder
-    sb.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="48" viewBox="0 0 140 48">`)
-    sb.WriteString(`<rect width="140" height="48" fill="#f1f5f9"/>`)
+    sb.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="64" viewBox="0 0 200 64">`)
+    sb.WriteString(`<rect width="200" height="64" fill="#f1f5f9"/>`)
     // #688: per-CHALLENGE entropy from crypto/rand — the previous
     // time.Now().UnixNano() seed was only per-process-time unpredictability;
     // the failure mode was the fixed geometry, not the seed, so the seed
@@ -229,19 +234,19 @@ func renderSVG(code string) string {
     // crossing the glyph band.
     for i := 0; i < 4; i++ {
         sb.WriteString(fmt.Sprintf(
-            `<path d="M0,%d Q35,%d 70,%d T140,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.6"/>`,
-            8+jitter(30), jitter(40), 8+jitter(30), jitter(40)))
+            `<path d="M0,%d Q60,%d 120,%d T200,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.6"/>`,
+            10+jitter(40), jitter(50), 10+jitter(40), jitter(50)))
     }
     for i := 0; i < 2; i++ {
-        x := jitter(60) + 20
+        x := jitter(80) + 30
         sb.WriteString(fmt.Sprintf(
             `<path d="M%d,%d q6,%d 12,%d q6,%d 12,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.5"/>`,
-            x, 10+jitter(28), jitter(13)-6, jitter(13)-6, jitter(13)-6, jitter(13)-6))
+            x, 12+jitter(36), jitter(13)-6, jitter(13)-6, jitter(13)-6, jitter(13)-6))
     }
     const (
-        cell    = 3.0    // glyph cell size in SVG units
-        rowStep = 3.2    // slight vertical stretch for readability
-        originY = 12.0
+        cell    = 4.0  // glyph cell size in SVG units (#694: roomier canvas)
+        rowStep = 4.4  // slight vertical stretch for readability
+        originY = 16.0
     )
     for i, ch := range code {
         glyph, ok := captchaGlyphFor(ch)
@@ -250,11 +255,11 @@ func renderSVG(code string) string {
             // future charset edit fails visibly instead of dropping a char.
             glyph = [7]string{"X...X", "X...X", "X...X", "X...X", "X...X", "X...X", "X...X"}
         }
-        gx := float64(14+i*24) + float64(jitter(5))
-        rot := jitter(33) - 16
-        gty := float64(jitter(50)-25) / 10.0 // per-glyph vertical shift ±2.5
-        cx := gx + 7.5
-        cy := originY + 10.5
+        gx := float64(22+i*36) + float64(jitter(5))
+        rot := jitter(17) - 8 // #694: ±8° — ±16° destroyed legibility
+        gty := float64(jitter(31)-15) / 10.0 // per-glyph vertical shift ±1.5
+        cx := gx + 10.0
+        cy := originY + 3*rowStep
         sb.WriteString(fmt.Sprintf(
             `<g transform="translate(0 %.1f) rotate(%d %.1f %.1f)">`,
             gty, rot, cx, cy))
@@ -272,8 +277,10 @@ func renderSVG(code string) string {
                 }
                 x0 := gx + float64(start)*cell + float64(jitter(9)-4)/10.0
                 x1 := gx + float64(c-1)*cell + float64(jitter(9)-4)/10.0
-                y := originY + float64(r)*rowStep + float64(jitter(25)-12)/10.0
-                ctrlY := y + float64(jitter(39)-19)/10.0 // curve bulge ±1.9
+                // #694: y jitter and bulge ±0.9 — under 1/4 of the 4.4 row
+                // pitch (the old ±1.2/±1.9 blurred rows together).
+                y := originY + float64(r)*rowStep + float64(jitter(19)-9)/10.0
+                ctrlY := y + float64(jitter(19)-9)/10.0
                 ctrlX := (x0 + x1) / 2 + float64(jitter(21)-10)/10.0
                 sw := 2.0 + float64(jitter(7))/10.0 // stroke width 2.0-2.6
                 sb.WriteString(fmt.Sprintf(
@@ -281,17 +288,18 @@ func renderSVG(code string) string {
                     x0, y, ctrlX, ctrlY, x1, y, sw))
             }
         }
-        // Distractor strokes: 1-2 short seeded strokes inside this glyph's
-        // bounding box, same visual weight as real strokes — any grid
-        // reconstruction picks up cells no bitmap contains.
-        for d := 0; d <= jitter(2); d++ {
-            dx0 := gx + float64(jitter(30)) / 10.0
-            dy0 := originY + float64(jitter(200)) / 10.0
-            dlen := 3 + float64(jitter(40))/10.0
+        // Distractor strokes: at most 1 short, light stroke inside this
+        // glyph's bounding box (#694: the old 1-2 same-weight strokes
+        // overpowered the glyphs) — any grid reconstruction still picks up
+        // cells no bitmap contains.
+        for d := 0; d < jitter(2); d++ {
+            dx0 := gx + float64(jitter(40)) / 10.0
+            dy0 := originY + float64(jitter(280)) / 10.0
+            dlen := 2 + float64(jitter(20))/10.0
             dx1 := dx0 + dlen
             dy1 := dy0 + float64(jitter(17)-8)/10.0
             sb.WriteString(fmt.Sprintf(
-                `<path d="M%.1f %.1f Q%.1f %.1f %.1f %.1f" stroke="#334155" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.85"/>`,
+                `<path d="M%.1f %.1f Q%.1f %.1f %.1f %.1f" stroke="#334155" stroke-width="2.0" stroke-linecap="round" fill="none" opacity="0.5"/>`,
                 dx0, dy0, (dx0+dx1)/2, (dy0+dy1)/2+float64(jitter(13)-6)/10.0, dx1, dy1))
         }
         sb.WriteString(`</g>`)
