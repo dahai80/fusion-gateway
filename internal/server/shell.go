@@ -113,6 +113,11 @@ func (s *Server) setupShell() {
             ttl = 5 * time.Minute
         }
         s.shellCaptcha = newShellCaptchaStore(ttl)
+        // #688: the deterministic test path is opt-in env-gated and refused
+        // outright when FUSION_ENV=production — see captchaTestModeEnabled.
+        if s.shellCaptcha.testMode = captchaTestModeEnabled(); s.shellCaptcha.testMode {
+            slog.Warn("shell captcha TEST MODE enabled: challenge codes ride the /captcha response — never set FUSION_CAPTCHA_TESTMODE outside CI")
+        }
     }
     s.shellRegistry = shell.NewRegistry(cfg.Shell.Manifests, cfg.Shell.EntryOriginAllowlist, cfg.Shell.HeartbeatTimeout)
     // #478: feed the static proxy upstream map into the registry so a
