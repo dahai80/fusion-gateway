@@ -1197,6 +1197,10 @@ type Config struct {
     // Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
     // for request logs + payloads. Default off — zero behavior change.
     Persistence     PersistenceConfig       `mapstructure:"persistence"`
+    // Ops is the ops.* namespace (#689, flywheel Loop A): fire-and-forget
+    // emission of request-level ops events into fusion_ops.ops_events.
+    // Default off — zero behavior change.
+    Ops             OpsConfig               `mapstructure:"ops"`
     // FileLog is the file_log.* namespace (G9): daily-rolled file logging.
     FileLog         FileLogConfig           `mapstructure:"file_log"`
     // UsageAlerts is the usage_alerts.* namespace (#326): periodic
@@ -2299,6 +2303,11 @@ func validate(cfg *Config) error {
         return err
     }
 
+    // #689: ops.* namespace. Same repair-in-place contract as persistence.
+    if err := validateOps(cfg); err != nil {
+        return err
+    }
+
     // G9: file_log.* namespace.
     if err := validateFileLog(cfg); err != nil {
         return err
@@ -3356,6 +3365,7 @@ func DefaultConfig() Config {
             },
         },
         Persistence: defaultPersistenceConfig(),
+        Ops:         defaultOpsConfig(),
         FileLog:     defaultFileLogConfig(),
     }
 }

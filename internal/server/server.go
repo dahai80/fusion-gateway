@@ -43,6 +43,7 @@ import (
     "github.com/fusion-gateway/fusion-gateway/internal/middleware"
     "github.com/fusion-gateway/fusion-gateway/internal/observability"
     "github.com/fusion-gateway/fusion-gateway/internal/insights"
+    "github.com/fusion-gateway/fusion-gateway/internal/ops"
     "github.com/fusion-gateway/fusion-gateway/internal/persist"
     "github.com/fusion-gateway/fusion-gateway/internal/realtime"
     "github.com/fusion-gateway/fusion-gateway/internal/rollout"
@@ -181,6 +182,11 @@ type Server struct {
     // skips capture + enqueue entirely when nil — the default (persistence
     // off) request path is byte-identical to before.
     persistSink persist.Sink
+    // opsEmitter (#689, flywheel Loop A): fire-and-forget ops event emission
+    // into fusion_ops.ops_events, wired by main.go when ops.enabled. nil-safe:
+    // withMiddleware skips emission entirely when nil — the default request
+    // path is byte-identical to before.
+    opsEmitter ops.Sink
     // adminHandler is the admin API handler, retained so main.go can wire the
     // insights (PG read) service into it after New (P3).
     adminHandler *admin.Handler
@@ -1507,6 +1513,13 @@ func (s *Server) SetPersistSink(sink persist.Sink) {
     s.persistSink = sink
 }
 
+// SetOpsEmitter wires the ops flywheel event emitter (#689). Called by
+// main.go after New when ops.enabled; nil (default) keeps the request path
+// emission-free.
+func (s *Server) SetOpsEmitter(e ops.Sink) {
+    s.opsEmitter = e
+}
+
 // warnPersistNoSinkOnce (#344): a hot-reload can flip persistence.enabled on,
 // but the sink is built once at startup — until a restart the gateway serves
 // normally yet persists nothing. Fail visibly: one loud ERROR per process.
@@ -1689,6 +1702,11 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
             final.ServeHTTP(rec, r)
         }
 
+        // #689: ops events cover ALL requests, including the high-frequency
+        // polls that skip the request log below. Fire-and-forget — Emit never
+        // blocks (drop-on-backpressure), so the response path cannot regress.
+        s.emitOpsEvents(r, entry, rec.StatusCode, start)
+
         // #351: skip logging for high-frequency poll endpoints so they do not
         // flood the ring / fg_request_logs with blank rows.
         if isLogSkippedPoll(r) {
@@ -1720,6 +1738,50 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
         // request was admin/master/failed-local-auth). ReportUsage carries
         // the token counts the handler stamped on the request log entry.
         s.releaseIdentityLease(r.Context(), entry)
+    }
+}
+
+// emitOpsEvents (#689, flywheel Loop A): request-level ops emission from the
+// access path. One http_request event per request; 5xx and 429 additionally
+// emit http_error with a stable status+route signature feeding the
+// mined_issues clustering (flywheel §5). The route collapses id-like path
+// segments to a template and query strings are dropped — raw paths are NEVER
+// stored (issue desensitization requirement). tenant_hash is the sha256
+// prefix of the identity lease tenant when authenticated. Emission is
+// fire-and-forget: Emit never blocks (drop-on-backpressure), so gateway
+// latency cannot regress.
+func (s *Server) emitOpsEvents(r *http.Request, entry *store.RequestLog, status int, start time.Time) {
+    if s.opsEmitter == nil {
+        return
+    }
+    route := ops.RouteTemplate(r.URL.Path)
+    tenantHash := ""
+    if lease := middleware.IdentityLeaseFromContext(r.Context()); lease != nil && lease.TenantID != "" {
+        tenantHash = ops.TenantHash(lease.TenantID)
+    }
+    latencyMS := int(time.Since(start).Milliseconds())
+    statusStr := strconv.Itoa(status)
+    s.opsEmitter.Emit(ops.Event{
+        Source:     "gateway",
+        TenantHash: tenantHash,
+        EventType:  "http_request",
+        LatencyMS:  latencyMS,
+        Status:     statusStr,
+        Payload:    map[string]any{"route": route, "method": r.Method},
+    })
+    if status >= 500 || status == http.StatusTooManyRequests {
+        s.opsEmitter.Emit(ops.Event{
+            Source:     "gateway",
+            TenantHash: tenantHash,
+            EventType:  "http_error",
+            LatencyMS:  latencyMS,
+            Status:     statusStr,
+            Payload: map[string]any{
+                "route":     route,
+                "method":    r.Method,
+                "signature": ops.ErrorSignature(status, route),
+            },
+        })
     }
 }
 

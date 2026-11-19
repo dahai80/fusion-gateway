@@ -23,6 +23,7 @@ import (
 	"github.com/fusion-gateway/fusion-gateway/internal/insights"
 	"github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
 	"github.com/fusion-gateway/fusion-gateway/internal/observability"
+	"github.com/fusion-gateway/fusion-gateway/internal/ops"
 	"github.com/fusion-gateway/fusion-gateway/internal/persist/pg"
 	"github.com/fusion-gateway/fusion-gateway/internal/router"
 	"github.com/fusion-gateway/fusion-gateway/internal/server"
@@ -564,6 +565,28 @@ func run(configPath string) error {
 			"queue_capacity", snap.Config.Persistence.Queue.Capacity)
 	}
 
+	// #689 (flywheel Loop A): ops event emitter into fusion_ops.ops_events.
+	// Opt-in via ops.enabled + DSN env. NOT fatal on empty DSN (analytics
+	// tier, unlike persistence compliance logs) — but fail visibly: one loud
+	// warning per process, then continue with emission disabled.
+	var opsEmitter *ops.Emitter
+	if snap.Config.Ops.Enabled {
+		opsDsn := os.Getenv(snap.Config.Ops.DsnEnv)
+		if opsDsn == "" {
+			slog.Warn("ops.enabled=true but env is empty — ops event emission disabled",
+				"dsn_env", snap.Config.Ops.DsnEnv)
+		} else {
+			opsEmitter = ops.New(snap.Config.Ops.MaxQueue, snap.Config.Ops.BatchSize,
+				snap.Config.Ops.FlushIntervalMS, opsDsn)
+			opsEmitter.Start(context.Background())
+			srv.SetOpsEmitter(opsEmitter)
+			slog.Info("ops event emission enabled",
+				"dsn_env", snap.Config.Ops.DsnEnv,
+				"max_queue", snap.Config.Ops.MaxQueue,
+				"batch_size", snap.Config.Ops.BatchSize)
+		}
+	}
+
 	stopCh := make(chan struct{})
 
 	// EI10: track long-lived background workers so Server.Shutdown can Stop
@@ -886,6 +909,11 @@ func run(configPath string) error {
 	// webhook POST must not outlive shutdown.
 	if usageAlertsWorker != nil {
 		usageAlertsWorker.Stop()
+	}
+	if opsEmitter != nil {
+		// #689: drain remaining ops events (max latency = flush interval),
+		// then close the pool.
+		opsEmitter.Stop(5 * time.Second)
 	}
 	if persistSink != nil {
 		// Sync variant: the async RecordEvent races the pool Close below and
