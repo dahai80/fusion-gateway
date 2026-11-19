@@ -2,12 +2,14 @@ package server
 
 import (
     "crypto/rand"
+    "encoding/binary"
     "encoding/json"
     "encoding/base64"
     "fmt"
     "log/slog"
     "math/big"
     "net/http"
+    "os"
     "strings"
     "sync"
     "time"
@@ -37,6 +39,11 @@ type shellCaptchaStore struct {
     challenges map[string]*shellCaptchaChallenge
     ttl        time.Duration
     nowFn      func() time.Time
+    // testMode (#688): the sanctioned deterministic path for CI/E2E —
+    // serveCaptchaChallenge then includes the challenge code in the JSON
+    // response so suites need no image decoding. Enabled only when
+    // captchaTestModeEnabled() passes; production can never turn it on.
+    testMode bool
 }
 
 func newShellCaptchaStore(ttl time.Duration) *shellCaptchaStore {
@@ -45,6 +52,18 @@ func newShellCaptchaStore(ttl time.Duration) *shellCaptchaStore {
         ttl:        ttl,
         nowFn:      time.Now,
     }
+}
+
+// captchaTestModeEnabled (#688): the deterministic test path is opt-in via
+// FUSION_CAPTCHA_TESTMODE=1 and is refused outright when
+// FUSION_ENV=production — a bypass token that ships enabled by default
+// would be a static bypass token in disguise. Production operators get no
+// flag that turns it on; CI and local E2E set both env vars explicitly.
+func captchaTestModeEnabled() bool {
+    if os.Getenv("FUSION_ENV") == "production" {
+        return false
+    }
+    return os.Getenv("FUSION_CAPTCHA_TESTMODE") == "1"
 }
 
 func (c *shellCaptchaStore) now() time.Time {
@@ -163,30 +182,65 @@ func captchaGlyphFor(ch rune) ([7]string, bool) {
     return g, ok
 }
 
-// renderSVG draws the challenge as a self-contained SVG document: the code
-// as per-character jittered dot-matrix stroke paths on a fixed light
-// background plus noise strokes against trivial OCR. NO text nodes, NO
-// character data — the decoded markup must not carry a machine-recoverable
-// code (#614: the <text>-based rendering was extractable with one string
-// match). Returns the base64 data URI the shell frontend drops straight
-// into an <img src>.
+// renderSVG draws the challenge as a self-contained SVG document (#614: no
+// text nodes — the markup must never carry a machine-recoverable code).
+//
+// #688 hardening: the previous renderer was deterministically decodable —
+// fixed glyph geometry quantized to exact grid constants (originY 12.0,
+// rowStep 3.2, cell 3.0), straight horizontal run-length strokes, and a
+// rotation-only transform, so template matching succeeded 100% of the time.
+// Now every challenge derives its geometry from a crypto/rand seed and the
+// per-stroke structure defeats grid quantization:
+//   - per-glyph transform gains translate + non-uniform scale
+//     (translate/rotate/scale), so no fixed origin recovers rows;
+//   - every horizontal run renders as a QUADRATIC curve (control point
+//     offset by up to ±1.9 units) with per-run y jitter ±1.2 — straight-line
+//     run-length parsing finds nothing and row buckets blur;
+//   - each glyph carries 1-2 distractor strokes inside its own bounding
+//     box (same color/width as real strokes), polluting any grid
+//     reconstruction with cells no glyph bitmap contains;
+//   - stroke widths and background noise are seeded per challenge.
+// Readability keeps: rotations ±16°, jitters well under half the 3.2 row
+// pitch, distractors short. Returns the base64 data URI the shell frontend
+// drops straight into an <img src>.
 func renderSVG(code string) string {
     var sb strings.Builder
     sb.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="48" viewBox="0 0 140 48">`)
     sb.WriteString(`<rect width="140" height="48" fill="#f1f5f9"/>`)
-    seed := time.Now().UnixNano()
+    // #688: per-CHALLENGE entropy from crypto/rand — the previous
+    // time.Now().UnixNano() seed was only per-process-time unpredictability;
+    // the failure mode was the fixed geometry, not the seed, so the seed
+    // now drives every coordinate decision below.
+    var seed int64
+    var seedBuf [8]byte
+    if _, err := rand.Read(seedBuf[:]); err != nil {
+        // Same fatal-quality fallback as issue(): a time-derived seed still
+        // randomizes the render; log loudly.
+        slog.Error("shell captcha: crypto/rand failed for render seed, falling back to time", "error", err)
+        seed = time.Now().UnixNano()
+    } else {
+        seed = int64(binary.BigEndian.Uint64(seedBuf[:]))
+    }
     jitter := func(mod int) int {
         seed = seed*6364136223846793005 + 1442695040888963407
         return int(uint64(seed)>>33) % mod
     }
-    for i := 0; i < 3; i++ {
+    // Background noise: 4 curves with random amplitude + 2 short arcs
+    // crossing the glyph band.
+    for i := 0; i < 4; i++ {
         sb.WriteString(fmt.Sprintf(
             `<path d="M0,%d Q35,%d 70,%d T140,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.6"/>`,
             8+jitter(30), jitter(40), 8+jitter(30), jitter(40)))
     }
+    for i := 0; i < 2; i++ {
+        x := jitter(60) + 20
+        sb.WriteString(fmt.Sprintf(
+            `<path d="M%d,%d q6,%d 12,%d q6,%d 12,%d" stroke="#94a3b8" stroke-width="1" fill="none" opacity="0.5"/>`,
+            x, 10+jitter(28), jitter(13)-6, jitter(13)-6, jitter(13)-6, jitter(13)-6))
+    }
     const (
-        cell = 3.0        // glyph cell size in SVG units
-        rowStep = 3.2     // slight vertical stretch for readability
+        cell    = 3.0    // glyph cell size in SVG units
+        rowStep = 3.2    // slight vertical stretch for readability
         originY = 12.0
     )
     for i, ch := range code {
@@ -197,12 +251,14 @@ func renderSVG(code string) string {
             glyph = [7]string{"X...X", "X...X", "X...X", "X...X", "X...X", "X...X", "X...X"}
         }
         gx := float64(14+i*24) + float64(jitter(5))
-        rot := jitter(30) - 15
+        rot := jitter(33) - 16
+        gty := float64(jitter(50)-25) / 10.0 // per-glyph vertical shift ±2.5
         cx := gx + 7.5
         cy := originY + 10.5
-        sb.WriteString(fmt.Sprintf(`<g transform="rotate(%d %.1f %.1f)">`, rot, cx, cy))
-        // Horizontal run-length strokes: contiguous cells in a row join into
-        // one path segment, so verticals stay crisp without per-cell dots.
+        sb.WriteString(fmt.Sprintf(
+            `<g transform="translate(0 %.1f) rotate(%d %.1f %.1f)">`,
+            gty, rot, cx, cy))
+        // Per-row strokes with y jitter and quadratic curvature (#688).
         for r, row := range glyph {
             c := 0
             for c < len(row) {
@@ -214,13 +270,29 @@ func renderSVG(code string) string {
                 for c < len(row) && row[c] == 'X' {
                     c++
                 }
-                x0 := gx + float64(start)*cell
-                x1 := gx + float64(c-1)*cell
-                y := originY + float64(r)*rowStep
+                x0 := gx + float64(start)*cell + float64(jitter(9)-4)/10.0
+                x1 := gx + float64(c-1)*cell + float64(jitter(9)-4)/10.0
+                y := originY + float64(r)*rowStep + float64(jitter(25)-12)/10.0
+                ctrlY := y + float64(jitter(39)-19)/10.0 // curve bulge ±1.9
+                ctrlX := (x0 + x1) / 2 + float64(jitter(21)-10)/10.0
+                sw := 2.0 + float64(jitter(7))/10.0 // stroke width 2.0-2.6
                 sb.WriteString(fmt.Sprintf(
-                    `<path d="M%.1f %.1f L%.1f %.1f" stroke="#334155" stroke-width="2.2" stroke-linecap="round" fill="none"/>`,
-                    x0, y, x1, y))
+                    `<path d="M%.1f %.1f Q%.1f %.1f %.1f %.1f" stroke="#334155" stroke-width="%.1f" stroke-linecap="round" fill="none"/>`,
+                    x0, y, ctrlX, ctrlY, x1, y, sw))
             }
+        }
+        // Distractor strokes: 1-2 short seeded strokes inside this glyph's
+        // bounding box, same visual weight as real strokes — any grid
+        // reconstruction picks up cells no bitmap contains.
+        for d := 0; d <= jitter(2); d++ {
+            dx0 := gx + float64(jitter(30)) / 10.0
+            dy0 := originY + float64(jitter(200)) / 10.0
+            dlen := 3 + float64(jitter(40))/10.0
+            dx1 := dx0 + dlen
+            dy1 := dy0 + float64(jitter(17)-8)/10.0
+            sb.WriteString(fmt.Sprintf(
+                `<path d="M%.1f %.1f Q%.1f %.1f %.1f %.1f" stroke="#334155" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.85"/>`,
+                dx0, dy0, (dx0+dx1)/2, (dy0+dy1)/2+float64(jitter(13)-6)/10.0, dx1, dy1))
         }
         sb.WriteString(`</g>`)
     }
@@ -241,10 +313,18 @@ func serveCaptchaChallenge(w http.ResponseWriter, st *shellCaptchaStore) {
     }
     id, code := st.issue()
     w.Header().Set("Content-Type", "application/json")
-    _ = json.NewEncoder(w).Encode(map[string]any{
-        "captcha_id":   id,
-        "image":        renderSVG(code),
-        "ttl_seconds":  int(st.ttl.Seconds()),
-        "enabled":      true,
-    })
+    resp := map[string]any{
+        "captcha_id":  id,
+        "image":       renderSVG(code),
+        "ttl_seconds": int(st.ttl.Seconds()),
+        "enabled":     true,
+    }
+    // #688: the sanctioned deterministic path for CI/E2E — the challenge
+    // code rides the response so suites need no image decoding. The store
+    // only carries testMode when captchaTestModeEnabled() passed at wiring
+    // time; production can never set it.
+    if st.testMode {
+        resp["test_code"] = code
+    }
+    _ = json.NewEncoder(w).Encode(resp)
 }
