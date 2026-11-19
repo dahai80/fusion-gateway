@@ -14,6 +14,7 @@ import (
     "time"
 
     "github.com/fusion-gateway/fusion-gateway/internal/jitter"
+    "github.com/fusion-gateway/fusion-gateway/internal/lifecycle"
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,8 +41,7 @@ type Emitter struct {
     flushInterval time.Duration
     dsn       string
     started   atomic.Bool
-    stopCh    chan struct{}
-    doneCh    chan struct{}
+    worker    *lifecycle.Worker
     // Counters surface emission health (drop rate feeds the <1% acceptance).
     Emitted    atomic.Int64
     Dropped    atomic.Int64
@@ -76,12 +76,11 @@ func New(maxQueue, batchSize, flushIntervalMS int, dsn string) *Emitter {
         batchSize:     batchSize,
         flushInterval: time.Duration(flushIntervalMS) * time.Millisecond,
         dsn:           dsn,
-        stopCh:        make(chan struct{}),
-        doneCh:        make(chan struct{}),
     }
 }
 
-// Start launches the flush worker and ensures the schema exists. Schema
+// Start launches the flush worker (EI10: lifecycle.Worker — joined on
+// shutdown, never a bare goroutine) and ensures the schema exists. Schema
 // failure is logged loudly but NOT fatal — the flywheel is analytics, and a
 // missing table must not take the gateway down (fail visibly, keep serving).
 func (e *Emitter) Start(ctx context.Context) {
@@ -92,21 +91,17 @@ func (e *Emitter) Start(ctx context.Context) {
     if err := e.ensureSchema(ctx); err != nil {
         slog.Error("ops emitter: schema ensure failed, events will drop until the table exists", "error", err)
     }
-    go e.run()
+    e.worker = lifecycle.Start(ctx, "ops-emitter", e.run)
 }
 
-// Stop drains: signals the worker, waits for the final flush (max latency =
-// flushInterval), then closes the pool.
-func (e *Emitter) Stop(timeout time.Duration) {
-    if !e.started.Load() {
+// Stop cancels the worker and joins it: run() drains the queue, does a final
+// flush, and returns (pool ops are timeout-bounded, so Stop cannot hang
+// indefinitely).
+func (e *Emitter) Stop(_ time.Duration) {
+    if !e.started.Load() || e.worker == nil {
         return
     }
-    close(e.stopCh)
-    select {
-    case <-e.doneCh:
-    case <-time.After(timeout):
-        slog.Warn("ops emitter: stop timed out, abandoning worker")
-    }
+    e.worker.Stop()
 }
 
 // Emit enqueues one event. Returns true if accepted, false if dropped.
@@ -171,9 +166,7 @@ func (e *Emitter) newPool(ctx context.Context) (*pgxpool.Pool, error) {
     return pgxpool.NewWithConfig(ctx, cfg)
 }
 
-func (e *Emitter) run() {
-    defer close(e.doneCh)
-    ctx := context.Background()
+func (e *Emitter) run(ctx context.Context) {
     var pool *pgxpool.Pool
     backoff := time.Second
     batch := make([]Event, 0, e.batchSize)
@@ -242,8 +235,9 @@ func (e *Emitter) run() {
             }
         case <-ticker.C:
             flush()
-        case <-e.stopCh:
-            // Drain remaining events, final flush, exit.
+        case <-ctx.Done():
+            // Shutdown: drain remaining events, final flush, exit. Worker.Stop
+            // joins this goroutine, so main's later pool teardown is safe.
             for {
                 select {
                 case ev := <-e.events:
