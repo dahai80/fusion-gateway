@@ -149,10 +149,18 @@
     // handler validates here first: the first invalid field surfaces as an
     // inline message (same area as server errors), always visible.
     function fieldLabel(input) {
-        var label = input.closest("form").querySelector('label[for="' + input.name + '"]');
+        // #686: primary lookup is label[for="<input.id>"] — index.html wires
+        // id/for on every field. Fallback walks previousElementSibling
+        // (inputs are siblings of labels; the old
+        // parentElement.querySelector("label") returned the FIRST label in
+        // the form, so every field reported as "Username").
+        var label = input.closest("form").querySelector('label[for="' + input.id + '"]');
         if (!label) {
-            var prev = input.parentElement.querySelector("label");
-            if (prev) label = prev;
+            var prev = input.previousElementSibling;
+            while (prev && prev.tagName !== "LABEL") {
+                prev = prev.previousElementSibling;
+            }
+            label = prev;
         }
         var text = label ? label.textContent.trim() : input.name;
         var i18n = label && label.getAttribute("data-i18n");
