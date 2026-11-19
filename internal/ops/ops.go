@@ -80,16 +80,15 @@ func New(maxQueue, batchSize, flushIntervalMS int, dsn string) *Emitter {
 }
 
 // Start launches the flush worker (EI10: lifecycle.Worker — joined on
-// shutdown, never a bare goroutine) and ensures the schema exists. Schema
-// failure is logged loudly but NOT fatal — the flywheel is analytics, and a
-// missing table must not take the gateway down (fail visibly, keep serving).
+// shutdown, never a bare goroutine). #692: the emitter no longer
+// self-provisions — schema v1 lives in `public` and is owned by the
+// fusion-ops migrations (dahai80/fusion-ops#1; the app role deliberately
+// has no CREATE). A missing/mis-shaped table surfaces as flush errors
+// (dropped + counted + logged) instead of a second divergent schema.
 func (e *Emitter) Start(ctx context.Context) {
     if !e.started.CompareAndSwap(false, true) {
         slog.Warn("ops emitter: already started")
         return
-    }
-    if err := e.ensureSchema(ctx); err != nil {
-        slog.Error("ops emitter: schema ensure failed, events will drop until the table exists", "error", err)
     }
     e.worker = lifecycle.Start(ctx, "ops-emitter", e.run)
 }
@@ -127,37 +126,11 @@ func (e *Emitter) Emit(ev Event) bool {
     }
 }
 
-// ensureSchema creates the fusion_ops schema + ops_events table when absent.
-// DDL matches fusion-core/fusion_core/ops.py so both emitters target the
-// same shape.
-func (e *Emitter) ensureSchema(ctx context.Context) error {
-    pool, err := e.newPool(ctx)
-    if err != nil {
-        return err
-    }
-    defer pool.Close()
-    for _, ddl := range []string{
-        `CREATE SCHEMA IF NOT EXISTS fusion_ops`,
-        `CREATE TABLE IF NOT EXISTS fusion_ops.ops_events (
-            id BIGSERIAL PRIMARY KEY,
-            ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-            source TEXT NOT NULL,
-            tenant_hash TEXT,
-            event_type TEXT NOT NULL,
-            latency_ms INTEGER,
-            status TEXT,
-            payload JSONB
-        )`,
-    } {
-        if _, err := pool.Exec(ctx, ddl); err != nil {
-            return fmt.Errorf("ops schema ddl failed: %w", err)
-        }
-    }
-    return nil
-}
+// ensureSchema was removed (#692): schema provisioning belongs to the
+// fusion-ops migrations (public.ops_events, schema v1). The emitter role
+// has no CREATE by design; a missing table fails visibly at flush time.
 
-func (e *Emitter) newPool(ctx context.Context) (*pgxpool.Pool, error) {
-    cfg, err := pgxpool.ParseConfig(e.dsn)
+func (e *Emitter) newPool(ctx context.Context) (*pgxpool.Pool, error) {    cfg, err := pgxpool.ParseConfig(e.dsn)
     if err != nil {
         return nil, fmt.Errorf("ops emitter dsn parse failed: %w", err)
     }
@@ -194,12 +167,21 @@ func (e *Emitter) run(ctx context.Context) {
             if b, err := json.Marshal(ev.Payload); err == nil {
                 payload = string(b)
             }
-            status := any(nilIfEmpty(ev.Status))
-            rows[i] = []any{ev.TS, ev.Source, nilIfEmpty(ev.TenantHash), ev.EventType, ev.LatencyMS, status, payload}
+            // Schema v1 (#692): status INTEGER (NULL when unset),
+            // tenant_hash NOT NULL (empty string, not NULL), payload NOT NULL.
+            var status any
+            if ev.Status != "" {
+                if n, err := strconv.Atoi(ev.Status); err == nil {
+                    status = n
+                } else {
+                    slog.Warn("ops emitter: non-numeric status, storing NULL", "status", ev.Status)
+                }
+            }
+            rows[i] = []any{ev.TS, ev.Source, ev.TenantHash, ev.EventType, ev.LatencyMS, status, payload}
         }
         fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
         src := pgx.CopyFromRows(rows)
-        n, err := pool.CopyFrom(fctx, pgx.Identifier{"fusion_ops", "ops_events"}, columns, src)
+        n, err := pool.CopyFrom(fctx, pgx.Identifier{"ops_events"}, columns, src)
         cancel()
         if err != nil {
             slog.Error("ops emitter: flush failed, dropping batch", "size", len(batch), "error", err)
@@ -254,13 +236,8 @@ func (e *Emitter) run(ctx context.Context) {
     }
 }
 
-// nilIfEmpty maps "" to nil so optional TEXT columns store SQL NULL.
-func nilIfEmpty(s string) any {
-    if s == "" {
-        return nil
-    }
-    return s
-}
+// nilIfEmpty was removed (#692): schema v1 declares tenant_hash NOT NULL
+// DEFAULT '' — empty strings are stored verbatim, never NULL.
 
 // TenantHash derives the desensitized tenant marker: sha256(tenant)[:8]
 // (flywheel desensitize standard v1: 用户名/租户名 → hash 前 8 位).
