@@ -71,8 +71,10 @@ func Test614_CaptchaSVG_NoEmbeddedPlaintext(t *testing.T) {
 func Test614_CaptchaSVG_DeterministicShapeStillReadable(t *testing.T) {
     // Five glyph groups must render: one <g> wrapper per character keeps
     // per-char rotation/jitter while every stroke is path data only.
+    // #688: the transform gained a translate prefix — count the group
+    // wrapper, not the rotate keyword alone.
     _, svg := svg614(t)
-    n := strings.Count(svg, `<g transform="rotate(`)
+    n := strings.Count(svg, `<g transform=`)
     if n != shellCaptchaLength {
         t.Fatalf("expected %d glyph groups, got %d: %s", shellCaptchaLength, n, svg)
     }
