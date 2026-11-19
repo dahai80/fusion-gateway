@@ -49,6 +49,10 @@
             "ok-tenant": "Team registered and active. You can sign in now.",
             "ok-verify": "Email verified. You can sign in now.",
             "ok-login": "Signed in.",
+            // #695: resend affordance for the verification-pending dead end.
+            // Uniform wording — never reveals whether the account exists.
+            "btn-resend": "Resend verification email",
+            "ok-resend": "If the address belongs to an unverified account, a new verification email has been sent. Check your inbox (and spam).",
             "err-generic": "Request failed. Try again shortly.",
             "err-field-required": "\"{field}\" is required.",
             "err-field-minlength": "\"{field}\" needs at least {n} characters.",
@@ -96,6 +100,10 @@
             "ok-tenant": "团队已注册并激活，现在可以登录。",
             "ok-verify": "邮箱已验证，现在可以登录。",
             "ok-login": "登录成功。",
+            // #695: resend affordance for the verification-pending dead end.
+            // Uniform wording — never reveals whether the account exists.
+            "btn-resend": "重发验证邮件",
+            "ok-resend": "若该地址属于未验证账号，新的验证邮件已发送。请查收邮箱（以及垃圾邮件箱）。",
             "err-generic": "请求失败，请稍后重试。",
             "err-field-required": "\"{field}\" 必填。",
             "err-field-minlength": "\"{field}\" 至少需要 {n} 个字符。",
@@ -223,6 +231,59 @@
         return detail || t("err-generic");
     }
 
+    // #695: resend-verification affordance. The email-outage incident left
+    // users stuck on "verification pending" with no way to re-request.
+    // Identity exposes a PUBLIC rate-limited resend that answers a uniform
+    // {"resent": bool} regardless of account existence — the UI shows the
+    // same "check your inbox" message either way (no enumeration branch).
+    var RESEND_COOLDOWN_SECS = 60;
+    var resendUsername = "";
+    var resendTimer = null;
+    var resendBtn = document.getElementById("btn-resend");
+
+    function resendLabel(remaining) {
+        return remaining > 0 ? t("btn-resend") + " (" + remaining + "s)" : t("btn-resend");
+    }
+
+    function startResendCooldown() {
+        if (resendTimer) clearInterval(resendTimer);
+        resendBtn.disabled = true;
+        var remaining = RESEND_COOLDOWN_SECS;
+        resendBtn.textContent = resendLabel(remaining);
+        resendTimer = setInterval(function () {
+            remaining--;
+            if (remaining <= 0) {
+                clearInterval(resendTimer);
+                resendTimer = null;
+                resendBtn.disabled = false;
+                resendBtn.textContent = resendLabel(0);
+                return;
+            }
+            resendBtn.textContent = resendLabel(remaining);
+        }, 1000);
+    }
+
+    function showResend(username) {
+        resendUsername = username;
+        show(resendBtn);
+        if (resendTimer) return; // cooldown already running — keep its countdown
+        startResendCooldown();
+    }
+
+    resendBtn.addEventListener("click", function () {
+        if (!resendUsername || resendBtn.disabled) return;
+        // #603 parity: errMsg renders captcha_* codes as a plain message.
+        postJSON("/auth/api/identity/api/v1/auth/verify-email/resend", {
+            username: resendUsername
+        }).then(function (r) {
+            if (!r.ok) { say(errMsg(r)); return; }
+            say(t("ok-resend"), "ok");
+        }).catch(function () { say(t("err-generic")); });
+        // Restart the cooldown window on every attempt (success or not) so a
+        // failing endpoint cannot be hammered.
+        startResendCooldown();
+    });
+
     // finishLogin: hand the token pair to the waiting client via a one-time
     // code, or just report success when no redirect is configured.
     function finishLogin(tokens) {
@@ -273,6 +334,8 @@
         document.querySelectorAll(".pane").forEach(function (pane) {
             pane.classList.toggle("active", pane.id === "form-" + name);
         });
+        // #695: the resend affordance belongs to the flow that surfaced it.
+        hide(resendBtn);
         clearMsg();
     }
     document.querySelectorAll(".tab").forEach(function (tab) {
@@ -306,6 +369,12 @@
                 if (r.data && typeof r.data.code === "string" && r.data.code.indexOf("captcha_") === 0) {
                     loadCaptcha();
                 }
+                // #695: 403 "email not verified" is the unverified-account dead
+                // end — offer the resend path with the submitted username.
+                if (r.status === 403 && r.data && typeof r.data.detail === "string" &&
+                    r.data.detail.indexOf("email not verified") === 0) {
+                    showResend(f.username.value.trim());
+                }
                 say(errMsg(r));
                 return;
             }
@@ -336,6 +405,8 @@
         }).then(function (r) {
             if (!r.ok) { say(errMsg(r)); return; }
             say(t("ok-register"), "ok");
+            // #695: post-registration pending state gets the resend affordance.
+            showResend(f.username.value.trim());
             f.reset();
         }).catch(function () { say(t("err-generic")); }).finally(function () { busy(f, false); });
     });
