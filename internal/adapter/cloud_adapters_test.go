@@ -35,7 +35,7 @@ func TestVolcengineProvider_HealthCheck(t *testing.T) {
     t.Run("healthy", func(t *testing.T) {
         slog.Info("test VolcengineProvider_HealthCheck healthy")
         srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            if r.URL.Path == "/v1/models" {
+            if r.URL.Path == "/api/v3/models" {
                 w.WriteHeader(http.StatusOK)
             }
         }))
@@ -74,7 +74,7 @@ func TestVolcengineProvider_Chat(t *testing.T) {
     }
     body, _ := json.Marshal(chatResp)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path == "/v1/chat/completions" {
+        if r.URL.Path == "/api/v3/chat/completions" {
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write(body)
         }
@@ -108,7 +108,7 @@ func TestVolcengineProvider_StreamChat(t *testing.T) {
     chunk := StreamChunk{ID: "volc-chunk-1", Object: "chat.completion.chunk", Model: "doubao"}
     b, _ := json.Marshal(chunk)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path == "/v1/chat/completions" {
+        if r.URL.Path == "/api/v3/chat/completions" {
             w.Header().Set("Content-Type", "text/event-stream")
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write([]byte("data: "))
@@ -168,7 +168,7 @@ func TestVolcengineProvider_ListModels(t *testing.T) {
     listResp := struct{ Data []ModelInfo `json:"data"` }{Data: []ModelInfo{{ID: "doubao", Object: "model", OwnedBy: "volcengine"}}}
     body, _ := json.Marshal(listResp)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path == "/v1/models" {
+        if r.URL.Path == "/api/v3/models" {
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write(body)
         }
@@ -236,7 +236,7 @@ func TestQianfanProvider_Chat(t *testing.T) {
     }
     body, _ := json.Marshal(chatResp)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path == "/v1/chat/completions" {
+        if r.URL.Path == "/v2/chat/completions" {
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write(body)
         }
@@ -302,7 +302,7 @@ func TestQianfanProvider_ListModels(t *testing.T) {
     listResp := struct{ Data []ModelInfo `json:"data"` }{Data: []ModelInfo{{ID: "ernie", Object: "model", OwnedBy: "baidu"}}}
     body, _ := json.Marshal(listResp)
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path == "/v1/models" {
+        if r.URL.Path == "/v2/models" {
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write(body)
         }

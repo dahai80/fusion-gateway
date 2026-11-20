@@ -16,7 +16,7 @@ type ZhipuProvider struct {
 
 func NewZhipuProvider(name string, backendCfg config.BackendConfig) *ZhipuProvider {
     slog.Info("building zhipu provider on openai-compatible base", "name", name, "base_url", backendCfg.BaseURL)
-    return &ZhipuProvider{baseOpenAICompatible: newBaseOpenAICompatible(name, backendCfg)}
+    return &ZhipuProvider{baseOpenAICompatible: newBaseOpenAICompatibleVersion(name, backendCfg, "/api/paas/v4")}
 }
 
 func (p *ZhipuProvider) Name() string { return p.baseName() }

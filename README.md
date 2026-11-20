@@ -298,7 +298,9 @@ Resolution order: `models.aliases` → qualified pin → `routing.cloud_models` 
 
 ### Minimal backend entries
 
-`backends.<name>.api_key_env` names the environment variable holding the key (resolved at load/reload; plaintext `api_key` still works but logs a deprecation WARN). When `base_url`/`timeout` are omitted, a built-in vendor table fills them per `type` (deepseek, dashscope, baichuan, moonshot, minimax, hunyuan, qianfan, glm, anthropic, openai, siliconflow, openrouter, lingyiwanwu). Resource-specific providers (bedrock, foundry) still require an explicit `base_url`.
+`backends.<name>.api_key_env` names the environment variable holding the key (resolved at load/reload; plaintext `api_key` still works but logs a deprecation WARN). When `base_url`/`timeout` are omitted, a built-in vendor table fills them per `type` (deepseek, dashscope, baichuan, moonshot, minimax, hunyuan, qianfan, glm, anthropic, openai, siliconflow, openrouter, lingyiwanwu, zhipu). Resource-specific providers (bedrock, foundry) still require an explicit `base_url`.
+
+For the OpenAI-style cloud shims (openai-compatible, deepseek, moonshot, dashscope, zhipu, minimax, baichuan, hunyuan, stepfun, yi, qianfan, openrouter, volcengine), `base_url` is the vendor-documented **versioned prefix** (#700): the admin-UI presets (`https://api.deepseek.com/v1`, `https://open.bigmodel.cn/api/paas/v4`, `https://ark.cn-beijing.volces.com/api/v3`, ...) are used as-is and the adapter appends only the resource path (`/chat/completions`, `/models`, ...). A `base_url` without a trailing version segment gets the vendor's version path appended automatically (`https://api.deepseek.com` → `.../v1`), so legacy configs keep working. anthropic/bedrock/vertex/foundry/azure-openai keep their own documented URL shapes.
 
 ```yaml
 backends:

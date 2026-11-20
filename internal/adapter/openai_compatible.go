@@ -49,7 +49,7 @@ func NewOpenAICompatibleProvider(name string, backendCfg config.BackendConfig) *
 
     return &OpenAICompatibleProvider{
         name:             name,
-        baseURL:          backendCfg.BaseURL,
+        baseURL:          normalizeVersionedBaseURL(backendCfg.BaseURL, "/v1"),
         apiKey:           backendCfg.APIKey,
         httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
         streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
@@ -61,7 +61,7 @@ func (p *OpenAICompatibleProvider) Name() string {
 }
 
 func (p *OpenAICompatibleProvider) HealthCheck(ctx context.Context) error {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
     if err != nil {
         return fmt.Errorf("create health check request: %w", err)
     }
@@ -88,7 +88,7 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req *ChatRequest) (
         return nil, fmt.Errorf("marshal chat request: %w", err)
     }
 
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("create chat request: %w", err)
     }
@@ -128,7 +128,7 @@ func (p *OpenAICompatibleProvider) StreamChat(ctx context.Context, req *ChatRequ
         return nil, fmt.Errorf("marshal stream chat request: %w", err)
     }
 
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("create stream chat request: %w", err)
     }
@@ -189,7 +189,7 @@ func (p *OpenAICompatibleProvider) Embedding(ctx context.Context, req *Embedding
         return nil, fmt.Errorf("marshal embedding request: %w", err)
     }
 
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/embeddings", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("create embedding request: %w", err)
     }
@@ -226,7 +226,7 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
         return nil, fmt.Errorf("marshal rerank request: %w", err)
     }
 
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/rerank", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/rerank", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("create rerank request: %w", err)
     }
@@ -258,7 +258,7 @@ func (p *OpenAICompatibleProvider) Rerank(ctx context.Context, req *RerankReques
 }
 
 func (p *OpenAICompatibleProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
     if err != nil {
         return nil, fmt.Errorf("create list models request: %w", err)
     }
@@ -294,7 +294,7 @@ func (p *OpenAICompatibleProvider) Images(ctx context.Context, req *ImageRequest
         return nil, fmt.Errorf("marshal image request: %w", err)
     }
 
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/images/generations", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/images/generations", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("create image request: %w", err)
     }
