@@ -754,6 +754,24 @@ web_shell:
     #    router: path
     #    sort: 35
     #    version: 0.1.0
+    #    layer: prod                           # #660 delivery-layer tag (dev|prod)
+    #    # web-shell#177 R1/R4: factory orders surface as a first-class shell
+    #    # module — ⌘K deep links + the factory/orders notification source.
+    #    # The notification endpoint must exist upstream (fusion-site serves
+    #    # /api/factory/*); the shell polls it through the /shell/ proxy and
+    #    # renders order progress (queued → running → awaiting_human → done)
+    #    # as notification-center events (kind: runs, lifecycle enum shared
+    #    # with web-shell#178).
+    #    pages:
+    #      - route: /factory
+    #        title: 工厂订单
+    #        title_en: Factory Orders
+    #    notifications:
+    #      - id: factory-orders
+    #        label: 工厂订单
+    #        label_en: Factory Orders
+    #        endpoint: /shell/fusion-site/api/factory/orders/notifications
+    #        kind: runs
     # #296: static proxy wiring for a self-keyed module (e.g. fusion-security).
     # The upstream validates the injected Bearer credential itself — the key
     # must be one of the UPSTREAM's API keys (with whatever tenant/role the
@@ -794,6 +812,12 @@ web_shell:
     #     # that exact path. No api_key — rag's user auth covers the namespace.
     #     fusion-rag:
     #         upstream: http://127.0.0.1:11436/shell/fusion-rag
+    #     # web-shell#177 R1: factory orders ride the gateway like every other
+    #     # module — the site server owns /api/factory/*; no api_key when the
+    #     # upstream accepts the gateway session identity (see fusion-site#103
+    #     # F1), or set one once the site validates the injected Bearer.
+    #     fusion-site:
+    #         upstream: http://127.0.0.1:11481
     #     # #480: pin the artifacts engine proxy — the engine's dynamic
     #     # self-registration evaporates across gateway restarts and the shell
     #     # chat artifact tool loop 404s until it re-registers. api_key = the
