@@ -33,7 +33,7 @@ func NewVolcengineProvider(name string, backendCfg config.BackendConfig) *Volcen
     streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
     return &VolcengineProvider{
         name:       name,
-        baseURL:    backendCfg.BaseURL,
+        baseURL:    normalizeVersionedBaseURL(backendCfg.BaseURL, "/api/v3"),
         apiKey:     backendCfg.APIKey,
         httpClient: &http.Client{Timeout: timeout, Transport: baseTransport},
         streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
@@ -43,7 +43,7 @@ func NewVolcengineProvider(name string, backendCfg config.BackendConfig) *Volcen
 func (p *VolcengineProvider) Name() string { return p.name }
 
 func (p *VolcengineProvider) HealthCheck(ctx context.Context) error {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
     if err != nil { return fmt.Errorf("create health check request: %w", err) }
     p.signRequest(req)
     resp, err := p.httpClient.Do(req)
@@ -56,7 +56,7 @@ func (p *VolcengineProvider) HealthCheck(ctx context.Context) error {
 func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
     body, err := json.Marshal(req)
     if err != nil { return nil, fmt.Errorf("marshal chat request: %w", err) }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil { return nil, fmt.Errorf("create chat request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
@@ -76,7 +76,7 @@ func (p *VolcengineProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatR
 func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error) {
     body, err := json.Marshal(req)
     if err != nil { return nil, fmt.Errorf("marshal stream chat request: %w", err) }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil { return nil, fmt.Errorf("create stream chat request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
@@ -118,7 +118,7 @@ func (p *VolcengineProvider) StreamChat(ctx context.Context, req *ChatRequest) (
 func (p *VolcengineProvider) Embedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
     body, err := json.Marshal(req)
     if err != nil { return nil, fmt.Errorf("marshal embedding request: %w", err) }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/embeddings", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/embeddings", bytes.NewReader(body))
     if err != nil { return nil, fmt.Errorf("create embedding request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     p.signRequest(httpReq)
@@ -140,7 +140,7 @@ func (p *VolcengineProvider) Rerank(ctx context.Context, req *RerankRequest) (*R
 }
 
 func (p *VolcengineProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
     if err != nil { return nil, fmt.Errorf("create list models request: %w", err) }
     p.signRequest(req)
     resp, err := p.httpClient.Do(req)

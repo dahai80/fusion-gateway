@@ -21,7 +21,7 @@ type QianfanProvider struct {
 
 func NewQianfanProvider(name string, backendCfg config.BackendConfig) *QianfanProvider {
     slog.Info("building qianfan provider on openai-compatible base", "name", name, "base_url", backendCfg.BaseURL)
-    return &QianfanProvider{baseOpenAICompatible: newBaseOpenAICompatible(name, backendCfg)}
+    return &QianfanProvider{baseOpenAICompatible: newBaseOpenAICompatibleVersion(name, backendCfg, "/v2")}
 }
 
 func (p *QianfanProvider) Name() string { return p.baseName() }

@@ -37,6 +37,13 @@ type baseOpenAICompatible struct {
 }
 
 func newBaseOpenAICompatible(name string, backendCfg config.BackendConfig) baseOpenAICompatible {
+    return newBaseOpenAICompatibleVersion(name, backendCfg, "/v1")
+}
+
+// newBaseOpenAICompatibleVersion lets a shim pick a non-/v1 version prefix
+// (#700): base_url is the versioned prefix (normalizeVersionedBaseURL) and
+// the endpoint methods append unversioned resource paths.
+func newBaseOpenAICompatibleVersion(name string, backendCfg config.BackendConfig, versionPath string) baseOpenAICompatible {
     timeout := backendCfg.Timeout
     if timeout == 0 {
         timeout = 120 * time.Second
@@ -50,7 +57,7 @@ func newBaseOpenAICompatible(name string, backendCfg config.BackendConfig) baseO
     streamTransport := cloneStreamTransportForBackend(baseTransport, timeout, backendCfg.BaseURL)
     return baseOpenAICompatible{
         name:             name,
-        baseURL:          backendCfg.BaseURL,
+        baseURL:          normalizeVersionedBaseURL(backendCfg.BaseURL, versionPath),
         apiKey:           backendCfg.APIKey,
         httpClient:       &http.Client{Timeout: timeout, Transport: baseTransport},
         streamHTTPClient: &http.Client{Timeout: 0, Transport: streamTransport},
@@ -75,7 +82,7 @@ func (b *baseOpenAICompatible) baseChat(ctx context.Context, req *ChatRequest, v
     if err != nil {
         return nil, fmt.Errorf("%s marshal chat request: %w", vendorLabel, err)
     }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("%s create chat request: %w", vendorLabel, err)
     }
@@ -106,7 +113,7 @@ func (b *baseOpenAICompatible) baseStream(ctx context.Context, req *ChatRequest,
     if err != nil {
         return nil, fmt.Errorf("%s marshal stream chat request: %w", vendorLabel, err)
     }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/chat/completions", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("%s create stream chat request: %w", vendorLabel, err)
     }
@@ -161,7 +168,7 @@ func (b *baseOpenAICompatible) baseEmbedding(ctx context.Context, req *Embedding
     if err != nil {
         return nil, fmt.Errorf("%s marshal embedding request: %w", vendorLabel, err)
     }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/v1/embeddings", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/embeddings", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("%s create embedding request: %w", vendorLabel, err)
     }
@@ -192,7 +199,7 @@ func (b *baseOpenAICompatible) baseRerank(ctx context.Context, req *RerankReques
     if err != nil {
         return nil, fmt.Errorf("%s marshal rerank request: %w", vendorLabel, err)
     }
-    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/v1/rerank", bytes.NewReader(body))
+    httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/rerank", bytes.NewReader(body))
     if err != nil {
         return nil, fmt.Errorf("%s create rerank request: %w", vendorLabel, err)
     }
@@ -219,7 +226,7 @@ func (b *baseOpenAICompatible) baseRerank(ctx context.Context, req *RerankReques
 }
 
 func (b *baseOpenAICompatible) baseHealthCheck(ctx context.Context, vendorLabel string, setAuth func(*http.Request)) error {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/models", nil)
     if err != nil {
         return fmt.Errorf("%s create health check request: %w", vendorLabel, err)
     }
@@ -238,7 +245,7 @@ func (b *baseOpenAICompatible) baseHealthCheck(ctx context.Context, vendorLabel 
 }
 
 func (b *baseOpenAICompatible) baseListModels(ctx context.Context, vendorLabel string, setAuth func(*http.Request)) ([]ModelInfo, error) {
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/v1/models", nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/models", nil)
     if err != nil {
         return nil, fmt.Errorf("%s create list models request: %w", vendorLabel, err)
     }
