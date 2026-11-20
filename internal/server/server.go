@@ -1049,6 +1049,15 @@ func (s *Server) Start() error {
     mux.HandleFunc("/v1/agent/tasks/", s.withMiddleware(s.handleAgentTask))
     mux.HandleFunc("/v1/audio/transcriptions", s.withMiddleware(s.handleTranscriptions))
     mux.HandleFunc("/v1/audio/speech", s.withMiddleware(s.handleSpeech))
+    // #698: fusion-mlx media surfaces the drama pipeline needs — local-only
+    // passthrough with full router admission (breaker, access checks) and the
+    // media body cap (ProxyMaxBodySize, video i2v embeds base64 frames).
+    mux.HandleFunc("/v1/images/generate", s.withMiddleware(s.mediaJSONHandler("images-generate")))
+    mux.HandleFunc("/v1/images/edits", s.withMiddleware(s.mediaMultipartHandler("images-edits")))
+    mux.HandleFunc("/v1/images/super-resolution", s.withMiddleware(s.mediaMultipartHandler("images-super-resolution")))
+    mux.HandleFunc("/v1/videos/generate", s.withMiddleware(s.mediaJSONHandler("videos-generate")))
+    // #698: voice capability metadata (drama TTS voice-pool discovery).
+    mux.HandleFunc("/v1/audio/voices", s.withMiddleware(s.handleAudioVoices))
     mux.HandleFunc("/v1/moderations", s.withMiddleware(s.handleModeration))
     mux.HandleFunc("/v1/batches", s.withMiddleware(s.handleBatches))
     mux.HandleFunc("/v1/batches/", s.withMiddleware(s.handleBatchCRUD))
