@@ -21,6 +21,7 @@ import (
     "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type TLSConfig struct {
@@ -2244,7 +2245,9 @@ func WatchAndReload(path string) {
     }
     addFile()
 
-    go func() {
+    // CI bare-goroutine gate: the watcher loop is a long-lived worker, so it
+    // launches through GoRestart (panic-safe with backoff restart).
+    safego.GoRestart("config-hot-reload-watcher", func() {
         defer watcher.Close()
 
         var timerMu sync.Mutex
@@ -2289,7 +2292,7 @@ func WatchAndReload(path string) {
                 slog.Warn("hot reload: fsnotify error", "error", err)
             }
         }
-    }()
+    })
 }
 
 // ValidManifestCategory is the single source for the shell manifest category
