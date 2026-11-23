@@ -521,9 +521,11 @@ func (s *Server) checkBackendAccess(w http.ResponseWriter, r *http.Request, back
 
 // writeRouteRejection emits the HTTP response for a Rejected route decision
 // (issue #429). Default status 403 (laya guard / qualified-model lock); a
-// decision carrying RejectStatus (503 overloaded: local-exclusive model with
-// the local breaker open) uses it so clients see an honest, retryable error
-// instead of a permission failure.
+// decision carrying RejectStatus (429 overloaded: local-exclusive model with
+// the local breaker open, issue #708) uses it so clients see an honest,
+// retryable error instead of a permission failure. A decision carrying
+// RejectRetryAfter emits the Retry-After header so callers with retry logic
+// back off for the stated window instead of hammering the half-open gate.
 func writeRouteRejection(w http.ResponseWriter, decision *router.RouteDecision) {
     body := decision.RejectDetail
     if body == "" {
@@ -532,6 +534,9 @@ func writeRouteRejection(w http.ResponseWriter, decision *router.RouteDecision) 
     status := http.StatusForbidden
     if decision.RejectStatus > 0 {
         status = decision.RejectStatus
+    }
+    if decision.RejectRetryAfter > 0 {
+        w.Header().Set("Retry-After", strconv.Itoa(decision.RejectRetryAfter))
     }
     http.Error(w, body, status)
 }

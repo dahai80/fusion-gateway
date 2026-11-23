@@ -21,6 +21,7 @@ import (
     "log/slog"
 
     "github.com/fusion-gateway/fusion-gateway/internal/crypto"
+    "github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type TLSConfig struct {
@@ -2087,10 +2088,10 @@ func FireReload(old, newSnap *ConfigSnapshot) {
 
 // Reload re-reads the config file from disk, builds a new ConfigSnapshot, runs
 // all OnReload handlers (C5: before commit), commits the snapshot, and audits
-// the diff. It is the deterministic reload path used by /admin/config/reload —
-// fsnotify file-watching (WatchAndReload) is unreliable on macOS (kqueue misses
-// edits made after process start), so the admin endpoint must trigger reload
-// explicitly rather than relying on the file watch (issue #57).
+// the diff. It is the deterministic reload path used by /admin/config/reload;
+// the fsnotify file watch (WatchAndReload, rewritten in #707 to watch the file
+// and its parent directory) triggers the same ReloadWithRecovery on external
+// edits.
 func Reload(path string) (*ConfigSnapshot, error) {
     slog.Info("config reload requested", "path", path)
     oldSnap := GetSnapshot()
@@ -2179,6 +2180,26 @@ func Reload(path string) (*ConfigSnapshot, error) {
     return newSnap, nil
 }
 
+// WatchAndReload sets up the config file watcher for hot reload (issue #707).
+// It replaces the previous viper.WatchConfig approach, which pinned an
+// fsnotify watch to the config file's inode: editors that save via
+// write-temp-then-rename (the default for many editors) detached the watch on
+// the first atomic replace, and the macOS kqueue backend missed subsequent
+// in-place edits entirely — net effect: hot reload never fired and every
+// change required a restart.
+//
+// The watcher now watches BOTH the file and its directory:
+//   - the file watch catches in-place writes, which never emit a
+//     directory-level event on any platform;
+//   - the directory watch survives atomic replaces (Create/Rename on the
+//     target filename) and re-arms the file watch after each replace.
+//
+// Debounce (hot_reload.debounce, default 500ms) collapses event bursts from
+// a single save into one reload. ReloadWithRecovery quarantines a broken
+// external edit and restores the last-good copy instead of leaving a broken
+// file on disk for the next restart. The watch loop runs in its own
+// goroutine so WatchAndReload returns immediately (callers wrap it in
+// safeGo for panic recovery).
 func WatchAndReload(path string) {
     snap := GetSnapshot()
     if !snap.Config.HotReload.Enabled {
@@ -2190,19 +2211,86 @@ func WatchAndReload(path string) {
     if snap.Config.HotReload.WatchPath != "" {
         watchPath = snap.Config.HotReload.WatchPath
     }
+    watchPath = filepath.Clean(watchPath)
+    if !filepath.IsAbs(watchPath) {
+        abs, err := filepath.Abs(watchPath)
+        if err != nil {
+            slog.Error("hot reload: cannot resolve watch path, file watching disabled", "path", watchPath, "error", err)
+            return
+        }
+        watchPath = abs
+    }
 
-    v := viper.New()
-    v.SetConfigFile(watchPath)
-    v.SetConfigType("yaml")
-    v.WatchConfig()
+    debounce := snap.Config.HotReload.Debounce
+    if debounce <= 0 {
+        debounce = 500 * time.Millisecond
+    }
 
-    v.OnConfigChange(func(e fsnotify.Event) {
-        slog.Info("config file changed, reloading", "path", watchPath)
-        // ReloadWithRecovery: an external textual edit that breaks the file
-        // is quarantined + restored from the last-good copy instead of
-        // leaving a broken file on disk for the next restart.
-        if _, err := ReloadWithRecovery(watchPath); err != nil {
-            slog.Error("fsnotify reload failed", "error", err)
+    watcher, err := fsnotify.NewWatcher()
+    if err != nil {
+        slog.Error("hot reload: fsnotify watcher unavailable, file watching disabled", "error", err)
+        return
+    }
+
+    dir := filepath.Dir(watchPath)
+    if err := watcher.Add(dir); err != nil {
+        slog.Error("hot reload: cannot watch config directory, file watching disabled", "dir", dir, "error", err)
+        _ = watcher.Close()
+        return
+    }
+    addFile := func() {
+        if err := watcher.Add(watchPath); err != nil {
+            slog.Warn("hot reload: cannot watch config file directly, relying on directory watch", "path", watchPath, "error", err)
+        }
+    }
+    addFile()
+
+    // CI bare-goroutine gate: the watcher loop is a long-lived worker, so it
+    // launches through GoRestart (panic-safe with backoff restart).
+    safego.GoRestart("config-hot-reload-watcher", func() {
+        defer watcher.Close()
+
+        var timerMu sync.Mutex
+        var timer *time.Timer
+        schedule := func() {
+            timerMu.Lock()
+            defer timerMu.Unlock()
+            if timer != nil {
+                timer.Stop()
+            }
+            timer = time.AfterFunc(debounce, func() {
+                slog.Info("config file changed, reloading", "path", watchPath)
+                if _, err := ReloadWithRecovery(watchPath); err != nil {
+                    slog.Error("fsnotify reload failed", "error", err)
+                }
+            })
+        }
+
+        base := filepath.Base(watchPath)
+        for {
+            select {
+            case ev, ok := <-watcher.Events:
+                if !ok {
+                    return
+                }
+                if filepath.Base(ev.Name) != base {
+                    continue
+                }
+                if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+                    continue
+                }
+                if ev.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+                    // Atomic replace detached the file watch — re-arm it so
+                    // the next in-place write is still seen.
+                    addFile()
+                }
+                schedule()
+            case err, ok := <-watcher.Errors:
+                if !ok {
+                    return
+                }
+                slog.Warn("hot reload: fsnotify error", "error", err)
+            }
         }
     })
 }

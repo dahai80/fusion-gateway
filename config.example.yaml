@@ -817,7 +817,13 @@ web_shell:
     #     # upstream accepts the gateway session identity (see fusion-site#103
     #     # F1), or set one once the site validates the injected Bearer.
     #     fusion-site:
-    #         upstream: http://127.0.0.1:11481
+    #         # #711: pass-through mode — the site must be built/run with
+    #         # NEXT_PUBLIC_BASE_PATH=/shell/fusion-site (basePath in
+    #         # next.config.ts); the proxy joins this path prefix with the
+    #         # request path. A stripping upstream (bare host:port) 404s every
+    #         # document request for a basePath-built site and leaks bare
+    #         # /login redirects to the gateway origin.
+    #         upstream: http://127.0.0.1:11481/shell/fusion-site
     #     # #480: pin the artifacts engine proxy — the engine's dynamic
     #     # self-registration evaporates across gateway restarts and the shell
     #     # chat artifact tool loop 404s until it re-registers. api_key = the
