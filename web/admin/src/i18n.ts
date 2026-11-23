@@ -39,6 +39,7 @@ const DICT: Record<string, Entry> = {
     "menu.config": { zh: "配置", en: "Configuration" },
     "menu.config.server": { zh: "服务器", en: "Server" },
     "menu.config.auth": { zh: "认证", en: "Auth" },
+    "menu.config.models": { zh: "模型路由", en: "Model Routing" },
     "menu.config.rateLimit": { zh: "限流", en: "Rate Limit" },
     "menu.config.retry": { zh: "重试", en: "Retry" },
     "menu.config.cache": { zh: "缓存", en: "Cache" },

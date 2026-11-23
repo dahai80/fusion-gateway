@@ -5,7 +5,7 @@ import {
     LayoutDashboard, KeyRound, Server, ChartLine, ArrowLeftRight, Search,
     Lightbulb, TriangleAlert, FileText, Database, Landmark, Zap, RefreshCw,
     CircleDollarSign, ShieldCheck, Lock, User, Cloud, Cpu, Wrench, Eye,
-    Filter, Network, AudioLines, FlaskConical, Inbox, CircleCheck,
+    Filter, Network, AudioLines, FlaskConical, Inbox, CircleCheck, Boxes,
     PanelLeftClose, PanelLeftOpen, LogOut, Languages,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -56,6 +56,7 @@ function useMenuItems() {
             children: [
                 { key: "/admin/config/server", icon: ic(Landmark), label: t("menu.config.server") },
                 { key: "/admin/config/auth", icon: ic(KeyRound), label: t("menu.config.auth") },
+                { key: "/admin/config/models", icon: ic(Boxes), label: t("menu.config.models") },
                 { key: "/admin/config/rate-limit", icon: ic(Zap), label: t("menu.config.rateLimit") },
                 { key: "/admin/config/retry", icon: ic(RefreshCw), label: t("menu.config.retry") },
                 { key: "/admin/config/cache", icon: ic(Database), label: t("menu.config.cache") },

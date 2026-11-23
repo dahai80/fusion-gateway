@@ -57,6 +57,7 @@ Base URL `http://127.0.0.1:11432`。鉴权：`Authorization: Bearer <key>` 或 `
 |---|---|
 | `/admin/api/login` / `logout` / `sso` | admin JWT 会话 |
 | `/admin/api/config/backends[/{name}]` | 后端供应商 CRUD（热生效） |
+| `/admin/api/config/models` | #709 模型路由只读视图：`models.supply` 优先级、`models.aliases`、`routing.cloud_models` 白名单、各 key 的 `allowed_models`/`allowed_backends`、合并模型目录（含来源标注）、`config_mutation_lock` 状态；写操作仅 405，key 白名单编辑走 `/admin/api/config/auth`（PUT 响应带 `warnings` 非阻断校验） |
 | `/admin/teams*` / `orgs*` / `api/try-quota/*` / `api/reports/governance` | 团队/组织/配额/治理报表 |
 | `/admin/api/fine-tune/*` | MLX 微调代理 |
 | `/api/v1/keys`（+ `/ext-runner`、rotate） | key CRUD（master 门禁；用户 key 为 `fk-` 前缀，带 module×action scope） |
