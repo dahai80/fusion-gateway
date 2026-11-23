@@ -10268,6 +10268,31 @@ func TestWriteRouteRejection_StatusSelection(t *testing.T) {
     }
 }
 
+// #708: a rejection carrying RejectRetryAfter must emit the Retry-After
+// header so callers with retry logic back off instead of hammering the
+// half-open gate; rejections without it must not.
+func TestWriteRouteRejection_RetryAfterHeader(t *testing.T) {
+    rec := httptest.NewRecorder()
+    writeRouteRejection(rec, &router.RouteDecision{
+        Rejected:         true,
+        RejectStatus:     http.StatusTooManyRequests,
+        RejectDetail:     `{"type":"overloaded_error"}`,
+        RejectRetryAfter: 7,
+    })
+    if rec.Code != http.StatusTooManyRequests {
+        t.Errorf("status = %d, want 429", rec.Code)
+    }
+    if got := rec.Header().Get("Retry-After"); got != "7" {
+        t.Errorf("Retry-After = %q, want \"7\"", got)
+    }
+
+    rec = httptest.NewRecorder()
+    writeRouteRejection(rec, &router.RouteDecision{Rejected: true, RejectDetail: `{"dimension":"pii"}`})
+    if got := rec.Header().Get("Retry-After"); got != "" {
+        t.Errorf("Retry-After = %q, want absent on permission-class rejection", got)
+    }
+}
+
 // --- #430: /v1/messages log accounting must include cache tokens ---
 
 // usageCacheStreamProvider streams a full Anthropic event sequence whose

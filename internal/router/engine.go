@@ -59,6 +59,10 @@ type RouteDecision struct {
     // breaker open" overloaded condition (issue #429) — retryable, unlike a
     // permission 403.
     RejectStatus int
+    // RejectRetryAfter (#708): seconds of backoff the caller should honor,
+    // emitted as the Retry-After header by writeRouteRejection. Zero = no
+    // header (permission-class rejections never ask the client to retry).
+    RejectRetryAfter int
 }
 
 type RouteRequest struct {
@@ -921,11 +925,16 @@ func (e *Engine) Decide(ctx context.Context, req *RouteRequest) *RouteDecision {
                     "breaker_state": snapBreaker.State.String(),
                     "trip_reason":   snapBreaker.TripReason,
                 })
+                // #708: 429 + Retry-After, not a bare 503 — the single-probe
+                // rule denies every concurrent caller while the probe runs, and
+                // a plain 503 gives clients no backoff window, so they retry
+                // immediately and deny-storm the half-open gate.
                 return &RouteDecision{
-                    Rejected:     true,
-                    RejectStatus: http.StatusServiceUnavailable,
-                    Reason:       "local_exclusive_model_breaker_open",
-                    RejectDetail: string(detail),
+                    Rejected:         true,
+                    RejectStatus:     http.StatusTooManyRequests,
+                    Reason:           "local_exclusive_model_breaker_open",
+                    RejectDetail:     string(detail),
+                    RejectRetryAfter: e.breakers["local"].RetryAfterSeconds(),
                 }
             }
             if d := e.tryClusterLocked(cfg, req.Model, snap); d != nil {
@@ -1193,9 +1202,10 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
         // it — diverting it cloud on a tripped breaker produced a misleading
         // 400 ("Selected backend does not support image generation") in
         // under a second, hiding the real cause (MLX 507 admission
-        // rejection). Reject with 503 + breaker state instead: honest,
-        // retryable, and Claude Code treats overloaded_error as backoff-
-        // retry rather than hard failure.
+        // rejection). Reject with breaker state: honest, retryable.
+        // #708: 429 + Retry-After instead of a bare 503 — Retry-After carries
+        // the exact seconds until the open->half_open transition, so callers
+        // back off instead of hammering a known-down backend.
         if localExclusiveDecision(cfg, req, snap) != nil {
             snapBreaker := e.breakers["local"].Snapshot()
             detail, _ := json.Marshal(map[string]any{
@@ -1208,12 +1218,14 @@ func (e *Engine) decideLocked(ctx context.Context, cfg *config.ConfigSnapshot, r
                 "model", req.Model,
                 "breaker_state", snapBreaker.State.String(),
                 "trip_reason", snapBreaker.TripReason,
+                "retry_after", e.breakers["local"].RetryAfterSeconds(),
             )
             return &RouteDecision{
-                Rejected:     true,
-                RejectStatus: http.StatusServiceUnavailable,
-                Reason:       "local_exclusive_model_breaker_open",
-                RejectDetail: string(detail),
+                Rejected:         true,
+                RejectStatus:     http.StatusTooManyRequests,
+                Reason:           "local_exclusive_model_breaker_open",
+                RejectDetail:     string(detail),
+                RejectRetryAfter: e.breakers["local"].RetryAfterSeconds(),
             }
         }
         if decision := e.tryClusterLocked(cfg, req.Model, snap); decision != nil {
