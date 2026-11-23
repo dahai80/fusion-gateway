@@ -41,7 +41,7 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
             slog.Warn("admin endpoint rejected inference master key",
                 "path", r.URL.Path, "method", r.Method,
                 "note", "admin surface requires admin JWT, not inference master key")
-            http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error"}}`, http.StatusForbidden)
+            http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error","hint":"use an admin JWT from POST /admin/api/login (or a shell admin session); inference auth.api_keys and master_key are intentionally rejected on admin routes (RR3 plane separation)"}}`, http.StatusForbidden)
             return
         }
         // Bridge an admin-login JWT into middleware.Principal BEFORE the IsAdmin
@@ -64,7 +64,7 @@ func (s *Server) withAdminOnly(handler http.HandlerFunc) http.HandlerFunc {
         if !middleware.IsAdmin(r.Context()) {
             slog.Warn("admin endpoint denied: not admin",
                 "path", r.URL.Path, "method", r.Method)
-            http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error"}}`, http.StatusForbidden)
+            http.Error(w, `{"error":{"message":"Admin access required","type":"rbac_error","hint":"use an admin JWT from POST /admin/api/login (or a shell admin session); inference auth.api_keys are not admin credentials (RR3 plane separation)"}}`, http.StatusForbidden)
             return
         }
         s.withMiddleware(handler)(w, r)
