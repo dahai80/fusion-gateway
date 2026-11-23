@@ -6,6 +6,7 @@ import (
     "encoding/base64"
     "os"
     "path/filepath"
+    "strings"
     "sync"
     "sync/atomic"
     "testing"
@@ -277,10 +278,78 @@ hot_reload:
     }
     t.Log("config file updated, waiting for reload...")
 
-    time.Sleep(2 * time.Second)
-
+    waitForReload(t, 9090)
     newSnap := GetSnapshot()
     t.Logf("after reload: version=%d port=%d", newSnap.Version, newSnap.Config.Server.Port)
+}
+
+// waitForReload polls the global snapshot until the server port matches want
+// (the reload committed) or the deadline expires — the deadline is a failure,
+// not a slow-pass (issue #707 regression guard: the watcher must actually
+// fire, not merely not crash).
+func waitForReload(t *testing.T, wantPort int) {
+    t.Helper()
+    deadline := time.Now().Add(10 * time.Second)
+    for time.Now().Before(deadline) {
+        snap := GetSnapshot()
+        if snap.Config.Server.Port == wantPort {
+            return
+        }
+        time.Sleep(100 * time.Millisecond)
+    }
+    snap := GetSnapshot()
+    t.Fatalf("hot reload did not fire within 10s: port=%d want=%d version=%d",
+        snap.Config.Server.Port, wantPort, snap.Version)
+}
+
+// #707: editors commonly save via write-temp-then-rename, which detaches a
+// watch pinned to the original inode. The directory-level watch must catch
+// the replaced file and trigger a reload anyway.
+func TestWatchAndReload_AtomicReplace(t *testing.T) {
+    dir := t.TempDir()
+    f := filepath.Join(dir, "config.yaml")
+    content := `
+server:
+  host: "0.0.0.0"
+  port: 8100
+  log_level: "info"
+  graceful_shutdown_timeout: 15
+  max_request_body_size: 5242880
+routing:
+  token_threshold: 8000
+  output_input_ratio_threshold: 0.6
+  local_priority:
+    enabled: true
+    max_system_memory_ratio: 0.9
+    max_mlx_memory_ratio: 0.7
+    max_concurrent: 8
+    swap_page_rate_threshold: 100
+hot_reload:
+  enabled: true
+  debounce: 100ms
+`
+    if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+        t.Fatal(err)
+    }
+
+    onReloadHandlers = nil
+    if _, err := Load(f); err != nil {
+        t.Fatalf("initial load failed: %v", err)
+    }
+
+    WatchAndReload(f)
+    time.Sleep(200 * time.Millisecond)
+
+    tmp := filepath.Join(dir, "config.yaml.tmp")
+    if err := os.WriteFile(tmp, []byte(strings.Replace(content, "port: 8100", "port: 8200", 1)), 0644); err != nil {
+        t.Fatal(err)
+    }
+    if err := os.Rename(tmp, f); err != nil {
+        t.Fatal(err)
+    }
+    t.Log("config atomically replaced, waiting for reload...")
+
+    waitForReload(t, 8200)
 }
 
 func TestWatchAndReload_CustomWatchPath(t *testing.T) {
