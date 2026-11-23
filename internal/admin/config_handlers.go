@@ -1651,6 +1651,10 @@ type authConfigResponse struct {
     MasterKey   string            `json:"master_key"`
     Passthrough bool              `json:"passthrough"`
     APIKeys     []authKeyResponse `json:"api_keys"`
+    // Warnings (#709): non-blocking allowlist validation on PUT — empty
+    // entries, malformed wildcards, and exact names absent from the model
+    // catalog. The write still lands; the editor surfaces these inline.
+    Warnings []string `json:"warnings,omitempty"`
 }
 
 type authConfigUpdate struct {
@@ -1746,9 +1750,14 @@ func (h *Handler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
                 }
             }
         }
+        var warnings []string
+        if req.APIKeys != nil {
+            warnings = allowedModelsWarnings(*req.APIKeys)
+        }
         writeJSON(w, http.StatusOK, authConfigResponse{
             Enabled: getBool(sec, "enabled"), MasterKey: maskAPIKey(getString(sec, "master_key")),
             Passthrough: getBool(sec, "passthrough"), APIKeys: authKeys,
+            Warnings: warnings,
         })
     default:
         writeError(w, http.StatusMethodNotAllowed, "method not allowed")

@@ -12,6 +12,7 @@ import Keys from "./pages/Keys";
 import Channels from "./pages/Channels";
 import ServerConfig from "./pages/config/ServerConfig";
 import AuthConfig from "./pages/config/AuthConfig";
+import ModelsConfig from "./pages/config/ModelsConfig";
 import RateLimitConfig from "./pages/config/RateLimitConfig";
 import RetryConfig from "./pages/config/RetryConfig";
 import CacheConfig from "./pages/config/CacheConfig";
@@ -150,6 +151,7 @@ export default function App() {
                         <Route path="config/providers" element={<Providers />} />
                         <Route path="config/server" element={<ServerConfig />} />
                         <Route path="config/auth" element={<AuthConfig />} />
+                        <Route path="config/models" element={<ModelsConfig />} />
                         <Route path="config/rate-limit" element={<RateLimitConfig />} />
                         <Route path="config/retry" element={<RetryConfig />} />
                         <Route path="config/cache" element={<CacheConfig />} />

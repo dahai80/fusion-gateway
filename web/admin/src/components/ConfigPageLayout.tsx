@@ -6,14 +6,15 @@ import { useLocale } from "../i18n";
 interface ConfigPageLayoutProps {
     title: string;
     loading: boolean;
-    saving: boolean;
-    onSave: () => void;
+    saving?: boolean;
+    // Omit onSave on a read-only surface (#709): the Save button is hidden.
+    onSave?: () => void;
     onRefresh: () => void;
     children: ReactNode;
 }
 
 export default function ConfigPageLayout({
-    title, loading, saving, onSave, onRefresh, children,
+    title, loading, saving = false, onSave, onRefresh, children,
 }: ConfigPageLayoutProps) {
     const { t } = useLocale();
     return (
@@ -25,9 +26,11 @@ export default function ConfigPageLayout({
                         <Button icon={<RefreshCw size={16} />} onClick={onRefresh} disabled={saving}>
                             {t("config.refresh")}
                         </Button>
-                        <Button type="primary" icon={<Save size={16} />} onClick={onSave} loading={saving}>
-                            {t("config.save")}
-                        </Button>
+                        {onSave && (
+                            <Button type="primary" icon={<Save size={16} />} onClick={onSave} loading={saving}>
+                                {t("config.save")}
+                            </Button>
+                        )}
                     </Space>
                 }
             >

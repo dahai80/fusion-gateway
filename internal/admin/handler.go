@@ -104,6 +104,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/api/config/full", h.requireAdminRole(h.handleFullConfig))
     mux.HandleFunc("/admin/api/config/server", h.requireAdminRole(h.handleServerConfig))
     mux.HandleFunc("/admin/api/config/auth", h.requireAdminRole(h.handleAuthConfig))
+    mux.HandleFunc("/admin/api/config/models", h.requireAdminRole(h.handleModelsConfig))
     mux.HandleFunc("/admin/api/config/rate-limit", h.requireAdminRole(h.handleRateLimitConfig))
     mux.HandleFunc("/admin/api/config/retry", h.requireAdminRole(h.handleRetryConfig))
     mux.HandleFunc("/admin/api/config/negotiation", h.requireAdminRole(h.handleNegotiationConfig))
