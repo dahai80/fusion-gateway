@@ -2,6 +2,7 @@ package router
 
 import (
     "log/slog"
+    "math"
     "sync"
     "time"
 
@@ -304,6 +305,37 @@ func (cb *CircuitBreaker) Snapshot() BreakerSnapshot {
         LastFailureTime: cb.lastFailureTime,
         TripReason:      cb.tripReason,
     }
+}
+
+// RetryAfterSeconds (#708) reports the backoff a rejected CALLER should
+// honor: open = seconds until the half-open transition (min 1); half-open
+// with a probe in flight = seconds until the probe window expires, capped at
+// 5 so streaming probes that outlive the window do not pin callers to a
+// stale value (min 1). Closed/half-open-without-probe = 1 (the next decision
+// will admit anyway).
+func (cb *CircuitBreaker) RetryAfterSeconds() int {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    switch cb.state {
+    case StateOpen:
+        remain := cb.cfg.Timeout - time.Since(cb.lastFailureTime)
+        if remain < time.Second {
+            remain = time.Second
+        }
+        return int(math.Ceil(remain.Seconds()))
+    case StateHalfOpen:
+        if cb.probeInFlight {
+            remain := time.Until(cb.probeDeadline)
+            if remain < time.Second {
+                remain = time.Second
+            }
+            if remain > 5*time.Second {
+                remain = 5 * time.Second
+            }
+            return int(math.Ceil(remain.Seconds()))
+        }
+    }
+    return 1
 }
 
 // InheritSnapshot copies a prior breaker's trip state onto this breaker. The

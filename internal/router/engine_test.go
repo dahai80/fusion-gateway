@@ -1924,7 +1924,8 @@ func TestDecide_LocalExclusiveModel_GPUMemoryLowStaysLocal(t *testing.T) {
 // than useless in production — the 400 ("Selected backend does not support
 // image generation") masked the real cause (MLX 507 admission rejection)
 // and arrived fast enough to look like a normal, hard failure. The decision
-// is now Rejected 503 with breaker state: honest, retryable.
+// is now Rejected with breaker state: honest, retryable (#708: 429 +
+// Retry-After so clients back off until the half-open transition).
 func TestDecide_LocalExclusiveModel_BreakerOpenStillCloud(t *testing.T) {
     cfg := defaultTestSnapshot()
     cfg.Config.Routing.Fallback.Enabled = true
@@ -1948,8 +1949,11 @@ func TestDecide_LocalExclusiveModel_BreakerOpenStillCloud(t *testing.T) {
     if !dec.Rejected {
         t.Fatalf("expected Rejected when local breaker open for local-exclusive, got %s: %s", dec.Backend, dec.Reason)
     }
-    if dec.RejectStatus != http.StatusServiceUnavailable {
-        t.Errorf("expected 503 RejectStatus, got %d", dec.RejectStatus)
+    if dec.RejectStatus != http.StatusTooManyRequests {
+        t.Errorf("expected 429 RejectStatus, got %d", dec.RejectStatus)
+    }
+    if dec.RejectRetryAfter <= 0 {
+        t.Errorf("expected positive RejectRetryAfter, got %d", dec.RejectRetryAfter)
     }
     if dec.Reason != "local_exclusive_model_breaker_open" {
         t.Errorf("expected local_exclusive_model_breaker_open, got %s", dec.Reason)
@@ -2665,9 +2669,9 @@ func TestRC2_CloudBreakerClosedGoesCloud(t *testing.T) {
 // local breaker is open — no cloud backend serves it, so the divert produced
 // a misleading 400 ("Selected backend does not support image generation")
 // that hid the real cause (MLX 507 admission rejection). The decision must
-// be Rejected with HTTP 503 and breaker state so the client sees an honest,
-// retryable overloaded error.
-func TestDecide_LocalExclusiveModel_BreakerOpenRejects503(t *testing.T) {
+// be Rejected with breaker state so the client sees an honest, retryable
+// overloaded error (#708: 429 + Retry-After so callers back off).
+func TestDecide_LocalExclusiveModel_BreakerOpenRejects429(t *testing.T) {
     cfg := defaultTestSnapshot()
     cfg.Config.Routing.Fallback.Enabled = true
     cfg.Config.Routing.Fallback.ModelMapping = map[string]string{
@@ -2690,8 +2694,11 @@ func TestDecide_LocalExclusiveModel_BreakerOpenRejects503(t *testing.T) {
     if !dec.Rejected {
         t.Fatalf("expected Rejected decision, got backend=%s reason=%s", dec.Backend, dec.Reason)
     }
-    if dec.RejectStatus != http.StatusServiceUnavailable {
-        t.Errorf("RejectStatus = %d, want 503", dec.RejectStatus)
+    if dec.RejectStatus != http.StatusTooManyRequests {
+        t.Errorf("RejectStatus = %d, want 429 (#708: Retry-After backoff, not bare 503)", dec.RejectStatus)
+    }
+    if dec.RejectRetryAfter <= 0 {
+        t.Errorf("RejectRetryAfter = %d, want > 0", dec.RejectRetryAfter)
     }
     if dec.Reason != "local_exclusive_model_breaker_open" {
         t.Errorf("reason = %s, want local_exclusive_model_breaker_open", dec.Reason)
