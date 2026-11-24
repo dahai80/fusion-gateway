@@ -156,6 +156,14 @@ func (s *Server) registerServiceRoutes(mux *http.ServeMux) {
 				continue
 			}
 			mount, strip = route.Prefix, ""
+			// #715: a shell-subsystem mount (identity messaging bridge) owns
+			// its path — ServeMux panics on duplicate registration, and the
+			// session-authed mount supersedes the client-key passthrough by
+			// design (the shell cannot hold a client key).
+			if s.claimedPrefixes[mount+"/"] {
+				slog.Warn("service route skipped: prefix claimed by shell mount", "service", name, "prefix", mount+"/")
+				continue
+			}
 		}
 		mux.HandleFunc(mount+"/", s.withMiddleware(s.handleServiceRoute(name, route, strip)))
 		slog.Info("service route registered", "service", name, "prefix", mount+"/", "upstream", route.URL)

@@ -136,6 +136,11 @@ type authPortal struct {
     sessions   *shell.Manager
     ssoModules []string
 
+    // #715: identity refresh-token vault feeding the /api/messaging bridge.
+    // Shared with the Server (same pointer); nil = bridge disabled, the
+    // exchange drops the refresh token as before.
+    identityVault *identityVault
+
     // #602: tiny fail-fast breaker for the identity hop. identityBreakerFails
     // counts consecutive timeout-class failures; at identityBreakerThreshold
     // the breaker opens for identityBreakerCooldown and login attempts get an
@@ -189,6 +194,7 @@ func (s *Server) registerAuthPortalRoutes(mux *http.ServeMux) {
         captcha:       s.shellCaptcha,
         sessions:      s.shellSessions,
         ssoModules:    s.cfg.Config.Shell.SSOModules,
+        identityVault: s.identityVault,
         captchaLive:   s.captchaStoreLive,
     }
     if len(cfg.RedirectURIs) == 0 {
@@ -726,6 +732,12 @@ func (p *authPortal) handleExchangeCode(w http.ResponseWriter, r *http.Request) 
     }
     slog.Info("shell session issued via portal code exchange", "sub", claims.Sub,
         "tenant", claims.TID, "role", shellRole)
+    // #715: feed the identity token vault so the session-authed messaging
+    // bridge can mint user bearers. Expiry mirrors the session TTL.
+    if p.identityVault != nil && grant.RefreshToken != "" {
+        p.identityVault.Store(sessionToken, claims.Sub, claims.TID, grant.RefreshToken,
+            time.Now().Add(p.sessions.TTL()).Unix())
+    }
     // Same HttpOnly session cookie as the SSO/password paths (#220) so
     // iframe navigation authenticates; identity JWTs ride the BODY only.
     http.SetCookie(w, &http.Cookie{

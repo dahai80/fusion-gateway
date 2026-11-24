@@ -1392,6 +1392,23 @@ type ShellConfig struct {
     // behaves exactly as before (back-compat); on = POST /api/v1/shell/session
     // requires a live challenge id + code BEFORE credential verification.
     Captcha ShellCaptchaConfig `mapstructure:"captcha"`
+    // IdentityBridge (#715) mounts /api/messaging/ under the shell-session
+    // chain and translates the session into a real fusion-identity user
+    // bearer via a server-side refresh-token vault (fed at SSO / portal-code
+    // login). Local-password sessions carry no identity principal and get a
+    // clear 403. When enabled, a colliding service_routes prefix mount on
+    // the same path is skipped (the bridge supersedes it).
+    IdentityBridge ShellIdentityBridgeConfig `mapstructure:"identity_bridge"`
+}
+
+// ShellIdentityBridgeConfig (#715) configures the session-authed identity
+// messaging bridge. No knobs beyond the enable flag on purpose: the identity
+// base URL reuses shell.identity_url (auth_portal fallback chain) and the
+// vault is bounded in code.
+type ShellIdentityBridgeConfig struct {
+    // Enabled turns the /api/messaging/ session mount + vault on. Off =
+    // no bridge route, no vault (SSO logins discard refresh tokens as before).
+    Enabled bool `mapstructure:"enabled"`
 }
 
 // ShellCaptchaConfig (#592) configures the login CAPTCHA plane. No external

@@ -832,6 +832,17 @@ web_shell:
     #     fusion-artifacts:
     #         upstream: http://127.0.0.1:11451
     #         api_key: "<from ~/.fusion/artifacts/gateway_service_key>"
+    # #715: session-authed bridge to fusion-identity's /api/messaging plane
+    # (factory ticket threads). Mounts /api/messaging/ under the shell
+    # session chain and translates the session into a real identity user
+    # bearer via a server-side refresh-token vault fed at SSO / portal-code
+    # login — the browser never holds an identity token. Local-password
+    # sessions carry no identity principal and get a clear 403. When
+    # enabled, a colliding service_routes prefix on the same path is skipped
+    # (the bridge supersedes the client-key passthrough — the shell cannot
+    # hold a client key).
+    # identity_bridge:
+    #     enabled: true
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
