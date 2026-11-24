@@ -265,6 +265,14 @@ type Server struct {
     // shellSessionSecret (#679): the raw secret backing shellSessions, kept
     // so the module proxy can sign upstream identity headers. Never logged.
     shellSessionSecret []byte
+    // identityVault (#715): per-shell-session identity refresh tokens backing
+    // the session-authed /api/messaging bridge. Nil when shell disabled or
+    // shell.identity_bridge.enabled=false (SSO logins discard refresh tokens).
+    identityVault *identityVault
+    // claimedPrefixes (#715): mount paths the shell subsystem registered so
+    // a colliding config-only service_routes prefix is skipped instead of
+    // panicking ServeMux on duplicate registration.
+    claimedPrefixes map[string]bool
     shellRegistry *shell.Registry
     shellProxy    *shell.Proxy
     shellUsers    *shell.UserStore

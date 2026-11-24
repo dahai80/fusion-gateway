@@ -101,6 +101,12 @@ func (s *Server) setupShell() {
     }
     s.shellSessions = shell.NewManager(secret, cfg.Shell.Session.TTL)
     s.shellSessionSecret = secret
+    // #715: the identity token vault backs the /api/messaging bridge. Built
+    // once here; entries feed from the SSO / portal-code login flows.
+    if cfg.Shell.IdentityBridge.Enabled {
+        s.identityVault = newIdentityVault(identityBaseURL(cfg.Shell.IdentityURL, cfg.AuthPortal.IdentityURL))
+        slog.Info("identity token vault armed", "identity_url", s.identityVault.url)
+    }
     // #587: the failed-login lockout state lives with the session subsystem.
     s.shellLoginThrottle = newShellLoginThrottle()
     // #592: single-use SVG challenges for the login plane. The store is
@@ -377,6 +383,19 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // path (best-effort, fail-open contract).
     mux.HandleFunc("GET /api/v1/shell/model-policy", s.withShellSession(s.handleShellModelPolicy))
     mux.HandleFunc("GET /api/v1/model-policy", s.withShellSession(s.handleShellModelPolicy))
+    // #715: session-authed bridge to fusion-identity's /api/messaging plane.
+    // Registered only when shell.identity_bridge.enabled; the vault feeds
+    // from the SSO / portal-code login flows. When active, the mount is
+    // claimed so a colliding config-only service_routes prefix is skipped
+    // (registerServiceRoutes) instead of panicking ServeMux on duplicates.
+    if s.identityVault != nil {
+        mux.HandleFunc("/api/messaging/", s.withShellSession(s.handleIdentityMessagingProxy))
+        if s.claimedPrefixes == nil {
+            s.claimedPrefixes = make(map[string]bool)
+        }
+        s.claimedPrefixes["/api/messaging/"] = true
+        slog.Info("identity messaging bridge registered", "mount", "/api/messaging/")
+    }
     mux.HandleFunc("POST /api/v1/shell/manifests", s.withShellManifestUpsertAuth(s.handleShellManifestUpsert))
     // #261 K1: heartbeat authenticates with the module's gateway-issued fm-
     // service key (hash-compare against the registry), NOT the standard fg-
@@ -584,7 +603,7 @@ func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
             shell.WriteEnvelope(w, http.StatusUnauthorized, "session_invalid", err.Error(), "", false)
             return
         }
-        next(w, r.WithContext(withShellClaims(r.Context(), claims)))
+        next(w, r.WithContext(withShellToken(withShellClaims(r.Context(), claims), token)))
     }
 }
 
@@ -800,9 +819,13 @@ func checkShellPassword(user *shellUserRecord, password string) bool {
 func (s *Server) handleShellSessionLogout(w http.ResponseWriter, r *http.Request) {
     if token := bearerToken(r); token != "" {
         s.shellSessions.Revoke(token)
+        // #715: a revoked session must not keep a live identity refresh
+        // token in the vault.
+        s.identityVault.Drop(token)
     }
     if c, err := r.Cookie(shellSessionCookieName); err == nil && c.Value != "" {
         s.shellSessions.Revoke(c.Value)
+        s.identityVault.Drop(c.Value)
     }
     http.SetCookie(w, &http.Cookie{
         Name:     shellSessionCookieName,

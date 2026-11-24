@@ -190,6 +190,12 @@ func (s *Server) handleShellSessionSSO(w http.ResponseWriter, r *http.Request) {
         return
     }
     slog.Info("shell session issued via identity sso", "sub", claims.Sub, "tenant", claims.TID, "role", shellRole)
+    // #715: feed the identity token vault so the session-authed messaging
+    // bridge can mint user bearers. Expiry mirrors the session TTL.
+    if s.identityVault != nil && ex.RefreshToken != "" {
+        s.identityVault.Store(token, claims.Sub, claims.TID, ex.RefreshToken,
+            time.Now().Add(s.shellSessions.TTL()).Unix())
+    }
     if s.shellAudit != nil {
         _ = s.shellAudit.Record(claims.Sub, shellRole, shell.AuditClassAuth, http.MethodPost,
             "/api/v1/shell/session/sso", shell.AuditOutcomeOk, 0)
