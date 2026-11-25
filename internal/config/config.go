@@ -1392,6 +1392,11 @@ type ShellConfig struct {
     // behaves exactly as before (back-compat); on = POST /api/v1/shell/session
     // requires a live challenge id + code BEFORE credential verification.
     Captcha ShellCaptchaConfig `mapstructure:"captcha"`
+    // Link (#717) provisions the fusion-link daemon's local service-ticket
+    // plane: the daemon exchanges its device credential for a short-lived
+    // loopback-only ticket that drives shell task APIs with no browser
+    // session present.
+    Link ShellLinkConfig `mapstructure:"link"`
     // IdentityBridge (#715) mounts /api/messaging/ under the shell-session
     // chain and translates the session into a real fusion-identity user
     // bearer via a server-side refresh-token vault (fed at SSO / portal-code
@@ -1413,6 +1418,35 @@ type ShellIdentityBridgeConfig struct {
 
 // ShellCaptchaConfig (#592) configures the login CAPTCHA plane. No external
 // CAPTCHA service — challenges are server-rendered SVG.
+// ShellLinkConfig (#717) configures the fusion-link daemon service-ticket
+// plane. Tickets are loopback-only by construction (enforced in code, not
+// config) and expire in at most LinkTicketMaxTTL.
+type ShellLinkConfig struct {
+    // Enabled turns the plane on. Off = no /api/v1/link/ticket endpoint and
+    // no ticket acceptance anywhere (fail-closed).
+    Enabled bool `mapstructure:"enabled"`
+    // Credential is the device credential the daemon presents at mint time
+    // (constant-time compared). Required >= 32 chars when enabled. Prefer
+    // CredentialFile (0600 secret file, tilde-expanded) — the inline value
+    // wins when both are set.
+    Credential string `mapstructure:"credential"`
+    // CredentialFile is the secret-file alternative to Credential (#370
+    // convention); its first line is the credential.
+    CredentialFile string `mapstructure:"credential_file"`
+    // TicketTTL is the ticket lifetime. Clamped to <= 15m (PRD §11.3);
+    // default 15m.
+    TicketTTL time.Duration `mapstructure:"ticket_ttl"`
+    // Sub is the audit principal stamped into tickets (e.g. "fusion-link").
+    // Default "fusion-link".
+    Sub string `mapstructure:"sub"`
+    // Tenant stamped into tickets. Default shell.session.tenant, then
+    // "local".
+    Tenant string `mapstructure:"tenant"`
+    // Modules is the manifest-id allowlist the ticket may reach (same
+    // semantics as session `permissions`). Default ["*"].
+    Modules []string `mapstructure:"modules"`
+}
+
 type ShellCaptchaConfig struct {
     // Enabled turns the challenge gate on. Off = no captcha required.
     Enabled bool `mapstructure:"enabled"`
@@ -2917,6 +2951,21 @@ func validate(cfg *Config) error {
         }
         if cfg.Shell.Captcha.TTL < 0 {
             return fmt.Errorf("web_shell.captcha.ttl must be non-negative")
+        }
+        // #717: the link plane needs a real device credential to be a plane
+        // at all; a short credential would make the mint endpoint a
+        // brute-force oracle on loopback.
+        if cfg.Shell.Link.Enabled {
+            cred := cfg.Shell.Link.Credential
+            if cred == "" && cfg.Shell.Link.CredentialFile != "" {
+                cred = "from-file"
+            }
+            if len(cred) < 32 {
+                return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+            }
+            if cfg.Shell.Link.TicketTTL < 0 || cfg.Shell.Link.TicketTTL > 15*time.Minute {
+                return fmt.Errorf("web_shell.link.ticket_ttl must be in (0, 15m], got %s", cfg.Shell.Link.TicketTTL)
+            }
         }
         // #243: a misconfigured AdminKey would 401 module self-registration
         // after the auth chain with no explanation — surface it at load time.

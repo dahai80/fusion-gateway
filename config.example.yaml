@@ -844,6 +844,24 @@ web_shell:
     # identity_bridge:
     #     enabled: true
 
+    # #717: fusion-link daemon service-ticket plane. The local fusion-link
+    # daemon executes cloud-dispatched tasks with no browser session — it
+    # exchanges its device credential (POST /api/v1/link/ticket) for a
+    # short-lived (<= 15m) ticket accepted ONLY from loopback and ONLY on
+    # the shell task APIs (chat completions + model/policy/manifest reads).
+    # Ticket is a separate token space from shell sessions; expiry surfaces
+    # as 401 E_AUTH (visible failure). Audit entries tag the user slot as
+    # link:<task_id>. Disabled by default; empty sub = "fusion-link",
+    # empty modules = ["*"].
+    # link:
+    #     enabled: true
+    #     credential: ""                    # >= 32 chars, or use credential_file
+    #     credential_file: "~/.fusion-gateway/link-credential"  # 0600; ignored when credential set
+    #     ticket_ttl: 10m
+    #     sub: fusion-link
+    #     tenant: ""                        # empty = web_shell.session.tenant = "local"
+    #     modules: ["*"]
+
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
 # FUSION_CLIENT_KEY; the gateway holds the per-service upstream credentials.

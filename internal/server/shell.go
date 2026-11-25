@@ -107,6 +107,14 @@ func (s *Server) setupShell() {
         s.identityVault = newIdentityVault(identityBaseURL(cfg.Shell.IdentityURL, cfg.AuthPortal.IdentityURL))
         slog.Info("identity token vault armed", "identity_url", s.identityVault.url)
     }
+    // #717: link service-ticket plane. The credential_file is preloaded once
+    // here; enabled/credential are consulted live per request
+    // (linkCredentialLive) so a reload can arm/disarm without a restart.
+    s.linkCredentialFile = expandLinkCredentialFile(cfg.Shell.Link)
+    if s.linkCredentialFile != "" {
+        slog.Info("link service-ticket plane armed from credential_file",
+            "ticket_ttl_cap", LinkTicketMaxTTL.String())
+    }
     // #587: the failed-login lockout state lives with the session subsystem.
     s.shellLoginThrottle = newShellLoginThrottle()
     // #592: single-use SVG challenges for the login plane. The store is
@@ -365,6 +373,10 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     // #517: identity SSO ticket exchange → shell session (no second login).
     mux.HandleFunc("POST /api/v1/shell/session/sso", s.handleShellSessionSSO)
     mux.HandleFunc("POST /api/v1/shell/session/logout", s.withShellSession(s.handleShellSessionLogout))
+    // #717: fusion-link device credential -> short-lived loopback service
+    // ticket. Unauthenticated by contract (credential IS the auth); disabled
+    // config answers 404 link_disabled from the handler itself.
+    mux.HandleFunc("POST /api/v1/link/ticket", s.handleLinkTicketIssue)
     mux.HandleFunc("GET /api/v1/shell/me", s.withShellSession(s.handleShellMe))
     mux.HandleFunc("GET /api/v1/shell/manifests", s.withShellSession(s.handleShellManifestList))
     // #267: session-gated chat completions for the shell Home delegation
@@ -594,6 +606,13 @@ func (s *Server) withShellSession(next http.HandlerFunc) http.HandlerFunc {
         }
         claims, err := s.shellSessions.Validate(token)
         if err != nil {
+            // #717: a token that fails session validation may be a link
+            // service ticket (separate HMAC key space). tryLinkTicket
+            // handles valid tickets and ticket-shaped rejections; false =
+            // not a link ticket, keep the session error path.
+            if s.tryLinkTicket(w, r, token, next) {
+                return
+            }
             slog.Info("shell session rejected", "path", r.URL.Path, "error", err)
             if s.spaRegistered && spaFallbackRequest(r) {
                 s.shellLoginRedirect(w, r)
