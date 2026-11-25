@@ -20,6 +20,11 @@ func (s *Server) registerMLXToolRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/v1/analyze-batch", s.withMiddleware(s.handleMLXToolProxy))
     mux.HandleFunc("/v1/migration-level", s.withMiddleware(s.handleMLXToolProxy))
     mux.HandleFunc("/v1/convert", s.withMiddleware(s.handleMLXToolProxy))
+    // #721: /v1/convert/jobs* (job poll/cancel) and /v1/merge-adapter are the
+    // same fusion-mlx convert surface — trainer `ft merge` drives
+    // POST /v1/merge-adapter through the gateway (fusion-trainer#95 loop).
+    mux.HandleFunc("/v1/convert/", s.withMiddleware(s.handleMLXToolProxy))
+    mux.HandleFunc("/v1/merge-adapter", s.withMiddleware(s.handleMLXToolProxy))
     mux.HandleFunc("/v1/quantize", s.withMiddleware(s.handleMLXToolProxy))
     mux.HandleFunc("/v1/quantize/", s.withMiddleware(s.handleMLXToolProxy))
     mux.HandleFunc("/v1/benchmarks", s.withMiddleware(s.handleMLXToolProxy))
