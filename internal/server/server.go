@@ -269,6 +269,11 @@ type Server struct {
     // the session-authed /api/messaging bridge. Nil when shell disabled or
     // shell.identity_bridge.enabled=false (SSO logins discard refresh tokens).
     identityVault *identityVault
+    // linkCredentialFile (#717): preloaded device credential from
+    // shell.link.credential_file (Credential config wins when both set).
+    // Resolved once at setup; consulted live via linkCredentialLive so a
+    // reload can flip the plane without a restart.
+    linkCredentialFile string
     // claimedPrefixes (#715): mount paths the shell subsystem registered so
     // a colliding config-only service_routes prefix is skipped instead of
     // panicking ServeMux on duplicate registration.
