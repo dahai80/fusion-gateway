@@ -37,9 +37,14 @@ const (
 )
 
 // Message is one turn of the mirrored conversation (D1 chat schema shape).
+// ToolCalls/ToolCallID carry the OpenAI tool trajectory (#720): assistant
+// tool_calls and role=tool results survive the mirror so agent traffic
+// produces trainer-consumable trajectories, not content-only fragments.
 type Message struct {
-    Role    string `json:"role"`
-    Content string `json:"content"`
+    Role       string          `json:"role"`
+    Content    string          `json:"content"`
+    ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+    ToolCallID string          `json:"tool_call_id,omitempty"`
 }
 
 // Outcome is backfilled by app-observable producers (cowork flow nodes,
@@ -51,18 +56,50 @@ type Outcome struct {
 }
 
 // Record is one rollout (schema v1). Required: schema_version, rollout_id,
-// model, messages. Optional: everything else.
+// model, messages. Optional: everything else. Tools mirrors the request's
+// available tool definitions (#720) so the trajectory shows what the agent
+// COULD call, not only what it did call.
 type Record struct {
-    SchemaVersion int       `json:"schema_version"`
-    RolloutID     string    `json:"rollout_id"`
-    TenantID      string    `json:"tenant_id,omitempty"`
-    Source        string    `json:"source,omitempty"`
-    Model         string    `json:"model,omitempty"`
-    CreatedAt     string    `json:"created_at,omitempty"`
-    Messages      []Message `json:"messages"`
-    FinishReason  string    `json:"finish_reason,omitempty"`
-    LatencyMS     int64     `json:"latency_ms,omitempty"`
-    Prompt        string    `json:"prompt,omitempty"`
+    SchemaVersion int             `json:"schema_version"`
+    RolloutID     string          `json:"rollout_id"`
+    TenantID      string          `json:"tenant_id,omitempty"`
+    Source        string          `json:"source,omitempty"`
+    Model         string          `json:"model,omitempty"`
+    CreatedAt     string          `json:"created_at,omitempty"`
+    Tools         json.RawMessage `json:"tools,omitempty"`
+    Messages      []Message       `json:"messages"`
+    FinishReason  string          `json:"finish_reason,omitempty"`
+    LatencyMS     int64           `json:"latency_ms,omitempty"`
+    Prompt        string          `json:"prompt,omitempty"`
+}
+
+// redactToolCalls applies the redact-mode PII gate to tool-call arguments
+// (#720): structure (id/name) survives, argument payloads are redacted with
+// the same shape-preserving reducer as message content. Any unmarshal or
+// remarshal failure drops the field entirely — fail-closed, never leak.
+func redactToolCalls(raw json.RawMessage) json.RawMessage {
+    if len(raw) == 0 {
+        return nil
+    }
+    var calls []struct {
+        ID       string `json:"id"`
+        Type     string `json:"type"`
+        Function struct {
+            Name      string `json:"name"`
+            Arguments string `json:"arguments"`
+        } `json:"function"`
+    }
+    if err := json.Unmarshal(raw, &calls); err != nil {
+        return nil
+    }
+    for i := range calls {
+        calls[i].Function.Arguments = RedactContent(calls[i].Function.Arguments)
+    }
+    out, err := json.Marshal(calls)
+    if err != nil {
+        return nil
+    }
+    return out
 }
 
 // NewRolloutID mints "ro-<16 hex>" from crypto/rand, with a time-derived
@@ -93,6 +130,7 @@ type Tap struct {
     enabled     bool
     contentMode string
     tenants     map[string]bool
+    sinkPath    string
     sink        *Sink
 }
 
@@ -130,12 +168,19 @@ func (t *Tap) Enabled() bool {
     if t == nil {
         return false
     }
+    t.mu.RLock()
+    defer t.mu.RUnlock()
     return t.enabled
 }
 
 // Allows decides for one request: tenant + per-key override (nil = inherit).
 func (t *Tap) Allows(tenant string, keyOverride *bool) bool {
-    if t == nil || !t.enabled || t.sink == nil {
+    if t == nil {
+        return false
+    }
+    t.mu.RLock()
+    defer t.mu.RUnlock()
+    if !t.enabled || t.sink == nil {
         return false
     }
     if keyOverride != nil {
@@ -147,10 +192,44 @@ func (t *Tap) Allows(tenant string, keyOverride *bool) bool {
     return t.tenants[tenant]
 }
 
+// UpdateConfig applies a hot-reloaded rollout_tap config (#720, G1 parity:
+// startup-config features must have a reload path). Decision inputs
+// (enabled / tenants / content mode) swap under the tap mutex so in-flight
+// Enabled/Allows readers stay race-free. The sink is rebuilt only when the
+// path actually changed — reopening the same path would start a second
+// drain worker on the same file (interleaved partial writes).
+func (t *Tap) UpdateConfig(cfg TapConfig) {
+    if t == nil {
+        return
+    }
+    if cfg.ContentMode == "" {
+        cfg.ContentMode = ContentModeRedact
+    }
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    t.enabled = cfg.Enabled
+    t.contentMode = cfg.ContentMode
+    t.tenants = make(map[string]bool, len(cfg.Tenants))
+    for _, tn := range cfg.Tenants {
+        t.tenants[tn] = true
+    }
+    if cfg.Enabled && cfg.SinkPath != "" && cfg.SinkPath != t.sinkPath {
+        t.sinkPath = cfg.SinkPath
+        t.sink = NewSink(cfg.SinkPath, cfg.MaxQueue)
+    }
+}
+
 // Record enqueues one rollout; never blocks (drop-on-full) and never
 // propagates errors to the caller — isolation contract.
 func (t *Tap) Record(rec Record) {
-    if t == nil || t.sink == nil {
+    if t == nil {
+        return
+    }
+    t.mu.RLock()
+    sink := t.sink
+    rawMode := t.contentMode == ContentModeRaw
+    t.mu.RUnlock()
+    if sink == nil {
         return
     }
     rec.SchemaVersion = SchemaVersion
@@ -160,13 +239,14 @@ func (t *Tap) Record(rec Record) {
     if rec.CreatedAt == "" {
         rec.CreatedAt = time.Now().UTC().Format(time.RFC3339)
     }
-    if t.contentMode != ContentModeRaw {
+    if !rawMode {
         for i := range rec.Messages {
             rec.Messages[i].Content = RedactContent(rec.Messages[i].Content)
+            rec.Messages[i].ToolCalls = redactToolCalls(rec.Messages[i].ToolCalls)
         }
         rec.Prompt = RedactContent(rec.Prompt)
     }
-    t.sink.enqueue(rec)
+    sink.enqueue(rec)
 }
 
 // Sink is the append-only JSONL store. Writes run on a background worker

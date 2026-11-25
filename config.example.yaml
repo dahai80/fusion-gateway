@@ -85,6 +85,25 @@ identity:
     breaker_threshold: 5                        # consecutive failures to open breaker
     breaker_open_sec: 30                        # breaker open duration before half-open probe
 
+# #608/#720 rollout tap: mirror chat traffic into a local JSONL sink that
+# fusion-trainer consumes as RL data. 100%% offline — no egress, the sink is
+# a local file. Opt-in per tenant (tenants list; empty = all) with a per-key
+# `rollout_tap: true/false` override (deny beats allow). Tool trajectories
+# (#720): assistant tool_calls, role=tool results and the request's tool
+# definitions are mirrored; in redact mode tool arguments are scrubbed with
+# the same shape-preserving reducer as message content.
+# Downstream wiring: point fusion-trainer at the sink via
+# FUSION_TRAINER_ROLLOUT_SINKS (os.pathsep-separated files/dirs); see
+# docs/rollout-tap.md for the full office-flywheel flow (outcome join by
+# rollout_id via office-api /v1/outcomes).
+# rollout_tap:
+#     enabled: true
+#     sink_path: "~/.fusion-gateway/rollout-tap.jsonl"   # required when enabled
+#     content_mode: raw                            # redact (default) | raw
+#     tenants: []                                  # empty = all tenants
+#     max_queue: 1024                              # async write queue; overflow drops loudly
+#     capture_max_bytes: 262144                    # response capture buffer per request
+
 routing:
     mode: hybrid                          # local = all-local, cloud = all-cloud, hybrid = smart routing (token ratio / hardware load)
     token_threshold: 8000                 # total tokens above this go cloud

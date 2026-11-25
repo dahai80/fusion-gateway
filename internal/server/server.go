@@ -1977,6 +1977,24 @@ func (s *Server) RebuildMiddlewareChain(newCfg *config.ConfigSnapshot) {
     if s.tryQuotaMeter != nil {
         s.tryQuotaMeter.SetWindow(newCfg.Config.TryQuota.ResetWindow)
     }
+    // #720 (G1 parity): the rollout tap was boot-time only — a reload that
+    // flipped enabled/tenants/content_mode/sink_path silently kept the old
+    // plane. UpdateConfig swaps decision inputs under the tap mutex and
+    // rebuilds the sink only on a path change; a reload-disable denies at
+    // Allows() without tearing down the writer mid-flight.
+    if s.rolloutTap != nil {
+        rt := newCfg.Config.RolloutTap
+        s.rolloutTap.UpdateConfig(rollout.TapConfig{
+            Enabled:     rt.Enabled,
+            ContentMode: rt.ContentMode,
+            Tenants:     rt.Tenants,
+            SinkPath:    rt.SinkPath,
+            MaxQueue:    rt.MaxQueue,
+        })
+        slog.Info("rollout tap after reload (#720)", "enabled", rt.Enabled,
+            "content_mode", rt.ContentMode, "sink_path", rt.SinkPath,
+            "tenants", len(rt.Tenants), "config_version", newCfg.Version)
+    }
     // #157/#630: rebuild the identity control-plane client BEFORE
     // buildMiddlewareChain — the chain captures the client pointer at build
     // time, so swapping after the build left the fresh chain holding the OLD
