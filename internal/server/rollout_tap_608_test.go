@@ -229,7 +229,7 @@ func Test608_SSEParserAccumulatesDeltas(t *testing.T) {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"}}]}\n\n" +
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
         "data: [DONE]\n\n"
-    content, finish := parseSSEBody([]byte(body))
+    content, finish, _ := parseSSEBody([]byte(body))
     if content != "hello" || finish != "stop" {
         t.Fatalf("content=%q finish=%q", content, finish)
     }
@@ -238,7 +238,7 @@ func Test608_SSEParserAccumulatesDeltas(t *testing.T) {
 func Test608_NonStreamParserReadsChoices(t *testing.T) {
     resp := rollout608ChatResponse()
     raw, _ := json.Marshal(resp)
-    content, finish := parseNonStreamBody(raw)
+    content, finish, _ := parseNonStreamBody(raw)
     if finish != "stop" {
         t.Fatalf("finish=%q", finish)
     }
