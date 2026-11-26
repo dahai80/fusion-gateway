@@ -1445,6 +1445,61 @@ type ShellLinkConfig struct {
     // Modules is the manifest-id allowlist the ticket may reach (same
     // semantics as session `permissions`). Default ["*"].
     Modules []string `mapstructure:"modules"`
+    // TicketRoutes (#732) extends the task-execution route allowlist a
+    // service ticket may drive, beyond the built-in shell task APIs. Each
+    // entry is "METHOD /path"; a literal "/*" suffix turns it into a
+    // same-origin path-prefix glob (same semantics as auth_portal
+    // redirect_uris, #729): "POST /shell/office-api/v1/*" covers every
+    // office-api write/parse route. The admin and auth planes are never
+    // configurable (validate rejects them); loopback + ticket-kind checks
+    // are unaffected. Empty = built-in allowlist only.
+    TicketRoutes []string `mapstructure:"ticket_routes"`
+}
+
+// LinkTicketRouteAdminPrefixes are path prefixes a TicketRoutes entry may
+// never target (#732): the ticket plane is execution-scoped and must not be
+// granted reach onto the admin or auth planes by config.
+var LinkTicketRouteAdminPrefixes = []string{"/admin", "/auth"}
+
+// validateLinkCredential (#717, fixed #732): an enabled link plane needs a
+// real device credential — an inline credential >= 32 chars, or a
+// credential_file (content is read at setup by expandLinkCredentialFile and
+// a short/unreadable file disables the plane fail-closed). The old
+// implementation substituted a 9-char placeholder for credential_file and
+// then applied the 32-char gate, so EVERY credential_file-only deployment
+// failed validate and the config guard quarantined the file as corrupt.
+func validateLinkCredential(link ShellLinkConfig) error {
+    if !link.Enabled {
+        return nil
+    }
+    if link.Credential == "" && link.CredentialFile == "" {
+        return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+    }
+    if link.Credential != "" && len(link.Credential) < 32 {
+        return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+    }
+    return nil
+}
+
+// validateLinkTicketRoutes (#732) checks each web_shell.link.ticket_routes
+// entry: "METHOD /path", at most a single trailing "/*" glob, never a path
+// on the admin/auth planes.
+func validateLinkTicketRoutes(link ShellLinkConfig) error {
+    for _, tr := range link.TicketRoutes {
+        method, path, ok := strings.Cut(strings.TrimSpace(tr), " ")
+        if !ok || method == "" || !strings.HasPrefix(path, "/") {
+            return fmt.Errorf("web_shell.link.ticket_routes entry %q must be \"METHOD /path\"", tr)
+        }
+        if strings.Contains(strings.TrimSuffix(path, "*"), "*") || strings.ContainsAny(path, " ?#") {
+            return fmt.Errorf("web_shell.link.ticket_routes entry %q supports only a trailing /* glob", tr)
+        }
+        for _, p := range LinkTicketRouteAdminPrefixes {
+            if path == p || strings.HasPrefix(path, p+"/") || path == p+"/*" || strings.HasPrefix(strings.TrimSuffix(path, "/*"), p+"/") {
+                return fmt.Errorf("web_shell.link.ticket_routes entry %q may not target the %s plane", tr, strings.TrimPrefix(p, "/"))
+            }
+        }
+    }
+    return nil
 }
 
 type ShellCaptchaConfig struct {
@@ -2956,15 +3011,17 @@ func validate(cfg *Config) error {
         // at all; a short credential would make the mint endpoint a
         // brute-force oracle on loopback.
         if cfg.Shell.Link.Enabled {
-            cred := cfg.Shell.Link.Credential
-            if cred == "" && cfg.Shell.Link.CredentialFile != "" {
-                cred = "from-file"
-            }
-            if len(cred) < 32 {
-                return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+            if err := validateLinkCredential(cfg.Shell.Link); err != nil {
+                return err
             }
             if cfg.Shell.Link.TicketTTL < 0 || cfg.Shell.Link.TicketTTL > 15*time.Minute {
                 return fmt.Errorf("web_shell.link.ticket_ttl must be in (0, 15m], got %s", cfg.Shell.Link.TicketTTL)
+            }
+            // #732: ticket_routes entries must be "METHOD /path" with a
+            // single "/*" glob suffix at most, and may never target the
+            // admin/auth planes (the ticket plane is execution-scoped).
+            if err := validateLinkTicketRoutes(cfg.Shell.Link); err != nil {
+                return err
             }
         }
         // #243: a misconfigured AdminKey would 401 module self-registration

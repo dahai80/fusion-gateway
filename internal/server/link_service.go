@@ -48,6 +48,37 @@ var linkTicketRoutes = map[string]bool{
     "GET /api/v1/model-policy":            true,
 }
 
+// linkRouteAllowed reports whether a method+path is on the task-execution
+// allowlist a service ticket may drive: the built-in shell task APIs plus
+// the config-driven web_shell.link.ticket_routes extensions (#732). A
+// configured entry is exact-match unless it ends in a literal "/*", which
+// makes it a path-prefix glob (same semantics as #729 redirect_uris).
+func linkRouteAllowed(link config.ShellLinkConfig, method, path string) bool {
+    routeKey := method + " " + path
+    if linkTicketRoutes[routeKey] {
+        return true
+    }
+    for _, tr := range link.TicketRoutes {
+        tr = strings.TrimSpace(tr)
+        if tr == routeKey {
+            return true
+        }
+        if strings.HasSuffix(tr, "/*") && strings.HasPrefix(routeKey, strings.TrimSuffix(tr, "*")) {
+            return true
+        }
+    }
+    return false
+}
+
+// linkConfigLive returns the current shell.link config under the config
+// lock (hot-reload parity: ticket_routes changes take effect on the next
+// request without a restart).
+func (s *Server) linkConfigLive() config.ShellLinkConfig {
+    s.cfgMu.RLock()
+    defer s.cfgMu.RUnlock()
+    return s.cfg.Config.Shell.Link
+}
+
 // isLoopbackRequest reports whether the request source is the loopback
 // interface. RemoteAddr is trusted here because the gateway binds localhost
 // in the fusion-link deployment posture (PRD §1: gateway keeps localhost
@@ -203,8 +234,8 @@ func (s *Server) tryLinkTicket(w http.ResponseWriter, r *http.Request, token str
         return true
     }
     routeKey := r.Method + " " + r.URL.Path
-    if !linkTicketRoutes[routeKey] {
-        slog.Warn("link ticket refused: route not in task allowlist", "method", r.Method, "path", r.URL.Path)
+    if !linkRouteAllowed(s.linkConfigLive(), r.Method, r.URL.Path) {
+        slog.Warn("link ticket refused: route not in task allowlist", "route", routeKey)
         shell.WriteEnvelope(w, http.StatusForbidden, "route_not_allowed",
             "link tickets are scoped to shell task APIs", "", false)
         return true
