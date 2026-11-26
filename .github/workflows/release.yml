@@ -1,16 +1,18 @@
 name: Release
 
 # R13 (audit): tag-triggered release workflow. CI (ci.yml) runs on every
-# push/PR; this workflow runs ONLY on a pushed v* tag to produce a built
-# darwin/arm64 binary with the version stamped in via ldflags (R4), a git
-# changelog since the last tag, and a GitHub Release attaching the binary.
+# push/PR; this workflow runs ONLY on a pushed v* tag to produce binaries
+# for all three platforms (darwin/arm64 + windows/amd64 + linux/amd64,
+# version stamped via ldflags (R4)), a git changelog since the last tag,
+# and a GitHub Release attaching them.
 #
 # Usage:
 #   git tag v0.8.46
 #   git push origin v0.8.46
 #
-# macOS-only — matches CI (internal/hardware is darwin-only IOKit + sysctl,
-# no cross-platform stubs) and the Apple-Silicon local-first target.
+# macOS runner — matches CI (internal/hardware is darwin-only IOKit + sysctl,
+# no cross-platform stubs) and the Apple-Silicon local-first target; the
+# windows/linux artifacts are pure-Go cross-compiles from the same runner.
 
 on:
   push:
@@ -60,13 +62,27 @@ jobs:
       - name: Build darwin/arm64 binary
         run: |
           # R4 ldflags: inject the resolved version + commit. GOOS=darwin
-          # GOARCH=arm64 matches the deployment target; the resulting binary
-          # is the single distributable artifact.
+          # GOARCH=arm64 matches the deployment target.
           GOOS=darwin GOARCH=arm64 go build \
             -ldflags "-X main.version=${{ steps.ver.outputs.version }} -X main.commit=${{ steps.ver.outputs.commit }}" \
             -o fusion-gateway ./cmd/gateway
-          # Sanity: the binary reports the injected version on /v1/status.
           tar -czf fusion-gateway-darwin-arm64.tar.gz fusion-gateway
+
+      - name: Build windows/amd64 + linux/amd64 binaries
+        run: |
+          # Every release ships all three platforms (user requirement:
+          # Windows + Ubuntu alongside macOS). Pure-Go cross-compile from the
+          # macos runner — CGO_ENABLED=0 matches the deployed linux build
+          # (purego IOKit path is darwin-only and already guarded).
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }} -X main.commit=${{ steps.ver.outputs.commit }}" \
+            -o fusion-gateway.exe ./cmd/gateway
+          zip -q fusion-gateway-windows-amd64.zip fusion-gateway.exe
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }} -X main.commit=${{ steps.ver.outputs.commit }}" \
+            -o fusion-gateway ./cmd/gateway
+          tar -czf fusion-gateway-linux-amd64.tar.gz fusion-gateway
+          rm -f fusion-gateway.exe fusion-gateway
 
       # Enterprise provenance: CycloneDX SBOM of the Go module graph. Built
       # from source under the pinned Go toolchain (no third-party binary
@@ -96,6 +112,8 @@ jobs:
         run: |
           shasum -a 256 \
             fusion-gateway-darwin-arm64.tar.gz \
+            fusion-gateway-windows-amd64.zip \
+            fusion-gateway-linux-amd64.tar.gz \
             fusion-gateway-sbom.cyclonedx.json \
             CHANGELOG.md > checksums.txt
           cat checksums.txt
@@ -129,6 +147,8 @@ jobs:
           body_path: CHANGELOG.md
           files: |
             fusion-gateway-darwin-arm64.tar.gz
+            fusion-gateway-windows-amd64.zip
+            fusion-gateway-linux-amd64.tar.gz
             fusion-gateway-sbom.cyclonedx.json
             checksums.txt
             CHANGELOG.md
