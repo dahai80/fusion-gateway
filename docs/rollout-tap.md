@@ -1,3 +1,19 @@
+---
+doc_id: fusion-gateway/guide
+product: fusion-gateway
+class: core
+entry: service
+doc_type: guide
+title: { zh: "Rollout tap 采集契约", en: "Rollout tap capture contract" }
+audience: engineer
+status: draft
+version: 0.9.195
+updated: 2026-11-25
+owner: "@dahai"
+source_of_truth:
+  - docs/rollout-tap.md
+---
+
 # Rollout tap (#608 / #720)
 
 The rollout tap mirrors production chat traffic from the gateway into an

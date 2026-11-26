@@ -67,7 +67,7 @@ CI is **macOS-only** (`runs-on: macos-latest`) because `internal/hardware` uses 
 
 - **`ci.yml` → build-test**: `go vet` → **bare-goroutine gate** (`scripts/check_bare_goroutines.sh`, runs *before* Build) → `go build ./...` → `go test ./... -count=1 -race`.
 - **`ci.yml` → vuln-scan**: `govulncheck -mode=source ./...` — scans the call graph (not just `go.mod`), fails only on *reachable* known vulns.
-- **`release.yml`**: builds `darwin/arm64` binary, generates a **CycloneDX SBOM** (`cyclonedx-gomod`), `sha256` checksums, and publishes a GitHub Release. Prerelease gating: tags containing `-rc` publish as prerelease (not `latest`).
+- **`release.yml`**: builds binaries for all three platforms (`darwin/arm64` tar.gz, `windows/amd64` zip, `linux/amd64` tar.gz — cross-compiled from the macOS runner), generates a **CycloneDX SBOM** (`cyclonedx-gomod`), `sha256` checksums, and publishes a GitHub Release. Prerelease gating: tags containing `-rc` publish as prerelease (not `latest`).
 
 **Bare-goroutine gate** (CI red on violation): no bare `go func()` / `go call()` outside `safeGo`. `lifecycle.Worker` is allowlisted. Adding a *new* panic-safe concurrency primitive requires adding it to the ALLOW list in `scripts/check_bare_goroutines.sh` or CI fails.
 
