@@ -905,10 +905,14 @@ auth_portal:
   enabled: false
   static_dir: web/auth
   identity_url: http://127.0.0.1:11470
-  # Exact client return URLs (scheme://host/path; query is client state).
-  # Empty list disables code issuance (fail-closed).
+  # Client return URLs (scheme://host/path; query is client state). Exact
+  # match by default; an entry ending in `/*` (#729) allowlists every path
+  # under that scheme://host/path prefix — one entry covers all web-shell
+  # module entry deep links on the same origin. Empty list disables code
+  # issuance (fail-closed).
   redirect_uris:
     - http://localhost:3000/login
+    # - http://localhost:11432/*
   code_ttl_secs: 60
   rate_per_min: 30
 

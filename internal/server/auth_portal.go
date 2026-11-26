@@ -762,13 +762,22 @@ func (p *authPortal) handleExchangeCode(w http.ResponseWriter, r *http.Request) 
 
 // allowlistedRedirect matches a redirect URI against the configured
 // allowlist, comparing scheme://host/path only (queries are client state).
+// An allowlist entry ending in `/*` (#729) matches any path under that
+// scheme://host/path prefix — one entry covers every web-shell module entry
+// path (office, cowork, agent-studio, …) on the same origin without listing
+// each deep link. The glob stays confined to a single origin + path prefix,
+// so it cannot widen the allowlist across hosts.
 func (p *authPortal) allowlistedRedirect(raw string) (string, bool) {
     base := redirectBase(raw)
     if base == "" {
         return "", false
     }
     for _, allowed := range p.cfg.RedirectURIs {
-        if redirectBase(allowed) == base {
+        ab := redirectBase(allowed)
+        if ab == base {
+            return base, true
+        }
+        if strings.HasSuffix(ab, "/*") && strings.HasPrefix(base, strings.TrimSuffix(ab, "*")) {
             return base, true
         }
     }
