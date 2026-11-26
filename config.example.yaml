@@ -880,6 +880,13 @@ web_shell:
     #     sub: fusion-link
     #     tenant: ""                        # empty = web_shell.session.tenant = "local"
     #     modules: ["*"]
+    #     # ticket_routes (#732): config-driven extension of the task-execution
+    #     # route allowlist a service ticket may drive, beyond the built-in
+    #     # shell task APIs. Each entry is "METHOD /path"; a literal "/*"
+    #     # suffix = path-prefix glob. Admin/auth planes are never configurable.
+    #     # Example (office browserless task dispatch):
+    #     # ticket_routes:
+    #     #     - "POST /shell/office-api/v1/*"
 
 # /svc/<name>/ platform-service proxy (config-conventions §1/§5): business
 # apps reach platform services exclusively through the gateway with their
