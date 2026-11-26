@@ -159,7 +159,7 @@ func Test720_EndToEndTapToolRequest(t *testing.T) {
         Model:    "test-model",
         Messages: []adapter.ChatMessage{{Role: "user", Content: "book a room"}},
     }
-    s.emitRolloutTapRecord(req, capw, time.Now())
+    s.emitRolloutTapRecord(req, capw, time.Now(), "")
     recs := rollout608WaitRecords(t, path, 1)
     if recs[0].Messages[1].ToolCalls == nil ||
         !strings.Contains(string(recs[0].Messages[1].ToolCalls), "call_e") {

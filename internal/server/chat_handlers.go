@@ -455,7 +455,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
     }
     if tapCap != nil {
-        s.emitRolloutTapRecord(&req, tapCap, start)
+        s.emitRolloutTapRecord(&req, tapCap, start, adoptRolloutHeaderID(r.Header))
     }
 }
 
