@@ -258,11 +258,35 @@ func buildRolloutRecord(req *adapter.ChatRequest, assistantMsg string, assistant
     }
 }
 
+// rolloutHeaderMaxLen bounds an adopted X-Fusion-Rollout-Id; anything longer
+// is treated as malformed and ignored (#725).
+const rolloutHeaderMaxLen = 128
+
+// adoptRolloutHeaderID extracts the caller-supplied rollout correlation id
+// from X-Fusion-Rollout-Id (#725). One agent turn spans several chat rounds;
+// the apps send one stable id per turn so tap records join the outcome plane
+// (office-api). Returns "" when absent or malformed — the tap then mints its
+// own id as before. Accepted shape: trimmed, 1..128 chars, printable ASCII
+// without spaces (control chars would poison the JSONL sink join).
+func adoptRolloutHeaderID(h http.Header) string {
+    raw := strings.TrimSpace(h.Get("X-Fusion-Rollout-Id"))
+    if raw == "" || len(raw) > rolloutHeaderMaxLen {
+        return ""
+    }
+    for _, c := range raw {
+        if c < 0x21 || c > 0x7E {
+            return ""
+        }
+    }
+    return raw
+}
+
 // emitRolloutTapRecord records one rollout for a finished chat request.
 // Called at the end of handleChatCompletions only when the capture writer
 // was installed (the tap already said yes), so the only decisions left are
-// parse-shape detection and empty-body bail.
-func (s *Server) emitRolloutTapRecord(req *adapter.ChatRequest, capw *rolloutTapCapture, start time.Time) {
+// parse-shape detection and empty-body bail. rolloutID is the adopted
+// X-Fusion-Rollout-Id value ("" = tap mints one) (#725).
+func (s *Server) emitRolloutTapRecord(req *adapter.ChatRequest, capw *rolloutTapCapture, start time.Time, rolloutID string) {
     if s.rolloutTap == nil || capw == nil {
         return
     }
@@ -279,5 +303,6 @@ func (s *Server) emitRolloutTapRecord(req *adapter.ChatRequest, capw *rolloutTap
         assistantMsg, finish, assistantTools = parseNonStreamBody(body)
     }
     rec := buildRolloutRecord(req, assistantMsg, assistantTools, finish, time.Since(start), capw.tenant, "chat_completions")
+    rec.RolloutID = rolloutID
     s.rolloutTap.Record(rec)
 }
