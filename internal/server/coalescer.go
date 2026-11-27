@@ -32,13 +32,17 @@ func newCoalescer() *coalescer {
 // returns. The leader publishes the entry with the mutex already held, so a
 // waiter that arrives after the entry exists is guaranteed to block on the
 // leader (it can never acquire the per-key mutex first and race through).
-func (c *coalescer) Do(key string, fn func()) {
+// Returns true when this caller executed fn (the leader), false when it
+// waited on an in-flight leader (#737: the caller uses this to label its
+// post-Do cache re-check — the leader generated the response upstream and
+// must not be labeled as a cache HIT).
+func (c *coalescer) Do(key string, fn func()) bool {
     c.mu.Lock()
     if call, ok := c.calls[key]; ok {
         c.mu.Unlock()
         call.mu.Lock()
         call.mu.Unlock()
-        return
+        return false
     }
     call := &coalescedCall{}
     call.mu.Lock()
@@ -51,6 +55,7 @@ func (c *coalescer) Do(key string, fn func()) {
         call.mu.Unlock()
     }()
     fn()
+    return true
 }
 
 // forget drops a pending entry without running fn. Used when a caller decides
