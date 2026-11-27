@@ -1300,8 +1300,9 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     // the error/A4-fallback path independently — the stampede target is the
     // SUCCESS path, which is now coalesced. Streaming is NOT coalesced (each
     // stream is unique); non-stream only.
+    led := false
     if s.fetchCoalescer != nil && cacheKey != "" {
-        s.fetchCoalescer.Do(cacheKey, func() {
+        led = s.fetchCoalescer.Do(cacheKey, func() {
             r, e := chatFn(ctx, req)
             if e != nil {
                 return
@@ -1333,6 +1334,12 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
         // Leader published (or failed): re-check cache. HIT means the leader
         // (or this caller, if it WAS the leader) populated it — serve it.
         if cached, ok := s.cache.Get(cacheKey); ok {
+            // #737: a caller that LED the coalesced fetch generated the
+            // response upstream and is only re-reading its own publish —
+            // labeling it HIT over-counted cache hits by one per cold key
+            // (and made the first post-bypass request look like a
+            // bypass-contract violation). Leaders are labeled MISS; genuine
+            // waiters keep HIT.
             slog.Debug("cache hit after coalesced fetch", "model", req.Model)
             // #log-model: stamp route info on the coalesced-hit path too.
             s.stampRouteInfo(ctx, req, decision, provider.Name())
@@ -1348,7 +1355,13 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
             }
             s.meterCachedServed(ctx, cached, string(decision.Backend), req.Model)
             w.Header().Set("Content-Type", "application/json")
-            w.Header().Set("X-Cache", "HIT")
+            // #737: coalescer LEADER = fresh upstream generation, label MISS
+            // (was HIT — over-counted cache hits per cold key); waiter = HIT.
+            if led {
+                w.Header().Set("X-Cache", "MISS")
+            } else {
+                w.Header().Set("X-Cache", "HIT")
+            }
             w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
             w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
             _, _ = w.Write(cached)
