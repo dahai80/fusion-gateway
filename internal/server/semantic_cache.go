@@ -103,11 +103,17 @@ type semanticCacheKey struct {
 // Cache-Control: no-store on the request. Structured-output clients whose
 // correctness cannot tolerate a near-match replay opt out per request; the
 // bypass skips both Search and Store.
+// #734: X-Cache: bypass (the bench hygiene contract, fusion-bench #47) opts
+// out of the semantic cache as well — a bench request must never be served
+// from or stored in any cache layer.
 func optsOutOfSemanticCache(r *http.Request) bool {
     if r == nil {
         return false
     }
     if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Cache")), "no-store") {
+        return true
+    }
+    if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Cache")), "bypass") {
         return true
     }
     for _, dir := range strings.Split(r.Header.Get("Cache-Control"), ",") {
@@ -133,6 +139,31 @@ func withSemanticCacheOptOut(ctx context.Context) context.Context {
 func semanticCacheOptedOut(ctx context.Context) bool {
     v, _ := ctx.Value(semanticNoStoreKey{}).(bool)
     return v
+}
+
+// exactCacheBypassKey carries the #734 decision (X-Cache: bypass) from the
+// entry handler down to handleNonStreamChat: the exact-key cache must neither
+// serve nor store for such requests, and the response must echo the bypass
+// so callers (fusion-bench #47) can verify the contract held.
+type exactCacheBypassKey struct{}
+
+// withExactCacheBypass marks the context so the exact-key cache is bypassed.
+func withExactCacheBypass(ctx context.Context) context.Context {
+    return context.WithValue(ctx, exactCacheBypassKey{}, true)
+}
+
+// exactCacheBypassed reports whether the request carries the #734 bypass.
+func exactCacheBypassed(ctx context.Context) bool {
+    v, _ := ctx.Value(exactCacheBypassKey{}).(bool)
+    return v
+}
+
+// requestsExactCacheBypass reports whether the request carries the #734
+// bench bypass directive (X-Cache: bypass): the exact-key cache must neither
+// read nor store for this request (#47 contract). Distinct from no-store,
+// which only opts out of the semantic cache (#423).
+func requestsExactCacheBypass(r *http.Request) bool {
+    return r != nil && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Cache")), "bypass")
 }
 
 // semanticCachePrompt returns the #423 key for the semantic cache, or a zero

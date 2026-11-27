@@ -452,6 +452,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         defer cancelDeadline()
         s.handleStreamChat(streamCtx, w, provider, &req, decision, budget, start)
     } else {
+        // #734: propagate the bench bypass contract (X-Cache: bypass) to the
+        // exact-key cache alongside the #423 semantic opt-out.
+        if optsOutOfSemanticCache(r) {
+            ctx = withSemanticCacheOptOut(ctx)
+        }
+        if requestsExactCacheBypass(r) {
+            ctx = withExactCacheBypass(ctx)
+        }
         s.handleNonStreamChat(ctx, w, provider, &req, decision, budget, start, tenant)
     }
     if tapCap != nil {
@@ -1193,9 +1201,17 @@ streamDone:
 }
 
 func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter, provider adapter.Provider, req *adapter.ChatRequest, decision *router.RouteDecision, budget tokenizer.TokenBudget, start time.Time, tenantName string) {
+    // #734: X-Cache: bypass (bench hygiene, fusion-bench #47) — neither the
+    // exact-key cache nor the semantic cache may read or store for this
+    // request. Leaving cacheKey empty disables every store site below; the
+    // response echoes the bypass so the caller can verify the contract.
+    bypass := exactCacheBypassed(ctx)
+    if bypass {
+        w.Header().Set("X-Cache", "BYPASS")
+    }
     // Cache lookup
     var cacheKey string
-    if s.cache != nil {
+    if s.cache != nil && !bypass {
         cacheKey = cache.ComputeCacheKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, req.TopP,
             "tenant", tenantName, "tools", req.Tools, "tool_choice", req.ToolChoice, "stop", req.Stop)
         if cached, ok := s.cache.Get(cacheKey); ok {
@@ -1472,7 +1488,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
                             // callers and audit (issue requirement 1).
                             w.Header().Set("X-Fusion-Routed", "cloud")
                             w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
-                            if s.cache != nil {
+                            if s.cache != nil && !exactCacheBypassed(ctx) {
                                 w.Header().Set("X-Cache", "MISS")
                             }
                             _ = json.NewEncoder(w).Encode(fallbackResp)
@@ -1541,7 +1557,7 @@ func (s *Server) handleNonStreamChat(ctx context.Context, w http.ResponseWriter,
     w.Header().Set("Content-Type", "application/json")
     w.Header().Set("X-Route-Decision", fmt.Sprintf("%s:%s", decision.Backend, decision.Reason))
     w.Header().Set("X-Token-Budget", fmt.Sprintf("%d", budget.TotalBudget))
-    if s.cache != nil {
+    if s.cache != nil && !exactCacheBypassed(ctx) {
         w.Header().Set("X-Cache", "MISS")
     }
     _ = json.NewEncoder(w).Encode(resp)
@@ -1686,6 +1702,10 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
         // #423: propagate the no-store opt-out to the non-stream handler.
         if optsOutOfSemanticCache(r) {
             ctx = withSemanticCacheOptOut(ctx)
+        }
+        // #734: propagate the bench bypass contract to the exact cache.
+        if requestsExactCacheBypass(r) {
+            ctx = withExactCacheBypass(ctx)
         }
         s.handleNonStreamChat(ctx, w, provider, &chatReq, decision, budget, start, tenant)
     }
