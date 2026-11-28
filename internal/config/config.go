@@ -1,32 +1,32 @@
 package config
 
 import (
-    "crypto/ed25519"
-    "crypto/sha256"
-    "encoding/base64"
-    "encoding/hex"
-    "encoding/json"
-    "fmt"
-    "os"
-    "path/filepath"
-    "strings"
-    "net/url"
-    "sync"
-    "sync/atomic"
-    "time"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
-    "github.com/fsnotify/fsnotify"
-    "github.com/spf13/viper"
-    "gopkg.in/yaml.v3"
-    "log/slog"
+	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
+	"log/slog"
 
-    "github.com/fusion-gateway/fusion-gateway/internal/crypto"
-    "github.com/fusion-gateway/fusion-gateway/internal/safego"
+	"github.com/fusion-gateway/fusion-gateway/internal/crypto"
+	"github.com/fusion-gateway/fusion-gateway/internal/safego"
 )
 
 type TLSConfig struct {
-    CertFile string `mapstructure:"cert_file"`
-    KeyFile  string `mapstructure:"key_file"`
+	CertFile string `mapstructure:"cert_file"`
+	KeyFile  string `mapstructure:"key_file"`
 }
 
 // NetworkConfig (#493): deployment network tier. local (default) binds
@@ -35,20 +35,20 @@ type TLSConfig struct {
 // anonymous allowlist; startup fails when the auth plane is off). public
 // is deliberately absent in phase 1 — see docs/deployment-public-tier.md.
 type NetworkConfig struct {
-    Tier string `mapstructure:"tier"`
+	Tier string `mapstructure:"tier"`
 }
 
 type EncryptionConfig struct {
-    MasterKey string `mapstructure:"master_key"`
+	MasterKey string `mapstructure:"master_key"`
 }
 
 type ConnectorConfig struct {
-    PersistencePath string `mapstructure:"persistence_path"`
-    // OAuth2 holds per-connector client credentials keyed by connector_key
-    // (#434). Without this the OAuth2 provider never receives a config and
-    // /gateway/v1/oauth2/authorize returns "no oauth2 config" even for the
-    // builtin connectors.
-    OAuth2 map[string]*ConnectorOAuth2Config `mapstructure:"oauth2"`
+	PersistencePath string `mapstructure:"persistence_path"`
+	// OAuth2 holds per-connector client credentials keyed by connector_key
+	// (#434). Without this the OAuth2 provider never receives a config and
+	// /gateway/v1/oauth2/authorize returns "no oauth2 config" even for the
+	// builtin connectors.
+	OAuth2 map[string]*ConnectorOAuth2Config `mapstructure:"oauth2"`
 }
 
 // ConnectorOAuth2Config is one connector's OAuth2 client app registration.
@@ -56,53 +56,53 @@ type ConnectorConfig struct {
 // builtin keys, so a minimal entry only needs client_id + client_secret +
 // redirect_url.
 type ConnectorOAuth2Config struct {
-    ClientID     string   `mapstructure:"client_id"`
-    ClientSecret string   `mapstructure:"client_secret"`
-    AuthURL      string   `mapstructure:"auth_url"`
-    TokenURL     string   `mapstructure:"token_url"`
-    Scopes       []string `mapstructure:"scopes"`
-    RedirectURL  string   `mapstructure:"redirect_url"`
+	ClientID     string   `mapstructure:"client_id"`
+	ClientSecret string   `mapstructure:"client_secret"`
+	AuthURL      string   `mapstructure:"auth_url"`
+	TokenURL     string   `mapstructure:"token_url"`
+	Scopes       []string `mapstructure:"scopes"`
+	RedirectURL  string   `mapstructure:"redirect_url"`
 }
 
 type ServerConfig struct {
-    Host                    string          `mapstructure:"host"`
-    Port                    int             `mapstructure:"port"`
-    LogLevel                string          `mapstructure:"log_level"`
-    GracefulShutdownTimeout int             `mapstructure:"graceful_shutdown_timeout"`
-    MaxRequestBodySize      int64           `mapstructure:"max_request_body_size"`
-    // ProxyMaxBodySize caps request bodies on reverse-proxy paths (model-hub,
-    // fusion-mlx admin/fine-tune, /stats, model load/unload). 0 = default
-    // (maxProxyBodySize, 256 MiB). E5 (audit): proxy paths forwarded r.Body to
-    // httputil.ReverseProxy with no cap → unbounded body OOMs fusion-mlx.
-    ProxyMaxBodySize        int64           `mapstructure:"proxy_max_body_size"`
-    // MaxOutputTokens caps a client-supplied max_tokens before the request is
-    // proxied (#528): the gateway clamps the value so behavior stays
-    // consistent regardless of backend (some upstreams reject oversized
-    // values, pay-per-token clouds may not). 0 = disabled (default — no
-    // behavior change; set an explicit ceiling to enable).
-    MaxOutputTokens         int             `mapstructure:"max_output_tokens"`
-    EnablePProf             bool            `mapstructure:"enable_pprof"`
-    TLS                     *TLSConfig      `mapstructure:"tls"`
-    AutoStart               *AutoStartConfig `mapstructure:"auto_start"`
-    // UnixSocket enables an inbound Unix Domain Socket listener (client -> gateway)
-    // in addition to (or instead of) the TCP listener. nil (default) = disabled,
-    // backward compatible. Orthogonal to outbound UDS (backends.socket_path) and
-    // to auto_start (which launches fusion-mlx over TCP/UDS independently).
-    UnixSocket              *UnixSocketConfig `mapstructure:"unix_socket"`
-    // DirectCallsBlocked is the migration-phase hint bit surfaced on
-    // /v1/status (plan §9.3): operators flip it to true once fusion-mlx
-    // enforces strict auth (upstream fusion-mlx#1381), telling clients
-    // direct :11434 calls are expected to be rejected. Advisory only —
-    // the gateway never blocks anything based on it.
-    DirectCallsBlocked      bool             `mapstructure:"direct_calls_blocked"`
+	Host                    string `mapstructure:"host"`
+	Port                    int    `mapstructure:"port"`
+	LogLevel                string `mapstructure:"log_level"`
+	GracefulShutdownTimeout int    `mapstructure:"graceful_shutdown_timeout"`
+	MaxRequestBodySize      int64  `mapstructure:"max_request_body_size"`
+	// ProxyMaxBodySize caps request bodies on reverse-proxy paths (model-hub,
+	// fusion-mlx admin/fine-tune, /stats, model load/unload). 0 = default
+	// (maxProxyBodySize, 256 MiB). E5 (audit): proxy paths forwarded r.Body to
+	// httputil.ReverseProxy with no cap → unbounded body OOMs fusion-mlx.
+	ProxyMaxBodySize int64 `mapstructure:"proxy_max_body_size"`
+	// MaxOutputTokens caps a client-supplied max_tokens before the request is
+	// proxied (#528): the gateway clamps the value so behavior stays
+	// consistent regardless of backend (some upstreams reject oversized
+	// values, pay-per-token clouds may not). 0 = disabled (default — no
+	// behavior change; set an explicit ceiling to enable).
+	MaxOutputTokens int              `mapstructure:"max_output_tokens"`
+	EnablePProf     bool             `mapstructure:"enable_pprof"`
+	TLS             *TLSConfig       `mapstructure:"tls"`
+	AutoStart       *AutoStartConfig `mapstructure:"auto_start"`
+	// UnixSocket enables an inbound Unix Domain Socket listener (client -> gateway)
+	// in addition to (or instead of) the TCP listener. nil (default) = disabled,
+	// backward compatible. Orthogonal to outbound UDS (backends.socket_path) and
+	// to auto_start (which launches fusion-mlx over TCP/UDS independently).
+	UnixSocket *UnixSocketConfig `mapstructure:"unix_socket"`
+	// DirectCallsBlocked is the migration-phase hint bit surfaced on
+	// /v1/status (plan §9.3): operators flip it to true once fusion-mlx
+	// enforces strict auth (upstream fusion-mlx#1381), telling clients
+	// direct :11434 calls are expected to be rejected. Advisory only —
+	// the gateway never blocks anything based on it.
+	DirectCallsBlocked bool `mapstructure:"direct_calls_blocked"`
 }
 
 // UnixSocketConfig configures the inbound UDS listener. Path is the socket
 // file; Mode is the permission bits applied via os.Chmod (default 0660).
 type UnixSocketConfig struct {
-    Enabled bool   `mapstructure:"enabled"`
-    Path    string `mapstructure:"path"` // e.g. /var/run/fusion-gateway.sock
-    Mode    uint32 `mapstructure:"mode"` // 0 = default 0660
+	Enabled bool   `mapstructure:"enabled"`
+	Path    string `mapstructure:"path"` // e.g. /var/run/fusion-gateway.sock
+	Mode    uint32 `mapstructure:"mode"` // 0 = default 0660
 }
 
 // AutoStartConfig configures the standalone fallback that launches fusion-mlx
@@ -112,142 +112,142 @@ type UnixSocketConfig struct {
 // supervisor is the intended path on managed hosts; auto_start is for
 // non-supervisor environments (bare gateway, single-binary, CI).
 type AutoStartConfig struct {
-    Enabled  bool   `mapstructure:"enabled"`
-    Command  string `mapstructure:"command"`  // e.g. "~/fusion/fusion-mlx/start.sh start"
-    StopCmd  string `mapstructure:"stop_cmd"` // e.g. "~/fusion/fusion-mlx/start.sh stop"
-    WaitURL  string `mapstructure:"wait_url"` // e.g. "http://127.0.0.1:11434/health"
-    WaitSecs int    `mapstructure:"wait_secs"` // max seconds to wait for health check
+	Enabled  bool   `mapstructure:"enabled"`
+	Command  string `mapstructure:"command"`   // e.g. "~/fusion/fusion-mlx/start.sh start"
+	StopCmd  string `mapstructure:"stop_cmd"`  // e.g. "~/fusion/fusion-mlx/start.sh stop"
+	WaitURL  string `mapstructure:"wait_url"`  // e.g. "http://127.0.0.1:11434/health"
+	WaitSecs int    `mapstructure:"wait_secs"` // max seconds to wait for health check
 }
 
 type AuthKeyConfig struct {
-    Key             string            `mapstructure:"key"`
-    Name            string            `mapstructure:"name"`
-    AllowedBackends []string          `mapstructure:"allowed_backends"`
-    AllowedModels   []string          `mapstructure:"allowed_models"`
-    ModelModules    []string          `mapstructure:"model_modules"`
-    RPM             int               `mapstructure:"rpm"`
-    TPM             int               `mapstructure:"tpm"`
-    // Unlimited (#594) is the explicit opt-in to the key plane's
-    // "rpm/tpm 0 = unlimited" back-compat semantics for a NON-admin entry.
-    // Without it a zero cap fails gateway startup with the entry named —
-    // copy-pasting an admin-style entry no longer silently mints an
-    // unlimited key.
-    Unlimited       bool              `mapstructure:"unlimited"`
-    ExpiresAt        string            `mapstructure:"expires_at"`
-    BudgetLimit      float64           `mapstructure:"budget_limit"`
-    DailyBudgetLimit float64           `mapstructure:"daily_budget_limit"`
-        // TeamID is the tenant this key belongs to, resolved from the store's
-    // key->team binding (Store.GetTeamByKey) at auth time. Issue #150 Gap1:
-    // gateway-derived tenant identity, NOT a client-supplied header. Empty
-    // when the key has no team binding (master key, legacy keys).
-    TeamID           string            `mapstructure:"team_id"`
-    // Scopes (#262 K2): module×action grants for /v1/* enforcement. Populated
-    // from the store entry at auth time; config-file keys rarely carry it.
-    Scopes           []string          `mapstructure:"scopes"`
-    // ExchangeOnly (#595): the credential works ONLY to mint short-lived
-    // scoped tokens at POST /auth/api/token/exchange — it is rejected on
-    // /v1/* paths. Bootstrap credential for client-side / sub-app
-    // integrations that should never hold a long-lived full-plane key.
-    ExchangeOnly     bool              `mapstructure:"exchange_only"`
-    // RolloutTap (#608): per-key override for the rollout tap mirror —
-    // explicit false DENIES even when the tenant is allowlisted (deny beats
-    // allow); explicit true ALLOWS even when the tenant is not listed; nil
-    // (unset) inherits the tenant/global tap decision.
-    RolloutTap       *bool             `mapstructure:"rollout_tap"`
+	Key             string   `mapstructure:"key"`
+	Name            string   `mapstructure:"name"`
+	AllowedBackends []string `mapstructure:"allowed_backends"`
+	AllowedModels   []string `mapstructure:"allowed_models"`
+	ModelModules    []string `mapstructure:"model_modules"`
+	RPM             int      `mapstructure:"rpm"`
+	TPM             int      `mapstructure:"tpm"`
+	// Unlimited (#594) is the explicit opt-in to the key plane's
+	// "rpm/tpm 0 = unlimited" back-compat semantics for a NON-admin entry.
+	// Without it a zero cap fails gateway startup with the entry named —
+	// copy-pasting an admin-style entry no longer silently mints an
+	// unlimited key.
+	Unlimited        bool    `mapstructure:"unlimited"`
+	ExpiresAt        string  `mapstructure:"expires_at"`
+	BudgetLimit      float64 `mapstructure:"budget_limit"`
+	DailyBudgetLimit float64 `mapstructure:"daily_budget_limit"`
+	// TeamID is the tenant this key belongs to, resolved from the store's
+	// key->team binding (Store.GetTeamByKey) at auth time. Issue #150 Gap1:
+	// gateway-derived tenant identity, NOT a client-supplied header. Empty
+	// when the key has no team binding (master key, legacy keys).
+	TeamID string `mapstructure:"team_id"`
+	// Scopes (#262 K2): module×action grants for /v1/* enforcement. Populated
+	// from the store entry at auth time; config-file keys rarely carry it.
+	Scopes []string `mapstructure:"scopes"`
+	// ExchangeOnly (#595): the credential works ONLY to mint short-lived
+	// scoped tokens at POST /auth/api/token/exchange — it is rejected on
+	// /v1/* paths. Bootstrap credential for client-side / sub-app
+	// integrations that should never hold a long-lived full-plane key.
+	ExchangeOnly bool `mapstructure:"exchange_only"`
+	// RolloutTap (#608): per-key override for the rollout tap mirror —
+	// explicit false DENIES even when the tenant is allowlisted (deny beats
+	// allow); explicit true ALLOWS even when the tenant is not listed; nil
+	// (unset) inherits the tenant/global tap decision.
+	RolloutTap *bool `mapstructure:"rollout_tap"`
 }
 
 type AuthConfig struct {
-    Enabled     bool            `mapstructure:"enabled"`
-    APIKeys     []AuthKeyConfig `mapstructure:"api_keys"`
-    Passthrough bool            `mapstructure:"passthrough"`
-    MasterKey   string          `mapstructure:"master_key"`
-    // KeyRotationGrace (#262 K2): after a key rotation, the previous key
-    // stays valid until this window elapses (dual-active grace). Default 24h.
-    KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
-    // AcceptBackendKeys (#327): opt-in — also accept a Bearer/X-API-Key
-    // credential that matches a configured local backend's api_key (e.g.
-    // fusion-mlx's fg-admin-key from ~/.fusion-mlx/settings.json). Lets
-    // same-machine clients reuse the key fusion-mlx itself accepts instead
-    // of provisioning a separate gateway key. Default OFF: a backend key
-    // grants full gateway access (cloud routing included), so it stays
-    // operator-explicit.
-    AcceptBackendKeys bool `mapstructure:"accept_backend_keys"`
-    // TokenExchange (#595): mint short-lived scoped RS256 JWTs from a
-    // bootstrap credential (API key or shell session token). Disabled by
-    // default; when enabled the gateway generates + persists an RSA signing
-    // key in data_dir and serves its JWKS at /.well-known/jwks.json.
-    TokenExchange TokenExchangeConfig `mapstructure:"token_exchange"`
+	Enabled     bool            `mapstructure:"enabled"`
+	APIKeys     []AuthKeyConfig `mapstructure:"api_keys"`
+	Passthrough bool            `mapstructure:"passthrough"`
+	MasterKey   string          `mapstructure:"master_key"`
+	// KeyRotationGrace (#262 K2): after a key rotation, the previous key
+	// stays valid until this window elapses (dual-active grace). Default 24h.
+	KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
+	// AcceptBackendKeys (#327): opt-in — also accept a Bearer/X-API-Key
+	// credential that matches a configured local backend's api_key (e.g.
+	// fusion-mlx's fg-admin-key from ~/.fusion-mlx/settings.json). Lets
+	// same-machine clients reuse the key fusion-mlx itself accepts instead
+	// of provisioning a separate gateway key. Default OFF: a backend key
+	// grants full gateway access (cloud routing included), so it stays
+	// operator-explicit.
+	AcceptBackendKeys bool `mapstructure:"accept_backend_keys"`
+	// TokenExchange (#595): mint short-lived scoped RS256 JWTs from a
+	// bootstrap credential (API key or shell session token). Disabled by
+	// default; when enabled the gateway generates + persists an RSA signing
+	// key in data_dir and serves its JWKS at /.well-known/jwks.json.
+	TokenExchange TokenExchangeConfig `mapstructure:"token_exchange"`
 }
 
 type TokenExchangeConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // MaxTTL caps the requested token lifetime on every exchange. Minted
-    // tokens also never outlive the bootstrap credential's own expiry.
-    MaxTTL time.Duration `mapstructure:"max_ttl"`
+	Enabled bool `mapstructure:"enabled"`
+	// MaxTTL caps the requested token lifetime on every exchange. Minted
+	// tokens also never outlive the bootstrap credential's own expiry.
+	MaxTTL time.Duration `mapstructure:"max_ttl"`
 }
 
 // RolloutTapConfig (#608): chat-traffic mirroring into the rollout sink.
 // Routes are fixed (both /v1/chat/completions and /v1/completions); the
 // opt-in matrix lives on tenants + the per-key rollout_tap override.
 type RolloutTapConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // SinkPath is the local JSONL file (100% offline, no egress). Required
-    // when enabled.
-    SinkPath string `mapstructure:"sink_path"`
-    // ContentMode: "redact" (default) drops message content keeping the
-    // shape/length; "raw" stores verbatim content — explicit opt-in only.
-    ContentMode string `mapstructure:"content_mode"`
-    // Tenants allowlists the tapped tenants; empty = all tenants when the
-    // plane is enabled.
-    Tenants []string `mapstructure:"tenants"`
-    // MaxQueue bounds the async write queue; overflow drops records loudly
-    // (isolation contract: the sink never slows the hot path).
-    MaxQueue int `mapstructure:"max_queue"`
-    // CaptureMaxBytes bounds the response capture buffer per request; a
-    // larger response is skipped (logged), never buffered unbounded.
-    CaptureMaxBytes int `mapstructure:"capture_max_bytes"`
+	Enabled bool `mapstructure:"enabled"`
+	// SinkPath is the local JSONL file (100% offline, no egress). Required
+	// when enabled.
+	SinkPath string `mapstructure:"sink_path"`
+	// ContentMode: "redact" (default) drops message content keeping the
+	// shape/length; "raw" stores verbatim content — explicit opt-in only.
+	ContentMode string `mapstructure:"content_mode"`
+	// Tenants allowlists the tapped tenants; empty = all tenants when the
+	// plane is enabled.
+	Tenants []string `mapstructure:"tenants"`
+	// MaxQueue bounds the async write queue; overflow drops records loudly
+	// (isolation contract: the sink never slows the hot path).
+	MaxQueue int `mapstructure:"max_queue"`
+	// CaptureMaxBytes bounds the response capture buffer per request; a
+	// larger response is skipped (logged), never buffered unbounded.
+	CaptureMaxBytes int `mapstructure:"capture_max_bytes"`
 }
 
 type RateLimitConfig struct {
-    Enabled        bool `mapstructure:"enabled"`
-    GlobalRPM      int  `mapstructure:"global_rpm"`
-    GlobalTPM      int  `mapstructure:"global_tpm"`
-    KeyEnforcement bool `mapstructure:"key_enforcement"`
-    // AnonymousRPM caps requests-per-minute from a single client IP when no API
-    // key is in play (auth.enabled=false or passthrough). N5 (audit): the
-    // anonymous path was fully unlimited — a single unauthenticated host could
-    // fan out unbounded requests. 0 disables the per-IP cap (back-compat).
-    AnonymousRPM int `mapstructure:"anonymous_rpm"`
+	Enabled        bool `mapstructure:"enabled"`
+	GlobalRPM      int  `mapstructure:"global_rpm"`
+	GlobalTPM      int  `mapstructure:"global_tpm"`
+	KeyEnforcement bool `mapstructure:"key_enforcement"`
+	// AnonymousRPM caps requests-per-minute from a single client IP when no API
+	// key is in play (auth.enabled=false or passthrough). N5 (audit): the
+	// anonymous path was fully unlimited — a single unauthenticated host could
+	// fan out unbounded requests. 0 disables the per-IP cap (back-compat).
+	AnonymousRPM int `mapstructure:"anonymous_rpm"`
 }
 
 type LocalPriorityConfig struct {
-    Enabled               bool          `mapstructure:"enabled"`
-    MaxSystemMemoryRatio  float64       `mapstructure:"max_system_memory_ratio"`
-    MaxMLXMemoryRatio     float64       `mapstructure:"max_mlx_memory_ratio"`
-    MaxConcurrent         int           `mapstructure:"max_concurrent"`
-    SwapPageRateThreshold uint64        `mapstructure:"swap_page_rate_threshold"`
-    // QueueEnabled engages a bounded FIFO wait-queue for local inference slots
-    // ONLY when routing.mode=local (cloud disabled). When local is at
-    // max_concurrent, a request waits up to QueueTimeout instead of falling
-    // back to cloud (there is no cloud in mode=local). Default OFF — hybrid
-    // mode behavior is unchanged (#102 ADR-001).
-    QueueEnabled bool          `mapstructure:"queue_enabled"`
-    QueueTimeout time.Duration `mapstructure:"queue_timeout"`
+	Enabled               bool    `mapstructure:"enabled"`
+	MaxSystemMemoryRatio  float64 `mapstructure:"max_system_memory_ratio"`
+	MaxMLXMemoryRatio     float64 `mapstructure:"max_mlx_memory_ratio"`
+	MaxConcurrent         int     `mapstructure:"max_concurrent"`
+	SwapPageRateThreshold uint64  `mapstructure:"swap_page_rate_threshold"`
+	// QueueEnabled engages a bounded FIFO wait-queue for local inference slots
+	// ONLY when routing.mode=local (cloud disabled). When local is at
+	// max_concurrent, a request waits up to QueueTimeout instead of falling
+	// back to cloud (there is no cloud in mode=local). Default OFF — hybrid
+	// mode behavior is unchanged (#102 ADR-001).
+	QueueEnabled bool          `mapstructure:"queue_enabled"`
+	QueueTimeout time.Duration `mapstructure:"queue_timeout"`
 }
 
 type CircuitBreakerConfig struct {
-    FailureThreshold    int           `mapstructure:"failure_threshold"`
-    Timeout             time.Duration `mapstructure:"timeout"`
-    HalfOpenMaxRequests int           `mapstructure:"half_open_max_requests"`
-    SuccessThreshold    int           `mapstructure:"success_threshold"`
+	FailureThreshold    int           `mapstructure:"failure_threshold"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	HalfOpenMaxRequests int           `mapstructure:"half_open_max_requests"`
+	SuccessThreshold    int           `mapstructure:"success_threshold"`
 }
 
 type FallbackConfig struct {
-    Enabled               bool              `mapstructure:"enabled"`
-    CloudDefault          string            `mapstructure:"cloud_default"`
-    ModelMapping          map[string]string `mapstructure:"model_mapping"`
-    ContextWindowFallback map[string]string `mapstructure:"context_window_fallback"`
-    Overflow              OverflowConfig    `mapstructure:"overflow"`
+	Enabled               bool              `mapstructure:"enabled"`
+	CloudDefault          string            `mapstructure:"cloud_default"`
+	ModelMapping          map[string]string `mapstructure:"model_mapping"`
+	ContextWindowFallback map[string]string `mapstructure:"context_window_fallback"`
+	Overflow              OverflowConfig    `mapstructure:"overflow"`
 }
 
 // OverflowConfig productizes the runtime cloud-overflow path (#301): when a
@@ -267,36 +267,36 @@ type FallbackConfig struct {
 //     the ceiling, further overflows are refused with an explicit error —
 //     never a silent fallback to the broken local backend. 0 = unlimited.
 type OverflowConfig struct {
-    Enabled     bool          `mapstructure:"enabled"`
-    Cooldown    time.Duration `mapstructure:"cooldown"`
-    CostCeiling float64       `mapstructure:"cost_ceiling"`
+	Enabled     bool          `mapstructure:"enabled"`
+	Cooldown    time.Duration `mapstructure:"cooldown"`
+	CostCeiling float64       `mapstructure:"cost_ceiling"`
 }
 
 type NegotiationConfig struct {
-    DisableFusionMLXRouting bool   `mapstructure:"disable_fusion_mlx_routing"`
-    RouteHeader             string `mapstructure:"route_header"`
-    RouteHeaderValue        string `mapstructure:"route_header_value"`
+	DisableFusionMLXRouting bool   `mapstructure:"disable_fusion_mlx_routing"`
+	RouteHeader             string `mapstructure:"route_header"`
+	RouteHeaderValue        string `mapstructure:"route_header_value"`
 }
 
 type TokenTierRule struct {
-    MaxTokens int    `mapstructure:"max_tokens"`
-    Backend   string `mapstructure:"backend"`
+	MaxTokens int    `mapstructure:"max_tokens"`
+	Backend   string `mapstructure:"backend"`
 }
 
 type TokenTierConfig struct {
-    Enabled bool            `mapstructure:"enabled"`
-    Metric  string          `mapstructure:"metric"`
-    Rules   []TokenTierRule `mapstructure:"rules"`
+	Enabled bool            `mapstructure:"enabled"`
+	Metric  string          `mapstructure:"metric"`
+	Rules   []TokenTierRule `mapstructure:"rules"`
 }
 
 type RatioTierRule struct {
-    MaxRatio float64 `mapstructure:"max_ratio"`
-    Backend  string  `mapstructure:"backend"`
+	MaxRatio float64 `mapstructure:"max_ratio"`
+	Backend  string  `mapstructure:"backend"`
 }
 
 type RatioTierConfig struct {
-    Enabled bool            `mapstructure:"enabled"`
-    Rules   []RatioTierRule `mapstructure:"rules"`
+	Enabled bool            `mapstructure:"enabled"`
+	Rules   []RatioTierRule `mapstructure:"rules"`
 }
 
 // MultimodalConfig governs how image/audio-bearing /v1/messages and
@@ -317,9 +317,9 @@ type RatioTierConfig struct {
 // CloudModel — local-first when a VLM is loaded, cloud fallback otherwise.
 // Empty CloudBackend leaves the prior behavior (LocalModel-only).
 type MultimodalConfig struct {
-    LocalModel  string `mapstructure:"local_model"`
-    CloudBackend string `mapstructure:"cloud_backend"`
-    CloudModel  string `mapstructure:"cloud_model"`
+	LocalModel   string `mapstructure:"local_model"`
+	CloudBackend string `mapstructure:"cloud_backend"`
+	CloudModel   string `mapstructure:"cloud_model"`
 }
 
 // AgentTaskConfig governs the TaskRegistry backstop against unbounded growth
@@ -333,47 +333,47 @@ type MultimodalConfig struct {
 // cancels and evicts entries older than TTL. TTL=0 disables reaping (cap-only
 // protection). Set once at construction; tuning needs a restart.
 type AgentTaskConfig struct {
-    TTL            time.Duration `mapstructure:"ttl"`
-    MaxEntries     int           `mapstructure:"max_entries"`
-    ReaperInterval time.Duration `mapstructure:"reaper_interval"`
+	TTL            time.Duration `mapstructure:"ttl"`
+	MaxEntries     int           `mapstructure:"max_entries"`
+	ReaperInterval time.Duration `mapstructure:"reaper_interval"`
 }
 
 type RoutingConfig struct {
-    Mode                      string               `mapstructure:"mode"`
-    DefaultModel              string               `mapstructure:"default_model"`
-    // CloudModels is the cloud-routable model allowlist (issue #265). Empty
-    // (default) = no restriction, historical hybrid behavior. When non-empty,
-    // only models matching an entry may route to a cloud backend; everything
-    // else (local set, unknown names, empty model) is pinned to local
-    // fusion-mlx at P0.15 so no overload/token/ratio heuristic can divert it
-    // to a cloud endpoint that cannot serve the name. Entries use the auth
-    // allowed_models pattern convention: exact match, "*", or trailing "*"
-    // prefix (case-insensitive). NOTE: fallback.model_mapping is applied by
-    // the handler AFTER Decide, so entries must be client-facing names
-    // (e.g. "claude-*"), not the mapped cloud model id.
-    CloudModels               []string             `mapstructure:"cloud_models"`
-    TokenThreshold            int                  `mapstructure:"token_threshold"`
-    ModelContextLimit         map[string]int       `mapstructure:"model_context_limit"`
-    OutputInputRatioThreshold float64              `mapstructure:"output_input_ratio_threshold"`
-    OutputInputRatioMinInputTokens int             `mapstructure:"output_input_ratio_min_input_tokens"`
-    RatioTiers                RatioTierConfig      `mapstructure:"ratio_tiers"`
-    TokenTiers                TokenTierConfig      `mapstructure:"token_tiers"`
-    LocalPriority              LocalPriorityConfig  `mapstructure:"local_priority"`
-    CircuitBreaker             CircuitBreakerConfig `mapstructure:"circuit_breaker"`
-    Fallback                   FallbackConfig       `mapstructure:"fallback"`
-    Negotiation                NegotiationConfig    `mapstructure:"negotiation"`
-    RateLimit                  RateLimitConfig      `mapstructure:"rate_limit"`
-    Retry                      RetryConfig          `mapstructure:"retry"`
-    Stream                     StreamConfig         `mapstructure:"stream"`
-    IntentClassifier           IntentClassifierConfig `mapstructure:"intent_classifier"`
-    HeuristicClassifier        HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
-    Webhooks                   WebhooksConfig         `mapstructure:"webhooks"`
-    Multimodal                 MultimodalConfig       `mapstructure:"multimodal"`
-    AgentTasks                 AgentTaskConfig        `mapstructure:"agent_tasks"`
-    TierQueue                  TierQueueConfig        `mapstructure:"tier_queue"`
-    BnupMode                   bool                   `mapstructure:"bnup_mode"`
-    BnupModel                  string                 `mapstructure:"bnup_model"`
-    BnupGrammar                string                 `mapstructure:"bnup_grammar"`
+	Mode         string `mapstructure:"mode"`
+	DefaultModel string `mapstructure:"default_model"`
+	// CloudModels is the cloud-routable model allowlist (issue #265). Empty
+	// (default) = no restriction, historical hybrid behavior. When non-empty,
+	// only models matching an entry may route to a cloud backend; everything
+	// else (local set, unknown names, empty model) is pinned to local
+	// fusion-mlx at P0.15 so no overload/token/ratio heuristic can divert it
+	// to a cloud endpoint that cannot serve the name. Entries use the auth
+	// allowed_models pattern convention: exact match, "*", or trailing "*"
+	// prefix (case-insensitive). NOTE: fallback.model_mapping is applied by
+	// the handler AFTER Decide, so entries must be client-facing names
+	// (e.g. "claude-*"), not the mapped cloud model id.
+	CloudModels                    []string                  `mapstructure:"cloud_models"`
+	TokenThreshold                 int                       `mapstructure:"token_threshold"`
+	ModelContextLimit              map[string]int            `mapstructure:"model_context_limit"`
+	OutputInputRatioThreshold      float64                   `mapstructure:"output_input_ratio_threshold"`
+	OutputInputRatioMinInputTokens int                       `mapstructure:"output_input_ratio_min_input_tokens"`
+	RatioTiers                     RatioTierConfig           `mapstructure:"ratio_tiers"`
+	TokenTiers                     TokenTierConfig           `mapstructure:"token_tiers"`
+	LocalPriority                  LocalPriorityConfig       `mapstructure:"local_priority"`
+	CircuitBreaker                 CircuitBreakerConfig      `mapstructure:"circuit_breaker"`
+	Fallback                       FallbackConfig            `mapstructure:"fallback"`
+	Negotiation                    NegotiationConfig         `mapstructure:"negotiation"`
+	RateLimit                      RateLimitConfig           `mapstructure:"rate_limit"`
+	Retry                          RetryConfig               `mapstructure:"retry"`
+	Stream                         StreamConfig              `mapstructure:"stream"`
+	IntentClassifier               IntentClassifierConfig    `mapstructure:"intent_classifier"`
+	HeuristicClassifier            HeuristicClassifierConfig `mapstructure:"heuristic_classifier"`
+	Webhooks                       WebhooksConfig            `mapstructure:"webhooks"`
+	Multimodal                     MultimodalConfig          `mapstructure:"multimodal"`
+	AgentTasks                     AgentTaskConfig           `mapstructure:"agent_tasks"`
+	TierQueue                      TierQueueConfig           `mapstructure:"tier_queue"`
+	BnupMode                       bool                      `mapstructure:"bnup_mode"`
+	BnupModel                      string                    `mapstructure:"bnup_model"`
+	BnupGrammar                    string                    `mapstructure:"bnup_grammar"`
 }
 
 // TierQueueConfig configures the #159 3-tier priority admission queue
@@ -383,11 +383,11 @@ type RoutingConfig struct {
 // when routing.mode=local AND tier_queue.enabled: in hybrid mode the engine
 // falls back to cloud instead of queueing.
 type TierQueueConfig struct {
-    Enabled        bool          `mapstructure:"enabled"`
-    MaxConcurrent  int           `mapstructure:"max_concurrent"`
-    QueueTimeout   time.Duration `mapstructure:"queue_timeout"`
-    HeavyGuarantee int           `mapstructure:"heavy_guarantee"`
-    LightGuarantee int           `mapstructure:"light_guarantee"`
+	Enabled        bool          `mapstructure:"enabled"`
+	MaxConcurrent  int           `mapstructure:"max_concurrent"`
+	QueueTimeout   time.Duration `mapstructure:"queue_timeout"`
+	HeavyGuarantee int           `mapstructure:"heavy_guarantee"`
+	LightGuarantee int           `mapstructure:"light_guarantee"`
 }
 
 // IntentClassifierConfig configures the D4 semantic intent layer (issue #22).
@@ -397,40 +397,40 @@ type TierQueueConfig struct {
 // When disabled, the engine uses NoopClassifier and the existing P0-P7 rule
 // chain decides routing unchanged.
 type IntentClassifierConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // Type selects the classifier implementation: "router_light" (default,
-    // 1B LoRA adapter via /v1/chat/completions), "laya" (laya-mlx typed
-    // decision model via /v1/laya/decide, sub-15ms), or "noop". When empty
-    // defaults to "router_light" for backward compatibility. Issue #191.
-    Type string `mapstructure:"type"`
-    // Endpoint is the fusion-mlx /v1/chat/completions base URL (e.g.
-    // "http://127.0.0.1:11434"). Defaults to the local fusion-mlx address.
-    Endpoint string `mapstructure:"endpoint"`
-    // BaseModel is the LoRA base model id served by fusion-mlx (the adapter is
-    // applied on top of it). e.g. "mlx-community/Llama-3.2-1B-Instruct-4bit".
-    BaseModel string `mapstructure:"base_model"`
-    // Model is a backward-compatible alias for the scaffolding config; when set
-    // it overrides BaseModel.
-    Model string `mapstructure:"model"`
-    // Adapter is the absolute path to the served LoRA adapter directory
-    // (the directory containing adapters.safetensors). Sent as the OpenAI
-    // request "adapters" field so fusion-mlx hot-loads the derived engine.
-    Adapter string `mapstructure:"adapter"`
-    // APIKey authenticates the classify request to fusion-mlx if auth enabled.
-    APIKey        string        `mapstructure:"api_key"`
-    Timeout       time.Duration `mapstructure:"timeout"`
-    MinConfidence float64       `mapstructure:"min_confidence"`
-    // GuardSensitiveThreshold is the is_sensitive noul value (0..1) from the
-    // router preset that triggers a guard-preset safety check before the
-    // request proceeds to fusion-mlx. 0 = guard disabled. Issue #195 / AC6.
-    GuardSensitiveThreshold float64 `mapstructure:"guard_sensitive_threshold"`
-    // Guard dimension block thresholds (preset=guard answers). When the guard
-    // check runs, any dimension at or above its threshold blocks the request
-    // with HTTP 403. Issue #195 / AC5.
-    GuardJailbreakThreshold      float64 `mapstructure:"guard_jailbreak_threshold"`
-    GuardInjectionThreshold      float64 `mapstructure:"guard_injection_threshold"`
-    GuardSensitiveDataThreshold  float64 `mapstructure:"guard_sensitive_data_threshold"`
-    GuardHarmSeverityThreshold   float64 `mapstructure:"guard_harm_severity_threshold"`
+	Enabled bool `mapstructure:"enabled"`
+	// Type selects the classifier implementation: "router_light" (default,
+	// 1B LoRA adapter via /v1/chat/completions), "laya" (laya-mlx typed
+	// decision model via /v1/laya/decide, sub-15ms), or "noop". When empty
+	// defaults to "router_light" for backward compatibility. Issue #191.
+	Type string `mapstructure:"type"`
+	// Endpoint is the fusion-mlx /v1/chat/completions base URL (e.g.
+	// "http://127.0.0.1:11434"). Defaults to the local fusion-mlx address.
+	Endpoint string `mapstructure:"endpoint"`
+	// BaseModel is the LoRA base model id served by fusion-mlx (the adapter is
+	// applied on top of it). e.g. "mlx-community/Llama-3.2-1B-Instruct-4bit".
+	BaseModel string `mapstructure:"base_model"`
+	// Model is a backward-compatible alias for the scaffolding config; when set
+	// it overrides BaseModel.
+	Model string `mapstructure:"model"`
+	// Adapter is the absolute path to the served LoRA adapter directory
+	// (the directory containing adapters.safetensors). Sent as the OpenAI
+	// request "adapters" field so fusion-mlx hot-loads the derived engine.
+	Adapter string `mapstructure:"adapter"`
+	// APIKey authenticates the classify request to fusion-mlx if auth enabled.
+	APIKey        string        `mapstructure:"api_key"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+	MinConfidence float64       `mapstructure:"min_confidence"`
+	// GuardSensitiveThreshold is the is_sensitive noul value (0..1) from the
+	// router preset that triggers a guard-preset safety check before the
+	// request proceeds to fusion-mlx. 0 = guard disabled. Issue #195 / AC6.
+	GuardSensitiveThreshold float64 `mapstructure:"guard_sensitive_threshold"`
+	// Guard dimension block thresholds (preset=guard answers). When the guard
+	// check runs, any dimension at or above its threshold blocks the request
+	// with HTTP 403. Issue #195 / AC5.
+	GuardJailbreakThreshold     float64 `mapstructure:"guard_jailbreak_threshold"`
+	GuardInjectionThreshold     float64 `mapstructure:"guard_injection_threshold"`
+	GuardSensitiveDataThreshold float64 `mapstructure:"guard_sensitive_data_threshold"`
+	GuardHarmSeverityThreshold  float64 `mapstructure:"guard_harm_severity_threshold"`
 }
 
 // HeuristicClassifierConfig configures the in-process sub-ms intent classifier
@@ -440,29 +440,29 @@ type IntentClassifierConfig struct {
 // LocalBackend + LoRA hot-swap (code_adapter), skipping the LLM classifier.
 // Disabled by default (backward compatible).
 type HeuristicClassifierConfig struct {
-    Enabled       bool          `mapstructure:"enabled"`
-    // CodeAdapter is the LoRA adapter name (e.g. "lora-code") to hot-mount on
-    // fusion-mlx via the per-request "adapters" field when a code intent is
-    // detected. Empty = code intent detected but no adapter to mount, so the
-    // engine defers to the rule chain (bare base model).
-    CodeAdapter   string        `mapstructure:"code_adapter"`
-    // CacheSize bounds the in-memory heuristic cache (LRU). 0 = no cache.
-    CacheSize     int           `mapstructure:"cache_size"`
-    // CacheTTL is the per-entry time-to-live. Stale entries are evicted on read.
-    CacheTTL      time.Duration `mapstructure:"cache_ttl"`
-    // MinConfidence is the score threshold above which a code intent dispatch
-    // fires. Below it the classifier defers to the LLM classifier / rule chain.
-    MinConfidence float64       `mapstructure:"min_confidence"`
-    // TextScanBytes caps how many bytes of the request text are hashed into the
-    // cache key / scanned for patterns. Bounds work on large prompts.
-    TextScanBytes int           `mapstructure:"text_scan_bytes"`
+	Enabled bool `mapstructure:"enabled"`
+	// CodeAdapter is the LoRA adapter name (e.g. "lora-code") to hot-mount on
+	// fusion-mlx via the per-request "adapters" field when a code intent is
+	// detected. Empty = code intent detected but no adapter to mount, so the
+	// engine defers to the rule chain (bare base model).
+	CodeAdapter string `mapstructure:"code_adapter"`
+	// CacheSize bounds the in-memory heuristic cache (LRU). 0 = no cache.
+	CacheSize int `mapstructure:"cache_size"`
+	// CacheTTL is the per-entry time-to-live. Stale entries are evicted on read.
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
+	// MinConfidence is the score threshold above which a code intent dispatch
+	// fires. Below it the classifier defers to the LLM classifier / rule chain.
+	MinConfidence float64 `mapstructure:"min_confidence"`
+	// TextScanBytes caps how many bytes of the request text are hashed into the
+	// cache key / scanned for patterns. Bounds work on large prompts.
+	TextScanBytes int `mapstructure:"text_scan_bytes"`
 }
 
 // WebhooksConfig holds inbound webhook receivers. fusion-model-hub (and other
 // upstream sources) POST lifecycle events here so the gateway can react without
 // polling. Each sub-config pins its own shared secret for HMAC verification.
 type WebhooksConfig struct {
-    ModelHub ModelHubWebhookConfig `mapstructure:"model_hub"`
+	ModelHub ModelHubWebhookConfig `mapstructure:"model_hub"`
 }
 
 // ModelHubWebhookConfig configures the POST /webhooks/model-hub receiver.
@@ -474,15 +474,15 @@ type WebhooksConfig struct {
 // Enabled defaults to false (no receiver registered); Enabled=true requires a
 // non-empty Secret (validated in validate()).
 type ModelHubWebhookConfig struct {
-    Enabled bool   `mapstructure:"enabled"`
-    Secret  string `mapstructure:"secret"`
+	Enabled bool   `mapstructure:"enabled"`
+	Secret  string `mapstructure:"secret"`
 }
 
 type RetryConfig struct {
-    MaxRetries           int           `mapstructure:"max_retries"`
-    InitialBackoff       time.Duration `mapstructure:"initial_backoff"`
-    MaxBackoff           time.Duration `mapstructure:"max_backoff"`
-    RetryableStatusCodes []int         `mapstructure:"retryable_status_codes"`
+	MaxRetries           int           `mapstructure:"max_retries"`
+	InitialBackoff       time.Duration `mapstructure:"initial_backoff"`
+	MaxBackoff           time.Duration `mapstructure:"max_backoff"`
+	RetryableStatusCodes []int         `mapstructure:"retryable_status_codes"`
 }
 
 // StreamConfig tunes SSE forwarding for /v1/messages against upstreams that
@@ -493,445 +493,445 @@ type RetryConfig struct {
 // and synthesizes a clean message_stop so the client gets a short-but-complete
 // response it can retry. Both <=0 disable the hardened path (backward compat).
 type StreamConfig struct {
-    KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
-    IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
-    // Resume (issue #116/#139): mid-stream-reconnect replay for the local MLX
-    // path. ResumeEnabled gates stream_id assignment + per-event id + the
-    // rolling buffer + the replay endpoints (/v1/stream/{stream_id}/events
-    // namespace-neutral #139, or /v1/messages/{stream_id}/events). The live
-    // stream response advertises X-Fusion-Stream-Resume-URL so a client
-    // discovers the replay path without hardcoding a namespace. Disabled by
-    // default — the buffered local path keeps the upstream pump alive past a
-    // client disconnect (so a reconnect can resume), which holds the local slot
-    // for the whole generation even after the client left. Cloud/first-party
-    // Anthropic paths are never resumable (upstream has no cursor protocol).
-    ResumeEnabled   bool          `mapstructure:"resume_enabled"`
-    ResumeMaxEvents int           `mapstructure:"resume_max_events"`
-    ResumeMaxBytes  int           `mapstructure:"resume_max_bytes"`
-    ResumeTTL       time.Duration `mapstructure:"resume_ttl"`
-    // ResumeMaxEntries is the GLOBAL cap on the number of concurrent stream
-    // buffers (audit R7). resume_max_events/bytes bound ONE stream's rolling
-    // window; this bounds how many streams can be buffered at once so a burst of
-    // 1000 concurrent resumable SSE does not grow the buffers map to 1000 ×
-    // maxBytes (1 GiB at 1 MiB each) before the periodic TTL reaper ticks. On
-    // reaching the cap, Open evicts the oldest entry (oldest createdAt) — the
-    // newest live streams stay resumable, the oldest (likely finalized/abandoned)
-    // is dropped. 0 = unlimited (preserves the prior behavior for back-comat,
-    // but DefaultConfig seeds 1024).
-    ResumeMaxEntries int           `mapstructure:"resume_max_entries"`
-    // MaxRequestDuration (R9 audit): per-request ceiling on the whole stream
-    // lifetime. The stream HTTP client now uses Timeout:0 (R3) so Client.Timeout
-    // no longer caps the body read; without a server-side deadline a cloud
-    // backend configured Timeout:0 could stall a handler goroutine + client
-    // connection indefinitely. 600s is a generous ceiling above the 180s idle
-    // watchdog so it only catches true stalls, not legit long generation. 0 =
-    // no server-side deadline (back-compat, but not recommended — rely on
-    // watchdog + upstream timeouts only).
-    MaxRequestDuration time.Duration `mapstructure:"max_request_duration"`
-    // MaxConcurrentStreams (R10 audit): global cap on concurrent in-flight
-    // streams across all backends. The local path is already hard-capped by
-    // max_concurrent slots (RR4); this caps cloud fan-out so a request burst
-    // cannot exhaust FDs/goroutines against cloud providers. Acquired at stream
-    // handler entry; excess requests get 429. 0 = unlimited (back-compat).
-    MaxConcurrentStreams int `mapstructure:"max_concurrent_streams"`
+	KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
+	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
+	// Resume (issue #116/#139): mid-stream-reconnect replay for the local MLX
+	// path. ResumeEnabled gates stream_id assignment + per-event id + the
+	// rolling buffer + the replay endpoints (/v1/stream/{stream_id}/events
+	// namespace-neutral #139, or /v1/messages/{stream_id}/events). The live
+	// stream response advertises X-Fusion-Stream-Resume-URL so a client
+	// discovers the replay path without hardcoding a namespace. Disabled by
+	// default — the buffered local path keeps the upstream pump alive past a
+	// client disconnect (so a reconnect can resume), which holds the local slot
+	// for the whole generation even after the client left. Cloud/first-party
+	// Anthropic paths are never resumable (upstream has no cursor protocol).
+	ResumeEnabled   bool          `mapstructure:"resume_enabled"`
+	ResumeMaxEvents int           `mapstructure:"resume_max_events"`
+	ResumeMaxBytes  int           `mapstructure:"resume_max_bytes"`
+	ResumeTTL       time.Duration `mapstructure:"resume_ttl"`
+	// ResumeMaxEntries is the GLOBAL cap on the number of concurrent stream
+	// buffers (audit R7). resume_max_events/bytes bound ONE stream's rolling
+	// window; this bounds how many streams can be buffered at once so a burst of
+	// 1000 concurrent resumable SSE does not grow the buffers map to 1000 ×
+	// maxBytes (1 GiB at 1 MiB each) before the periodic TTL reaper ticks. On
+	// reaching the cap, Open evicts the oldest entry (oldest createdAt) — the
+	// newest live streams stay resumable, the oldest (likely finalized/abandoned)
+	// is dropped. 0 = unlimited (preserves the prior behavior for back-comat,
+	// but DefaultConfig seeds 1024).
+	ResumeMaxEntries int `mapstructure:"resume_max_entries"`
+	// MaxRequestDuration (R9 audit): per-request ceiling on the whole stream
+	// lifetime. The stream HTTP client now uses Timeout:0 (R3) so Client.Timeout
+	// no longer caps the body read; without a server-side deadline a cloud
+	// backend configured Timeout:0 could stall a handler goroutine + client
+	// connection indefinitely. 600s is a generous ceiling above the 180s idle
+	// watchdog so it only catches true stalls, not legit long generation. 0 =
+	// no server-side deadline (back-compat, but not recommended — rely on
+	// watchdog + upstream timeouts only).
+	MaxRequestDuration time.Duration `mapstructure:"max_request_duration"`
+	// MaxConcurrentStreams (R10 audit): global cap on concurrent in-flight
+	// streams across all backends. The local path is already hard-capped by
+	// max_concurrent slots (RR4); this caps cloud fan-out so a request burst
+	// cannot exhaust FDs/goroutines against cloud providers. Acquired at stream
+	// handler entry; excess requests get 429. 0 = unlimited (back-compat).
+	MaxConcurrentStreams int `mapstructure:"max_concurrent_streams"`
 }
 
 type CacheConfig struct {
-    Enabled      bool          `mapstructure:"enabled"`
-    MaxEntries   int           `mapstructure:"max_entries"`
-    TTL          time.Duration `mapstructure:"ttl"`
-    MaxMemoryMB  int           `mapstructure:"max_memory_mb"`
-    Backend      string        `mapstructure:"backend"`
-    Redis        RedisConfig   `mapstructure:"redis"`
-    WarmupFile   string        `mapstructure:"warmup_file"`
+	Enabled     bool          `mapstructure:"enabled"`
+	MaxEntries  int           `mapstructure:"max_entries"`
+	TTL         time.Duration `mapstructure:"ttl"`
+	MaxMemoryMB int           `mapstructure:"max_memory_mb"`
+	Backend     string        `mapstructure:"backend"`
+	Redis       RedisConfig   `mapstructure:"redis"`
+	WarmupFile  string        `mapstructure:"warmup_file"`
 }
 
 type RedisConfig struct {
-    Addr     string `mapstructure:"addr"`
-    Password string `mapstructure:"password"`
-    DB       int    `mapstructure:"db"`
-    PoolSize int    `mapstructure:"pool_size"`
+	Addr     string `mapstructure:"addr"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
+	PoolSize int    `mapstructure:"pool_size"`
 }
 
 type PIIConfig struct {
-    Enabled  bool           `mapstructure:"enabled"`
-    Action   string         `mapstructure:"action"`
-    Patterns []PIIPattern   `mapstructure:"patterns"`
-    // #128: reserved integration point for a future fusion-guard
-    // guard.redact.patterns.dump IPC contract (filed as fusion-guard#7).
-    // Default false → gateway uses the vendored SSOT (pii_patterns.go), no
-    // runtime guard dependency (guard-unreachable still functions by
-    // construction). When guard ships the dump method, flip this on and add
-    // the fetch+cache path; the drift test keeps the vendored set honest in
-    // the meantime. Do NOT add a fetch call while this is false (dead code).
-    GuardFetch bool `mapstructure:"guard_fetch"`
+	Enabled  bool         `mapstructure:"enabled"`
+	Action   string       `mapstructure:"action"`
+	Patterns []PIIPattern `mapstructure:"patterns"`
+	// #128: reserved integration point for a future fusion-guard
+	// guard.redact.patterns.dump IPC contract (filed as fusion-guard#7).
+	// Default false → gateway uses the vendored SSOT (pii_patterns.go), no
+	// runtime guard dependency (guard-unreachable still functions by
+	// construction). When guard ships the dump method, flip this on and add
+	// the fetch+cache path; the drift test keeps the vendored set honest in
+	// the meantime. Do NOT add a fetch call while this is false (dead code).
+	GuardFetch bool `mapstructure:"guard_fetch"`
 }
 
 type PIIPattern struct {
-    Name  string `mapstructure:"name"`
-    Regex string `mapstructure:"regex"`
+	Name  string `mapstructure:"name"`
+	Regex string `mapstructure:"regex"`
 }
 
 // GuardrailConfig (G4) is one link of the ordered guardrail chain. The chain
 // activates only when guardrails: is configured — an empty list preserves the
 // legacy single-point PII middleware behavior verbatim.
 type GuardrailConfig struct {
-    // Name labels the link in logs and metrics.
-    Name string `mapstructure:"name"`
-    // Type selects the builtin guard. Today: "pii" (the vendored guard SSOT
-    // pattern set + pii.patterns extensions). config.Validate rejects others.
-    Type string `mapstructure:"type"`
-    // Action for this link: log / deny / mask. Empty falls back to
-    // pii.action. deny short-circuits the request with a 400.
-    Action string `mapstructure:"action"`
-    // Enabled gates the link (default false — an explicit opt-in per link,
-    // consistent with pii.enabled).
-    Enabled bool `mapstructure:"enabled"`
+	// Name labels the link in logs and metrics.
+	Name string `mapstructure:"name"`
+	// Type selects the builtin guard. Today: "pii" (the vendored guard SSOT
+	// pattern set + pii.patterns extensions). config.Validate rejects others.
+	Type string `mapstructure:"type"`
+	// Action for this link: log / deny / mask. Empty falls back to
+	// pii.action. deny short-circuits the request with a 400.
+	Action string `mapstructure:"action"`
+	// Enabled gates the link (default false — an explicit opt-in per link,
+	// consistent with pii.enabled).
+	Enabled bool `mapstructure:"enabled"`
 }
 
 type CloudRoutingConfig struct {
-    Strategy     string         `mapstructure:"strategy"`
-    CloudWeights map[string]int `mapstructure:"cloud_weights"`
-    // CooldownSeconds (G1): after a cloud deployment fails
-    // FailureThreshold consecutive outcomes, exclude it from strategy
-    // selection for this window. 0 (default) disables cooldown entirely —
-    // every backend stays eligible, matching pre-G1 behavior.
-    CooldownSeconds int `mapstructure:"cooldown_seconds"`
-    // FailureThreshold is the consecutive-failure count that arms the
-    // cooldown. 0 means 1 (first failure cools the deployment) when
-    // CooldownSeconds > 0. Capped by config.Validate.
-    FailureThreshold int `mapstructure:"failure_threshold"`
+	Strategy     string         `mapstructure:"strategy"`
+	CloudWeights map[string]int `mapstructure:"cloud_weights"`
+	// CooldownSeconds (G1): after a cloud deployment fails
+	// FailureThreshold consecutive outcomes, exclude it from strategy
+	// selection for this window. 0 (default) disables cooldown entirely —
+	// every backend stays eligible, matching pre-G1 behavior.
+	CooldownSeconds int `mapstructure:"cooldown_seconds"`
+	// FailureThreshold is the consecutive-failure count that arms the
+	// cooldown. 0 means 1 (first failure cools the deployment) when
+	// CooldownSeconds > 0. Capped by config.Validate.
+	FailureThreshold int `mapstructure:"failure_threshold"`
 }
 
 type GCConfig struct {
-    Enabled            bool          `mapstructure:"enabled"`
-    IdleInterval       time.Duration `mapstructure:"idle_interval"`
-    MinIdleSinceLastGC time.Duration `mapstructure:"min_idle_since_last_gc"`
+	Enabled            bool          `mapstructure:"enabled"`
+	IdleInterval       time.Duration `mapstructure:"idle_interval"`
+	MinIdleSinceLastGC time.Duration `mapstructure:"min_idle_since_last_gc"`
 }
 
 type BackendConfig struct {
-    Type                string        `mapstructure:"type"`
-    BaseURL             string        `mapstructure:"base_url"`
-    APIKey              string        `mapstructure:"api_key"`
-    // APIKeyEnv names the environment variable holding this backend's key
-    // (plan §13.3): normalizeBackends resolves it into APIKey at load/
-    // reload time so plaintext keys never need to live in config.yaml.
-    // Takes precedence over an empty api_key; a set api_key with an empty
-    // api_key_env logs a deprecation WARN.
-    APIKeyEnv           string        `mapstructure:"api_key_env"`
-    Timeout             time.Duration `mapstructure:"timeout"`
-    HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
-    Priority            int           `mapstructure:"priority"`
-    Enabled             bool          `mapstructure:"enabled"`
-    Models              []string      `mapstructure:"models"`
-    GC                  GCConfig      `mapstructure:"gc"`
-    // SocketPath enables outbound Unix Domain Socket to this backend. When set,
-    // the adapter transport dials the unix socket instead of TCP; base_url is a
-    // dummy host (convention: http://unix/). Empty (default) = plain TCP.
-    SocketPath          string        `mapstructure:"socket_path"`
-    // MaxConnsPerHost caps the number of active (in-flight) connections the
-    // gateway will open to this single backend host at once. 0 = use the
-    // transport-factory default. RR11 (audit P2): without this cap Go's
-    // transport treats MaxConnsPerHost=0 as unlimited — a concurrent burst to a
-    // single-host backend (local fusion-mlx, or one cloud vendor) opens hundreds
-    // of simultaneous connections, exhausts file descriptors, and takes down the
-    // whole gateway process (accept, logs, other backends all fail).
-    MaxConnsPerHost     int           `mapstructure:"max_conns_per_host"`
-    // MaxIdleConnsPerHost caps idle keep-alive connections cached per host. 0 =
-    // use the transport-factory default (64). Lowering it shrinks the idle pool
-    // (and the idle FD footprint) for low-QPS backends.
-    MaxIdleConnsPerHost int           `mapstructure:"max_idle_conns_per_host"`
-    // ResponseHeaderTimeout caps how long the transport waits for the upstream
-    // to return response HEADERS after the request is fully sent. R5 (audit P0):
-    // the prior TCP transport set MaxConnsPerHost/IdleConnTimeout but NOT this
-    // field — a stuck upstream that accepted the connection but never replied
-    // occupied a full Client.Timeout (120s) slot, and with a bounded connection
-    // pool (MaxConnsPerHost=16) a few stuck upstreams saturated the pool and
-    // stalled ALL requests to that backend. 0 = use the factory default (30s);
-    // set lower for latency-sensitive backends, higher for slow first-token LLMs.
-    ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
-    // ForceHTTP1 (#386): pin this backend to HTTP/1.1, refusing the h2 TLS
-    // upgrade even when the upstream offers it. Escape hatch for a cloud
-    // host whose pooled HTTP/2 connection wedges (half-dead node behind an
-    // LB): on h2 every subsequent request multiplexes onto the dead conn
-    // until the header timeout, while HTTP/1.1 fails fast and re-dials.
-    ForceHTTP1 bool `mapstructure:"force_http1"`
-    // APIVersion (#324): Azure OpenAI api-version query parameter for the
-    // azure-openai backend type. Default "2024-10-21" when empty.
-    APIVersion string `mapstructure:"api_version"`
-    // Deployments (#324): azure-openai requested-model -> deployment-name
-    // mapping. Unmapped models use the request model id verbatim as the
-    // deployment name. Lets business apps pin a deployment per model version.
-    Deployments map[string]string `mapstructure:"deployments"`
+	Type    string `mapstructure:"type"`
+	BaseURL string `mapstructure:"base_url"`
+	APIKey  string `mapstructure:"api_key"`
+	// APIKeyEnv names the environment variable holding this backend's key
+	// (plan §13.3): normalizeBackends resolves it into APIKey at load/
+	// reload time so plaintext keys never need to live in config.yaml.
+	// Takes precedence over an empty api_key; a set api_key with an empty
+	// api_key_env logs a deprecation WARN.
+	APIKeyEnv           string        `mapstructure:"api_key_env"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
+	Priority            int           `mapstructure:"priority"`
+	Enabled             bool          `mapstructure:"enabled"`
+	Models              []string      `mapstructure:"models"`
+	GC                  GCConfig      `mapstructure:"gc"`
+	// SocketPath enables outbound Unix Domain Socket to this backend. When set,
+	// the adapter transport dials the unix socket instead of TCP; base_url is a
+	// dummy host (convention: http://unix/). Empty (default) = plain TCP.
+	SocketPath string `mapstructure:"socket_path"`
+	// MaxConnsPerHost caps the number of active (in-flight) connections the
+	// gateway will open to this single backend host at once. 0 = use the
+	// transport-factory default. RR11 (audit P2): without this cap Go's
+	// transport treats MaxConnsPerHost=0 as unlimited — a concurrent burst to a
+	// single-host backend (local fusion-mlx, or one cloud vendor) opens hundreds
+	// of simultaneous connections, exhausts file descriptors, and takes down the
+	// whole gateway process (accept, logs, other backends all fail).
+	MaxConnsPerHost int `mapstructure:"max_conns_per_host"`
+	// MaxIdleConnsPerHost caps idle keep-alive connections cached per host. 0 =
+	// use the transport-factory default (64). Lowering it shrinks the idle pool
+	// (and the idle FD footprint) for low-QPS backends.
+	MaxIdleConnsPerHost int `mapstructure:"max_idle_conns_per_host"`
+	// ResponseHeaderTimeout caps how long the transport waits for the upstream
+	// to return response HEADERS after the request is fully sent. R5 (audit P0):
+	// the prior TCP transport set MaxConnsPerHost/IdleConnTimeout but NOT this
+	// field — a stuck upstream that accepted the connection but never replied
+	// occupied a full Client.Timeout (120s) slot, and with a bounded connection
+	// pool (MaxConnsPerHost=16) a few stuck upstreams saturated the pool and
+	// stalled ALL requests to that backend. 0 = use the factory default (30s);
+	// set lower for latency-sensitive backends, higher for slow first-token LLMs.
+	ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
+	// ForceHTTP1 (#386): pin this backend to HTTP/1.1, refusing the h2 TLS
+	// upgrade even when the upstream offers it. Escape hatch for a cloud
+	// host whose pooled HTTP/2 connection wedges (half-dead node behind an
+	// LB): on h2 every subsequent request multiplexes onto the dead conn
+	// until the header timeout, while HTTP/1.1 fails fast and re-dials.
+	ForceHTTP1 bool `mapstructure:"force_http1"`
+	// APIVersion (#324): Azure OpenAI api-version query parameter for the
+	// azure-openai backend type. Default "2024-10-21" when empty.
+	APIVersion string `mapstructure:"api_version"`
+	// Deployments (#324): azure-openai requested-model -> deployment-name
+	// mapping. Unmapped models use the request model id verbatim as the
+	// deployment name. Lets business apps pin a deployment per model version.
+	Deployments map[string]string `mapstructure:"deployments"`
 }
 
 type IOKitConfig struct {
-    Enabled bool `mapstructure:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
 }
 
 type GopsutilConfig struct {
-    Enabled bool `mapstructure:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
 }
 
 type MLXMetricsConfig struct {
-    Enabled  bool          `mapstructure:"enabled"`
-    Interval time.Duration `mapstructure:"interval"`
-    // URL is the fusion-mlx /metrics endpoint the hardware collector polls for
-    // MLX application metrics (active memory, loaded models, queue depth). Bare
-    // metal defaults to http://127.0.0.1:11434/metrics; a containerized gateway
-    // (#143) sets this to http://host.docker.internal:11434/metrics to reach the
-    // bare-metal engine on the Docker host. Previously this field did not exist
-    // and collectMLXMetrics dialed a hardcoded 127.0.0.1 — unreachable in a
-    // container, so /metrics failed every collect tick.
-    URL string `mapstructure:"url"`
-    // APIKey is the Bearer token sent on /metrics fetches. fusion-mlx enables
-    // auth (ENG-08 auth_precheck) and rejects unauthenticated /metrics with
-    // 401, which made the hardware collector log an error every tick.
-    APIKey string `mapstructure:"api_key"`
+	Enabled  bool          `mapstructure:"enabled"`
+	Interval time.Duration `mapstructure:"interval"`
+	// URL is the fusion-mlx /metrics endpoint the hardware collector polls for
+	// MLX application metrics (active memory, loaded models, queue depth). Bare
+	// metal defaults to http://127.0.0.1:11434/metrics; a containerized gateway
+	// (#143) sets this to http://host.docker.internal:11434/metrics to reach the
+	// bare-metal engine on the Docker host. Previously this field did not exist
+	// and collectMLXMetrics dialed a hardcoded 127.0.0.1 — unreachable in a
+	// container, so /metrics failed every collect tick.
+	URL string `mapstructure:"url"`
+	// APIKey is the Bearer token sent on /metrics fetches. fusion-mlx enables
+	// auth (ENG-08 auth_precheck) and rejects unauthenticated /metrics with
+	// 401, which made the hardware collector log an error every tick.
+	APIKey string `mapstructure:"api_key"`
 }
 
 type SwapConfig struct {
-    PageRateSampling  bool   `mapstructure:"page_rate_sampling"`
-    PageRateThreshold uint64 `mapstructure:"page_rate_threshold"`
+	PageRateSampling  bool   `mapstructure:"page_rate_sampling"`
+	PageRateThreshold uint64 `mapstructure:"page_rate_threshold"`
 }
 
 type HardwareConfig struct {
-    Enabled                   bool             `mapstructure:"enabled"`
-    CollectInterval           time.Duration    `mapstructure:"collect_interval"`
-    IOKit                     IOKitConfig      `mapstructure:"iokit"`
-    Gopsutil                  GopsutilConfig   `mapstructure:"gopsutil"`
-    MLXMetrics                MLXMetricsConfig `mapstructure:"mlx_metrics"`
-    Swap                      SwapConfig       `mapstructure:"swap"`
-    CollectionErrorProtection bool             `mapstructure:"collection_error_protection"`
+	Enabled                   bool             `mapstructure:"enabled"`
+	CollectInterval           time.Duration    `mapstructure:"collect_interval"`
+	IOKit                     IOKitConfig      `mapstructure:"iokit"`
+	Gopsutil                  GopsutilConfig   `mapstructure:"gopsutil"`
+	MLXMetrics                MLXMetricsConfig `mapstructure:"mlx_metrics"`
+	Swap                      SwapConfig       `mapstructure:"swap"`
+	CollectionErrorProtection bool             `mapstructure:"collection_error_protection"`
 }
 
 type CalibrationConfig struct {
-    Enabled             bool    `mapstructure:"enabled"`
-    SampleInterval      int     `mapstructure:"sample_interval"`
-    SampleSize          int     `mapstructure:"sample_size"`
-    DeviationThreshold  float64 `mapstructure:"deviation_threshold"`
-    AutoSwitchThreshold float64 `mapstructure:"auto_switch_threshold"`
+	Enabled             bool    `mapstructure:"enabled"`
+	SampleInterval      int     `mapstructure:"sample_interval"`
+	SampleSize          int     `mapstructure:"sample_size"`
+	DeviationThreshold  float64 `mapstructure:"deviation_threshold"`
+	AutoSwitchThreshold float64 `mapstructure:"auto_switch_threshold"`
 }
 
 type ScenePresetsConfig struct {
-    Chat     int `mapstructure:"chat"`
-    Code     int `mapstructure:"code"`
-    ToolCall int `mapstructure:"tool_call"`
+	Chat     int `mapstructure:"chat"`
+	Code     int `mapstructure:"code"`
+	ToolCall int `mapstructure:"tool_call"`
 }
 
 type TokenizerConfig struct {
-    Provider                 string            `mapstructure:"provider"`
-    DefaultMaxTokensStrategy string            `mapstructure:"default_max_tokens_strategy"`
-    ContextWindowRatio       float64           `mapstructure:"context_window_ratio"`
-    MinMaxTokens             int               `mapstructure:"min_max_tokens"`
-    ScenePresets             ScenePresetsConfig `mapstructure:"scene_presets"`
-    VisionTokenEstimate      int               `mapstructure:"vision_token_estimate"`
-    Calibration              CalibrationConfig `mapstructure:"calibration"`
+	Provider                 string             `mapstructure:"provider"`
+	DefaultMaxTokensStrategy string             `mapstructure:"default_max_tokens_strategy"`
+	ContextWindowRatio       float64            `mapstructure:"context_window_ratio"`
+	MinMaxTokens             int                `mapstructure:"min_max_tokens"`
+	ScenePresets             ScenePresetsConfig `mapstructure:"scene_presets"`
+	VisionTokenEstimate      int                `mapstructure:"vision_token_estimate"`
+	Calibration              CalibrationConfig  `mapstructure:"calibration"`
 }
 
 type ObservabilityConfig struct {
-    LogFormat             string `mapstructure:"log_format"`
-    // S3: log_file enables structured-log mirroring to a rotating file via
-    // lumberjack (in addition to stderr), so logs are no longer an unbounded
-    // stderr stream. Empty = stderr only (default). log_rotation_max_size is the
-    // per-file cap in MiB before rotation; log_rotation_max_backups is how many
-    // rotated files to retain. Defaults applied in DefaultConfig (100 MiB / 7).
-    LogFile               string `mapstructure:"log_file"`
-    LogRotationMaxSize    int    `mapstructure:"log_rotation_max_size"`
-    LogRotationMaxBackups int    `mapstructure:"log_rotation_max_backups"`
-    MetricsEnabled        bool   `mapstructure:"metrics_enabled"`
-    MetricsPath           string `mapstructure:"metrics_path"`
-    AuditLogEnabled       bool   `mapstructure:"audit_log_enabled"`
-    ConfigAuditLog        bool   `mapstructure:"config_audit_log"`
-    ConfigAuditFile       string `mapstructure:"config_audit_file"`
-    OtelEnabled           bool   `mapstructure:"otel_enabled"`
-    OtelEndpoint          string `mapstructure:"otel_endpoint"`
-    OtelProtocol          string `mapstructure:"otel_protocol"`
-    OtelServiceName       string `mapstructure:"otel_service_name"`
+	LogFormat string `mapstructure:"log_format"`
+	// S3: log_file enables structured-log mirroring to a rotating file via
+	// lumberjack (in addition to stderr), so logs are no longer an unbounded
+	// stderr stream. Empty = stderr only (default). log_rotation_max_size is the
+	// per-file cap in MiB before rotation; log_rotation_max_backups is how many
+	// rotated files to retain. Defaults applied in DefaultConfig (100 MiB / 7).
+	LogFile               string `mapstructure:"log_file"`
+	LogRotationMaxSize    int    `mapstructure:"log_rotation_max_size"`
+	LogRotationMaxBackups int    `mapstructure:"log_rotation_max_backups"`
+	MetricsEnabled        bool   `mapstructure:"metrics_enabled"`
+	MetricsPath           string `mapstructure:"metrics_path"`
+	AuditLogEnabled       bool   `mapstructure:"audit_log_enabled"`
+	ConfigAuditLog        bool   `mapstructure:"config_audit_log"`
+	ConfigAuditFile       string `mapstructure:"config_audit_file"`
+	OtelEnabled           bool   `mapstructure:"otel_enabled"`
+	OtelEndpoint          string `mapstructure:"otel_endpoint"`
+	OtelProtocol          string `mapstructure:"otel_protocol"`
+	OtelServiceName       string `mapstructure:"otel_service_name"`
 }
 
 type CORSConfig struct {
-    AllowedOrigins []string `mapstructure:"allowed_origins"`
-    AllowedMethods []string `mapstructure:"allowed_methods"`
-    AllowedHeaders []string `mapstructure:"allowed_headers"`
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	AllowedMethods []string `mapstructure:"allowed_methods"`
+	AllowedHeaders []string `mapstructure:"allowed_headers"`
 }
 
 type HotReloadConfig struct {
-    Enabled              bool          `mapstructure:"enabled"`
-    WatchPath            string        `mapstructure:"watch_path"`
-    Debounce             time.Duration `mapstructure:"debounce"`
-    BreakerDrainTimeout  time.Duration `mapstructure:"breaker_drain_timeout"`
+	Enabled             bool          `mapstructure:"enabled"`
+	WatchPath           string        `mapstructure:"watch_path"`
+	Debounce            time.Duration `mapstructure:"debounce"`
+	BreakerDrainTimeout time.Duration `mapstructure:"breaker_drain_timeout"`
 }
 
 type ValidationConfig struct {
-    BaseURLConflictCheck bool `mapstructure:"base_url_conflict_check"`
+	BaseURLConflictCheck bool `mapstructure:"base_url_conflict_check"`
 }
 
 type ClusterNodeConfig struct {
-    ID       string `mapstructure:"id"`
-    Address  string `mapstructure:"address"`
-    GPU      string `mapstructure:"gpu"`
-    MemoryGB int    `mapstructure:"memory_gb"`
-    // Platform identifies the node's runtime platform for D4 dispatch
-    // (issue #23/#25): "mac" (fusion-mlx Base+LoRA+SpecDec) or
-    // "windows-cuda" (DeepSeek 70B / Qwen 72B FP8 + diffusion). Empty means
-    // legacy untyped node (eligible for all cluster fallback).
-    Platform string `mapstructure:"platform"`
+	ID       string `mapstructure:"id"`
+	Address  string `mapstructure:"address"`
+	GPU      string `mapstructure:"gpu"`
+	MemoryGB int    `mapstructure:"memory_gb"`
+	// Platform identifies the node's runtime platform for D4 dispatch
+	// (issue #23/#25): "mac" (fusion-mlx Base+LoRA+SpecDec) or
+	// "windows-cuda" (DeepSeek 70B / Qwen 72B FP8 + diffusion). Empty means
+	// legacy untyped node (eligible for all cluster fallback).
+	Platform string `mapstructure:"platform"`
 }
 
 type ClusterMode string
 
 const (
-    ClusterModeStandalone ClusterMode = "standalone"
-    ClusterModeMaster     ClusterMode = "master"
+	ClusterModeStandalone ClusterMode = "standalone"
+	ClusterModeMaster     ClusterMode = "master"
 )
 
 type ClusterMasterConfig struct {
-    Address     string `mapstructure:"address"`
-    // Addresses (#159-C) enables dual-master active-active load balancing
-    // across multiple fusion-multi-node masters (e.g. :11452 + :11453). When
-    // non-empty the gateway fronts them with a least-conn pool + health-check
-    // failover: a failing master is circuit-cooled and traffic shifts to a
-    // healthy peer transparently. Address (singular) remains supported for
-    // backward-compat — if Addresses is empty but Address is set, the pool
-    // degrades to a single-element list (identical to pre-#159 behavior).
-    Addresses   []string `mapstructure:"addresses"`
-    SharedToken string `mapstructure:"shared_token"`
-    // IgnoreMasterStrategy is the #119 opt-out: when true, master mode still
-    // syncs node membership from the master but keeps the LOCAL load_balancer
-    // strategy for inference node selection (the gateway's own strategy wins).
-    // Default false (zero value) → the gateway HONORS the strategy the master
-    // owns (master.RoutingSummary.Strategy), so a strategy set in fusion-studio
-    // is authoritative for both task.* and /v1/chat/completions. Zero-value
-    // safe: no DefaultConfig seed needed, no mapstructure "omitted vs false"
-    // ambiguity — false means "honor master" which is the desired default.
-    IgnoreMasterStrategy bool `mapstructure:"ignore_strategy"`
-    // MaxStaleAge (R3 audit P2): the maximum age a cached master strategy may
-    // reach before resolveStrategy treats it as stale and falls back to the
-    // local load_balancer. Before R3 a fetch failure left the cache untouched
-    // with NO staleness bound — a master outage of any duration kept routing
-    // by a possibly-dead strategy (route to dead nodes, sustained outage),
-    // with no operator signal the strategy was过期. Default 2m: a strategy
-    // older than 2m of failed syncs is treated as untrusted. 0 disables the
-    // staleness bound (legacy永久-sticky behavior) — not recommended.
-    MaxStaleAge time.Duration `mapstructure:"max_stale_age"`
+	Address string `mapstructure:"address"`
+	// Addresses (#159-C) enables dual-master active-active load balancing
+	// across multiple fusion-multi-node masters (e.g. :11452 + :11453). When
+	// non-empty the gateway fronts them with a least-conn pool + health-check
+	// failover: a failing master is circuit-cooled and traffic shifts to a
+	// healthy peer transparently. Address (singular) remains supported for
+	// backward-compat — if Addresses is empty but Address is set, the pool
+	// degrades to a single-element list (identical to pre-#159 behavior).
+	Addresses   []string `mapstructure:"addresses"`
+	SharedToken string   `mapstructure:"shared_token"`
+	// IgnoreMasterStrategy is the #119 opt-out: when true, master mode still
+	// syncs node membership from the master but keeps the LOCAL load_balancer
+	// strategy for inference node selection (the gateway's own strategy wins).
+	// Default false (zero value) → the gateway HONORS the strategy the master
+	// owns (master.RoutingSummary.Strategy), so a strategy set in fusion-studio
+	// is authoritative for both task.* and /v1/chat/completions. Zero-value
+	// safe: no DefaultConfig seed needed, no mapstructure "omitted vs false"
+	// ambiguity — false means "honor master" which is the desired default.
+	IgnoreMasterStrategy bool `mapstructure:"ignore_strategy"`
+	// MaxStaleAge (R3 audit P2): the maximum age a cached master strategy may
+	// reach before resolveStrategy treats it as stale and falls back to the
+	// local load_balancer. Before R3 a fetch failure left the cache untouched
+	// with NO staleness bound — a master outage of any duration kept routing
+	// by a possibly-dead strategy (route to dead nodes, sustained outage),
+	// with no operator signal the strategy was过期. Default 2m: a strategy
+	// older than 2m of failed syncs is treated as untrusted. 0 disables the
+	// staleness bound (legacy永久-sticky behavior) — not recommended.
+	MaxStaleAge time.Duration `mapstructure:"max_stale_age"`
 }
 
 type ClusterConfig struct {
-    Enabled             bool                `mapstructure:"enabled"`
-    Mode                ClusterMode         `mapstructure:"mode"`
-    Nodes               []ClusterNodeConfig `mapstructure:"nodes"`
-    Master              ClusterMasterConfig `mapstructure:"master"`
-    LoadBalancer        string              `mapstructure:"load_balancer"`
-    HealthCheckInterval time.Duration       `mapstructure:"health_check_interval"`
-    FailureThreshold    int                 `mapstructure:"failure_threshold"`
-    RecoveryInterval    time.Duration       `mapstructure:"recovery_interval"`
-    // PlatformRouting enables D4 dispatch-by-platform (issue #23/#25). When
-    // enabled, the semantic intent layer routes heavy_model / diffusion
-    // intents to the configured platform's cluster nodes.
-    PlatformRouting PlatformRoutingConfig `mapstructure:"platform_routing"`
-    // HARouting enables multi-instance fusion-mlx HA routing (issue #150
-    // Gap2). When enabled, a request for a model served by a healthy cluster
-    // node on MacPlatformTag is routed to the cluster pool (health-weighted
-    // load balancing) at P0.25, before the single-local-upstream path. This
-    // gives clients transparent failover across multiple MLX instances
-    // (fusion-mlx#754) — CLI pick_alive_mlx_base gets real alternatives.
-    // Default off: single-node deployments keep the unchanged single-local
-    // behavior. MacPlatformTag (default "mac") selects which platform tag
-    // counts as a local-class MLX peer.
-    HARouting HARoutingConfig `mapstructure:"ha_routing"`
+	Enabled             bool                `mapstructure:"enabled"`
+	Mode                ClusterMode         `mapstructure:"mode"`
+	Nodes               []ClusterNodeConfig `mapstructure:"nodes"`
+	Master              ClusterMasterConfig `mapstructure:"master"`
+	LoadBalancer        string              `mapstructure:"load_balancer"`
+	HealthCheckInterval time.Duration       `mapstructure:"health_check_interval"`
+	FailureThreshold    int                 `mapstructure:"failure_threshold"`
+	RecoveryInterval    time.Duration       `mapstructure:"recovery_interval"`
+	// PlatformRouting enables D4 dispatch-by-platform (issue #23/#25). When
+	// enabled, the semantic intent layer routes heavy_model / diffusion
+	// intents to the configured platform's cluster nodes.
+	PlatformRouting PlatformRoutingConfig `mapstructure:"platform_routing"`
+	// HARouting enables multi-instance fusion-mlx HA routing (issue #150
+	// Gap2). When enabled, a request for a model served by a healthy cluster
+	// node on MacPlatformTag is routed to the cluster pool (health-weighted
+	// load balancing) at P0.25, before the single-local-upstream path. This
+	// gives clients transparent failover across multiple MLX instances
+	// (fusion-mlx#754) — CLI pick_alive_mlx_base gets real alternatives.
+	// Default off: single-node deployments keep the unchanged single-local
+	// behavior. MacPlatformTag (default "mac") selects which platform tag
+	// counts as a local-class MLX peer.
+	HARouting HARoutingConfig `mapstructure:"ha_routing"`
 }
 
 // HARoutingConfig configures multi-instance local-class HA routing (#150 Gap2).
 type HARoutingConfig struct {
-    Enabled          bool   `mapstructure:"enabled"`
-    MacPlatformTag   string `mapstructure:"mac_platform_tag"`
+	Enabled        bool   `mapstructure:"enabled"`
+	MacPlatformTag string `mapstructure:"mac_platform_tag"`
 }
 
 // PlatformRoutingConfig maps semantic intents to target cluster platforms.
 type PlatformRoutingConfig struct {
-    Enabled            bool   `mapstructure:"enabled"`
-    HeavyModelPlatform string `mapstructure:"heavy_model_platform"` // default "windows-cuda"
-    DiffusionPlatform  string `mapstructure:"diffusion_platform"`   // default "windows-cuda"
+	Enabled            bool   `mapstructure:"enabled"`
+	HeavyModelPlatform string `mapstructure:"heavy_model_platform"` // default "windows-cuda"
+	DiffusionPlatform  string `mapstructure:"diffusion_platform"`   // default "windows-cuda"
 }
 
 type RealtimeConfig struct {
-    Enabled       bool   `mapstructure:"enabled"`
-    BackendURL    string `mapstructure:"backend_url"`
-    APIKey        string `mapstructure:"api_key"`
-    MaxMessageMB  int    `mapstructure:"max_message_mb"`
+	Enabled      bool   `mapstructure:"enabled"`
+	BackendURL   string `mapstructure:"backend_url"`
+	APIKey       string `mapstructure:"api_key"`
+	MaxMessageMB int    `mapstructure:"max_message_mb"`
 }
 
 type AdminConfig struct {
-    Users     map[string]string `mapstructure:"users"`
-    Enabled   bool   `mapstructure:"enabled"`
-    Listen    string `mapstructure:"listen"`
-    LogMaxLen int    `mapstructure:"log_max_len"`
-    JWTSecret string `mapstructure:"jwt_secret"`
-    // #662: when true, every admin config-file mutation (PUT/POST/DELETE on
-    // /admin/api/config/*) is refused with 403 before the file is touched.
-    // Test harnesses with admin credentials must never be able to rewrite a
-    // production-local gateway's config (the /tmp/fc-e2e2 incident swapped
-    // auth portal off and dropped mlx metrics auth mid-day). Unlock by
-    // editing config.yaml and calling /admin/config/reload (reload itself is
-    // deliberately not gated — it applies on-disk state and cannot corrupt
-    // the file).
-    ConfigMutationLock bool `mapstructure:"config_mutation_lock"`
+	Users     map[string]string `mapstructure:"users"`
+	Enabled   bool              `mapstructure:"enabled"`
+	Listen    string            `mapstructure:"listen"`
+	LogMaxLen int               `mapstructure:"log_max_len"`
+	JWTSecret string            `mapstructure:"jwt_secret"`
+	// #662: when true, every admin config-file mutation (PUT/POST/DELETE on
+	// /admin/api/config/*) is refused with 403 before the file is touched.
+	// Test harnesses with admin credentials must never be able to rewrite a
+	// production-local gateway's config (the /tmp/fc-e2e2 incident swapped
+	// auth portal off and dropped mlx metrics auth mid-day). Unlock by
+	// editing config.yaml and calling /admin/config/reload (reload itself is
+	// deliberately not gated — it applies on-disk state and cannot corrupt
+	// the file).
+	ConfigMutationLock bool `mapstructure:"config_mutation_lock"`
 }
 
 type OIDCConfig struct {
-    Enabled       bool   `mapstructure:"enabled"`
-    Issuer        string `mapstructure:"issuer"`
-    ClientID      string `mapstructure:"client_id"`
-    Audiences     string `mapstructure:"audiences"`
-    Scopes        string `mapstructure:"scopes"`
-    ClaimMappings string `mapstructure:"claim_mappings"`
+	Enabled       bool   `mapstructure:"enabled"`
+	Issuer        string `mapstructure:"issuer"`
+	ClientID      string `mapstructure:"client_id"`
+	Audiences     string `mapstructure:"audiences"`
+	Scopes        string `mapstructure:"scopes"`
+	ClaimMappings string `mapstructure:"claim_mappings"`
 }
 
 type RBACConfig struct {
-    Enabled bool   `mapstructure:"enabled"`
-    DefaultRole string `mapstructure:"default_role"`
-    // B20 (audit): when false (default), OIDC role/groups claims are NOT
-    // mapped into the RBAC role — a self-serve or compromised IdP cannot
-    // escalate a user to admin by emitting a crafted claim. Set true only
-    // when the OIDC issuer is trusted to control role assignment.
-    TrustOIDCClaims bool `mapstructure:"trust_oidc_claims"`
+	Enabled     bool   `mapstructure:"enabled"`
+	DefaultRole string `mapstructure:"default_role"`
+	// B20 (audit): when false (default), OIDC role/groups claims are NOT
+	// mapped into the RBAC role — a self-serve or compromised IdP cannot
+	// escalate a user to admin by emitting a crafted claim. Set true only
+	// when the OIDC issuer is trusted to control role assignment.
+	TrustOIDCClaims bool `mapstructure:"trust_oidc_claims"`
 }
 
 type TeamConfig struct {
-    Enabled bool   `mapstructure:"enabled"`
-    DefaultTeam string `mapstructure:"default_team"`
+	Enabled     bool   `mapstructure:"enabled"`
+	DefaultTeam string `mapstructure:"default_team"`
 }
 
 type SemanticCacheConfig struct {
-    Enabled           bool    `mapstructure:"enabled"`
-    SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
-    MaxEntries        int     `mapstructure:"max_entries"`
-    Provider          string  `mapstructure:"provider"`
-    Endpoint          string  `mapstructure:"endpoint"`
-    // #400: embedding model id sent to the provider's /v1/embeddings.
-    // Required when enabled — the semantic cache cannot embed without it.
-    Model             string  `mapstructure:"model"`
+	Enabled             bool    `mapstructure:"enabled"`
+	SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
+	MaxEntries          int     `mapstructure:"max_entries"`
+	Provider            string  `mapstructure:"provider"`
+	Endpoint            string  `mapstructure:"endpoint"`
+	// #400: embedding model id sent to the provider's /v1/embeddings.
+	// Required when enabled — the semantic cache cannot embed without it.
+	Model string `mapstructure:"model"`
 }
 
 type PromptInjectionConfig struct {
-    Enabled    bool   `mapstructure:"enabled"`
-    Action     string `mapstructure:"action"`
-    Provider   string `mapstructure:"provider"`
-    APIKey     string `mapstructure:"api_key"`
-    Threshold  float64 `mapstructure:"threshold"`
+	Enabled   bool    `mapstructure:"enabled"`
+	Action    string  `mapstructure:"action"`
+	Provider  string  `mapstructure:"provider"`
+	APIKey    string  `mapstructure:"api_key"`
+	Threshold float64 `mapstructure:"threshold"`
 }
 
 type CostMarkupConfig struct {
-    Enabled      bool    `mapstructure:"enabled"`
-    GlobalMarkup float64 `mapstructure:"global_markup"`
+	Enabled      bool    `mapstructure:"enabled"`
+	GlobalMarkup float64 `mapstructure:"global_markup"`
 }
 
 // ModelPrice is one pricing.* entry: USD per million tokens. Either side may
 // be omitted (defaults 0) — e.g. local models priced only on input.
 type ModelPrice struct {
-    InputPerMTok  float64 `mapstructure:"input_per_mtok"`
-    OutputPerMTok float64 `mapstructure:"output_per_mtok"`
+	InputPerMTok  float64 `mapstructure:"input_per_mtok"`
+	OutputPerMTok float64 `mapstructure:"output_per_mtok"`
 }
 
 // PricingConfig is the pricing.* namespace (#564): per-model USD prices used
@@ -941,20 +941,20 @@ type ModelPrice struct {
 // back to the stored per-request cost column. Prices are read-only analytics
 // input: no request path, no billing side effect.
 type PricingConfig struct {
-    ModelPricing map[string]ModelPrice `mapstructure:"model_pricing"`
+	ModelPricing map[string]ModelPrice `mapstructure:"model_pricing"`
 }
 
 type BatchConfig struct {
-    Enabled       bool          `mapstructure:"enabled"`
-    MaxBatchSize  int           `mapstructure:"max_batch_size"`
-    PollInterval  time.Duration `mapstructure:"poll_interval"`
-    Timeout       time.Duration `mapstructure:"timeout"`
+	Enabled      bool          `mapstructure:"enabled"`
+	MaxBatchSize int           `mapstructure:"max_batch_size"`
+	PollInterval time.Duration `mapstructure:"poll_interval"`
+	Timeout      time.Duration `mapstructure:"timeout"`
 }
 
 type StoreConfig struct {
-    Backend string      `mapstructure:"backend"`
-    DataDir string      `mapstructure:"data_dir"`
-    Redis   RedisConfig `mapstructure:"redis"`
+	Backend string      `mapstructure:"backend"`
+	DataDir string      `mapstructure:"data_dir"`
+	Redis   RedisConfig `mapstructure:"redis"`
 }
 
 // BillingBucket is a purchasable prepaid token tier (#633). Catalog-only in
@@ -962,9 +962,9 @@ type StoreConfig struct {
 // ships an order plane (upstream issue); balances are provisioned via the
 // admin billing API in the meantime.
 type BillingBucket struct {
-    Name     string  `mapstructure:"name"`
-    Tokens   int64   `mapstructure:"tokens"`
-    PriceUSD float64 `mapstructure:"price_usd"`
+	Name     string  `mapstructure:"name"`
+	Tokens   int64   `mapstructure:"tokens"`
+	PriceUSD float64 `mapstructure:"price_usd"`
 }
 
 // BillingConfig is the value-based rate plan layer (#633) — SEPARATE from
@@ -974,16 +974,16 @@ type BillingBucket struct {
 // margin floats with the model actually served). `enabled: false` = no
 // billable amounts computed, no balance enforcement.
 type BillingConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // ListPricePer1KTokensUSD is the single list rate. Hot-reloadable: the
-    // request path syncs it into the cost tracker per request, so an Owner
-    // edit + config reload takes effect on the next billed request without
-    // redeploy.
-    ListPricePer1KTokensUSD float64 `mapstructure:"list_price_per_1k_tokens_usd"`
-    // PrepaidBuckets is the purchasable tier catalog (100K/500K/2M...).
-    // Bulk discounts allowed WITHIN the x100 anchor; never below cost x floor
-    // margin — that is a pricing-policy constraint for whoever fills this in.
-    PrepaidBuckets []BillingBucket `mapstructure:"prepaid_buckets"`
+	Enabled bool `mapstructure:"enabled"`
+	// ListPricePer1KTokensUSD is the single list rate. Hot-reloadable: the
+	// request path syncs it into the cost tracker per request, so an Owner
+	// edit + config reload takes effect on the next billed request without
+	// redeploy.
+	ListPricePer1KTokensUSD float64 `mapstructure:"list_price_per_1k_tokens_usd"`
+	// PrepaidBuckets is the purchasable tier catalog (100K/500K/2M...).
+	// Bulk discounts allowed WITHIN the x100 anchor; never below cost x floor
+	// margin — that is a pricing-policy constraint for whoever fills this in.
+	PrepaidBuckets []BillingBucket `mapstructure:"prepaid_buckets"`
 }
 
 // BrowserConfig is the gateway-side configuration for the cross-node
@@ -1001,92 +1001,92 @@ type BillingConfig struct {
 // persistent engine — a persisted pin would point at a dead session after a
 // browser restart, a false guarantee).
 type BrowserConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // PollInterval is the capacity poll cadence. Each tick queries every live
-    // node's `{type:"capacity"}` and refreshes the registry snapshot used for
-    // placement. Jittered via internal/jitter (H5) so a cluster of gateways
-    // does not synchronize a request spike against shared nodes at each tick
-    // edge. Default 5s.
-    PollInterval time.Duration `mapstructure:"poll_interval"`
-    // FailureThreshold is the consecutive poll-fail count that marks a node
-    // dead (dial fail / conn-refused / framing error). Dead nodes stay in the
-    // map (the admin node map shows them) but are skipped by placement.
-    // Default 3.
-    FailureThreshold int `mapstructure:"failure_threshold"`
-    // RecoveryInterval is the backoff before a dead node is re-probed. A node
-    // that recovers (poll succeeds) flips back to live. Default 30s.
-    RecoveryInterval time.Duration `mapstructure:"recovery_interval"`
-    // GlobalMaxSessions is the optional cross-node session ceiling. 0 = no
-    // ceiling (each node capped by its own max_sessions). When set, a create
-    // that would push the sum of live_sessions across live nodes to >= the
-    // ceiling is rejected with quota_exceeded (503, not retryable).
-    GlobalMaxSessions int `mapstructure:"global_max_sessions"`
-    // MinFreeMBPerSession is the per-session memory floor for placement. A
-    // candidate node must have free_memory_mb >= this floor to admit a new
-    // session. free_memory_mb==0 means the probe failed (unknown — never
-    // fabricate); such a node is admitted with the memory check skipped
-    // (contract fallback ranks by fewest live_sessions). Default 200.
-    MinFreeMBPerSession int `mapstructure:"min_free_mb_per_session"`
-    // FrameMaxBytes bounds a single length-prefixed frame, mirroring
-    // fusion-browser Framing.swift maxFrameBytes. A frame claiming > cap is a
-    // hard error (drop + close conn). Default 8 MiB.
-    FrameMaxBytes int `mapstructure:"frame_max_bytes"`
-    // DialTimeout is the NodeClient UDS dial timeout. A node that does not
-    // accept the connection within this bound is unreachable. Default 2s.
-    DialTimeout time.Duration `mapstructure:"dial_timeout"`
-    // FrameTimeout is the partial-frame / response-read timeout — the bound
-    // on reading the full frame body after the length prefix is consumed
-    // (B-4 partial-frame slow-drip hold). Default 30s.
-    FrameTimeout time.Duration `mapstructure:"frame_timeout"`
-    // Nodes is the static seed for hybrid discovery. Each entry is an operator
-    // label (id) + the node's UDS socket_path. The registry keys on the stable
-    // config id (NOT the per-process node_id the poll returns), so a browser
-    // restart (new node_id) is absorbed under the same key without churning
-    // placement. Dial-in nodes self-register with a minted label.
-    Nodes []BrowserNodeConfig `mapstructure:"nodes"`
+	Enabled bool `mapstructure:"enabled"`
+	// PollInterval is the capacity poll cadence. Each tick queries every live
+	// node's `{type:"capacity"}` and refreshes the registry snapshot used for
+	// placement. Jittered via internal/jitter (H5) so a cluster of gateways
+	// does not synchronize a request spike against shared nodes at each tick
+	// edge. Default 5s.
+	PollInterval time.Duration `mapstructure:"poll_interval"`
+	// FailureThreshold is the consecutive poll-fail count that marks a node
+	// dead (dial fail / conn-refused / framing error). Dead nodes stay in the
+	// map (the admin node map shows them) but are skipped by placement.
+	// Default 3.
+	FailureThreshold int `mapstructure:"failure_threshold"`
+	// RecoveryInterval is the backoff before a dead node is re-probed. A node
+	// that recovers (poll succeeds) flips back to live. Default 30s.
+	RecoveryInterval time.Duration `mapstructure:"recovery_interval"`
+	// GlobalMaxSessions is the optional cross-node session ceiling. 0 = no
+	// ceiling (each node capped by its own max_sessions). When set, a create
+	// that would push the sum of live_sessions across live nodes to >= the
+	// ceiling is rejected with quota_exceeded (503, not retryable).
+	GlobalMaxSessions int `mapstructure:"global_max_sessions"`
+	// MinFreeMBPerSession is the per-session memory floor for placement. A
+	// candidate node must have free_memory_mb >= this floor to admit a new
+	// session. free_memory_mb==0 means the probe failed (unknown — never
+	// fabricate); such a node is admitted with the memory check skipped
+	// (contract fallback ranks by fewest live_sessions). Default 200.
+	MinFreeMBPerSession int `mapstructure:"min_free_mb_per_session"`
+	// FrameMaxBytes bounds a single length-prefixed frame, mirroring
+	// fusion-browser Framing.swift maxFrameBytes. A frame claiming > cap is a
+	// hard error (drop + close conn). Default 8 MiB.
+	FrameMaxBytes int `mapstructure:"frame_max_bytes"`
+	// DialTimeout is the NodeClient UDS dial timeout. A node that does not
+	// accept the connection within this bound is unreachable. Default 2s.
+	DialTimeout time.Duration `mapstructure:"dial_timeout"`
+	// FrameTimeout is the partial-frame / response-read timeout — the bound
+	// on reading the full frame body after the length prefix is consumed
+	// (B-4 partial-frame slow-drip hold). Default 30s.
+	FrameTimeout time.Duration `mapstructure:"frame_timeout"`
+	// Nodes is the static seed for hybrid discovery. Each entry is an operator
+	// label (id) + the node's UDS socket_path. The registry keys on the stable
+	// config id (NOT the per-process node_id the poll returns), so a browser
+	// restart (new node_id) is absorbed under the same key without churning
+	// placement. Dial-in nodes self-register with a minted label.
+	Nodes []BrowserNodeConfig `mapstructure:"nodes"`
 }
 
 // BrowserNodeConfig is one static-seed browser node entry.
 type BrowserNodeConfig struct {
-    ID         string `mapstructure:"id"`
-    SocketPath string `mapstructure:"socket_path"`
-    // Token is the per-node UDS auth credential, MUST match the node's
-    // configured authToken. fusion-browser requires an {type:"auth", token}
-    // handshake before ANY op (FR-10/H-5, fail-closed); a node with no token
-    // is a deny-all sentinel. Empty here → every poll/auth_denied → node dead.
-    // Required (non-empty) per node when browser.enabled — validated at load so
-    // an operator never dials anonymous.
-    Token string `mapstructure:"token"`
+	ID         string `mapstructure:"id"`
+	SocketPath string `mapstructure:"socket_path"`
+	// Token is the per-node UDS auth credential, MUST match the node's
+	// configured authToken. fusion-browser requires an {type:"auth", token}
+	// handshake before ANY op (FR-10/H-5, fail-closed); a node with no token
+	// is a deny-all sentinel. Empty here → every poll/auth_denied → node dead.
+	// Required (non-empty) per node when browser.enabled — validated at load so
+	// an operator never dials anonymous.
+	Token string `mapstructure:"token"`
 }
 
 type MCPConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // #118: Host/Port bind a dedicated MCP HTTP listener (security-domain
-    // isolation from the main :11432 mux). Previously these fields were logged
-    // by mcp.Start() but never bound — dead config. ListenEnabled gates whether
-    // the dedicated listener starts; false (default) keeps MCP on the shared
-    // main mux + the MCP auth gate below. When true, Host/Port must be set.
-    ListenEnabled bool   `mapstructure:"listen_enabled"`
-    Host          string `mapstructure:"host"`
-    Port          int    `mapstructure:"port"`
-    // Token is the MCP-specific bearer credential. The MCP auth gate requires
-    // it independent of the main auth chain, so auth.enabled=false does NOT open
-    // MCP. Empty Token falls back to the master_key (admin-equivalent). If both
-    // Token and master_key are empty with MCP enabled, the listener refuses to
-    // start (fail-closed) — MCP routes must not be anonymously reachable.
-    Token       string `mapstructure:"token"`
-    TokenBudget int64  `mapstructure:"token_budget"`
-    MaxRequests int    `mapstructure:"max_requests"`
-    NodePort    int    `mapstructure:"node_port"`
-    LocalPort   int    `mapstructure:"local_port"`
-    // #129 Gap 3: managed-MCP per-node tool allowlist. Enterprise MCP tool names
-    // permitted on this node. Enforced at the MCP admission path: a tool call
-    // whose name is NOT in this list is rejected (slog.Warn) when the list is
-    // non-empty. Empty = unrestricted (current behavior preserved). Declared
-    // per-node by design — no runtime fan-out needed; set identically across
-    // nodes via deployment, converge on next restart (Rule 2: no pub/sub
-    // subsystem for a single, rarely-changed consumer).
-    ManagedToolAllowlist []string `mapstructure:"managed_tool_allowlist"`
+	Enabled bool `mapstructure:"enabled"`
+	// #118: Host/Port bind a dedicated MCP HTTP listener (security-domain
+	// isolation from the main :11432 mux). Previously these fields were logged
+	// by mcp.Start() but never bound — dead config. ListenEnabled gates whether
+	// the dedicated listener starts; false (default) keeps MCP on the shared
+	// main mux + the MCP auth gate below. When true, Host/Port must be set.
+	ListenEnabled bool   `mapstructure:"listen_enabled"`
+	Host          string `mapstructure:"host"`
+	Port          int    `mapstructure:"port"`
+	// Token is the MCP-specific bearer credential. The MCP auth gate requires
+	// it independent of the main auth chain, so auth.enabled=false does NOT open
+	// MCP. Empty Token falls back to the master_key (admin-equivalent). If both
+	// Token and master_key are empty with MCP enabled, the listener refuses to
+	// start (fail-closed) — MCP routes must not be anonymously reachable.
+	Token       string `mapstructure:"token"`
+	TokenBudget int64  `mapstructure:"token_budget"`
+	MaxRequests int    `mapstructure:"max_requests"`
+	NodePort    int    `mapstructure:"node_port"`
+	LocalPort   int    `mapstructure:"local_port"`
+	// #129 Gap 3: managed-MCP per-node tool allowlist. Enterprise MCP tool names
+	// permitted on this node. Enforced at the MCP admission path: a tool call
+	// whose name is NOT in this list is rejected (slog.Warn) when the list is
+	// non-empty. Empty = unrestricted (current behavior preserved). Declared
+	// per-node by design — no runtime fan-out needed; set identically across
+	// nodes via deployment, converge on next restart (Rule 2: no pub/sub
+	// subsystem for a single, rarely-changed consumer).
+	ManagedToolAllowlist []string `mapstructure:"managed_tool_allowlist"`
 }
 
 // ManagedSettingsConfig configures the server-side signed managed-settings
@@ -1104,114 +1104,128 @@ type MCPConfig struct {
 // degrades per-source (manifest registry / supervisor status) instead of
 // failing — that is also the core-profile boot contract (#490).
 type CatalogConfig struct {
-    // Enabled gates the /v1/catalog route. Default on.
-    Enabled bool `mapstructure:"enabled"`
-    // SupervisorStatusURL is the fusion-supervisor read-only status face
-    // (GET /api/v1/status, no token, loopback-only) consumed for the
-    // installed/stopped dimension. Zero supervisor changes: unreachable
-    // supervisor = degraded source flag, never a 5xx.
-    SupervisorStatusURL string `mapstructure:"supervisor_status_url"`
-    // StatusTTL caches the supervisor fetch so concurrent catalogs don't
-    // hammer the supervisor. <=0 falls back to the default 30s.
-    StatusTTL time.Duration `mapstructure:"status_ttl"`
+	// Enabled gates the /v1/catalog route. Default on.
+	Enabled bool `mapstructure:"enabled"`
+	// SupervisorStatusURL is the fusion-supervisor read-only status face
+	// (GET /api/v1/status, no token, loopback-only) consumed for the
+	// installed/stopped dimension. Zero supervisor changes: unreachable
+	// supervisor = degraded source flag, never a 5xx.
+	SupervisorStatusURL string `mapstructure:"supervisor_status_url"`
+	// StatusTTL caches the supervisor fetch so concurrent catalogs don't
+	// hammer the supervisor. <=0 falls back to the default 30s.
+	StatusTTL time.Duration `mapstructure:"status_ttl"`
 }
 
 type ManagedSettingsConfig struct {
-    Enabled    bool   `mapstructure:"enabled"`
-    PrivateKey string `mapstructure:"private_key"`
-    // Payload is the raw managed-settings JSON document served to clients. It is
-    // returned verbatim (after JSON re-serialization is NOT performed — the raw
-    // bytes are signed and served so the signature is stable against key-order
-    // drift). Hot-reloadable via the standard ConfigSnapshot path.
-    Payload string `mapstructure:"payload"`
+	Enabled    bool   `mapstructure:"enabled"`
+	PrivateKey string `mapstructure:"private_key"`
+	// Payload is the raw managed-settings JSON document served to clients. It is
+	// returned verbatim (after JSON re-serialization is NOT performed — the raw
+	// bytes are signed and served so the signature is stable against key-order
+	// drift). Hot-reloadable via the standard ConfigSnapshot path.
+	Payload string `mapstructure:"payload"`
 }
 
 type Config struct {
-    Server        ServerConfig             `mapstructure:"server"`
-    Auth          AuthConfig               `mapstructure:"auth"`
-    Routing       RoutingConfig            `mapstructure:"routing"`
-    Backends      map[string]BackendConfig `mapstructure:"backends"`
-    // Models is the models.* namespace (plan §13.3): supply priority,
-    // aliases, cross-supply toggle. Optional — zero value keeps the
-    // historical routing chain untouched.
-    Models        ModelsConfig             `mapstructure:"models"`
-    Validation    ValidationConfig         `mapstructure:"validation"`
-    Hardware      HardwareConfig           `mapstructure:"hardware"`
-    Tokenizer     TokenizerConfig          `mapstructure:"tokenizer"`
-    Observability ObservabilityConfig      `mapstructure:"observability"`
-    CORS          CORSConfig               `mapstructure:"cors"`
-    HotReload     HotReloadConfig          `mapstructure:"hot_reload"`
-    Cluster       ClusterConfig            `mapstructure:"cluster"`
-    Realtime      RealtimeConfig           `mapstructure:"realtime"`
-    Cache         CacheConfig              `mapstructure:"cache"`
-    PII           PIIConfig                `mapstructure:"pii"`
-    // Guardrails (G4): ordered governance chain scanned before inference.
-    // Empty = legacy single-point PII behavior (the chain never activates on
-    // its own).
-    Guardrails    []GuardrailConfig        `mapstructure:"guardrails"`
-    CloudRouting  CloudRoutingConfig       `mapstructure:"cloud_routing"`
-    Admin         *AdminConfig             `mapstructure:"admin"`
-    OIDC          OIDCConfig               `mapstructure:"oidc"`
-    RBAC          RBACConfig               `mapstructure:"rbac"`
-    Team          TeamConfig               `mapstructure:"team"`
-    SemanticCache SemanticCacheConfig      `mapstructure:"semantic_cache"`
-    PromptInjection PromptInjectionConfig  `mapstructure:"prompt_injection"`
-    CostMarkup    CostMarkupConfig         `mapstructure:"cost_markup"`
-    // Billing is the value-based rate-plan layer (#633): one list price per
-    // 1K tokens on top of real cost telemetry, prepaid token buckets, and
-    // live balance enforcement. Default off — zero behavior change until
-    // billing.enabled=true.
-    Billing       BillingConfig            `mapstructure:"billing"`
-    Batch         BatchConfig              `mapstructure:"batch"`
-    Store         StoreConfig              `mapstructure:"store"`
-    Encryption    *EncryptionConfig        `mapstructure:"encryption"`
-    Connector     *ConnectorConfig         `mapstructure:"connector"`
-    MCP           MCPConfig                `mapstructure:"mcp"`
-    Browser       BrowserConfig            `mapstructure:"browser"`
-    Catalog       CatalogConfig            `mapstructure:"catalog"`
-    Network       NetworkConfig            `mapstructure:"network"`
-    ManagedSettings ManagedSettingsConfig  `mapstructure:"managed_settings"`
-    Identity        IdentityConfig          `mapstructure:"identity"`
-    Shell           ShellConfig             `mapstructure:"web_shell"`
-    // AuthPortal wires the unified auth portal (#506 follow-up): the /auth
-    // static SPA plus the public identity auth proxy and one-time code
-    // handoff endpoints. Default off — nothing registered until
-    // auth_portal.enabled=true (fail-closed, mirrors service_routes).
-    AuthPortal      AuthPortalConfig        `mapstructure:"auth_portal"`
-    // TryQuota wires the per-user daily token quota meter (#514, cloud-try
-    // plan Phase 1): fusion-identity JWT on product LLM calls keys the
-    // meter; over-budget new requests get 429. Default off — no behavior
-    // change until try_quota.enabled=true.
-    TryQuota        TryQuotaConfig          `mapstructure:"try_quota"`
-    // RolloutTap mirrors chat traffic into a JSONL rollout sink for
-    // fusion-trainer RFT/GRPO datasets (#608, agent-lightning pattern).
-    // Default off for everything; opt-in per tenant (allowlist) with a
-    // per-API-key override (deny beats allow). Content is redacted by
-    // default (PII gate); `raw` needs an explicit opt-in.
-    RolloutTap      RolloutTapConfig        `mapstructure:"rollout_tap"`
-    // ServiceRoutes wires the /svc/<name>/ platform-service proxy
-    // (config-conventions §1/§5): business apps call platform services
-    // (rag/identity/drawing-parser…) exclusively through the gateway with
-    // FUSION_CLIENT_KEY, never sibling ports directly. Default off — no
-    // routes registered until service_routes is configured (fail-closed).
-    ServiceRoutes map[string]ServiceRouteConfig `mapstructure:"service_routes"`
-    // Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
-    // for request logs + payloads. Default off — zero behavior change.
-    Persistence     PersistenceConfig       `mapstructure:"persistence"`
-    // Ops is the ops.* namespace (#689, flywheel Loop A): fire-and-forget
-    // emission of request-level ops events into fusion_ops.ops_events.
-    // Default off — zero behavior change.
-    Ops             OpsConfig               `mapstructure:"ops"`
-    // FileLog is the file_log.* namespace (G9): daily-rolled file logging.
-    FileLog         FileLogConfig           `mapstructure:"file_log"`
-    // UsageAlerts is the usage_alerts.* namespace (#326): periodic
-    // per-(app, scenario, model) cost threshold checks with webhook
-    // notification. Default off.
-    UsageAlerts     UsageAlertsConfig       `mapstructure:"usage_alerts"`
-    // Pricing is the pricing.* namespace (#564): read-time per-model USD
-    // prices for the insights aggregations. Default empty — cost falls back
-    // to the stored per-request column.
-    Pricing         PricingConfig           `mapstructure:"pricing"`
+	Server   ServerConfig             `mapstructure:"server"`
+	Auth     AuthConfig               `mapstructure:"auth"`
+	Routing  RoutingConfig            `mapstructure:"routing"`
+	Backends map[string]BackendConfig `mapstructure:"backends"`
+	// Models is the models.* namespace (plan §13.3): supply priority,
+	// aliases, cross-supply toggle. Optional — zero value keeps the
+	// historical routing chain untouched.
+	Models        ModelsConfig        `mapstructure:"models"`
+	Validation    ValidationConfig    `mapstructure:"validation"`
+	Hardware      HardwareConfig      `mapstructure:"hardware"`
+	Tokenizer     TokenizerConfig     `mapstructure:"tokenizer"`
+	Observability ObservabilityConfig `mapstructure:"observability"`
+	CORS          CORSConfig          `mapstructure:"cors"`
+	HotReload     HotReloadConfig     `mapstructure:"hot_reload"`
+	Cluster       ClusterConfig       `mapstructure:"cluster"`
+	Realtime      RealtimeConfig      `mapstructure:"realtime"`
+	Cache         CacheConfig         `mapstructure:"cache"`
+	PII           PIIConfig           `mapstructure:"pii"`
+	// Guardrails (G4): ordered governance chain scanned before inference.
+	// Empty = legacy single-point PII behavior (the chain never activates on
+	// its own).
+	Guardrails      []GuardrailConfig     `mapstructure:"guardrails"`
+	CloudRouting    CloudRoutingConfig    `mapstructure:"cloud_routing"`
+	Admin           *AdminConfig          `mapstructure:"admin"`
+	OIDC            OIDCConfig            `mapstructure:"oidc"`
+	RBAC            RBACConfig            `mapstructure:"rbac"`
+	Team            TeamConfig            `mapstructure:"team"`
+	SemanticCache   SemanticCacheConfig   `mapstructure:"semantic_cache"`
+	PromptInjection PromptInjectionConfig `mapstructure:"prompt_injection"`
+	CostMarkup      CostMarkupConfig      `mapstructure:"cost_markup"`
+	// Billing is the value-based rate-plan layer (#633): one list price per
+	// 1K tokens on top of real cost telemetry, prepaid token buckets, and
+	// live balance enforcement. Default off — zero behavior change until
+	// billing.enabled=true.
+	Billing         BillingConfig         `mapstructure:"billing"`
+	Batch           BatchConfig           `mapstructure:"batch"`
+	Store           StoreConfig           `mapstructure:"store"`
+	Encryption      *EncryptionConfig     `mapstructure:"encryption"`
+	Connector       *ConnectorConfig      `mapstructure:"connector"`
+	MCP             MCPConfig             `mapstructure:"mcp"`
+	Browser         BrowserConfig         `mapstructure:"browser"`
+	Catalog         CatalogConfig         `mapstructure:"catalog"`
+	Network         NetworkConfig         `mapstructure:"network"`
+	ManagedSettings ManagedSettingsConfig `mapstructure:"managed_settings"`
+	Identity        IdentityConfig        `mapstructure:"identity"`
+	Shell           ShellConfig           `mapstructure:"web_shell"`
+	// AuthPortal wires the unified auth portal (#506 follow-up): the /auth
+	// static SPA plus the public identity auth proxy and one-time code
+	// handoff endpoints. Default off — nothing registered until
+	// auth_portal.enabled=true (fail-closed, mirrors service_routes).
+	AuthPortal AuthPortalConfig `mapstructure:"auth_portal"`
+	// TryQuota wires the per-user daily token quota meter (#514, cloud-try
+	// plan Phase 1): fusion-identity JWT on product LLM calls keys the
+	// meter; over-budget new requests get 429. Default off — no behavior
+	// change until try_quota.enabled=true.
+	TryQuota TryQuotaConfig `mapstructure:"try_quota"`
+	// RolloutTap mirrors chat traffic into a JSONL rollout sink for
+	// fusion-trainer RFT/GRPO datasets (#608, agent-lightning pattern).
+	// Default off for everything; opt-in per tenant (allowlist) with a
+	// per-API-key override (deny beats allow). Content is redacted by
+	// default (PII gate); `raw` needs an explicit opt-in.
+	RolloutTap RolloutTapConfig `mapstructure:"rollout_tap"`
+	// ServiceRoutes wires the /svc/<name>/ platform-service proxy
+	// (config-conventions §1/§5): business apps call platform services
+	// (rag/identity/drawing-parser…) exclusively through the gateway with
+	// FUSION_CLIENT_KEY, never sibling ports directly. Default off — no
+	// routes registered until service_routes is configured (fail-closed).
+	ServiceRoutes map[string]ServiceRouteConfig `mapstructure:"service_routes"`
+	// Persistence is the persistence.* namespace (plan §6): PostgreSQL sink
+	// for request logs + payloads. Default off — zero behavior change.
+	Persistence PersistenceConfig `mapstructure:"persistence"`
+	// Ops is the ops.* namespace (#689, flywheel Loop A): fire-and-forget
+	// emission of request-level ops events into fusion_ops.ops_events.
+	// Default off — zero behavior change.
+	Ops OpsConfig `mapstructure:"ops"`
+	// FileLog is the file_log.* namespace (G9): daily-rolled file logging.
+	FileLog FileLogConfig `mapstructure:"file_log"`
+	// UsageAlerts is the usage_alerts.* namespace (#326): periodic
+	// per-(app, scenario, model) cost threshold checks with webhook
+	// notification. Default off.
+	UsageAlerts UsageAlertsConfig `mapstructure:"usage_alerts"`
+	// Pricing is the pricing.* namespace (#564): read-time per-model USD
+	// prices for the insights aggregations. Default empty — cost falls back
+	// to the stored per-request column.
+	Pricing PricingConfig `mapstructure:"pricing"`
+	// ArtifactsEngine is the fusion-artifacts-engine JSON-RPC upstream
+	// (fusion-web-shell#196 leg 1): POST /api/v1/artifacts proxies to it
+	// with the session principal stamped in. URL and key resolve env-first
+	// (FUSION_ARTIFACTS_URL / FUSION_ARTIFACTS_API_KEY, mirroring the mlx
+	// backend bindings), then these config values. Empty key = the proxy
+	// forwards unauthenticated and the engine answers Unauthorized.
+	ArtifactsEngine ArtifactsEngineConfig `mapstructure:"artifacts_engine"`
+}
+
+// ArtifactsEngineConfig points the /api/v1/artifacts JSON-RPC proxy at the
+// engine-of-record daemon (port-registry :11451).
+type ArtifactsEngineConfig struct {
+	URL    string `mapstructure:"url"`
+	APIKey string `mapstructure:"api_key"`
 }
 
 // ServiceRouteConfig is one /svc/<name>/ upstream: where to dial and how to
@@ -1228,23 +1242,23 @@ type Config struct {
 //     hold these credentials.
 //   - "" (default) — passthrough: forward the incoming Authorization.
 type ServiceRouteConfig struct {
-    URL           string `mapstructure:"url"`
-    UpstreamAuth  string `mapstructure:"upstream_auth"`
-    UpstreamToken string `mapstructure:"upstream_token"`
-    // UpstreamTokenFile is a 0600 secret-file alternative to upstream_token
-    // (#370): when upstream_token is empty the file (tilde-expanded) is read
-    // once at registration and its first line becomes the injected credential
-    // — the same secret convention fm-server itself uses
-    // (~/.fusion-memory/api_key). Mutually exclusive in practice: the inline
-    // token wins when both are set.
-    UpstreamTokenFile string `mapstructure:"upstream_token_file"`
-    // Prefix optionally mounts the route at an alias path instead of
-    // /svc/<name>/ (#370): e.g. prefix "/v1/memory" serves the fusion-memory
-    // fm-server surface at the path business clients already migrated to.
-    // Unlike /svc/<name>/ the prefix is NOT stripped — the upstream receives
-    // the caller's path verbatim (fm-server serves the same /v1/memory/*
-    // routes). Must start with "/" or the route is skipped at registration.
-    Prefix string `mapstructure:"prefix"`
+	URL           string `mapstructure:"url"`
+	UpstreamAuth  string `mapstructure:"upstream_auth"`
+	UpstreamToken string `mapstructure:"upstream_token"`
+	// UpstreamTokenFile is a 0600 secret-file alternative to upstream_token
+	// (#370): when upstream_token is empty the file (tilde-expanded) is read
+	// once at registration and its first line becomes the injected credential
+	// — the same secret convention fm-server itself uses
+	// (~/.fusion-memory/api_key). Mutually exclusive in practice: the inline
+	// token wins when both are set.
+	UpstreamTokenFile string `mapstructure:"upstream_token_file"`
+	// Prefix optionally mounts the route at an alias path instead of
+	// /svc/<name>/ (#370): e.g. prefix "/v1/memory" serves the fusion-memory
+	// fm-server surface at the path business clients already migrated to.
+	// Unlike /svc/<name>/ the prefix is NOT stripped — the upstream receives
+	// the caller's path verbatim (fm-server serves the same /v1/memory/*
+	// routes). Must start with "/" or the route is skipped at registration.
+	Prefix string `mapstructure:"prefix"`
 }
 
 // AuthPortalConfig wires the unified auth portal: one login/register UI
@@ -1259,63 +1273,63 @@ type ServiceRouteConfig struct {
 // user (override per user via the admin endpoint), soft-limit semantics —
 // in-flight requests finish, only new requests are rejected with 429.
 type TryQuotaConfig struct {
-    // Enabled gates the whole meter (fail-closed OFF: no gate, no metering).
-    Enabled bool `mapstructure:"enabled"`
-    // DailyTokenBudget is the default per-user daily token budget
-    // (FUSION_TRY_TOKEN_BUDGET in the plan; ~100k default).
-    DailyTokenBudget int `mapstructure:"daily_token_budget"`
-    // JWTSecret is the fusion-identity HS256 signing secret shared for local
-    // verification (no per-request identity hop). Required when jwt_algorithm
-    // is hs256 (explicitly or by default resolution).
-    JWTSecret string `mapstructure:"jwt_secret"`
-    // JwtAlgorithm selects the identity-token verification mode (#524):
-    // "rs256" verifies against the fusion-identity JWKS
-    // (identity_url + /.well-known/jwks.json — the same source the shell-SSO
-    // exchange trusts), "hs256" verifies the shared jwt_secret locally.
-    // Empty resolves by provisioning: rs256 when jwt_secret is empty (the
-    // deployed identity signs RS256), hs256 when set. Only the resolved
-    // algorithm is ever accepted (alg-confusion guard).
-    JwtAlgorithm string `mapstructure:"jwt_algorithm"`
-    // IdentityURL is the fusion-identity base URL for JWKS discovery in
-    // rs256 mode. Falls back to web_shell.identity_url, then
-    // auth_portal.identity_url, then http://127.0.0.1:11470.
-    IdentityURL string `mapstructure:"identity_url"`
-    // StatePath is the optional JSON snapshot file for usage rollups
-    // (survives restarts). Empty = memory only.
-    StatePath string `mapstructure:"state_path"`
-    // EstimateFallback is the tokenizer-estimate floor used when a request
-    // body cannot be read (default 1024).
-    EstimateFallback int `mapstructure:"estimate_fallback"`
-    // ResetWindow (G3): the budget period — "daily" (default) / "weekly"
-    // (ISO year-week) / "monthly". The bucket rolls over on the next request
-    // after the boundary; no timers.
-    ResetWindow string `mapstructure:"reset_window"`
-    // SoftLimitPercent (G3): 0 (default) = off; when projected usage reaches
-    // this percent of the budget, a soft-limit alert fires once per window
-    // (WARN log + AlertWebhook POST). Hard rejection at 100% is unchanged.
-    SoftLimitPercent int `mapstructure:"soft_limit_percent"`
-    // AlertWebhook (G3): URL that receives the budget.soft_limit alert JSON.
-    // Empty = log-only alerting. Delivery is best-effort, async, 5s timeout.
-    AlertWebhook string `mapstructure:"alert_webhook"`
+	// Enabled gates the whole meter (fail-closed OFF: no gate, no metering).
+	Enabled bool `mapstructure:"enabled"`
+	// DailyTokenBudget is the default per-user daily token budget
+	// (FUSION_TRY_TOKEN_BUDGET in the plan; ~100k default).
+	DailyTokenBudget int `mapstructure:"daily_token_budget"`
+	// JWTSecret is the fusion-identity HS256 signing secret shared for local
+	// verification (no per-request identity hop). Required when jwt_algorithm
+	// is hs256 (explicitly or by default resolution).
+	JWTSecret string `mapstructure:"jwt_secret"`
+	// JwtAlgorithm selects the identity-token verification mode (#524):
+	// "rs256" verifies against the fusion-identity JWKS
+	// (identity_url + /.well-known/jwks.json — the same source the shell-SSO
+	// exchange trusts), "hs256" verifies the shared jwt_secret locally.
+	// Empty resolves by provisioning: rs256 when jwt_secret is empty (the
+	// deployed identity signs RS256), hs256 when set. Only the resolved
+	// algorithm is ever accepted (alg-confusion guard).
+	JwtAlgorithm string `mapstructure:"jwt_algorithm"`
+	// IdentityURL is the fusion-identity base URL for JWKS discovery in
+	// rs256 mode. Falls back to web_shell.identity_url, then
+	// auth_portal.identity_url, then http://127.0.0.1:11470.
+	IdentityURL string `mapstructure:"identity_url"`
+	// StatePath is the optional JSON snapshot file for usage rollups
+	// (survives restarts). Empty = memory only.
+	StatePath string `mapstructure:"state_path"`
+	// EstimateFallback is the tokenizer-estimate floor used when a request
+	// body cannot be read (default 1024).
+	EstimateFallback int `mapstructure:"estimate_fallback"`
+	// ResetWindow (G3): the budget period — "daily" (default) / "weekly"
+	// (ISO year-week) / "monthly". The bucket rolls over on the next request
+	// after the boundary; no timers.
+	ResetWindow string `mapstructure:"reset_window"`
+	// SoftLimitPercent (G3): 0 (default) = off; when projected usage reaches
+	// this percent of the budget, a soft-limit alert fires once per window
+	// (WARN log + AlertWebhook POST). Hard rejection at 100% is unchanged.
+	SoftLimitPercent int `mapstructure:"soft_limit_percent"`
+	// AlertWebhook (G3): URL that receives the budget.soft_limit alert JSON.
+	// Empty = log-only alerting. Delivery is best-effort, async, 5s timeout.
+	AlertWebhook string `mapstructure:"alert_webhook"`
 }
 
 type AuthPortalConfig struct {
-    // Enabled gates the whole subsystem (fail-closed).
-    Enabled bool `mapstructure:"enabled"`
-    // StaticDir is the portal SPA directory served at /auth/. Relative to
-    // the gateway working directory; must contain index.html.
-    StaticDir string `mapstructure:"static_dir"`
-    // IdentityURL is the fusion-identity base URL (default :11470).
-    IdentityURL string `mapstructure:"identity_url"`
-    // RedirectURIs is the allowlist of exact client return URLs (scheme://
-    // host/path — the query string is compared separately). Empty allowlist
-    // disables code issuance (fail-closed).
-    RedirectURIs []string `mapstructure:"redirect_uris"`
-    // CodeTTLSecs is the one-time code lifetime (default 60, max 300).
-    CodeTTLSecs int `mapstructure:"code_ttl_secs"`
-    // RatePerMin is the per-IP request ceiling across all /auth/api/* and
-    // /auth/api/identity/* endpoints (default 30).
-    RatePerMin int `mapstructure:"rate_per_min"`
+	// Enabled gates the whole subsystem (fail-closed).
+	Enabled bool `mapstructure:"enabled"`
+	// StaticDir is the portal SPA directory served at /auth/. Relative to
+	// the gateway working directory; must contain index.html.
+	StaticDir string `mapstructure:"static_dir"`
+	// IdentityURL is the fusion-identity base URL (default :11470).
+	IdentityURL string `mapstructure:"identity_url"`
+	// RedirectURIs is the allowlist of exact client return URLs (scheme://
+	// host/path — the query string is compared separately). Empty allowlist
+	// disables code issuance (fail-closed).
+	RedirectURIs []string `mapstructure:"redirect_uris"`
+	// CodeTTLSecs is the one-time code lifetime (default 60, max 300).
+	CodeTTLSecs int `mapstructure:"code_ttl_secs"`
+	// RatePerMin is the per-IP request ceiling across all /auth/api/* and
+	// /auth/api/identity/* endpoints (default 30).
+	RatePerMin int `mapstructure:"rate_per_min"`
 }
 
 // ShellConfig wires the union-web shell capabilities (#215, PRD R-1): the
@@ -1325,85 +1339,85 @@ type AuthPortalConfig struct {
 // subsystem is inert until shell.enabled=true (fail-closed, mirrors
 // browser/identity opt-in gates).
 type ShellConfig struct {
-    Enabled bool `mapstructure:"enabled"`
-    // AdminKey designates the module-registration credential (#243): manifest
-    // upsert/heartbeat require the master_key OR this key. Env override is
-    // FG_SHELL_ADMIN_KEY (gateway-native canonical, #409); the legacy
-    // FUSION_GATEWAY_ADMIN_KEY name documented by downstream modules stays
-    // bound as a transition alias (fusion-cowork shell_registry). Must be one
-    // of auth.api_keys (static)
-    // — a WARN is logged at validate time otherwise. Plain client keys are
-    // rejected: letting any consumer key register manifests was a privilege
-    // inversion.
-    AdminKey string `mapstructure:"admin_key"`
-    // ServiceKeys (#493): per-module service-to-gateway credentials,
-    // overlayed at load from FUSION_SERVICE_KEY_<MODULE> envs (uppercase
-    // module id). A registered key authenticates that module's own manifest
-    // registration/self-heal only — never a general admin plane.
-    ServiceKeys map[string]string `mapstructure:"service_keys"`
-    // IdentityURL (#517) is the fusion-identity base URL for the shell SSO
-    // ticket exchange (POST /api/v1/auth/ticket/exchange). Empty falls back
-    // to auth_portal.identity_url, then the default :11470.
-    IdentityURL string `mapstructure:"identity_url"`
-    // SSOModules (#517) is the module id list an identity-SSO session may
-    // open. Empty = ["*"] (identity already authenticated the user; shell
-    // write classes stay gated by the mapped role).
-    SSOModules []string `mapstructure:"sso_modules"`
-    Session ShellSessionConfig `mapstructure:"session"`
-    // Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
-    // have not registered still render in the shell menu (greyed offline) so
-    // the menu is never empty. Seeded into the registry at construction.
-    Manifests []ShellManifest `mapstructure:"manifests"`
-    // EntryOriginAllowlist restricts which origins a manifest entry URL may
-    // point at (A7: whitelist + token enforcement). Registration with an
-    // entry outside the list is rejected 403. Required non-empty when
-    // shell.enabled — without it any registered module could inject scripts
-    // into the shell host.
-    EntryOriginAllowlist []string `mapstructure:"entry_origin_allowlist"`
-    // HeartbeatTimeout: a dynamic manifest whose last heartbeat is older than
-    // this is marked unreachable (menu greyed, NOT deleted). Default 30s.
-    HeartbeatTimeout time.Duration `mapstructure:"heartbeat_timeout"`
-    // KeyRotationGrace (#261 K1): after a service-key rotation, the previous
-    // key stays valid for heartbeats until the module's next heartbeat
-    // carries the new key (early retirement) or this window elapses —
-    // whichever comes first (dual-active grace). Default 24h.
-    KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
-    // HealthPollInterval is the module health poll cadence on the manifest
-    // health URL. Default 30s.
-    HealthPollInterval time.Duration `mapstructure:"health_poll_interval"`
-    // Modules maps manifest id -> upstream base URL for the /shell/<id>/
-    // proxy. Modules without an entry get the module_not_found envelope.
-    Modules map[string]ShellModuleConfig `mapstructure:"modules"`
-    // SpaDir (#247) hosts the union-web shell SPA dist on the gateway itself:
-    // a "/" catch-all serves the directory with an index.html fallback (deep
-    // links) below every API namespace (/v1/*, /shell/, /admin/, /api/v1/*,
-    // /health ...). Empty (default) = no root route — the dev posture
-    // (:11430 vite proxy) keeps working unchanged. Points at the built
-    // apps/shell dist from fusion-web-shell.
-    SpaDir string `mapstructure:"spa_dir"`
-    // RateLimit (#586) caps per-shell-user inference usage on the
-    // /api/v1/shell/chat/completions plane. Shell sessions carry no API key,
-    // so the /v1 key-plane rate-limit middleware deliberately skips them
-    // (#216) — without this gate any shell session (and every web app mounted
-    // in the shell) drives unlimited inference spend.
-    RateLimit ShellRateLimitConfig `mapstructure:"rate_limit"`
-    // Captcha (#592) gates the public login endpoint with a server-rendered
-    // SVG challenge (contract for fusion-web-shell #139). Off = login plane
-    // behaves exactly as before (back-compat); on = POST /api/v1/shell/session
-    // requires a live challenge id + code BEFORE credential verification.
-    Captcha ShellCaptchaConfig `mapstructure:"captcha"`
-    // Link (#717) provisions the fusion-link daemon's local service-ticket
-    // plane: the daemon exchanges its device credential for a short-lived
-    // loopback-only ticket that drives shell task APIs with no browser
-    // session present.
-    Link ShellLinkConfig `mapstructure:"link"`
-    // IdentityBridge (#715) mounts /api/messaging/ under the shell-session
-    // chain and translates the session into a real fusion-identity user
-    // bearer via a server-side refresh-token vault (fed at SSO / portal-code
-    // login). Local-password sessions carry no identity principal and get a
-    // clear 403. When enabled, a colliding service_routes prefix mount on
-    // the same path is skipped (the bridge supersedes it).
-    IdentityBridge ShellIdentityBridgeConfig `mapstructure:"identity_bridge"`
+	Enabled bool `mapstructure:"enabled"`
+	// AdminKey designates the module-registration credential (#243): manifest
+	// upsert/heartbeat require the master_key OR this key. Env override is
+	// FG_SHELL_ADMIN_KEY (gateway-native canonical, #409); the legacy
+	// FUSION_GATEWAY_ADMIN_KEY name documented by downstream modules stays
+	// bound as a transition alias (fusion-cowork shell_registry). Must be one
+	// of auth.api_keys (static)
+	// — a WARN is logged at validate time otherwise. Plain client keys are
+	// rejected: letting any consumer key register manifests was a privilege
+	// inversion.
+	AdminKey string `mapstructure:"admin_key"`
+	// ServiceKeys (#493): per-module service-to-gateway credentials,
+	// overlayed at load from FUSION_SERVICE_KEY_<MODULE> envs (uppercase
+	// module id). A registered key authenticates that module's own manifest
+	// registration/self-heal only — never a general admin plane.
+	ServiceKeys map[string]string `mapstructure:"service_keys"`
+	// IdentityURL (#517) is the fusion-identity base URL for the shell SSO
+	// ticket exchange (POST /api/v1/auth/ticket/exchange). Empty falls back
+	// to auth_portal.identity_url, then the default :11470.
+	IdentityURL string `mapstructure:"identity_url"`
+	// SSOModules (#517) is the module id list an identity-SSO session may
+	// open. Empty = ["*"] (identity already authenticated the user; shell
+	// write classes stay gated by the mapped role).
+	SSOModules []string           `mapstructure:"sso_modules"`
+	Session    ShellSessionConfig `mapstructure:"session"`
+	// Manifests is the STATIC fallback manifest list (PRD §5.2): modules that
+	// have not registered still render in the shell menu (greyed offline) so
+	// the menu is never empty. Seeded into the registry at construction.
+	Manifests []ShellManifest `mapstructure:"manifests"`
+	// EntryOriginAllowlist restricts which origins a manifest entry URL may
+	// point at (A7: whitelist + token enforcement). Registration with an
+	// entry outside the list is rejected 403. Required non-empty when
+	// shell.enabled — without it any registered module could inject scripts
+	// into the shell host.
+	EntryOriginAllowlist []string `mapstructure:"entry_origin_allowlist"`
+	// HeartbeatTimeout: a dynamic manifest whose last heartbeat is older than
+	// this is marked unreachable (menu greyed, NOT deleted). Default 30s.
+	HeartbeatTimeout time.Duration `mapstructure:"heartbeat_timeout"`
+	// KeyRotationGrace (#261 K1): after a service-key rotation, the previous
+	// key stays valid for heartbeats until the module's next heartbeat
+	// carries the new key (early retirement) or this window elapses —
+	// whichever comes first (dual-active grace). Default 24h.
+	KeyRotationGrace time.Duration `mapstructure:"key_rotation_grace"`
+	// HealthPollInterval is the module health poll cadence on the manifest
+	// health URL. Default 30s.
+	HealthPollInterval time.Duration `mapstructure:"health_poll_interval"`
+	// Modules maps manifest id -> upstream base URL for the /shell/<id>/
+	// proxy. Modules without an entry get the module_not_found envelope.
+	Modules map[string]ShellModuleConfig `mapstructure:"modules"`
+	// SpaDir (#247) hosts the union-web shell SPA dist on the gateway itself:
+	// a "/" catch-all serves the directory with an index.html fallback (deep
+	// links) below every API namespace (/v1/*, /shell/, /admin/, /api/v1/*,
+	// /health ...). Empty (default) = no root route — the dev posture
+	// (:11430 vite proxy) keeps working unchanged. Points at the built
+	// apps/shell dist from fusion-web-shell.
+	SpaDir string `mapstructure:"spa_dir"`
+	// RateLimit (#586) caps per-shell-user inference usage on the
+	// /api/v1/shell/chat/completions plane. Shell sessions carry no API key,
+	// so the /v1 key-plane rate-limit middleware deliberately skips them
+	// (#216) — without this gate any shell session (and every web app mounted
+	// in the shell) drives unlimited inference spend.
+	RateLimit ShellRateLimitConfig `mapstructure:"rate_limit"`
+	// Captcha (#592) gates the public login endpoint with a server-rendered
+	// SVG challenge (contract for fusion-web-shell #139). Off = login plane
+	// behaves exactly as before (back-compat); on = POST /api/v1/shell/session
+	// requires a live challenge id + code BEFORE credential verification.
+	Captcha ShellCaptchaConfig `mapstructure:"captcha"`
+	// Link (#717) provisions the fusion-link daemon's local service-ticket
+	// plane: the daemon exchanges its device credential for a short-lived
+	// loopback-only ticket that drives shell task APIs with no browser
+	// session present.
+	Link ShellLinkConfig `mapstructure:"link"`
+	// IdentityBridge (#715) mounts /api/messaging/ under the shell-session
+	// chain and translates the session into a real fusion-identity user
+	// bearer via a server-side refresh-token vault (fed at SSO / portal-code
+	// login). Local-password sessions carry no identity principal and get a
+	// clear 403. When enabled, a colliding service_routes prefix mount on
+	// the same path is skipped (the bridge supersedes it).
+	IdentityBridge ShellIdentityBridgeConfig `mapstructure:"identity_bridge"`
 }
 
 // ShellIdentityBridgeConfig (#715) configures the session-authed identity
@@ -1411,9 +1425,9 @@ type ShellConfig struct {
 // base URL reuses shell.identity_url (auth_portal fallback chain) and the
 // vault is bounded in code.
 type ShellIdentityBridgeConfig struct {
-    // Enabled turns the /api/messaging/ session mount + vault on. Off =
-    // no bridge route, no vault (SSO logins discard refresh tokens as before).
-    Enabled bool `mapstructure:"enabled"`
+	// Enabled turns the /api/messaging/ session mount + vault on. Off =
+	// no bridge route, no vault (SSO logins discard refresh tokens as before).
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // ShellCaptchaConfig (#592) configures the login CAPTCHA plane. No external
@@ -1422,38 +1436,38 @@ type ShellIdentityBridgeConfig struct {
 // plane. Tickets are loopback-only by construction (enforced in code, not
 // config) and expire in at most LinkTicketMaxTTL.
 type ShellLinkConfig struct {
-    // Enabled turns the plane on. Off = no /api/v1/link/ticket endpoint and
-    // no ticket acceptance anywhere (fail-closed).
-    Enabled bool `mapstructure:"enabled"`
-    // Credential is the device credential the daemon presents at mint time
-    // (constant-time compared). Required >= 32 chars when enabled. Prefer
-    // CredentialFile (0600 secret file, tilde-expanded) — the inline value
-    // wins when both are set.
-    Credential string `mapstructure:"credential"`
-    // CredentialFile is the secret-file alternative to Credential (#370
-    // convention); its first line is the credential.
-    CredentialFile string `mapstructure:"credential_file"`
-    // TicketTTL is the ticket lifetime. Clamped to <= 15m (PRD §11.3);
-    // default 15m.
-    TicketTTL time.Duration `mapstructure:"ticket_ttl"`
-    // Sub is the audit principal stamped into tickets (e.g. "fusion-link").
-    // Default "fusion-link".
-    Sub string `mapstructure:"sub"`
-    // Tenant stamped into tickets. Default shell.session.tenant, then
-    // "local".
-    Tenant string `mapstructure:"tenant"`
-    // Modules is the manifest-id allowlist the ticket may reach (same
-    // semantics as session `permissions`). Default ["*"].
-    Modules []string `mapstructure:"modules"`
-    // TicketRoutes (#732) extends the task-execution route allowlist a
-    // service ticket may drive, beyond the built-in shell task APIs. Each
-    // entry is "METHOD /path"; a literal "/*" suffix turns it into a
-    // same-origin path-prefix glob (same semantics as auth_portal
-    // redirect_uris, #729): "POST /shell/office-api/v1/*" covers every
-    // office-api write/parse route. The admin and auth planes are never
-    // configurable (validate rejects them); loopback + ticket-kind checks
-    // are unaffected. Empty = built-in allowlist only.
-    TicketRoutes []string `mapstructure:"ticket_routes"`
+	// Enabled turns the plane on. Off = no /api/v1/link/ticket endpoint and
+	// no ticket acceptance anywhere (fail-closed).
+	Enabled bool `mapstructure:"enabled"`
+	// Credential is the device credential the daemon presents at mint time
+	// (constant-time compared). Required >= 32 chars when enabled. Prefer
+	// CredentialFile (0600 secret file, tilde-expanded) — the inline value
+	// wins when both are set.
+	Credential string `mapstructure:"credential"`
+	// CredentialFile is the secret-file alternative to Credential (#370
+	// convention); its first line is the credential.
+	CredentialFile string `mapstructure:"credential_file"`
+	// TicketTTL is the ticket lifetime. Clamped to <= 15m (PRD §11.3);
+	// default 15m.
+	TicketTTL time.Duration `mapstructure:"ticket_ttl"`
+	// Sub is the audit principal stamped into tickets (e.g. "fusion-link").
+	// Default "fusion-link".
+	Sub string `mapstructure:"sub"`
+	// Tenant stamped into tickets. Default shell.session.tenant, then
+	// "local".
+	Tenant string `mapstructure:"tenant"`
+	// Modules is the manifest-id allowlist the ticket may reach (same
+	// semantics as session `permissions`). Default ["*"].
+	Modules []string `mapstructure:"modules"`
+	// TicketRoutes (#732) extends the task-execution route allowlist a
+	// service ticket may drive, beyond the built-in shell task APIs. Each
+	// entry is "METHOD /path"; a literal "/*" suffix turns it into a
+	// same-origin path-prefix glob (same semantics as auth_portal
+	// redirect_uris, #729): "POST /shell/office-api/v1/*" covers every
+	// office-api write/parse route. The admin and auth planes are never
+	// configurable (validate rejects them); loopback + ticket-kind checks
+	// are unaffected. Empty = built-in allowlist only.
+	TicketRoutes []string `mapstructure:"ticket_routes"`
 }
 
 // LinkTicketRouteAdminPrefixes are path prefixes a TicketRoutes entry may
@@ -1469,45 +1483,45 @@ var LinkTicketRouteAdminPrefixes = []string{"/admin", "/auth"}
 // then applied the 32-char gate, so EVERY credential_file-only deployment
 // failed validate and the config guard quarantined the file as corrupt.
 func validateLinkCredential(link ShellLinkConfig) error {
-    if !link.Enabled {
-        return nil
-    }
-    if link.Credential == "" && link.CredentialFile == "" {
-        return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
-    }
-    if link.Credential != "" && len(link.Credential) < 32 {
-        return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
-    }
-    return nil
+	if !link.Enabled {
+		return nil
+	}
+	if link.Credential == "" && link.CredentialFile == "" {
+		return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+	}
+	if link.Credential != "" && len(link.Credential) < 32 {
+		return fmt.Errorf("web_shell.link.enabled is true but web_shell.link.credential is shorter than 32 characters (set a real device credential or credential_file)")
+	}
+	return nil
 }
 
 // validateLinkTicketRoutes (#732) checks each web_shell.link.ticket_routes
 // entry: "METHOD /path", at most a single trailing "/*" glob, never a path
 // on the admin/auth planes.
 func validateLinkTicketRoutes(link ShellLinkConfig) error {
-    for _, tr := range link.TicketRoutes {
-        method, path, ok := strings.Cut(strings.TrimSpace(tr), " ")
-        if !ok || method == "" || !strings.HasPrefix(path, "/") {
-            return fmt.Errorf("web_shell.link.ticket_routes entry %q must be \"METHOD /path\"", tr)
-        }
-        if strings.Contains(strings.TrimSuffix(path, "*"), "*") || strings.ContainsAny(path, " ?#") {
-            return fmt.Errorf("web_shell.link.ticket_routes entry %q supports only a trailing /* glob", tr)
-        }
-        for _, p := range LinkTicketRouteAdminPrefixes {
-            if path == p || strings.HasPrefix(path, p+"/") || path == p+"/*" || strings.HasPrefix(strings.TrimSuffix(path, "/*"), p+"/") {
-                return fmt.Errorf("web_shell.link.ticket_routes entry %q may not target the %s plane", tr, strings.TrimPrefix(p, "/"))
-            }
-        }
-    }
-    return nil
+	for _, tr := range link.TicketRoutes {
+		method, path, ok := strings.Cut(strings.TrimSpace(tr), " ")
+		if !ok || method == "" || !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("web_shell.link.ticket_routes entry %q must be \"METHOD /path\"", tr)
+		}
+		if strings.Contains(strings.TrimSuffix(path, "*"), "*") || strings.ContainsAny(path, " ?#") {
+			return fmt.Errorf("web_shell.link.ticket_routes entry %q supports only a trailing /* glob", tr)
+		}
+		for _, p := range LinkTicketRouteAdminPrefixes {
+			if path == p || strings.HasPrefix(path, p+"/") || path == p+"/*" || strings.HasPrefix(strings.TrimSuffix(path, "/*"), p+"/") {
+				return fmt.Errorf("web_shell.link.ticket_routes entry %q may not target the %s plane", tr, strings.TrimPrefix(p, "/"))
+			}
+		}
+	}
+	return nil
 }
 
 type ShellCaptchaConfig struct {
-    // Enabled turns the challenge gate on. Off = no captcha required.
-    Enabled bool `mapstructure:"enabled"`
-    // TTL is how long a challenge stays valid. Required > 0 when enabled
-    // (fail closed); default 5m.
-    TTL time.Duration `mapstructure:"ttl"`
+	// Enabled turns the challenge gate on. Off = no captcha required.
+	Enabled bool `mapstructure:"enabled"`
+	// TTL is how long a challenge stays valid. Required > 0 when enabled
+	// (fail closed); default 5m.
+	TTL time.Duration `mapstructure:"ttl"`
 }
 
 // ShellRateLimitConfig (#586) holds the per-shell-user usage caps. All values
@@ -1515,124 +1529,124 @@ type ShellCaptchaConfig struct {
 // enabling the gate with rpm <= 0 is a config error (fail closed — an
 // "unlimited by typo" default is exactly the footgun #586 reports).
 type ShellRateLimitConfig struct {
-    // Enabled turns the shell usage gate on. Off = unlimited (back-compat).
-    Enabled bool `mapstructure:"enabled"`
-    // RPM caps chat requests per shell user per minute. Required > 0 when
-    // enabled.
-    RPM int `mapstructure:"rpm"`
-    // TPM caps estimated input tokens per shell user per minute. 0 = off.
-    TPM int `mapstructure:"tpm"`
-    // DailyTokens caps total input tokens per shell user per UTC day
-    // (in-memory, resets on restart and at UTC midnight). 0 = off.
-    DailyTokens int `mapstructure:"daily_tokens"`
+	// Enabled turns the shell usage gate on. Off = unlimited (back-compat).
+	Enabled bool `mapstructure:"enabled"`
+	// RPM caps chat requests per shell user per minute. Required > 0 when
+	// enabled.
+	RPM int `mapstructure:"rpm"`
+	// TPM caps estimated input tokens per shell user per minute. 0 = off.
+	TPM int `mapstructure:"tpm"`
+	// DailyTokens caps total input tokens per shell user per UTC day
+	// (in-memory, resets on restart and at UTC midnight). 0 = off.
+	DailyTokens int `mapstructure:"daily_tokens"`
 }
 
 type ShellSessionConfig struct {
-    // Secret signs session tokens (HMAC-SHA256). Empty = derived from
-    // master_key (logged); both empty is a validate error when shell.enabled.
-    Secret string `mapstructure:"secret"`
-    // TTL is the session token lifetime. Default 12h.
-    TTL time.Duration `mapstructure:"ttl"`
-    // Users is the local single-tenant account list. Empty = a bootstrap
-    // admin with a random password is generated and logged once at startup
-    // (PRD §4.1.5), with must_change_password in the claims.
-    Users []ShellUser `mapstructure:"users"`
-    // Tenant is the tenant id stamped into password-session claims (issue
-    // #543). Default "local". A deployment that mixes password logins with
-    // identity-SSO sessions must set this to the SSO tenant id, or the two
-    // login methods operate on isolated model-policy / preference namespaces.
-    // Changing it re-keys future sessions only; policies already stored under
-    // the old tenant keep living there until re-keyed.
-    Tenant string `mapstructure:"tenant"`
+	// Secret signs session tokens (HMAC-SHA256). Empty = derived from
+	// master_key (logged); both empty is a validate error when shell.enabled.
+	Secret string `mapstructure:"secret"`
+	// TTL is the session token lifetime. Default 12h.
+	TTL time.Duration `mapstructure:"ttl"`
+	// Users is the local single-tenant account list. Empty = a bootstrap
+	// admin with a random password is generated and logged once at startup
+	// (PRD §4.1.5), with must_change_password in the claims.
+	Users []ShellUser `mapstructure:"users"`
+	// Tenant is the tenant id stamped into password-session claims (issue
+	// #543). Default "local". A deployment that mixes password logins with
+	// identity-SSO sessions must set this to the SSO tenant id, or the two
+	// login methods operate on isolated model-policy / preference namespaces.
+	// Changing it re-keys future sessions only; policies already stored under
+	// the old tenant keep living there until re-keyed.
+	Tenant string `mapstructure:"tenant"`
 }
 
 type ShellUser struct {
-    Username       string   `mapstructure:"username"`
-    Password       string   `mapstructure:"password"`
-    PasswordBcrypt string   `mapstructure:"password_bcrypt"`
-    Roles          []string `mapstructure:"roles"`
-    // Modules lists the manifest ids this user may see (token permissions[]).
-    // "admin" role implies all modules.
-    Modules []string `mapstructure:"modules"`
+	Username       string   `mapstructure:"username"`
+	Password       string   `mapstructure:"password"`
+	PasswordBcrypt string   `mapstructure:"password_bcrypt"`
+	Roles          []string `mapstructure:"roles"`
+	// Modules lists the manifest ids this user may see (token permissions[]).
+	// "admin" role implies all modules.
+	Modules []string `mapstructure:"modules"`
 }
 
 // ShellManifest mirrors the PRD §5.1 schema v1. Static fallback entries use
 // the same struct as dynamic registrations.
 type ShellManifest struct {
-    ID       string   `json:"id" mapstructure:"id"`
-    Title    string   `json:"title" mapstructure:"title"`
-    TitleEn  string   `json:"title_en,omitempty" mapstructure:"title_en"`
-    Version  string   `json:"version,omitempty" mapstructure:"version"`
-    Path     string   `json:"path" mapstructure:"path"`
-    Icon     string   `json:"icon,omitempty" mapstructure:"icon"`
-    Entry    string   `json:"entry" mapstructure:"entry"`
-    Health   string   `json:"health,omitempty" mapstructure:"health"`
-    Backend  string   `json:"backend,omitempty" mapstructure:"backend"`
-    Devices  []string `json:"devices" mapstructure:"devices"`
-    Category string   `json:"category" mapstructure:"category"`
-    // Upstream is the module's proxy base URL (optional, #232). When set, a
-    // dynamically registered module is proxied at /shell/<id>/ without a
-    // static web_shell.modules entry; static config still wins as override.
-    Upstream string `json:"upstream,omitempty" mapstructure:"upstream"`
-    // APIKey is the upstream credential injected by the /shell/ proxy for a
-    // dynamically routed module. It decodes from registration bodies but is
-    // NEVER surfaced in manifest list output: Registry.List zeroes it on the
-    // returned copies and omitempty drops the empty field (the shell host
-    // must not receive secrets).
-    APIKey string `json:"api_key,omitempty" mapstructure:"api_key"`
-    // Schema v1 ext fields (#250, shell#24): optional module-provided
-    // extensions consumed by the shell host (⌘K cross-module search,
-    // sub-page deep links, notification poll sources). The JSON wire keys
-    // are camelCase to match the shell-side ManifestDto
-    // (dto.searchProviders/pages/notifications); inner keys and the
-    // config.yaml mapstructure keys stay snake_case. The shell host
-    // re-sanitizes on load (shape-check, dedupe, cap) — the gateway
-    // validates shape and bounds at registration, then passes through.
-    SearchProviders []ShellSearchProvider     `json:"searchProviders,omitempty" mapstructure:"search_providers"`
-    Pages           []ShellPage               `json:"pages,omitempty" mapstructure:"pages"`
-    Notifications   []ShellNotificationSource `json:"notifications,omitempty" mapstructure:"notifications"`
-    // Home is the optional home-page contribution (#263, shell#32): cards
-    // the module renders on the shell host's Home landing. Absent = no
-    // contribution. Same passthrough contract as the other ext fields.
-    Home *ShellHome `json:"home,omitempty" mapstructure:"home"`
-    // PermissionsPolicy is the module-declared Permissions-Policy feature list
-    // (shell#66): features the module's iframe needs delegated (e.g.
-    // "microphone", "camera"). The shell renders them as the iframe `allow`
-    // attribute, scoped to the frame's own origin. Validated against the
-    // feature allowlist at registration; absent = no delegation (default).
-    // JSON wire key is camelCase like the other ext fields (searchProviders);
-    // config.yaml static entries use snake_case (permissions_policy).
-    PermissionsPolicy []string `json:"permissionsPolicy,omitempty" mapstructure:"permissions_policy"`
-    // Schema v2 grouping fields (#297): display-only aggregation for the
-    // shell host's two-level menu. Group is a stable group id shared by
-    // sibling modules (e.g. "fusion-office"); empty = ungrouped, renders
-    // top-level as today (backward compatible). GroupTitle/GroupTitleEn is
-    // the group's display name — siblings must agree, first registered
-    // wins, mismatch logs a warning. Sort is an ordering hint within a
-    // group (stable sort; ties by id). No group-level auth/RBAC:
-    // permissions stay per-module.
-    Group        string `json:"group,omitempty"         mapstructure:"group"`
-    GroupTitle   string `json:"group_title,omitempty"   mapstructure:"group_title"`
-    GroupTitleEn string `json:"group_title_en,omitempty" mapstructure:"group_title_en"`
-    Sort         int    `json:"sort,omitempty"          mapstructure:"sort"`
-    // Schema v3 model-policy fields (#486): module-declared domain knowledge,
-    // pass-through per the #250/#297 ext-field precedent — the gateway
-    // validates nothing beyond JSON safety, the admin governs them in
-    // Settings. ModelCapable declares the module can consume a resolved
-    // model at all; SuggestedModel is the module's own domain suggestion
-    // (advisory — resolution follows the #486 chain, not this hint).
-    // Older manifests without the fields keep working: omitempty drops both
-    // on the wire and the mapstructure round-trip.
-    ModelCapable   bool   `json:"model_capable,omitempty"   mapstructure:"model_capable"`
-    SuggestedModel string `json:"suggested_model,omitempty" mapstructure:"suggested_model"`
-    // Router is the optional deep-link routing mode (fusion-web-shell#169):
-    // "path" = path-form deep links (/site/factory), "hash" = hash-form
-    // (/#/factory). Absent = "hash", the historical default — older
-    // manifests keep working unchanged. Passed through verbatim to the
-    // shell host like the model-policy fields above; validated at
-    // registration (empty|hash|path) so only the two known modes reach
-    // the wire.
-    Router string `json:"router,omitempty" mapstructure:"router"`
+	ID       string   `json:"id" mapstructure:"id"`
+	Title    string   `json:"title" mapstructure:"title"`
+	TitleEn  string   `json:"title_en,omitempty" mapstructure:"title_en"`
+	Version  string   `json:"version,omitempty" mapstructure:"version"`
+	Path     string   `json:"path" mapstructure:"path"`
+	Icon     string   `json:"icon,omitempty" mapstructure:"icon"`
+	Entry    string   `json:"entry" mapstructure:"entry"`
+	Health   string   `json:"health,omitempty" mapstructure:"health"`
+	Backend  string   `json:"backend,omitempty" mapstructure:"backend"`
+	Devices  []string `json:"devices" mapstructure:"devices"`
+	Category string   `json:"category" mapstructure:"category"`
+	// Upstream is the module's proxy base URL (optional, #232). When set, a
+	// dynamically registered module is proxied at /shell/<id>/ without a
+	// static web_shell.modules entry; static config still wins as override.
+	Upstream string `json:"upstream,omitempty" mapstructure:"upstream"`
+	// APIKey is the upstream credential injected by the /shell/ proxy for a
+	// dynamically routed module. It decodes from registration bodies but is
+	// NEVER surfaced in manifest list output: Registry.List zeroes it on the
+	// returned copies and omitempty drops the empty field (the shell host
+	// must not receive secrets).
+	APIKey string `json:"api_key,omitempty" mapstructure:"api_key"`
+	// Schema v1 ext fields (#250, shell#24): optional module-provided
+	// extensions consumed by the shell host (⌘K cross-module search,
+	// sub-page deep links, notification poll sources). The JSON wire keys
+	// are camelCase to match the shell-side ManifestDto
+	// (dto.searchProviders/pages/notifications); inner keys and the
+	// config.yaml mapstructure keys stay snake_case. The shell host
+	// re-sanitizes on load (shape-check, dedupe, cap) — the gateway
+	// validates shape and bounds at registration, then passes through.
+	SearchProviders []ShellSearchProvider     `json:"searchProviders,omitempty" mapstructure:"search_providers"`
+	Pages           []ShellPage               `json:"pages,omitempty" mapstructure:"pages"`
+	Notifications   []ShellNotificationSource `json:"notifications,omitempty" mapstructure:"notifications"`
+	// Home is the optional home-page contribution (#263, shell#32): cards
+	// the module renders on the shell host's Home landing. Absent = no
+	// contribution. Same passthrough contract as the other ext fields.
+	Home *ShellHome `json:"home,omitempty" mapstructure:"home"`
+	// PermissionsPolicy is the module-declared Permissions-Policy feature list
+	// (shell#66): features the module's iframe needs delegated (e.g.
+	// "microphone", "camera"). The shell renders them as the iframe `allow`
+	// attribute, scoped to the frame's own origin. Validated against the
+	// feature allowlist at registration; absent = no delegation (default).
+	// JSON wire key is camelCase like the other ext fields (searchProviders);
+	// config.yaml static entries use snake_case (permissions_policy).
+	PermissionsPolicy []string `json:"permissionsPolicy,omitempty" mapstructure:"permissions_policy"`
+	// Schema v2 grouping fields (#297): display-only aggregation for the
+	// shell host's two-level menu. Group is a stable group id shared by
+	// sibling modules (e.g. "fusion-office"); empty = ungrouped, renders
+	// top-level as today (backward compatible). GroupTitle/GroupTitleEn is
+	// the group's display name — siblings must agree, first registered
+	// wins, mismatch logs a warning. Sort is an ordering hint within a
+	// group (stable sort; ties by id). No group-level auth/RBAC:
+	// permissions stay per-module.
+	Group        string `json:"group,omitempty"         mapstructure:"group"`
+	GroupTitle   string `json:"group_title,omitempty"   mapstructure:"group_title"`
+	GroupTitleEn string `json:"group_title_en,omitempty" mapstructure:"group_title_en"`
+	Sort         int    `json:"sort,omitempty"          mapstructure:"sort"`
+	// Schema v3 model-policy fields (#486): module-declared domain knowledge,
+	// pass-through per the #250/#297 ext-field precedent — the gateway
+	// validates nothing beyond JSON safety, the admin governs them in
+	// Settings. ModelCapable declares the module can consume a resolved
+	// model at all; SuggestedModel is the module's own domain suggestion
+	// (advisory — resolution follows the #486 chain, not this hint).
+	// Older manifests without the fields keep working: omitempty drops both
+	// on the wire and the mapstructure round-trip.
+	ModelCapable   bool   `json:"model_capable,omitempty"   mapstructure:"model_capable"`
+	SuggestedModel string `json:"suggested_model,omitempty" mapstructure:"suggested_model"`
+	// Router is the optional deep-link routing mode (fusion-web-shell#169):
+	// "path" = path-form deep links (/site/factory), "hash" = hash-form
+	// (/#/factory). Absent = "hash", the historical default — older
+	// manifests keep working unchanged. Passed through verbatim to the
+	// shell host like the model-policy fields above; validated at
+	// registration (empty|hash|path) so only the two known modes reach
+	// the wire.
+	Router string `json:"router,omitempty" mapstructure:"router"`
 }
 
 // ShellHome is a module's Home-page contribution (#263, shell#32): cards
@@ -1641,37 +1655,37 @@ type ShellManifest struct {
 // shell#41) declares the module's spaces/projects poll sources for the
 // Home "Projects/Spaces" section, same contract family as Notifications.
 type ShellHome struct {
-    Cards    []ShellHomeCard     `json:"cards,omitempty" mapstructure:"cards"`
-    Projects []ShellHomeProject `json:"projects,omitempty" mapstructure:"projects"`
+	Cards    []ShellHomeCard    `json:"cards,omitempty" mapstructure:"cards"`
+	Projects []ShellHomeProject `json:"projects,omitempty" mapstructure:"projects"`
 }
 
 // ShellHomeProject is one spaces/projects poll source (shell#41): the shell
 // host polls GET <endpoint> and expects {items:[{id, title, route?, ...}]}.
 type ShellHomeProject struct {
-    ID       string `json:"id" mapstructure:"id"`
-    Label    string `json:"label" mapstructure:"label"`
-    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
-    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
+	ID       string `json:"id" mapstructure:"id"`
+	Label    string `json:"label" mapstructure:"label"`
+	LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+	Endpoint string `json:"endpoint" mapstructure:"endpoint"`
 }
 
 // ShellHomeCard is one Home card or suggested chip contributed by a module.
 type ShellHomeCard struct {
-    ID            string `json:"id" mapstructure:"id"`
-    Title         string `json:"title" mapstructure:"title"`
-    TitleEn       string `json:"title_en,omitempty" mapstructure:"title_en"`
-    Description   string `json:"description,omitempty" mapstructure:"description"`
-    DescriptionEn string `json:"description_en,omitempty" mapstructure:"description_en"`
-    Route         string `json:"route" mapstructure:"route"`
-    Chip          bool   `json:"chip,omitempty" mapstructure:"chip"`
+	ID            string `json:"id" mapstructure:"id"`
+	Title         string `json:"title" mapstructure:"title"`
+	TitleEn       string `json:"title_en,omitempty" mapstructure:"title_en"`
+	Description   string `json:"description,omitempty" mapstructure:"description"`
+	DescriptionEn string `json:"description_en,omitempty" mapstructure:"description_en"`
+	Route         string `json:"route" mapstructure:"route"`
+	Chip          bool   `json:"chip,omitempty" mapstructure:"chip"`
 }
 
 // ShellSearchProvider is one ⌘K cross-module search source (shell#24): the
 // shell host calls GET <endpoint>?q=<query> and expects {items:[{title, route?}]}.
 type ShellSearchProvider struct {
-    ID       string `json:"id" mapstructure:"id"`
-    Label    string `json:"label" mapstructure:"label"`
-    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
-    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
+	ID       string `json:"id" mapstructure:"id"`
+	Label    string `json:"label" mapstructure:"label"`
+	LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+	Endpoint string `json:"endpoint" mapstructure:"endpoint"`
 }
 
 // ShellPage is a sub-page deep link (shell#24): the shell links to
@@ -1681,28 +1695,28 @@ type ShellSearchProvider struct {
 // prod-layer pages as a labeled subgroup and degrades to the flat list when
 // the field is absent.
 type ShellPage struct {
-    Route   string `json:"route" mapstructure:"route"`
-    Title   string `json:"title" mapstructure:"title"`
-    TitleEn string `json:"title_en,omitempty" mapstructure:"title_en"`
-    Layer   string `json:"layer,omitempty" mapstructure:"layer"`
+	Route   string `json:"route" mapstructure:"route"`
+	Title   string `json:"title" mapstructure:"title"`
+	TitleEn string `json:"title_en,omitempty" mapstructure:"title_en"`
+	Layer   string `json:"layer,omitempty" mapstructure:"layer"`
 }
 
 // ShellNotificationSource is one notification-center poll source (shell#24);
 // kind selects the host's rendering pipeline: approvals|runs|engine.
 type ShellNotificationSource struct {
-    ID       string `json:"id" mapstructure:"id"`
-    Label    string `json:"label" mapstructure:"label"`
-    LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
-    Endpoint string `json:"endpoint" mapstructure:"endpoint"`
-    Kind     string `json:"kind" mapstructure:"kind"`
+	ID       string `json:"id" mapstructure:"id"`
+	Label    string `json:"label" mapstructure:"label"`
+	LabelEn  string `json:"label_en,omitempty" mapstructure:"label_en"`
+	Endpoint string `json:"endpoint" mapstructure:"endpoint"`
+	Kind     string `json:"kind" mapstructure:"kind"`
 }
 
 type ShellModuleConfig struct {
-    Upstream string `mapstructure:"upstream"`
-    // APIKey is the upstream credential injected by the /shell/ proxy as
-    // `Authorization: Bearer` (acceptance F-3). The caller's shell session
-    // token is never forwarded upstream — it is gateway-internal only.
-    APIKey string `mapstructure:"api_key"`
+	Upstream string `mapstructure:"upstream"`
+	// APIKey is the upstream credential injected by the /shell/ proxy as
+	// `Authorization: Bearer` (acceptance F-3). The caller's shell session
+	// token is never forwarded upstream — it is gateway-internal only.
+	APIKey string `mapstructure:"api_key"`
 }
 
 // IdentityConfig wires the fusion-identity gRPC control plane (#157). When
@@ -1713,51 +1727,51 @@ type ShellModuleConfig struct {
 // identity outage rejects NEW requests with 503 while active streams keep
 // running, avoiding inference-cluster meltdown.
 type IdentityConfig struct {
-    Enabled      bool   `mapstructure:"enabled"`
-    Endpoint     string `mapstructure:"endpoint"`
-    // Deadline for AuthorizeAndAcquire (hot path). PRD §7 targets <5ms TTFT
-    // impact; 10ms matches the Python reference client default.
-    DeadlineMS   int    `mapstructure:"deadline_ms"`
-    // KeepAlive interval for the long-lived gRPC channel (seconds).
-    KeepAliveSec int    `mapstructure:"keepalive_sec"`
-    // FallbackToLocal: when identity is unavailable (breaker open), fall back
-    // to the local key-store auth path instead of 503. Off by default = strict
-    // (503 on identity outage, per #157 acceptance).
-    FallbackToLocal bool `mapstructure:"fallback_to_local"`
-    // BreakerThreshold consecutive failures to open the breaker.
-    BreakerThreshold int `mapstructure:"breaker_threshold"`
-    // BreakerOpenSec breaker open duration before half-open probe (seconds).
-    BreakerOpenSec int `mapstructure:"breaker_open_sec"`
-    // ServiceTokenFile: 0600 secret file whose trimmed contents are attached
-    // as the x-fusion-service-token gRPC metadata on every RPC. identity#72
-    // enforces the service token server-side (ServiceTokenInterceptor,
-    // constant-time compare) on ALL RPCs — without it every call is rejected
-    // UNAUTHENTICATED and, in strict mode, every inference call 503s (#630).
-    // Empty = no token attached (pre-#72 identity servers).
-    ServiceTokenFile string `mapstructure:"service_token_file"`
+	Enabled  bool   `mapstructure:"enabled"`
+	Endpoint string `mapstructure:"endpoint"`
+	// Deadline for AuthorizeAndAcquire (hot path). PRD §7 targets <5ms TTFT
+	// impact; 10ms matches the Python reference client default.
+	DeadlineMS int `mapstructure:"deadline_ms"`
+	// KeepAlive interval for the long-lived gRPC channel (seconds).
+	KeepAliveSec int `mapstructure:"keepalive_sec"`
+	// FallbackToLocal: when identity is unavailable (breaker open), fall back
+	// to the local key-store auth path instead of 503. Off by default = strict
+	// (503 on identity outage, per #157 acceptance).
+	FallbackToLocal bool `mapstructure:"fallback_to_local"`
+	// BreakerThreshold consecutive failures to open the breaker.
+	BreakerThreshold int `mapstructure:"breaker_threshold"`
+	// BreakerOpenSec breaker open duration before half-open probe (seconds).
+	BreakerOpenSec int `mapstructure:"breaker_open_sec"`
+	// ServiceTokenFile: 0600 secret file whose trimmed contents are attached
+	// as the x-fusion-service-token gRPC metadata on every RPC. identity#72
+	// enforces the service token server-side (ServiceTokenInterceptor,
+	// constant-time compare) on ALL RPCs — without it every call is rejected
+	// UNAUTHENTICATED and, in strict mode, every inference call 503s (#630).
+	// Empty = no token attached (pre-#72 identity servers).
+	ServiceTokenFile string `mapstructure:"service_token_file"`
 }
 
 type ConfigSnapshot struct {
-    Config   Config
-    Version  uint64
-    LoadedAt time.Time
+	Config   Config
+	Version  uint64
+	LoadedAt time.Time
 }
 
 var (
-    globalConfig     atomic.Pointer[ConfigSnapshot]
-    configVersion    atomic.Uint64
-    configMu         sync.RWMutex
-    onReloadHandlers []func(old, new *ConfigSnapshot)
-    // H7: reloadMu serializes the onReload handler-run + commit window. Without
-    // it, two concurrent Reloads (admin PUT + fsnotify) both copy the handler
-    // list under a shared RLock then run handlers + globalConfig.Store with NO
-    // lock between them — handlers interleave, DrainAndApply/BuildProviders run
-    // twice concurrently, and the unlocked gap before commit is race-prone.
-    // Holding reloadMu across handler-run+commit makes the whole apply atomic
-    // and mutually exclusive, without coupling to configMu (which guards the
-    // handler-list registration under its own Lock). Handlers in main.go do not
-    // reenter Reload/OnReload, so holding this lock across them is safe.
-    reloadMu sync.Mutex
+	globalConfig     atomic.Pointer[ConfigSnapshot]
+	configVersion    atomic.Uint64
+	configMu         sync.RWMutex
+	onReloadHandlers []func(old, new *ConfigSnapshot)
+	// H7: reloadMu serializes the onReload handler-run + commit window. Without
+	// it, two concurrent Reloads (admin PUT + fsnotify) both copy the handler
+	// list under a shared RLock then run handlers + globalConfig.Store with NO
+	// lock between them — handlers interleave, DrainAndApply/BuildProviders run
+	// twice concurrently, and the unlocked gap before commit is race-prone.
+	// Holding reloadMu across handler-run+commit makes the whole apply atomic
+	// and mutually exclusive, without coupling to configMu (which guards the
+	// handler-list registration under its own Lock). Handlers in main.go do not
+	// reenter Reload/OnReload, so holding this lock across them is safe.
+	reloadMu sync.Mutex
 )
 
 // encPrefix marks a backend api_key as AES-256-GCM ciphertext (base64 of
@@ -1778,37 +1792,37 @@ const encPrefix = "enc:"
 // key would send an unauthenticated request upstream and look like an upstream
 // bug. Fail loud at Load so the operator fixes the key, not the backend.
 func decryptBackendAPIKeys(cfg *Config) error {
-    if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
-        for name, bc := range cfg.Backends {
-            if bc.APIKey != "" {
-                slog.Warn("backend api_key stored plaintext and no encryption.master_key set; rotate to enc: form",
-                    "backend", name)
-            }
-        }
-        return nil
-    }
-    cipher, err := crypto.NewAESCipher(cfg.Encryption.MasterKey)
-    if err != nil {
-        return fmt.Errorf("init backend api_key cipher: %w", err)
-    }
-    for name, bc := range cfg.Backends {
-        if bc.APIKey == "" {
-            continue
-        }
-        if !strings.HasPrefix(bc.APIKey, encPrefix) {
-            slog.Warn("backend api_key stored plaintext; rotate to enc: form for at-rest protection",
-                "backend", name)
-            continue
-        }
-        plain, err := cipher.Decrypt(strings.TrimPrefix(bc.APIKey, encPrefix))
-        if err != nil {
-            return fmt.Errorf("decrypt backends.%s.api_key: %w", name, err)
-        }
-        bc.APIKey = plain
-        cfg.Backends[name] = bc
-        slog.Info("backend api_key decrypted from enc: form", "backend", name)
-    }
-    return nil
+	if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
+		for name, bc := range cfg.Backends {
+			if bc.APIKey != "" {
+				slog.Warn("backend api_key stored plaintext and no encryption.master_key set; rotate to enc: form",
+					"backend", name)
+			}
+		}
+		return nil
+	}
+	cipher, err := crypto.NewAESCipher(cfg.Encryption.MasterKey)
+	if err != nil {
+		return fmt.Errorf("init backend api_key cipher: %w", err)
+	}
+	for name, bc := range cfg.Backends {
+		if bc.APIKey == "" {
+			continue
+		}
+		if !strings.HasPrefix(bc.APIKey, encPrefix) {
+			slog.Warn("backend api_key stored plaintext; rotate to enc: form for at-rest protection",
+				"backend", name)
+			continue
+		}
+		plain, err := cipher.Decrypt(strings.TrimPrefix(bc.APIKey, encPrefix))
+		if err != nil {
+			return fmt.Errorf("decrypt backends.%s.api_key: %w", name, err)
+		}
+		bc.APIKey = plain
+		cfg.Backends[name] = bc
+		slog.Info("backend api_key decrypted from enc: form", "backend", name)
+	}
+	return nil
 }
 
 // bindSecretEnv wires named env vars to the config keys that hold secrets,
@@ -1825,70 +1839,70 @@ func decryptBackendAPIKeys(cfg *Config) error {
 // instance that Unmarshals (Load + Reload); the file-watcher instance in
 // WatchAndReload does not Unmarshal, so it is unaffected.
 func bindSecretEnv(v *viper.Viper) {
-    // auth.master_key — admin-equivalent + /metrics + /debug/pprof gate.
-    // The Helm chart injects FG_MASTER_KEY via a secretKeyRef (deployment.yaml).
-    // #493: FUSION_ADMIN_KEY is the ecosystem-canonical management-plane
-    // credential (config-conventions §1) as a second env name.
-    v.BindEnv("auth.master_key", "FG_MASTER_KEY", "FUSION_ADMIN_KEY")
-    // encryption.master_key — protects OAuth2/connector tokens at rest.
-    v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
-    // #175: admin.jwt_secret — HS256 signing key for admin dashboard sessions.
-    // Same env-first treatment as the other secrets: injecting via env avoids
-    // a plaintext secret in config.yaml and lets Kubernetes secretKeyRef drive
-    // rotation without a config rewrite.
-    v.BindEnv("admin.jwt_secret", "FG_ADMIN_JWT_SECRET")
-    // server.port — containerized deployment overrides the listen port via env
-    // (#143: docker run -p maps the host port, but the in-container port must
-    // match EXPOSE; FUSION_GATEWAY_PORT lets a compose overlay drive it without
-    // mounting a config.yaml). AutomaticEnv maps SERVER_PORT, but the issue
-    // names FUSION_GATEWAY_PORT explicitly, so bind it.
-    v.BindEnv("server.port", "FUSION_GATEWAY_PORT")
-    // backends.fusion-mlx.base_url — in Docker the gateway reaches the
-    // bare-metal fusion-mlx via host.docker.internal:11434 (#143), not the
-    // in-container 127.0.0.1. The backend key has a hyphen so AutomaticEnv's
-    // BACKENDS_FUSION-MLX_BASE_URL is not a valid env name; FUSION_MLX_URL is
-    // the documented override. auto_start.wait_url is typically moot in a
-    // container (auto_start disabled — the supervisor or bare-metal owns mlx).
-    // The mlx /metrics URL is NOT covered by this env — it has its own explicit
-    // hardware.mlx_metrics.url config key (wired in hardware.NewCollector), so
-    // a container sets that to host.docker.internal:11434/metrics directly.
-    v.BindEnv("backends.fusion-mlx.base_url", "FUSION_MLX_URL")
-    // backends.fusion-mlx.api_key — the ecosystem default mlx key (set by
-    // fusion-cli as "fg-admin-key") starts with the "fg-" placeholder prefix
-    // and trips the C1 looksLikePlaceholder guard at validate time. Binding an
-    // explicit env lets an operator inject the real upstream key without
-    // writing it into config.yaml, and the validate C1 check skips the
-    // placeholder refusal for a key that arrived via this env (env = operator
-    // explicitly provided, not a shipped template stub). #412: only the
-    // deliberate injection name FUSION_MLX_API_KEY is bound. FUSION_CLIENT_KEY
-    // is the ecosystem gateway CLIENT credential (config-conventions §1),
-    // ambient in every client shell — binding it here let an ambient client
-    // key clobber the mlx backend key or, through the #363 check, hard-fail
-    // start.sh on convention-compliant machines. FUSION_CLIENT_KEY still
-    // reaches the backend key only via an explicit api_key_env reference
-    // (normalizeBackends), which is what the shipped configs use.
-    v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
-    // #493: FUSION_NETWORK_TIER drives the deployment network tier
-    // (local|lan) with env-first precedence, same family as the other
-    // deployment-injected settings.
-    v.BindEnv("network.tier", "FUSION_NETWORK_TIER")
-    // #493: FUSION_GATEWAY_KEY is documented as an alias of the CLIENT plane
-    // (FUSION_CLIENT_KEY, config-conventions §1). That credential is ambient
-    // on clients and never enters the gateway process (#412) — binding it
-    // server-side would let an ambient client key clobber an auth plane, so
-    // it is only observed (deprecation-style WARN in checkClientKeyAlias).
-    // web_shell.admin_key (#243) — the module self-registration credential.
-    // Env precedence keeps the admin-plane secret out of config.yaml.
-    // FG_SHELL_ADMIN_KEY is the gateway-native canonical name; the legacy
-    // FUSION_GATEWAY_ADMIN_KEY name documented by downstream modules stays as
-    // a transition alias so existing module deployments keep registering.
-    v.BindEnv("web_shell.admin_key", "FG_SHELL_ADMIN_KEY", "FUSION_GATEWAY_ADMIN_KEY")
-    // managed_settings.private_key (#151) — Ed25519 seed (base64 32 bytes) the
-    // gateway signs managed-settings payloads with. A Kubernetes Secret via
-    // secretKeyRef injects FG_MANAGED_SETTINGS_PRIVATE_KEY; env precedence keeps
-    // the signing key out of config.yaml. The matching public key is derived and
-    // exposed at /gateway/v1/managed-settings/pubkey for client pinning.
-    v.BindEnv("managed_settings.private_key", "FG_MANAGED_SETTINGS_PRIVATE_KEY")
+	// auth.master_key — admin-equivalent + /metrics + /debug/pprof gate.
+	// The Helm chart injects FG_MASTER_KEY via a secretKeyRef (deployment.yaml).
+	// #493: FUSION_ADMIN_KEY is the ecosystem-canonical management-plane
+	// credential (config-conventions §1) as a second env name.
+	v.BindEnv("auth.master_key", "FG_MASTER_KEY", "FUSION_ADMIN_KEY")
+	// encryption.master_key — protects OAuth2/connector tokens at rest.
+	v.BindEnv("encryption.master_key", "FG_ENCRYPTION_MASTER_KEY")
+	// #175: admin.jwt_secret — HS256 signing key for admin dashboard sessions.
+	// Same env-first treatment as the other secrets: injecting via env avoids
+	// a plaintext secret in config.yaml and lets Kubernetes secretKeyRef drive
+	// rotation without a config rewrite.
+	v.BindEnv("admin.jwt_secret", "FG_ADMIN_JWT_SECRET")
+	// server.port — containerized deployment overrides the listen port via env
+	// (#143: docker run -p maps the host port, but the in-container port must
+	// match EXPOSE; FUSION_GATEWAY_PORT lets a compose overlay drive it without
+	// mounting a config.yaml). AutomaticEnv maps SERVER_PORT, but the issue
+	// names FUSION_GATEWAY_PORT explicitly, so bind it.
+	v.BindEnv("server.port", "FUSION_GATEWAY_PORT")
+	// backends.fusion-mlx.base_url — in Docker the gateway reaches the
+	// bare-metal fusion-mlx via host.docker.internal:11434 (#143), not the
+	// in-container 127.0.0.1. The backend key has a hyphen so AutomaticEnv's
+	// BACKENDS_FUSION-MLX_BASE_URL is not a valid env name; FUSION_MLX_URL is
+	// the documented override. auto_start.wait_url is typically moot in a
+	// container (auto_start disabled — the supervisor or bare-metal owns mlx).
+	// The mlx /metrics URL is NOT covered by this env — it has its own explicit
+	// hardware.mlx_metrics.url config key (wired in hardware.NewCollector), so
+	// a container sets that to host.docker.internal:11434/metrics directly.
+	v.BindEnv("backends.fusion-mlx.base_url", "FUSION_MLX_URL")
+	// backends.fusion-mlx.api_key — the ecosystem default mlx key (set by
+	// fusion-cli as "fg-admin-key") starts with the "fg-" placeholder prefix
+	// and trips the C1 looksLikePlaceholder guard at validate time. Binding an
+	// explicit env lets an operator inject the real upstream key without
+	// writing it into config.yaml, and the validate C1 check skips the
+	// placeholder refusal for a key that arrived via this env (env = operator
+	// explicitly provided, not a shipped template stub). #412: only the
+	// deliberate injection name FUSION_MLX_API_KEY is bound. FUSION_CLIENT_KEY
+	// is the ecosystem gateway CLIENT credential (config-conventions §1),
+	// ambient in every client shell — binding it here let an ambient client
+	// key clobber the mlx backend key or, through the #363 check, hard-fail
+	// start.sh on convention-compliant machines. FUSION_CLIENT_KEY still
+	// reaches the backend key only via an explicit api_key_env reference
+	// (normalizeBackends), which is what the shipped configs use.
+	v.BindEnv("backends.fusion-mlx.api_key", "FUSION_MLX_API_KEY")
+	// #493: FUSION_NETWORK_TIER drives the deployment network tier
+	// (local|lan) with env-first precedence, same family as the other
+	// deployment-injected settings.
+	v.BindEnv("network.tier", "FUSION_NETWORK_TIER")
+	// #493: FUSION_GATEWAY_KEY is documented as an alias of the CLIENT plane
+	// (FUSION_CLIENT_KEY, config-conventions §1). That credential is ambient
+	// on clients and never enters the gateway process (#412) — binding it
+	// server-side would let an ambient client key clobber an auth plane, so
+	// it is only observed (deprecation-style WARN in checkClientKeyAlias).
+	// web_shell.admin_key (#243) — the module self-registration credential.
+	// Env precedence keeps the admin-plane secret out of config.yaml.
+	// FG_SHELL_ADMIN_KEY is the gateway-native canonical name; the legacy
+	// FUSION_GATEWAY_ADMIN_KEY name documented by downstream modules stays as
+	// a transition alias so existing module deployments keep registering.
+	v.BindEnv("web_shell.admin_key", "FG_SHELL_ADMIN_KEY", "FUSION_GATEWAY_ADMIN_KEY")
+	// managed_settings.private_key (#151) — Ed25519 seed (base64 32 bytes) the
+	// gateway signs managed-settings payloads with. A Kubernetes Secret via
+	// secretKeyRef injects FG_MANAGED_SETTINGS_PRIVATE_KEY; env precedence keeps
+	// the signing key out of config.yaml. The matching public key is derived and
+	// exposed at /gateway/v1/managed-settings/pubkey for client pinning.
+	v.BindEnv("managed_settings.private_key", "FG_MANAGED_SETTINGS_PRIVATE_KEY")
 }
 
 // fileValueForKey (#363 F1) reads a key's value straight from the config file
@@ -1897,21 +1911,21 @@ func bindSecretEnv(v *viper.Viper) {
 // the deliberate injection name only), so a Get through it can never reveal
 // what the file actually says — this helper can.
 func fileValueForKey(path, key string) (string, bool) {
-    fv := viper.New()
-    fv.SetConfigFile(path)
-    fv.SetConfigType("yaml")
-    if err := fv.ReadInConfig(); err != nil {
-        slog.Warn("cannot read config file for key source check", "path", path, "error", err)
-        return "", false
-    }
-    if !fv.InConfig(key) {
-        return "", false
-    }
-    val, ok := fv.Get(key).(string)
-    if !ok || val == "" {
-        return "", false
-    }
-    return val, true
+	fv := viper.New()
+	fv.SetConfigFile(path)
+	fv.SetConfigType("yaml")
+	if err := fv.ReadInConfig(); err != nil {
+		slog.Warn("cannot read config file for key source check", "path", path, "error", err)
+		return "", false
+	}
+	if !fv.InConfig(key) {
+		return "", false
+	}
+	val, ok := fv.Get(key).(string)
+	if !ok || val == "" {
+		return "", false
+	}
+	return val, true
 }
 
 // logMasterKeySource (#536): bindSecretEnv gives FG_MASTER_KEY and
@@ -1922,22 +1936,22 @@ func fileValueForKey(path, key string) (string, bool) {
 // fingerprint of the effective value, so the override is visible without
 // dumping process env. Called from Load and Reload.
 func logMasterKeySource(effective string) {
-    source := "config file"
-    for _, name := range []string{"FG_MASTER_KEY", "FUSION_ADMIN_KEY"} {
-        if os.Getenv(name) != "" {
-            source = "env " + name
-            break
-        }
-    }
-    sum := sha256.Sum256([]byte(effective))
-    slog.Info("auth.master_key resolved", "source", source, "fingerprint", "sha256:"+hex.EncodeToString(sum[:8]))
+	source := "config file"
+	for _, name := range []string{"FG_MASTER_KEY", "FUSION_ADMIN_KEY"} {
+		if os.Getenv(name) != "" {
+			source = "env " + name
+			break
+		}
+	}
+	sum := sha256.Sum256([]byte(effective))
+	slog.Info("auth.master_key resolved", "source", source, "fingerprint", "sha256:"+hex.EncodeToString(sum[:8]))
 }
 
 // secretFingerprint returns the short non-secret fingerprint used by the
 // master-key source logs (#536, #611).
 func secretFingerprint(v string) string {
-    sum := sha256.Sum256([]byte(v))
-    return "sha256:" + hex.EncodeToString(sum[:8])
+	sum := sha256.Sum256([]byte(v))
+	return "sha256:" + hex.EncodeToString(sum[:8])
 }
 
 // fileMasterKey (#611): the auth.master_key literal exactly as the config
@@ -1946,19 +1960,19 @@ func secretFingerprint(v string) string {
 // Unreadable/unparseable files yield "" (no conflict verdict possible; the
 // load itself fails elsewhere).
 func fileMasterKey(path string) string {
-    raw, err := os.ReadFile(path)
-    if err != nil {
-        return ""
-    }
-    var doc struct {
-        Auth struct {
-            MasterKey string `yaml:"master_key"`
-        } `yaml:"auth"`
-    }
-    if err := yaml.Unmarshal(raw, &doc); err != nil {
-        return ""
-    }
-    return strings.TrimSpace(doc.Auth.MasterKey)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Auth struct {
+			MasterKey string `yaml:"master_key"`
+		} `yaml:"auth"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Auth.MasterKey)
 }
 
 // warnMasterKeyOverrideConflict (#611): FUSION_ADMIN_KEY / FG_MASTER_KEY
@@ -1972,22 +1986,22 @@ func fileMasterKey(path string) string {
 // documented ${VAR} injection form (the placeholder is expected to differ
 // from the injected secret).
 func warnMasterKeyOverrideConflict(path, effective string) {
-    fileKey := fileMasterKey(path)
-    if fileKey == "" || strings.HasPrefix(fileKey, "${") {
-        return
-    }
-    if fileKey == effective {
-        return
-    }
-    winner := "FG_MASTER_KEY"
-    if os.Getenv("FUSION_ADMIN_KEY") != "" {
-        winner = "FUSION_ADMIN_KEY"
-    }
-    slog.Warn("auth.master_key override conflict: env value wins over the yaml literal; tooling minting shell-session tokens from the yaml value will 401",
-        "winner", "env "+winner,
-        "file_fingerprint", secretFingerprint(fileKey),
-        "effective_fingerprint", secretFingerprint(effective),
-    )
+	fileKey := fileMasterKey(path)
+	if fileKey == "" || strings.HasPrefix(fileKey, "${") {
+		return
+	}
+	if fileKey == effective {
+		return
+	}
+	winner := "FG_MASTER_KEY"
+	if os.Getenv("FUSION_ADMIN_KEY") != "" {
+		winner = "FUSION_ADMIN_KEY"
+	}
+	slog.Warn("auth.master_key override conflict: env value wins over the yaml literal; tooling minting shell-session tokens from the yaml value will 401",
+		"winner", "env "+winner,
+		"file_fingerprint", secretFingerprint(fileKey),
+		"effective_fingerprint", secretFingerprint(effective),
+	)
 }
 
 // fusionMLXKeyEnvs (#412) returns the two env values relevant to the
@@ -1999,7 +2013,7 @@ func warnMasterKeyOverrideConflict(path, effective string) {
 // exemption (a key that arrived via api_key_env: FUSION_CLIENT_KEY) and the
 // checkFusionMLXKeySource mismatch WARN.
 func fusionMLXKeyEnvs() (mlxEnv, clientEnv string) {
-    return strings.TrimSpace(os.Getenv("FUSION_MLX_API_KEY")), strings.TrimSpace(os.Getenv("FUSION_CLIENT_KEY"))
+	return strings.TrimSpace(os.Getenv("FUSION_MLX_API_KEY")), strings.TrimSpace(os.Getenv("FUSION_CLIENT_KEY"))
 }
 
 // checkFusionMLXKeySource (#363 F1) makes the fusion-mlx api_key env override
@@ -2019,25 +2033,25 @@ func fusionMLXKeyEnvs() (mlxEnv, clientEnv string) {
 // the file per-module so a deployment can rotate a service key without a
 // config rewrite.
 func overlayServiceKeyEnvs(cfg *Config) {
-    for _, kv := range os.Environ() {
-        name, val, ok := strings.Cut(kv, "=")
-        if !ok || !strings.HasPrefix(name, "FUSION_SERVICE_KEY_") || val == "" {
-            continue
-        }
-        module := strings.ToLower(strings.TrimPrefix(name, "FUSION_SERVICE_KEY_"))
-        module = strings.ReplaceAll(module, "_", "-")
-        if module == "" {
-            continue
-        }
-        if cfg.Shell.ServiceKeys == nil {
-            cfg.Shell.ServiceKeys = map[string]string{}
-        }
-        if prev := cfg.Shell.ServiceKeys[module]; prev != "" && prev != val {
-            slog.Warn("FUSION_SERVICE_KEY env overrides the file value for module service key",
-                "module", module, "env", name)
-        }
-        cfg.Shell.ServiceKeys[module] = val
-    }
+	for _, kv := range os.Environ() {
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, "FUSION_SERVICE_KEY_") || val == "" {
+			continue
+		}
+		module := strings.ToLower(strings.TrimPrefix(name, "FUSION_SERVICE_KEY_"))
+		module = strings.ReplaceAll(module, "_", "-")
+		if module == "" {
+			continue
+		}
+		if cfg.Shell.ServiceKeys == nil {
+			cfg.Shell.ServiceKeys = map[string]string{}
+		}
+		if prev := cfg.Shell.ServiceKeys[module]; prev != "" && prev != val {
+			slog.Warn("FUSION_SERVICE_KEY env overrides the file value for module service key",
+				"module", module, "env", name)
+		}
+		cfg.Shell.ServiceKeys[module] = val
+	}
 }
 
 // checkClientKeyAlias (#493): FUSION_GATEWAY_KEY is documented as an alias
@@ -2045,10 +2059,10 @@ func overlayServiceKeyEnvs(cfg *Config) {
 // credential never enters the gateway process (#412), so the alias is only
 // observed — one WARN pointing at the canonical name.
 func checkClientKeyAlias() {
-    if v := strings.TrimSpace(os.Getenv("FUSION_GATEWAY_KEY")); v != "" {
-        slog.Warn("FUSION_GATEWAY_KEY is a documentation alias of the client plane and is not consumed by the gateway; use FUSION_CLIENT_KEY (config-conventions §1) on clients",
-            "canonical", "FUSION_CLIENT_KEY")
-    }
+	if v := strings.TrimSpace(os.Getenv("FUSION_GATEWAY_KEY")); v != "" {
+		slog.Warn("FUSION_GATEWAY_KEY is a documentation alias of the client plane and is not consumed by the gateway; use FUSION_CLIENT_KEY (config-conventions §1) on clients",
+			"canonical", "FUSION_CLIENT_KEY")
+	}
 }
 
 // the ecosystem gateway CLIENT credential (config-conventions §1), exported
@@ -2058,138 +2072,138 @@ func checkClientKeyAlias() {
 // bricked start.sh on every convention-compliant machine. The file value wins
 // with a WARN instead.
 func checkFusionMLXKeySource(path string) error {
-    mlxEnv, clientEnv := fusionMLXKeyEnvs()
-    fileKey, fileSet := fileValueForKey(path, "backends.fusion-mlx.api_key")
-    switch {
-    case mlxEnv != "" && fileSet && fileKey != mlxEnv:
-        return fmt.Errorf("backends.fusion-mlx.api_key is set in both config.yaml and FUSION_MLX_API_KEY with DIFFERENT values; before #363 the env value silently overrode the file value — resolve to one source (unset FUSION_MLX_API_KEY, or align both to the same key)")
-    case mlxEnv != "" && fileSet:
-        slog.Info("backends.fusion-mlx.api_key set in both config.yaml and env with identical values", "env", "FUSION_MLX_API_KEY")
-    case mlxEnv != "":
-        slog.Info("backends.fusion-mlx.api_key sourced from env, no file value", "env", "FUSION_MLX_API_KEY")
-    case fileSet:
-        slog.Debug("backends.fusion-mlx.api_key sourced from config file")
-    }
-    if clientEnv != "" && fileSet && fileKey != clientEnv {
-        slog.Warn("FUSION_CLIENT_KEY (gateway client credential, config-conventions §1) differs from backends.fusion-mlx.api_key — it does not override the mlx backend key; inject the backend key via FUSION_MLX_API_KEY or api_key_env instead",
-            "client_key_prefix", clientEnv[:min(6, len(clientEnv))]+"***",
-            "file_key_prefix", fileKey[:min(6, len(fileKey))]+"***")
-    }
-    return nil
+	mlxEnv, clientEnv := fusionMLXKeyEnvs()
+	fileKey, fileSet := fileValueForKey(path, "backends.fusion-mlx.api_key")
+	switch {
+	case mlxEnv != "" && fileSet && fileKey != mlxEnv:
+		return fmt.Errorf("backends.fusion-mlx.api_key is set in both config.yaml and FUSION_MLX_API_KEY with DIFFERENT values; before #363 the env value silently overrode the file value — resolve to one source (unset FUSION_MLX_API_KEY, or align both to the same key)")
+	case mlxEnv != "" && fileSet:
+		slog.Info("backends.fusion-mlx.api_key set in both config.yaml and env with identical values", "env", "FUSION_MLX_API_KEY")
+	case mlxEnv != "":
+		slog.Info("backends.fusion-mlx.api_key sourced from env, no file value", "env", "FUSION_MLX_API_KEY")
+	case fileSet:
+		slog.Debug("backends.fusion-mlx.api_key sourced from config file")
+	}
+	if clientEnv != "" && fileSet && fileKey != clientEnv {
+		slog.Warn("FUSION_CLIENT_KEY (gateway client credential, config-conventions §1) differs from backends.fusion-mlx.api_key — it does not override the mlx backend key; inject the backend key via FUSION_MLX_API_KEY or api_key_env instead",
+			"client_key_prefix", clientEnv[:min(6, len(clientEnv))]+"***",
+			"file_key_prefix", fileKey[:min(6, len(fileKey))]+"***")
+	}
+	return nil
 }
 
 func Load(path string) (*ConfigSnapshot, error) {
-    v := viper.New()
-    v.SetConfigFile(path)
-    v.SetConfigType("yaml")
-    v.AutomaticEnv()
-    bindSecretEnv(v)
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	v.AutomaticEnv()
+	bindSecretEnv(v)
 
-    if err := v.ReadInConfig(); err != nil {
-        return nil, fmt.Errorf("read config: %w", err)
-    }
-    warnUnknownKeys(v.AllSettings())
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	warnUnknownKeys(v.AllSettings())
 
-    // #363 F1: fail loud when FUSION_MLX_API_KEY disagrees with the file value
-    // (the env binding above would otherwise silently win).
-    if err := checkFusionMLXKeySource(path); err != nil {
-        return nil, err
-    }
+	// #363 F1: fail loud when FUSION_MLX_API_KEY disagrees with the file value
+	// (the env binding above would otherwise silently win).
+	if err := checkFusionMLXKeySource(path); err != nil {
+		return nil, err
+	}
 
-    // Seed with DefaultConfig so fields a YAML omits land on sane defaults, not
-    // zero values that validate() then rejects (e.g. circuit_breaker thresholds
-    // default to 5/3/30s, not 0). Matches the GetSnapshot() fallback behavior.
-    // v.Unmarshal overwrites only the keys present in the YAML; absent keys keep
-    // their seeded default. EI8: validate() now enforces positive thresholds,
-    // so seeding defaults is required for minimal-but-valid YAMLs to load.
-    cfg := DefaultConfig()
-    // Clear the baked-in default JWT secret before unmarshaling — the loaded
-    // config must supply its own (RR1 rejects the known-insecure default).
-    if cfg.Admin != nil {
-        cfg.Admin.JWTSecret = ""
-    }
-    if err := v.Unmarshal(&cfg); err != nil {
-        return nil, fmt.Errorf("unmarshal config: %w", err)
-    }
-    overlayServiceKeyEnvs(&cfg)
-    checkClientKeyAlias()
+	// Seed with DefaultConfig so fields a YAML omits land on sane defaults, not
+	// zero values that validate() then rejects (e.g. circuit_breaker thresholds
+	// default to 5/3/30s, not 0). Matches the GetSnapshot() fallback behavior.
+	// v.Unmarshal overwrites only the keys present in the YAML; absent keys keep
+	// their seeded default. EI8: validate() now enforces positive thresholds,
+	// so seeding defaults is required for minimal-but-valid YAMLs to load.
+	cfg := DefaultConfig()
+	// Clear the baked-in default JWT secret before unmarshaling — the loaded
+	// config must supply its own (RR1 rejects the known-insecure default).
+	if cfg.Admin != nil {
+		cfg.Admin.JWTSecret = ""
+	}
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+	overlayServiceKeyEnvs(&cfg)
+	checkClientKeyAlias()
 
-    // models.supply/aliases: viper cannot decode dotted model-name keys
-    // (AllSettings re-nests them), so the fields are mapstructure:"-" and
-    // populated here from the raw file bytes. See models_raw.go.
-    rawCfg, err := os.ReadFile(path)
-    if err != nil {
-        return nil, fmt.Errorf("read config for models.*: %w", err)
-    }
-    loadModelsNamespace(&cfg, rawCfg)
+	// models.supply/aliases: viper cannot decode dotted model-name keys
+	// (AllSettings re-nests them), so the fields are mapstructure:"-" and
+	// populated here from the raw file bytes. See models_raw.go.
+	rawCfg, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config for models.*: %w", err)
+	}
+	loadModelsNamespace(&cfg, rawCfg)
 
-    // Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
-    // "kimi-k2"), so re-derive Backends from the raw file bytes.
-    fixDottedBackendNames(&cfg, rawCfg)
+	// Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
+	// "kimi-k2"), so re-derive Backends from the raw file bytes.
+	fixDottedBackendNames(&cfg, rawCfg)
 
-    // §13.3: api_key_env resolution + vendor base_url/timeout fill, before
-    // validate so downstream checks see the normalized entries.
-    normalizeBackends(&cfg)
+	// §13.3: api_key_env resolution + vendor base_url/timeout fill, before
+	// validate so downstream checks see the normalized entries.
+	normalizeBackends(&cfg)
 
-    if err := validate(&cfg); err != nil {
-        return nil, fmt.Errorf("validate config: %w", err)
-    }
-    logMasterKeySource(cfg.Auth.MasterKey)
-    warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
+	if err := validate(&cfg); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+	logMasterKeySource(cfg.Auth.MasterKey)
+	warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
 
-    // N4 (audit): decrypt backends[*].api_key stored as "enc:" ciphertext.
-    // Runs after validate (master_key placeholder refusal) and before the
-    // snapshot is stored, so providers built from this config see plaintext.
-    if err := decryptBackendAPIKeys(&cfg); err != nil {
-        return nil, fmt.Errorf("decrypt backend api_keys: %w", err)
-    }
+	// N4 (audit): decrypt backends[*].api_key stored as "enc:" ciphertext.
+	// Runs after validate (master_key placeholder refusal) and before the
+	// snapshot is stored, so providers built from this config see plaintext.
+	if err := decryptBackendAPIKeys(&cfg); err != nil {
+		return nil, fmt.Errorf("decrypt backend api_keys: %w", err)
+	}
 
-    ver := configVersion.Add(1)
-    snap := &ConfigSnapshot{
-        Config:   cfg,
-        Version:  ver,
-        LoadedAt: time.Now(),
-    }
-    globalConfig.Store(snap)
+	ver := configVersion.Add(1)
+	snap := &ConfigSnapshot{
+		Config:   cfg,
+		Version:  ver,
+		LoadedAt: time.Now(),
+	}
+	globalConfig.Store(snap)
 
-    slog.Info("config loaded", "version", ver, "path", path)
-    return snap, nil
+	slog.Info("config loaded", "version", ver, "path", path)
+	return snap, nil
 }
 
 func GetSnapshot() *ConfigSnapshot {
-    if s := globalConfig.Load(); s != nil {
-        return s
-    }
-    cfg := DefaultConfig()
-    // Never expose a hardcoded JWT secret — clear it in the fallback path
-    // so admin auth cannot be used before Load() provides a real secret.
-    if cfg.Admin != nil {
-        cfg.Admin.JWTSecret = ""
-    }
-    return &ConfigSnapshot{Config: cfg, Version: 0, LoadedAt: time.Now()}
+	if s := globalConfig.Load(); s != nil {
+		return s
+	}
+	cfg := DefaultConfig()
+	// Never expose a hardcoded JWT secret — clear it in the fallback path
+	// so admin auth cannot be used before Load() provides a real secret.
+	if cfg.Admin != nil {
+		cfg.Admin.JWTSecret = ""
+	}
+	return &ConfigSnapshot{Config: cfg, Version: 0, LoadedAt: time.Now()}
 }
 
 func OnReload(fn func(old, new *ConfigSnapshot)) {
-    configMu.Lock()
-    defer configMu.Unlock()
-    onReloadHandlers = append(onReloadHandlers, fn)
+	configMu.Lock()
+	defer configMu.Unlock()
+	onReloadHandlers = append(onReloadHandlers, fn)
 }
 
 func FireReload(old, newSnap *ConfigSnapshot) {
-    configMu.RLock()
-    handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
-    copy(handlers, onReloadHandlers)
-    configMu.RUnlock()
+	configMu.RLock()
+	handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
+	copy(handlers, onReloadHandlers)
+	configMu.RUnlock()
 
-    // H7: serialize handler-run under reloadMu so FireReload and Reload do not
-    // run handlers concurrently. FireReload itself does not commit (callers
-    // own the snapshot swap), but it shares the handler list with Reload, so
-    // the same exclusion applies to keep apply paths mutually consistent.
-    reloadMu.Lock()
-    defer reloadMu.Unlock()
-    for _, fn := range handlers {
-        fn(old, newSnap)
-    }
+	// H7: serialize handler-run under reloadMu so FireReload and Reload do not
+	// run handlers concurrently. FireReload itself does not commit (callers
+	// own the snapshot swap), but it shares the handler list with Reload, so
+	// the same exclusion applies to keep apply paths mutually consistent.
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+	for _, fn := range handlers {
+		fn(old, newSnap)
+	}
 }
 
 // Reload re-reads the config file from disk, builds a new ConfigSnapshot, runs
@@ -2199,91 +2213,91 @@ func FireReload(old, newSnap *ConfigSnapshot) {
 // and its parent directory) triggers the same ReloadWithRecovery on external
 // edits.
 func Reload(path string) (*ConfigSnapshot, error) {
-    slog.Info("config reload requested", "path", path)
-    oldSnap := GetSnapshot()
+	slog.Info("config reload requested", "path", path)
+	oldSnap := GetSnapshot()
 
-    v := viper.New()
-    v.SetConfigFile(path)
-    v.SetConfigType("yaml")
-    v.AutomaticEnv()
-    bindSecretEnv(v)
-    if err := v.ReadInConfig(); err != nil {
-        slog.Error("reload: failed to read config", "error", err)
-        return nil, fmt.Errorf("read config: %w", err)
-    }
-    warnUnknownKeys(v.AllSettings())
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	v.AutomaticEnv()
+	bindSecretEnv(v)
+	if err := v.ReadInConfig(); err != nil {
+		slog.Error("reload: failed to read config", "error", err)
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	warnUnknownKeys(v.AllSettings())
 
-    // #363 F1: same fail-loud key-source check as Load; a rejected reload keeps
-    // the previous snapshot serving.
-    if err := checkFusionMLXKeySource(path); err != nil {
-        slog.Error("reload: rejected config, fusion-mlx api_key source conflict", "error", err)
-        return nil, err
-    }
+	// #363 F1: same fail-loud key-source check as Load; a rejected reload keeps
+	// the previous snapshot serving.
+	if err := checkFusionMLXKeySource(path); err != nil {
+		slog.Error("reload: rejected config, fusion-mlx api_key source conflict", "error", err)
+		return nil, err
+	}
 
-    // Seed with DefaultConfig (same as Load) so omitted YAML keys keep sane
-    // defaults, not zero values that validate() rejects. EI8 made validate()
-    // enforce positive circuit-breaker thresholds, so minimal YAMLs need the
-    // seed. Clear the baked-in default JWT secret (RR1 rejects it).
-    cfg := DefaultConfig()
-    if cfg.Admin != nil {
-        cfg.Admin.JWTSecret = ""
-    }
-    if err := v.Unmarshal(&cfg); err != nil {
-        slog.Error("reload: failed to unmarshal config", "error", err)
-        return nil, fmt.Errorf("unmarshal config: %w", err)
-    }
+	// Seed with DefaultConfig (same as Load) so omitted YAML keys keep sane
+	// defaults, not zero values that validate() rejects. EI8 made validate()
+	// enforce positive circuit-breaker thresholds, so minimal YAMLs need the
+	// seed. Clear the baked-in default JWT secret (RR1 rejects it).
+	cfg := DefaultConfig()
+	if cfg.Admin != nil {
+		cfg.Admin.JWTSecret = ""
+	}
+	if err := v.Unmarshal(&cfg); err != nil {
+		slog.Error("reload: failed to unmarshal config", "error", err)
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
 
-    // models.supply/aliases: same raw-bytes bypass as Load (dotted keys).
-    rawCfg, err := os.ReadFile(path)
-    if err != nil {
-        slog.Error("reload: failed to read config for models.*", "error", err)
-        return nil, fmt.Errorf("read config for models.*: %w", err)
-    }
-    loadModelsNamespace(&cfg, rawCfg)
+	// models.supply/aliases: same raw-bytes bypass as Load (dotted keys).
+	rawCfg, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("reload: failed to read config for models.*", "error", err)
+		return nil, fmt.Errorf("read config for models.*: %w", err)
+	}
+	loadModelsNamespace(&cfg, rawCfg)
 
-    // Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
-    // "kimi-k2"), so re-derive Backends from the raw file bytes.
-    fixDottedBackendNames(&cfg, rawCfg)
+	// Dotted backend names: viper re-nests them (kimi-k2.7-code → ghost
+	// "kimi-k2"), so re-derive Backends from the raw file bytes.
+	fixDottedBackendNames(&cfg, rawCfg)
 
-    // §13.3: same normalization as Load — hot-reloaded entries get
-    // api_key_env resolution + vendor defaults fill.
-    normalizeBackends(&cfg)
+	// §13.3: same normalization as Load — hot-reloaded entries get
+	// api_key_env resolution + vendor defaults fill.
+	normalizeBackends(&cfg)
 
-    if err := validate(&cfg); err != nil {
-        slog.Error("reload: config validation failed", "error", err)
-        return nil, fmt.Errorf("validate config: %w", err)
-    }
-    logMasterKeySource(cfg.Auth.MasterKey)
-    warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
+	if err := validate(&cfg); err != nil {
+		slog.Error("reload: config validation failed", "error", err)
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+	logMasterKeySource(cfg.Auth.MasterKey)
+	warnMasterKeyOverrideConflict(path, cfg.Auth.MasterKey)
 
-    ver := configVersion.Add(1)
-    newSnap := &ConfigSnapshot{
-        Config:   cfg,
-        Version:  ver,
-        LoadedAt: time.Now(),
-    }
+	ver := configVersion.Add(1)
+	newSnap := &ConfigSnapshot{
+		Config:   cfg,
+		Version:  ver,
+		LoadedAt: time.Now(),
+	}
 
-    // C5 fix: run handlers BEFORE committing new snapshot. H7: serialize the
-    // handler-run + commit under reloadMu so concurrent Reloads (admin PUT +
-    // fsnotify) cannot interleave handlers or commit mid-apply — the prior
-    // unlocked gap between RUnlock and Store was race-prone.
-    configMu.RLock()
-    handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
-    copy(handlers, onReloadHandlers)
-    configMu.RUnlock()
+	// C5 fix: run handlers BEFORE committing new snapshot. H7: serialize the
+	// handler-run + commit under reloadMu so concurrent Reloads (admin PUT +
+	// fsnotify) cannot interleave handlers or commit mid-apply — the prior
+	// unlocked gap between RUnlock and Store was race-prone.
+	configMu.RLock()
+	handlers := make([]func(old, new *ConfigSnapshot), len(onReloadHandlers))
+	copy(handlers, onReloadHandlers)
+	configMu.RUnlock()
 
-    reloadMu.Lock()
-    for _, fn := range handlers {
-        fn(oldSnap, newSnap)
-    }
-    // commit new snapshot only after all handlers succeed
-    globalConfig.Store(newSnap)
-    reloadMu.Unlock()
+	reloadMu.Lock()
+	for _, fn := range handlers {
+		fn(oldSnap, newSnap)
+	}
+	// commit new snapshot only after all handlers succeed
+	globalConfig.Store(newSnap)
+	reloadMu.Unlock()
 
-    slog.Info("config reloaded", "version", ver)
+	slog.Info("config reloaded", "version", ver)
 
-    AuditConfigChange(oldSnap, newSnap)
-    return newSnap, nil
+	AuditConfigChange(oldSnap, newSnap)
+	return newSnap, nil
 }
 
 // WatchAndReload sets up the config file watcher for hot reload (issue #707).
@@ -2307,98 +2321,98 @@ func Reload(path string) (*ConfigSnapshot, error) {
 // goroutine so WatchAndReload returns immediately (callers wrap it in
 // safeGo for panic recovery).
 func WatchAndReload(path string) {
-    snap := GetSnapshot()
-    if !snap.Config.HotReload.Enabled {
-        slog.Info("hot reload disabled")
-        return
-    }
+	snap := GetSnapshot()
+	if !snap.Config.HotReload.Enabled {
+		slog.Info("hot reload disabled")
+		return
+	}
 
-    watchPath := path
-    if snap.Config.HotReload.WatchPath != "" {
-        watchPath = snap.Config.HotReload.WatchPath
-    }
-    watchPath = filepath.Clean(watchPath)
-    if !filepath.IsAbs(watchPath) {
-        abs, err := filepath.Abs(watchPath)
-        if err != nil {
-            slog.Error("hot reload: cannot resolve watch path, file watching disabled", "path", watchPath, "error", err)
-            return
-        }
-        watchPath = abs
-    }
+	watchPath := path
+	if snap.Config.HotReload.WatchPath != "" {
+		watchPath = snap.Config.HotReload.WatchPath
+	}
+	watchPath = filepath.Clean(watchPath)
+	if !filepath.IsAbs(watchPath) {
+		abs, err := filepath.Abs(watchPath)
+		if err != nil {
+			slog.Error("hot reload: cannot resolve watch path, file watching disabled", "path", watchPath, "error", err)
+			return
+		}
+		watchPath = abs
+	}
 
-    debounce := snap.Config.HotReload.Debounce
-    if debounce <= 0 {
-        debounce = 500 * time.Millisecond
-    }
+	debounce := snap.Config.HotReload.Debounce
+	if debounce <= 0 {
+		debounce = 500 * time.Millisecond
+	}
 
-    watcher, err := fsnotify.NewWatcher()
-    if err != nil {
-        slog.Error("hot reload: fsnotify watcher unavailable, file watching disabled", "error", err)
-        return
-    }
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Error("hot reload: fsnotify watcher unavailable, file watching disabled", "error", err)
+		return
+	}
 
-    dir := filepath.Dir(watchPath)
-    if err := watcher.Add(dir); err != nil {
-        slog.Error("hot reload: cannot watch config directory, file watching disabled", "dir", dir, "error", err)
-        _ = watcher.Close()
-        return
-    }
-    addFile := func() {
-        if err := watcher.Add(watchPath); err != nil {
-            slog.Warn("hot reload: cannot watch config file directly, relying on directory watch", "path", watchPath, "error", err)
-        }
-    }
-    addFile()
+	dir := filepath.Dir(watchPath)
+	if err := watcher.Add(dir); err != nil {
+		slog.Error("hot reload: cannot watch config directory, file watching disabled", "dir", dir, "error", err)
+		_ = watcher.Close()
+		return
+	}
+	addFile := func() {
+		if err := watcher.Add(watchPath); err != nil {
+			slog.Warn("hot reload: cannot watch config file directly, relying on directory watch", "path", watchPath, "error", err)
+		}
+	}
+	addFile()
 
-    // CI bare-goroutine gate: the watcher loop is a long-lived worker, so it
-    // launches through GoRestart (panic-safe with backoff restart).
-    safego.GoRestart("config-hot-reload-watcher", func() {
-        defer watcher.Close()
+	// CI bare-goroutine gate: the watcher loop is a long-lived worker, so it
+	// launches through GoRestart (panic-safe with backoff restart).
+	safego.GoRestart("config-hot-reload-watcher", func() {
+		defer watcher.Close()
 
-        var timerMu sync.Mutex
-        var timer *time.Timer
-        schedule := func() {
-            timerMu.Lock()
-            defer timerMu.Unlock()
-            if timer != nil {
-                timer.Stop()
-            }
-            timer = time.AfterFunc(debounce, func() {
-                slog.Info("config file changed, reloading", "path", watchPath)
-                if _, err := ReloadWithRecovery(watchPath); err != nil {
-                    slog.Error("fsnotify reload failed", "error", err)
-                }
-            })
-        }
+		var timerMu sync.Mutex
+		var timer *time.Timer
+		schedule := func() {
+			timerMu.Lock()
+			defer timerMu.Unlock()
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(debounce, func() {
+				slog.Info("config file changed, reloading", "path", watchPath)
+				if _, err := ReloadWithRecovery(watchPath); err != nil {
+					slog.Error("fsnotify reload failed", "error", err)
+				}
+			})
+		}
 
-        base := filepath.Base(watchPath)
-        for {
-            select {
-            case ev, ok := <-watcher.Events:
-                if !ok {
-                    return
-                }
-                if filepath.Base(ev.Name) != base {
-                    continue
-                }
-                if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
-                    continue
-                }
-                if ev.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
-                    // Atomic replace detached the file watch — re-arm it so
-                    // the next in-place write is still seen.
-                    addFile()
-                }
-                schedule()
-            case err, ok := <-watcher.Errors:
-                if !ok {
-                    return
-                }
-                slog.Warn("hot reload: fsnotify error", "error", err)
-            }
-        }
-    })
+		base := filepath.Base(watchPath)
+		for {
+			select {
+			case ev, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if filepath.Base(ev.Name) != base {
+					continue
+				}
+				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+					continue
+				}
+				if ev.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+					// Atomic replace detached the file watch — re-arm it so
+					// the next in-place write is still seen.
+					addFile()
+				}
+				schedule()
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				slog.Warn("hot reload: fsnotify error", "error", err)
+			}
+		}
+	})
 }
 
 // ValidManifestCategory is the single source for the shell manifest category
@@ -2407,795 +2421,795 @@ func WatchAndReload(path string) {
 // for compatibility. Both static config validation and dynamic registration
 // (internal/shell) key off it so the two cannot drift.
 func ValidManifestCategory(c string) bool {
-    switch c {
-    case "core", "governance", "platform", "domain", "infra", "dev":
-        return true
-    }
-    return false
+	switch c {
+	case "core", "governance", "platform", "domain", "infra", "dev":
+		return true
+	}
+	return false
 }
 
 func validate(cfg *Config) error {
-    if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
-        return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
-    }
+	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
+		return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
+	}
 
-    // #493: network tier enum + lan hard auth gate. lan must be able to
-    // reject an anonymous request before the listener binds — fail visibly
-    // naming the anonymous surface instead of silently serving one.
-    tier := cfg.Network.Tier
-    if tier == "" {
-        tier = "local"
-    }
-    switch tier {
-    case "local":
-    case "lan":
-        if !cfg.Auth.Enabled || cfg.Auth.Passthrough {
-            return fmt.Errorf("network.tier lan requires auth.enabled with explicit keys (no passthrough); anonymous routes would be: * (auth disabled — every route is anonymous); see docs/network-tiers.md")
-        }
-        if cfg.Auth.MasterKey == "" && len(cfg.Auth.APIKeys) == 0 {
-            return fmt.Errorf("network.tier lan requires at least one credential (auth.master_key or auth.api_keys); anonymous routes would be: * (no credential configured — every route is anonymous); see docs/network-tiers.md")
-        }
-    default:
-        return fmt.Errorf("network.tier must be local|lan (public tier is deployment guidance, docs/deployment-public-tier.md), got: %q", cfg.Network.Tier)
-    }
+	// #493: network tier enum + lan hard auth gate. lan must be able to
+	// reject an anonymous request before the listener binds — fail visibly
+	// naming the anonymous surface instead of silently serving one.
+	tier := cfg.Network.Tier
+	if tier == "" {
+		tier = "local"
+	}
+	switch tier {
+	case "local":
+	case "lan":
+		if !cfg.Auth.Enabled || cfg.Auth.Passthrough {
+			return fmt.Errorf("network.tier lan requires auth.enabled with explicit keys (no passthrough); anonymous routes would be: * (auth disabled — every route is anonymous); see docs/network-tiers.md")
+		}
+		if cfg.Auth.MasterKey == "" && len(cfg.Auth.APIKeys) == 0 {
+			return fmt.Errorf("network.tier lan requires at least one credential (auth.master_key or auth.api_keys); anonymous routes would be: * (no credential configured — every route is anonymous); see docs/network-tiers.md")
+		}
+	default:
+		return fmt.Errorf("network.tier must be local|lan (public tier is deployment guidance, docs/deployment-public-tier.md), got: %q", cfg.Network.Tier)
+	}
 
-    // Inbound UDS listener: when enabled, a socket path is required.
-    if cfg.Server.UnixSocket != nil && cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path == "" {
-        return fmt.Errorf("server.unix_socket.enabled is true but path is empty")
-    }
+	// Inbound UDS listener: when enabled, a socket path is required.
+	if cfg.Server.UnixSocket != nil && cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path == "" {
+		return fmt.Errorf("server.unix_socket.enabled is true but path is empty")
+	}
 
-    if cfg.Routing.TokenThreshold <= 0 {
-        return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
-    }
+	if cfg.Routing.TokenThreshold <= 0 {
+		return fmt.Errorf("token_threshold must be positive, got: %d", cfg.Routing.TokenThreshold)
+	}
 
-    // G1: cloud_routing cooldown sanity (EI8: numeric range checks).
-    if cfg.CloudRouting.CooldownSeconds < 0 || cfg.CloudRouting.CooldownSeconds > 3600 {
-        return fmt.Errorf("cloud_routing.cooldown_seconds must be within [0, 3600], got: %d", cfg.CloudRouting.CooldownSeconds)
-    }
-    if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
-        return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
-    }
+	// G1: cloud_routing cooldown sanity (EI8: numeric range checks).
+	if cfg.CloudRouting.CooldownSeconds < 0 || cfg.CloudRouting.CooldownSeconds > 3600 {
+		return fmt.Errorf("cloud_routing.cooldown_seconds must be within [0, 3600], got: %d", cfg.CloudRouting.CooldownSeconds)
+	}
+	if cfg.CloudRouting.FailureThreshold < 0 || cfg.CloudRouting.FailureThreshold > 100 {
+		return fmt.Errorf("cloud_routing.failure_threshold must be within [0, 100], got: %d", cfg.CloudRouting.FailureThreshold)
+	}
 
-    // #564: pricing sanity — negative USD prices are always a config typo,
-    // never a discount.
-    for name, p := range cfg.Pricing.ModelPricing {
-        if p.InputPerMTok < 0 || p.OutputPerMTok < 0 {
-            return fmt.Errorf("pricing.model_pricing[%s] rates must be >= 0, got input=%v output=%v", name, p.InputPerMTok, p.OutputPerMTok)
-        }
-    }
+	// #564: pricing sanity — negative USD prices are always a config typo,
+	// never a discount.
+	for name, p := range cfg.Pricing.ModelPricing {
+		if p.InputPerMTok < 0 || p.OutputPerMTok < 0 {
+			return fmt.Errorf("pricing.model_pricing[%s] rates must be >= 0, got input=%v output=%v", name, p.InputPerMTok, p.OutputPerMTok)
+		}
+	}
 
-    // G3: try_quota budget window sanity.
-    switch cfg.TryQuota.ResetWindow {
-    case "", "daily", "weekly", "monthly":
-    default:
-        return fmt.Errorf("try_quota.reset_window must be daily|weekly|monthly, got: %q", cfg.TryQuota.ResetWindow)
-    }
-    if cfg.TryQuota.SoftLimitPercent < 0 || cfg.TryQuota.SoftLimitPercent > 100 {
-        return fmt.Errorf("try_quota.soft_limit_percent must be within [0, 100], got: %d", cfg.TryQuota.SoftLimitPercent)
-    }
+	// G3: try_quota budget window sanity.
+	switch cfg.TryQuota.ResetWindow {
+	case "", "daily", "weekly", "monthly":
+	default:
+		return fmt.Errorf("try_quota.reset_window must be daily|weekly|monthly, got: %q", cfg.TryQuota.ResetWindow)
+	}
+	if cfg.TryQuota.SoftLimitPercent < 0 || cfg.TryQuota.SoftLimitPercent > 100 {
+		return fmt.Errorf("try_quota.soft_limit_percent must be within [0, 100], got: %d", cfg.TryQuota.SoftLimitPercent)
+	}
 
-    // G4: guardrail chain links must reference known builtins (fail-closed on
-    // config — an unknown type must not silently skip at request time).
-    validGuardrailActions := map[string]bool{"": true, "log": true, "deny": true, "mask": true}
-    for i, g := range cfg.Guardrails {
-        if g.Type != "pii" {
-            return fmt.Errorf("guardrails[%d].type must be \"pii\" (known builtins: pii), got: %q", i, g.Type)
-        }
-        if !validGuardrailActions[g.Action] {
-            return fmt.Errorf("guardrails[%d].action must be log|deny|mask, got: %q", i, g.Action)
-        }
-    }
+	// G4: guardrail chain links must reference known builtins (fail-closed on
+	// config — an unknown type must not silently skip at request time).
+	validGuardrailActions := map[string]bool{"": true, "log": true, "deny": true, "mask": true}
+	for i, g := range cfg.Guardrails {
+		if g.Type != "pii" {
+			return fmt.Errorf("guardrails[%d].type must be \"pii\" (known builtins: pii), got: %q", i, g.Type)
+		}
+		if !validGuardrailActions[g.Action] {
+			return fmt.Errorf("guardrails[%d].action must be log|deny|mask, got: %q", i, g.Action)
+		}
+	}
 
-    // §13.3 models.* namespace (alias/supply sanity, WARN-first).
-    if err := validateModels(cfg); err != nil {
-        return err
-    }
+	// §13.3 models.* namespace (alias/supply sanity, WARN-first).
+	if err := validateModels(cfg); err != nil {
+		return err
+	}
 
-    // Plan §6: persistence.* namespace. Repairs degenerate tuning values
-    // in place (defaults, not errors) — they are knobs, not correctness.
-    if err := validatePersistence(cfg); err != nil {
-        return err
-    }
+	// Plan §6: persistence.* namespace. Repairs degenerate tuning values
+	// in place (defaults, not errors) — they are knobs, not correctness.
+	if err := validatePersistence(cfg); err != nil {
+		return err
+	}
 
-    // #689: ops.* namespace. Same repair-in-place contract as persistence.
-    if err := validateOps(cfg); err != nil {
-        return err
-    }
+	// #689: ops.* namespace. Same repair-in-place contract as persistence.
+	if err := validateOps(cfg); err != nil {
+		return err
+	}
 
-    // G9: file_log.* namespace.
-    if err := validateFileLog(cfg); err != nil {
-        return err
-    }
+	// G9: file_log.* namespace.
+	if err := validateFileLog(cfg); err != nil {
+		return err
+	}
 
-    // RC3: per-model context-limit map. Values must be positive; a zero/negative
-    // limit would either never trigger or reject every request. Empty map = opt-out
-    // (backward-compatible, no cap enforced).
-    for model, limit := range cfg.Routing.ModelContextLimit {
-        if limit <= 0 {
-            return fmt.Errorf("model_context_limit[%q] must be positive, got: %d", model, limit)
-        }
-    }
+	// RC3: per-model context-limit map. Values must be positive; a zero/negative
+	// limit would either never trigger or reject every request. Empty map = opt-out
+	// (backward-compatible, no cap enforced).
+	for model, limit := range cfg.Routing.ModelContextLimit {
+		if limit <= 0 {
+			return fmt.Errorf("model_context_limit[%q] must be positive, got: %d", model, limit)
+		}
+	}
 
-    // S3: when file logging is enabled, rotation knobs must be sane. A zero or
-    // negative max_size would make lumberjack never rotate (unbounded file, the
-    // exact bug S3 fixes); a negative backup count is meaningless. Empty log_file
-    // = stderr-only opt-out, so these only matter when a file is configured.
-    if strings.TrimSpace(cfg.Observability.LogFile) != "" {
-        if cfg.Observability.LogRotationMaxSize <= 0 {
-            return fmt.Errorf("observability.log_rotation_max_size must be positive when log_file is set, got: %d", cfg.Observability.LogRotationMaxSize)
-        }
-        if cfg.Observability.LogRotationMaxBackups < 0 {
-            return fmt.Errorf("observability.log_rotation_max_backups must be non-negative when log_file is set, got: %d", cfg.Observability.LogRotationMaxBackups)
-        }
-    }
+	// S3: when file logging is enabled, rotation knobs must be sane. A zero or
+	// negative max_size would make lumberjack never rotate (unbounded file, the
+	// exact bug S3 fixes); a negative backup count is meaningless. Empty log_file
+	// = stderr-only opt-out, so these only matter when a file is configured.
+	if strings.TrimSpace(cfg.Observability.LogFile) != "" {
+		if cfg.Observability.LogRotationMaxSize <= 0 {
+			return fmt.Errorf("observability.log_rotation_max_size must be positive when log_file is set, got: %d", cfg.Observability.LogRotationMaxSize)
+		}
+		if cfg.Observability.LogRotationMaxBackups < 0 {
+			return fmt.Errorf("observability.log_rotation_max_backups must be non-negative when log_file is set, got: %d", cfg.Observability.LogRotationMaxBackups)
+		}
+	}
 
-    if cfg.Routing.Mode != "" && cfg.Routing.Mode != "local" && cfg.Routing.Mode != "cloud" && cfg.Routing.Mode != "hybrid" {
-        return fmt.Errorf("routing.mode must be local, cloud, or hybrid, got: %q", cfg.Routing.Mode)
-    }
+	if cfg.Routing.Mode != "" && cfg.Routing.Mode != "local" && cfg.Routing.Mode != "cloud" && cfg.Routing.Mode != "hybrid" {
+		return fmt.Errorf("routing.mode must be local, cloud, or hybrid, got: %q", cfg.Routing.Mode)
+	}
 
-    // Inbound model-hub webhook: when enabled, a shared HMAC secret is required
-    // to verify signed payloads (fusion-model-hub signs with HMAC-SHA256).
-    if cfg.Routing.Webhooks.ModelHub.Enabled && cfg.Routing.Webhooks.ModelHub.Secret == "" {
-        return fmt.Errorf("routing.webhooks.model_hub.enabled is true but secret is empty")
-    }
+	// Inbound model-hub webhook: when enabled, a shared HMAC secret is required
+	// to verify signed payloads (fusion-model-hub signs with HMAC-SHA256).
+	if cfg.Routing.Webhooks.ModelHub.Enabled && cfg.Routing.Webhooks.ModelHub.Secret == "" {
+		return fmt.Errorf("routing.webhooks.model_hub.enabled is true but secret is empty")
+	}
 
-    if cfg.Routing.OutputInputRatioThreshold < 0 {
-        return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
-    }
-    if cfg.Routing.OutputInputRatioMinInputTokens < 0 {
-        return fmt.Errorf("output_input_ratio_min_input_tokens must be non-negative, got: %d", cfg.Routing.OutputInputRatioMinInputTokens)
-    }
+	if cfg.Routing.OutputInputRatioThreshold < 0 {
+		return fmt.Errorf("output_input_ratio_threshold must be non-negative, got: %f", cfg.Routing.OutputInputRatioThreshold)
+	}
+	if cfg.Routing.OutputInputRatioMinInputTokens < 0 {
+		return fmt.Errorf("output_input_ratio_min_input_tokens must be non-negative, got: %d", cfg.Routing.OutputInputRatioMinInputTokens)
+	}
 
-    // R7: resume stream buffers. ResumeMaxEntries < 0 is invalid (0 = unlimited
-    // is the documented opt-out). ResumeTTL must be positive when resume is
-    // enabled — a zero/negative TTL makes ReapExpired a no-op (ttl<=0 guard)
-    // so the buffer cap is the only bound, defeating the time-based eviction.
-    if cfg.Routing.Stream.ResumeMaxEntries < 0 {
-        return fmt.Errorf("resume_max_entries must be >= 0 (0 = unlimited), got: %d", cfg.Routing.Stream.ResumeMaxEntries)
-    }
-    if cfg.Routing.Stream.ResumeEnabled && cfg.Routing.Stream.ResumeTTL <= 0 {
-        return fmt.Errorf("resume_ttl must be positive when resume_enabled is true, got: %s", cfg.Routing.Stream.ResumeTTL)
-    }
-    for i, r := range cfg.Routing.RatioTiers.Rules {
-        if r.MaxRatio <= 0 {
-            return fmt.Errorf("ratio_tiers.rules[%d].max_ratio must be positive, got: %f", i, r.MaxRatio)
-        }
-        if r.Backend == "" {
-            return fmt.Errorf("ratio_tiers.rules[%d].backend is required", i)
-        }
-    }
+	// R7: resume stream buffers. ResumeMaxEntries < 0 is invalid (0 = unlimited
+	// is the documented opt-out). ResumeTTL must be positive when resume is
+	// enabled — a zero/negative TTL makes ReapExpired a no-op (ttl<=0 guard)
+	// so the buffer cap is the only bound, defeating the time-based eviction.
+	if cfg.Routing.Stream.ResumeMaxEntries < 0 {
+		return fmt.Errorf("resume_max_entries must be >= 0 (0 = unlimited), got: %d", cfg.Routing.Stream.ResumeMaxEntries)
+	}
+	if cfg.Routing.Stream.ResumeEnabled && cfg.Routing.Stream.ResumeTTL <= 0 {
+		return fmt.Errorf("resume_ttl must be positive when resume_enabled is true, got: %s", cfg.Routing.Stream.ResumeTTL)
+	}
+	for i, r := range cfg.Routing.RatioTiers.Rules {
+		if r.MaxRatio <= 0 {
+			return fmt.Errorf("ratio_tiers.rules[%d].max_ratio must be positive, got: %f", i, r.MaxRatio)
+		}
+		if r.Backend == "" {
+			return fmt.Errorf("ratio_tiers.rules[%d].backend is required", i)
+		}
+	}
 
-    if cfg.Routing.LocalPriority.MaxSystemMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxSystemMemoryRatio > 1 {
-        return fmt.Errorf("max_system_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxSystemMemoryRatio)
-    }
+	if cfg.Routing.LocalPriority.MaxSystemMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxSystemMemoryRatio > 1 {
+		return fmt.Errorf("max_system_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxSystemMemoryRatio)
+	}
 
-    if cfg.Validation.BaseURLConflictCheck {
-        urls := make(map[string]string)
-        for name, backend := range cfg.Backends {
-            if !backend.Enabled {
-                continue
-            }
-            if existing, ok := urls[backend.BaseURL]; ok {
-                return fmt.Errorf("base_url conflict: %s and %s both use %s", existing, name, backend.BaseURL)
-            }
-            urls[backend.BaseURL] = name
-        }
-    }
+	if cfg.Validation.BaseURLConflictCheck {
+		urls := make(map[string]string)
+		for name, backend := range cfg.Backends {
+			if !backend.Enabled {
+				continue
+			}
+			if existing, ok := urls[backend.BaseURL]; ok {
+				return fmt.Errorf("base_url conflict: %s and %s both use %s", existing, name, backend.BaseURL)
+			}
+			urls[backend.BaseURL] = name
+		}
+	}
 
-    // V1 fix: validate admin config security
-    // RR1 (audit P0): reject the baked-in default JWT secret — an unchanged
-    // deployment ships with a publicly-known signing key, allowing anyone who
-    // reads the source to forge admin JWTs. Fail-closed at startup rather than
-    // relying on operators to override an already-effective default.
-    if cfg.Admin != nil && cfg.Admin.Enabled {
-        if cfg.Admin.JWTSecret == "" {
-            return fmt.Errorf("admin.jwt_secret is required when admin is enabled")
-        }
-        if isKnownInsecureJWTSecret(cfg.Admin.JWTSecret) {
-            return fmt.Errorf("admin.jwt_secret must not be a known placeholder/default; set a unique secret of at least 32 characters")
-        }
-        if len(cfg.Admin.JWTSecret) < 32 {
-            return fmt.Errorf("admin.jwt_secret must be at least 32 characters, got %d", len(cfg.Admin.JWTSecret))
-        }
-        for username, password := range cfg.Admin.Users {
-            if len(password) < 8 {
-                return fmt.Errorf("admin user %q password must be at least 8 characters, got %d", username, len(password))
-            }
-            // R7 (audit): reject known placeholder admin passwords. bcrypt
-            // already rejects empty, but "change-me" / "password" would hash
-            // and authenticate — a publicly-known admin credential is an open
-            // door. (Plaintext passwords here are hashed at startup by AdminAuth.)
-            if isKnownInsecureSecret(password) {
-                return fmt.Errorf("admin user %q password must not be a known placeholder; set a unique strong password", username)
-            }
-        }
-    }
+	// V1 fix: validate admin config security
+	// RR1 (audit P0): reject the baked-in default JWT secret — an unchanged
+	// deployment ships with a publicly-known signing key, allowing anyone who
+	// reads the source to forge admin JWTs. Fail-closed at startup rather than
+	// relying on operators to override an already-effective default.
+	if cfg.Admin != nil && cfg.Admin.Enabled {
+		if cfg.Admin.JWTSecret == "" {
+			return fmt.Errorf("admin.jwt_secret is required when admin is enabled")
+		}
+		if isKnownInsecureJWTSecret(cfg.Admin.JWTSecret) {
+			return fmt.Errorf("admin.jwt_secret must not be a known placeholder/default; set a unique secret of at least 32 characters")
+		}
+		if len(cfg.Admin.JWTSecret) < 32 {
+			return fmt.Errorf("admin.jwt_secret must be at least 32 characters, got %d", len(cfg.Admin.JWTSecret))
+		}
+		for username, password := range cfg.Admin.Users {
+			if len(password) < 8 {
+				return fmt.Errorf("admin user %q password must be at least 8 characters, got %d", username, len(password))
+			}
+			// R7 (audit): reject known placeholder admin passwords. bcrypt
+			// already rejects empty, but "change-me" / "password" would hash
+			// and authenticate — a publicly-known admin credential is an open
+			// door. (Plaintext passwords here are hashed at startup by AdminAuth.)
+			if isKnownInsecureSecret(password) {
+				return fmt.Errorf("admin user %q password must not be a known placeholder; set a unique strong password", username)
+			}
+		}
+	}
 
-    // V2 fix: validate routing config
-    if cfg.Routing.LocalPriority.MaxConcurrent < 0 {
-        return fmt.Errorf("max_concurrent must be non-negative, got %d", cfg.Routing.LocalPriority.MaxConcurrent)
-    }
-    if cfg.Routing.LocalPriority.QueueTimeout < 0 {
-        return fmt.Errorf("queue_timeout must be non-negative, got %d", cfg.Routing.LocalPriority.QueueTimeout)
-    }
-    if cfg.Routing.AgentTasks.TTL < 0 {
-        return fmt.Errorf("agent_tasks.ttl must be non-negative, got %d", cfg.Routing.AgentTasks.TTL)
-    }
-    if cfg.Routing.AgentTasks.MaxEntries < 0 {
-        return fmt.Errorf("agent_tasks.max_entries must be non-negative, got %d", cfg.Routing.AgentTasks.MaxEntries)
-    }
-    if cfg.Routing.AgentTasks.ReaperInterval < 0 {
-        return fmt.Errorf("agent_tasks.reaper_interval must be non-negative, got %d", cfg.Routing.AgentTasks.ReaperInterval)
-    }
-    if cfg.Cache.MaxMemoryMB < 0 {
-        return fmt.Errorf("cache.max_memory_mb must be non-negative, got %d", cfg.Cache.MaxMemoryMB)
-    }
-    if cfg.Cache.MaxEntries < 0 {
-        return fmt.Errorf("cache.max_entries must be non-negative, got %d", cfg.Cache.MaxEntries)
-    }
+	// V2 fix: validate routing config
+	if cfg.Routing.LocalPriority.MaxConcurrent < 0 {
+		return fmt.Errorf("max_concurrent must be non-negative, got %d", cfg.Routing.LocalPriority.MaxConcurrent)
+	}
+	if cfg.Routing.LocalPriority.QueueTimeout < 0 {
+		return fmt.Errorf("queue_timeout must be non-negative, got %d", cfg.Routing.LocalPriority.QueueTimeout)
+	}
+	if cfg.Routing.AgentTasks.TTL < 0 {
+		return fmt.Errorf("agent_tasks.ttl must be non-negative, got %d", cfg.Routing.AgentTasks.TTL)
+	}
+	if cfg.Routing.AgentTasks.MaxEntries < 0 {
+		return fmt.Errorf("agent_tasks.max_entries must be non-negative, got %d", cfg.Routing.AgentTasks.MaxEntries)
+	}
+	if cfg.Routing.AgentTasks.ReaperInterval < 0 {
+		return fmt.Errorf("agent_tasks.reaper_interval must be non-negative, got %d", cfg.Routing.AgentTasks.ReaperInterval)
+	}
+	if cfg.Cache.MaxMemoryMB < 0 {
+		return fmt.Errorf("cache.max_memory_mb must be non-negative, got %d", cfg.Cache.MaxMemoryMB)
+	}
+	if cfg.Cache.MaxEntries < 0 {
+		return fmt.Errorf("cache.max_entries must be non-negative, got %d", cfg.Cache.MaxEntries)
+	}
 
-    // EI8 (audit P3): validate the remaining numeric knobs that the prior
-    // validate() left bare. A typo like max_mlx_memory_ratio: -1 or a circuit
-    // breaker timeout of 0 silently passes validate and produces runtime
-    // behavior opposite to intent (0 timeout = immediate/open-or-never-open
-    // depending on the comparison; negative ratio never trips). validate exists
-    // to catch these at startup, not let them surface as "routing never goes
-    // cloud" mysteries.
-    if cfg.Routing.LocalPriority.MaxMLXMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxMLXMemoryRatio > 1 {
-        return fmt.Errorf("max_mlx_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxMLXMemoryRatio)
-    }
-    // B13 follow-up: the admin routing PUT writes failure_threshold: 0 to
-    // DISABLE the breaker (and the engine reads >0 as enabled), so 0 is the
-    // documented opt-out — reject only negatives. The old <=0 check made every
-    // admin "disable" PUT pass validation silently (reload was never called
-    // from that path) but blow up on the next reload.
-    if cfg.Routing.CircuitBreaker.FailureThreshold < 0 {
-        return fmt.Errorf("circuit_breaker.failure_threshold must be non-negative (0 disables), got: %d", cfg.Routing.CircuitBreaker.FailureThreshold)
-    }
-    if cfg.Routing.CircuitBreaker.SuccessThreshold <= 0 {
-        return fmt.Errorf("circuit_breaker.success_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.SuccessThreshold)
-    }
-    if cfg.Routing.CircuitBreaker.Timeout < 0 {
-        return fmt.Errorf("circuit_breaker.timeout must be non-negative, got: %s", cfg.Routing.CircuitBreaker.Timeout)
-    }
-    if cfg.Routing.CircuitBreaker.HalfOpenMaxRequests <= 0 {
-        return fmt.Errorf("circuit_breaker.half_open_max_requests must be positive, got: %d", cfg.Routing.CircuitBreaker.HalfOpenMaxRequests)
-    }
-    // #301: overflow policy knobs — 0 is each knob's documented opt-out
-    // (no cooldown / no ceiling), negatives are unit mistakes (e.g. "500"
-    // parsed as milliseconds by viper into a wrong-sign Duration).
-    if cfg.Routing.Fallback.Overflow.Cooldown < 0 {
-        return fmt.Errorf("fallback.overflow.cooldown must be non-negative (0 = off), got: %s", cfg.Routing.Fallback.Overflow.Cooldown)
-    }
-    if cfg.Routing.Fallback.Overflow.CostCeiling < 0 {
-        return fmt.Errorf("fallback.overflow.cost_ceiling must be non-negative (0 = unlimited), got: %f", cfg.Routing.Fallback.Overflow.CostCeiling)
-    }
-    // RR11 MaxConnsPerHost: 0 means unlimited (Go transport default), which is
-    // exactly the FD-exhaustion vector RR11 closed. Reject negative (invalid);
-    // 0 is allowed only as the explicit "unlimited" opt-out the operator typed
-    // knowingly — but we surface it as a warning so a missing/zero value is not
-    // silently unlimited. Negative is a hard error.
-    for name, backend := range cfg.Backends {
-        if backend.Enabled {
-            if backend.MaxConnsPerHost < 0 {
-                return fmt.Errorf("backends.%s.max_conns_per_host must be non-negative, got: %d", name, backend.MaxConnsPerHost)
-            }
-            if backend.MaxIdleConnsPerHost < 0 {
-                return fmt.Errorf("backends.%s.max_idle_conns_per_host must be non-negative, got: %d", name, backend.MaxIdleConnsPerHost)
-            }
-            // R5: ResponseHeaderTimeout guards against stuck upstreams. 0 = factory
-            // default (30s). Negative is invalid; an absurdly large value (>10m)
-            // defeats the cap's purpose and is rejected to catch unit mistakes (s vs ms).
-            if backend.ResponseHeaderTimeout < 0 {
-                return fmt.Errorf("backends.%s.response_header_timeout must be non-negative, got: %d", name, backend.ResponseHeaderTimeout)
-            }
-            if backend.ResponseHeaderTimeout > 10*time.Minute {
-                return fmt.Errorf("backends.%s.response_header_timeout must be <= 10m, got: %d", name, backend.ResponseHeaderTimeout)
-            }
-            if backend.MaxConnsPerHost == 0 {
-                slog.Warn("backend max_conns_per_host is 0 (unlimited); set a positive cap to bound FDs", "backend", name)
-            }
-            // C1 (audit P1): reject a known-placeholder backend api_key on an
-            // ENABLED backend. Cloud provider keys ("your-volcengine-key",
-            // "sk-your-openai-key", "sk-ant-your-key", ...) are shipped as
-            // template stubs; a careless operator enabling the backend without
-            // rotating the key would send requests with a publicly-known
-            // credential. Disabled backends keep their stub (reserved, not
-            // live). Empty api_key is allowed (local backends need none). The
-            // auth.APIKeys loop above covers the gateway auth keys; this covers
-            // the upstream provider credentials — a separate credential surface
-            // the prior R7 blacklist never touched.
-            //
-            // Exception: a key injected via the fusion-mlx key env is
-            // operator-provided at runtime (not a shipped template stub), so
-            // the placeholder refusal is skipped for it. The ecosystem default
-            // mlx key ("fg-admin-key", set by fusion-cli) starts with the "fg-"
-            // prefix the guard treats as a stub marker; routing it through env
-            // is the documented way to supply it without weakening the guard
-            // for cloud providers in config.yaml.
-            //
-            // #412: two names reach here. FUSION_MLX_API_KEY is the deliberate
-            // backend injection name; FUSION_CLIENT_KEY is the ecosystem CLIENT
-            // credential, honored only when config.yaml opts in via
-            // api_key_env: FUSION_CLIENT_KEY (normalizeBackends resolved it
-            // into APIKey). The MLX name wins when both are set.
-            mlxEnv, clientEnv := fusionMLXKeyEnvs()
-            envKey, envName := mlxEnv, "FUSION_MLX_API_KEY"
-            if envKey == "" {
-                envKey, envName = clientEnv, "FUSION_CLIENT_KEY"
-            }
-            if backend.APIKey != "" && isKnownInsecureSecret(backend.APIKey) {
-                if name == "fusion-mlx" && backend.APIKey == envKey && envKey != "" {
-                    slog.Info("fusion-mlx api_key injected via env, skipping C1 placeholder check",
-                        "env", envName,
-                        "key_prefix", backend.APIKey[:min(3, len(backend.APIKey))]+"***")
-                } else {
-                    return fmt.Errorf("backends.%s.api_key must not be a known placeholder; set the real upstream credential or disable the backend", name)
-                }
-            }
-        }
-    }
+	// EI8 (audit P3): validate the remaining numeric knobs that the prior
+	// validate() left bare. A typo like max_mlx_memory_ratio: -1 or a circuit
+	// breaker timeout of 0 silently passes validate and produces runtime
+	// behavior opposite to intent (0 timeout = immediate/open-or-never-open
+	// depending on the comparison; negative ratio never trips). validate exists
+	// to catch these at startup, not let them surface as "routing never goes
+	// cloud" mysteries.
+	if cfg.Routing.LocalPriority.MaxMLXMemoryRatio <= 0 || cfg.Routing.LocalPriority.MaxMLXMemoryRatio > 1 {
+		return fmt.Errorf("max_mlx_memory_ratio must be in (0,1], got: %f", cfg.Routing.LocalPriority.MaxMLXMemoryRatio)
+	}
+	// B13 follow-up: the admin routing PUT writes failure_threshold: 0 to
+	// DISABLE the breaker (and the engine reads >0 as enabled), so 0 is the
+	// documented opt-out — reject only negatives. The old <=0 check made every
+	// admin "disable" PUT pass validation silently (reload was never called
+	// from that path) but blow up on the next reload.
+	if cfg.Routing.CircuitBreaker.FailureThreshold < 0 {
+		return fmt.Errorf("circuit_breaker.failure_threshold must be non-negative (0 disables), got: %d", cfg.Routing.CircuitBreaker.FailureThreshold)
+	}
+	if cfg.Routing.CircuitBreaker.SuccessThreshold <= 0 {
+		return fmt.Errorf("circuit_breaker.success_threshold must be positive, got: %d", cfg.Routing.CircuitBreaker.SuccessThreshold)
+	}
+	if cfg.Routing.CircuitBreaker.Timeout < 0 {
+		return fmt.Errorf("circuit_breaker.timeout must be non-negative, got: %s", cfg.Routing.CircuitBreaker.Timeout)
+	}
+	if cfg.Routing.CircuitBreaker.HalfOpenMaxRequests <= 0 {
+		return fmt.Errorf("circuit_breaker.half_open_max_requests must be positive, got: %d", cfg.Routing.CircuitBreaker.HalfOpenMaxRequests)
+	}
+	// #301: overflow policy knobs — 0 is each knob's documented opt-out
+	// (no cooldown / no ceiling), negatives are unit mistakes (e.g. "500"
+	// parsed as milliseconds by viper into a wrong-sign Duration).
+	if cfg.Routing.Fallback.Overflow.Cooldown < 0 {
+		return fmt.Errorf("fallback.overflow.cooldown must be non-negative (0 = off), got: %s", cfg.Routing.Fallback.Overflow.Cooldown)
+	}
+	if cfg.Routing.Fallback.Overflow.CostCeiling < 0 {
+		return fmt.Errorf("fallback.overflow.cost_ceiling must be non-negative (0 = unlimited), got: %f", cfg.Routing.Fallback.Overflow.CostCeiling)
+	}
+	// RR11 MaxConnsPerHost: 0 means unlimited (Go transport default), which is
+	// exactly the FD-exhaustion vector RR11 closed. Reject negative (invalid);
+	// 0 is allowed only as the explicit "unlimited" opt-out the operator typed
+	// knowingly — but we surface it as a warning so a missing/zero value is not
+	// silently unlimited. Negative is a hard error.
+	for name, backend := range cfg.Backends {
+		if backend.Enabled {
+			if backend.MaxConnsPerHost < 0 {
+				return fmt.Errorf("backends.%s.max_conns_per_host must be non-negative, got: %d", name, backend.MaxConnsPerHost)
+			}
+			if backend.MaxIdleConnsPerHost < 0 {
+				return fmt.Errorf("backends.%s.max_idle_conns_per_host must be non-negative, got: %d", name, backend.MaxIdleConnsPerHost)
+			}
+			// R5: ResponseHeaderTimeout guards against stuck upstreams. 0 = factory
+			// default (30s). Negative is invalid; an absurdly large value (>10m)
+			// defeats the cap's purpose and is rejected to catch unit mistakes (s vs ms).
+			if backend.ResponseHeaderTimeout < 0 {
+				return fmt.Errorf("backends.%s.response_header_timeout must be non-negative, got: %d", name, backend.ResponseHeaderTimeout)
+			}
+			if backend.ResponseHeaderTimeout > 10*time.Minute {
+				return fmt.Errorf("backends.%s.response_header_timeout must be <= 10m, got: %d", name, backend.ResponseHeaderTimeout)
+			}
+			if backend.MaxConnsPerHost == 0 {
+				slog.Warn("backend max_conns_per_host is 0 (unlimited); set a positive cap to bound FDs", "backend", name)
+			}
+			// C1 (audit P1): reject a known-placeholder backend api_key on an
+			// ENABLED backend. Cloud provider keys ("your-volcengine-key",
+			// "sk-your-openai-key", "sk-ant-your-key", ...) are shipped as
+			// template stubs; a careless operator enabling the backend without
+			// rotating the key would send requests with a publicly-known
+			// credential. Disabled backends keep their stub (reserved, not
+			// live). Empty api_key is allowed (local backends need none). The
+			// auth.APIKeys loop above covers the gateway auth keys; this covers
+			// the upstream provider credentials — a separate credential surface
+			// the prior R7 blacklist never touched.
+			//
+			// Exception: a key injected via the fusion-mlx key env is
+			// operator-provided at runtime (not a shipped template stub), so
+			// the placeholder refusal is skipped for it. The ecosystem default
+			// mlx key ("fg-admin-key", set by fusion-cli) starts with the "fg-"
+			// prefix the guard treats as a stub marker; routing it through env
+			// is the documented way to supply it without weakening the guard
+			// for cloud providers in config.yaml.
+			//
+			// #412: two names reach here. FUSION_MLX_API_KEY is the deliberate
+			// backend injection name; FUSION_CLIENT_KEY is the ecosystem CLIENT
+			// credential, honored only when config.yaml opts in via
+			// api_key_env: FUSION_CLIENT_KEY (normalizeBackends resolved it
+			// into APIKey). The MLX name wins when both are set.
+			mlxEnv, clientEnv := fusionMLXKeyEnvs()
+			envKey, envName := mlxEnv, "FUSION_MLX_API_KEY"
+			if envKey == "" {
+				envKey, envName = clientEnv, "FUSION_CLIENT_KEY"
+			}
+			if backend.APIKey != "" && isKnownInsecureSecret(backend.APIKey) {
+				if name == "fusion-mlx" && backend.APIKey == envKey && envKey != "" {
+					slog.Info("fusion-mlx api_key injected via env, skipping C1 placeholder check",
+						"env", envName,
+						"key_prefix", backend.APIKey[:min(3, len(backend.APIKey))]+"***")
+				} else {
+					return fmt.Errorf("backends.%s.api_key must not be a known placeholder; set the real upstream credential or disable the backend", name)
+				}
+			}
+		}
+	}
 
-    // V2 fix: validate cluster node addresses
-    for _, node := range cfg.Cluster.Nodes {
-        if node.Address != "" && !strings.HasPrefix(node.Address, "http://") && !strings.HasPrefix(node.Address, "https://") {
-            return fmt.Errorf("cluster node %q address must start with http:// or https://, got %q", node.ID, node.Address)
-        }
-    }
+	// V2 fix: validate cluster node addresses
+	for _, node := range cfg.Cluster.Nodes {
+		if node.Address != "" && !strings.HasPrefix(node.Address, "http://") && !strings.HasPrefix(node.Address, "https://") {
+			return fmt.Errorf("cluster node %q address must start with http:// or https://, got %q", node.ID, node.Address)
+		}
+	}
 
-    // #87: validate auth key budgets non-negative
-    // RR2 (audit P0): reject empty Key entries. A configured api_keys entry
-    // with an empty key creates a key that authenticates nothing yet still
-    // occupies a config slot (and a name/index the admin UI references). The
-    // runtime auth middleware already rejects an empty *submitted* key, but a
-    // config-side reject fails fast at startup so the operator learns before a
-    // request is ever attempted. Only enforced when auth is enabled; a disabled
-    // auth block has no live keys to validate.
-    // R7 (audit): reject a known-placeholder master_key. The master_key is
-    // admin-equivalent (it bypasses rate limits + opens MCP) AND gates
-    // /metrics + /debug/pprof/* via withMasterKey, which honors ANY non-empty
-    // master_key regardless of auth.enabled. So a publicly-known value is a
-    // full bypass of the protected endpoints even when auth.enabled=false
-    // (the chart default). The guard therefore fires whenever a master_key is
-    // SET, not only when auth is enabled — the auth.Enabled precondition would
-    // let a bare `helm install` ship the literal "${FG_MASTER_KEY}" as a live
-    // /metrics key. Empty is allowed (master_key is optional) — only the
-    // placeholder literals (and unexpanded ${VAR} references) are refused.
-    if cfg.Auth.MasterKey != "" && isKnownInsecureSecret(cfg.Auth.MasterKey) {
-        return fmt.Errorf("auth.master_key must not be a known placeholder; set a unique strong secret or leave empty to disable")
-    }
+	// #87: validate auth key budgets non-negative
+	// RR2 (audit P0): reject empty Key entries. A configured api_keys entry
+	// with an empty key creates a key that authenticates nothing yet still
+	// occupies a config slot (and a name/index the admin UI references). The
+	// runtime auth middleware already rejects an empty *submitted* key, but a
+	// config-side reject fails fast at startup so the operator learns before a
+	// request is ever attempted. Only enforced when auth is enabled; a disabled
+	// auth block has no live keys to validate.
+	// R7 (audit): reject a known-placeholder master_key. The master_key is
+	// admin-equivalent (it bypasses rate limits + opens MCP) AND gates
+	// /metrics + /debug/pprof/* via withMasterKey, which honors ANY non-empty
+	// master_key regardless of auth.enabled. So a publicly-known value is a
+	// full bypass of the protected endpoints even when auth.enabled=false
+	// (the chart default). The guard therefore fires whenever a master_key is
+	// SET, not only when auth is enabled — the auth.Enabled precondition would
+	// let a bare `helm install` ship the literal "${FG_MASTER_KEY}" as a live
+	// /metrics key. Empty is allowed (master_key is optional) — only the
+	// placeholder literals (and unexpanded ${VAR} references) are refused.
+	if cfg.Auth.MasterKey != "" && isKnownInsecureSecret(cfg.Auth.MasterKey) {
+		return fmt.Errorf("auth.master_key must not be a known placeholder; set a unique strong secret or leave empty to disable")
+	}
 
-    for _, k := range cfg.Auth.APIKeys {
-        if cfg.Auth.Enabled && strings.TrimSpace(k.Key) == "" {
-            return fmt.Errorf("auth key %q has an empty key; set a non-empty key or remove the entry", k.Name)
-        }
-        // R7 (audit): reject known-placeholder API keys when auth is enabled.
-        // A publicly-known key authenticates anyone who read the repo.
-        if cfg.Auth.Enabled && isKnownInsecureSecret(k.Key) {
-            return fmt.Errorf("auth key %q must not be a known placeholder; set a unique strong key", k.Name)
-        }
-        if k.BudgetLimit < 0 {
-            return fmt.Errorf("auth key %q budget_limit must be non-negative, got %f", k.Name, k.BudgetLimit)
-        }
-        if k.DailyBudgetLimit < 0 {
-            return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
-        }
-        // #595: an exchange-only key with 0 caps mints tokens that inherit
-        // those caps — require the same explicitness as #594. Checked before
-        // the generic #594 rule so the message names the exchange plane.
-        if cfg.Auth.Enabled && k.ExchangeOnly && k.Name != "admin" && (k.RPM <= 0 || k.TPM <= 0) && !k.Unlimited {
-            return fmt.Errorf("auth key %q is exchange_only with zero rate caps: minted tokens inherit these caps; set numeric caps or unlimited: true (#595)", k.Name)
-        }
-        // #586/#594: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
-        // semantics — AllowRPM/AllowTPM return true for rpm<=0). That is a
-        // dangerous silent default: a typo or omission disables capping
-        // instead of failing closed. #594 escalates it for NON-admin entries:
-        // they fail startup unless the operator sets unlimited: true — an
-        // explicit, greppable decision. The admin entry keeps the WARN
-        // (existing deployments rely on its unlimited semantics).
-        if cfg.Auth.Enabled {
-            if k.RPM <= 0 || k.TPM <= 0 {
-                dims := []string{}
-                if k.RPM <= 0 {
-                    dims = append(dims, "rpm=0")
-                }
-                if k.TPM <= 0 {
-                    dims = append(dims, "tpm=0")
-                }
-                if k.Name == "admin" {
-                    slog.Warn("admin key has uncapped rate dimensions (0 = unlimited, back-compat)", "dims", dims)
-                } else if !k.Unlimited {
-                    return fmt.Errorf("auth key %q has %s: 0 means UNLIMITED on the key plane; set a numeric cap, or add explicit unlimited: true to opt in deliberately (#594)", k.Name, strings.Join(dims, ", "))
-                } else {
-                    slog.Warn("auth key is explicitly unlimited (unlimited: true, #594)", "key", k.Name, "dims", dims)
-                }
-            }
-        }
-    }
+	for _, k := range cfg.Auth.APIKeys {
+		if cfg.Auth.Enabled && strings.TrimSpace(k.Key) == "" {
+			return fmt.Errorf("auth key %q has an empty key; set a non-empty key or remove the entry", k.Name)
+		}
+		// R7 (audit): reject known-placeholder API keys when auth is enabled.
+		// A publicly-known key authenticates anyone who read the repo.
+		if cfg.Auth.Enabled && isKnownInsecureSecret(k.Key) {
+			return fmt.Errorf("auth key %q must not be a known placeholder; set a unique strong key", k.Name)
+		}
+		if k.BudgetLimit < 0 {
+			return fmt.Errorf("auth key %q budget_limit must be non-negative, got %f", k.Name, k.BudgetLimit)
+		}
+		if k.DailyBudgetLimit < 0 {
+			return fmt.Errorf("auth key %q daily_budget_limit must be non-negative, got %f", k.Name, k.DailyBudgetLimit)
+		}
+		// #595: an exchange-only key with 0 caps mints tokens that inherit
+		// those caps — require the same explicitness as #594. Checked before
+		// the generic #594 rule so the message names the exchange plane.
+		if cfg.Auth.Enabled && k.ExchangeOnly && k.Name != "admin" && (k.RPM <= 0 || k.TPM <= 0) && !k.Unlimited {
+			return fmt.Errorf("auth key %q is exchange_only with zero rate caps: minted tokens inherit these caps; set numeric caps or unlimited: true (#595)", k.Name)
+		}
+		// #586/#594: rpm/tpm 0 means UNLIMITED on the key plane (back-compat
+		// semantics — AllowRPM/AllowTPM return true for rpm<=0). That is a
+		// dangerous silent default: a typo or omission disables capping
+		// instead of failing closed. #594 escalates it for NON-admin entries:
+		// they fail startup unless the operator sets unlimited: true — an
+		// explicit, greppable decision. The admin entry keeps the WARN
+		// (existing deployments rely on its unlimited semantics).
+		if cfg.Auth.Enabled {
+			if k.RPM <= 0 || k.TPM <= 0 {
+				dims := []string{}
+				if k.RPM <= 0 {
+					dims = append(dims, "rpm=0")
+				}
+				if k.TPM <= 0 {
+					dims = append(dims, "tpm=0")
+				}
+				if k.Name == "admin" {
+					slog.Warn("admin key has uncapped rate dimensions (0 = unlimited, back-compat)", "dims", dims)
+				} else if !k.Unlimited {
+					return fmt.Errorf("auth key %q has %s: 0 means UNLIMITED on the key plane; set a numeric cap, or add explicit unlimited: true to opt in deliberately (#594)", k.Name, strings.Join(dims, ", "))
+				} else {
+					slog.Warn("auth key is explicitly unlimited (unlimited: true, #594)", "key", k.Name, "dims", dims)
+				}
+			}
+		}
+	}
 
-    // #595: token exchange plane fail-closed validation.
-    if cfg.Auth.TokenExchange.Enabled {
-        if !cfg.Auth.Enabled {
-            return fmt.Errorf("auth.token_exchange.enabled requires auth.enabled (the exchange endpoint authenticates bootstrap credentials through the key plane) (#595)")
-        }
-        if cfg.Auth.TokenExchange.MaxTTL <= 0 {
-            return fmt.Errorf("auth.token_exchange.max_ttl must be positive when token exchange is enabled (got %s); minted tokens must be short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
-        }
-        if cfg.Auth.TokenExchange.MaxTTL > 24*time.Hour {
-            return fmt.Errorf("auth.token_exchange.max_ttl %s exceeds the 24h ceiling; minted tokens are bootstrap-credential replacements and must stay short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
-        }
-    }
+	// #595: token exchange plane fail-closed validation.
+	if cfg.Auth.TokenExchange.Enabled {
+		if !cfg.Auth.Enabled {
+			return fmt.Errorf("auth.token_exchange.enabled requires auth.enabled (the exchange endpoint authenticates bootstrap credentials through the key plane) (#595)")
+		}
+		if cfg.Auth.TokenExchange.MaxTTL <= 0 {
+			return fmt.Errorf("auth.token_exchange.max_ttl must be positive when token exchange is enabled (got %s); minted tokens must be short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
+		}
+		if cfg.Auth.TokenExchange.MaxTTL > 24*time.Hour {
+			return fmt.Errorf("auth.token_exchange.max_ttl %s exceeds the 24h ceiling; minted tokens are bootstrap-credential replacements and must stay short-lived (#595)", cfg.Auth.TokenExchange.MaxTTL)
+		}
+	}
 
-    // #608 rollout tap: sink path required; PII gate mode restricted.
-    if cfg.RolloutTap.Enabled {
-        if cfg.RolloutTap.SinkPath == "" {
-            return fmt.Errorf("rollout_tap.enabled requires rollout_tap.sink_path (the sink is a local JSONL file; no default for safety) (#608)")
-        }
-        switch cfg.RolloutTap.ContentMode {
-        case "", rolloutContentModeRedact, rolloutContentModeRaw:
-        default:
-            return fmt.Errorf("rollout_tap.content_mode %q is invalid: must be \"redact\" (default) or \"raw\" (#608)", cfg.RolloutTap.ContentMode)
-        }
-        if cfg.RolloutTap.MaxQueue < 0 || cfg.RolloutTap.CaptureMaxBytes < 0 {
-            return fmt.Errorf("rollout_tap.max_queue and capture_max_bytes must be non-negative (#608)")
-        }
-    }
+	// #608 rollout tap: sink path required; PII gate mode restricted.
+	if cfg.RolloutTap.Enabled {
+		if cfg.RolloutTap.SinkPath == "" {
+			return fmt.Errorf("rollout_tap.enabled requires rollout_tap.sink_path (the sink is a local JSONL file; no default for safety) (#608)")
+		}
+		switch cfg.RolloutTap.ContentMode {
+		case "", rolloutContentModeRedact, rolloutContentModeRaw:
+		default:
+			return fmt.Errorf("rollout_tap.content_mode %q is invalid: must be \"redact\" (default) or \"raw\" (#608)", cfg.RolloutTap.ContentMode)
+		}
+		if cfg.RolloutTap.MaxQueue < 0 || cfg.RolloutTap.CaptureMaxBytes < 0 {
+			return fmt.Errorf("rollout_tap.max_queue and capture_max_bytes must be non-negative (#608)")
+		}
+	}
 
-    // R7/C2 (audit P1): encryption.master_key protects OAuth2 connector tokens
-    // at rest (data/connections.json). Without it, tokens persist PLAINTEXT to
-    // disk. Audit C2 grades this a release-blocking MUST ("不满足 C1 或 C2 不得
-    // 对外发布"), so a deployment that activates OAuth2 flows (OIDC enabled OR a
-    // connector persistence_path configured) WITHOUT a master_key is
-    // fail-closed at Load rather than warned. A local-only no-OIDC/no-connector
-    // deployment needs no master_key (nothing to encrypt) and is unaffected.
-    // Signals: cfg.OIDC.Enabled = OAuth2 flows active; cfg.Connector != nil =
-    // connector framework configured (enablement is runtime via stored keys,
-    // but presence of the block means the operator intends to use it).
-    oauth2Active := cfg.OIDC.Enabled || cfg.Connector != nil
-    if oauth2Active {
-        if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
-            return fmt.Errorf("encryption.master_key is required when OIDC or connector is enabled — without it OAuth2/connector tokens persist PLAINTEXT to disk; set a >=32-char random master_key (audit C2, release-blocking)")
-        }
-        if isKnownInsecureSecret(cfg.Encryption.MasterKey) {
-            return fmt.Errorf("encryption.master_key must not be a known placeholder when OIDC or connector is enabled — OAuth2/connector tokens would be encrypted with a publicly-known key; set a unique >=32-char random master_key (audit C2, release-blocking)")
-        }
-        if len(cfg.Encryption.MasterKey) < 32 {
-            return fmt.Errorf("encryption.master_key must be at least 32 characters when OIDC or connector is enabled, got %d (audit C2)", len(cfg.Encryption.MasterKey))
-        }
-    }
+	// R7/C2 (audit P1): encryption.master_key protects OAuth2 connector tokens
+	// at rest (data/connections.json). Without it, tokens persist PLAINTEXT to
+	// disk. Audit C2 grades this a release-blocking MUST ("不满足 C1 或 C2 不得
+	// 对外发布"), so a deployment that activates OAuth2 flows (OIDC enabled OR a
+	// connector persistence_path configured) WITHOUT a master_key is
+	// fail-closed at Load rather than warned. A local-only no-OIDC/no-connector
+	// deployment needs no master_key (nothing to encrypt) and is unaffected.
+	// Signals: cfg.OIDC.Enabled = OAuth2 flows active; cfg.Connector != nil =
+	// connector framework configured (enablement is runtime via stored keys,
+	// but presence of the block means the operator intends to use it).
+	oauth2Active := cfg.OIDC.Enabled || cfg.Connector != nil
+	if oauth2Active {
+		if cfg.Encryption == nil || cfg.Encryption.MasterKey == "" {
+			return fmt.Errorf("encryption.master_key is required when OIDC or connector is enabled — without it OAuth2/connector tokens persist PLAINTEXT to disk; set a >=32-char random master_key (audit C2, release-blocking)")
+		}
+		if isKnownInsecureSecret(cfg.Encryption.MasterKey) {
+			return fmt.Errorf("encryption.master_key must not be a known placeholder when OIDC or connector is enabled — OAuth2/connector tokens would be encrypted with a publicly-known key; set a unique >=32-char random master_key (audit C2, release-blocking)")
+		}
+		if len(cfg.Encryption.MasterKey) < 32 {
+			return fmt.Errorf("encryption.master_key must be at least 32 characters when OIDC or connector is enabled, got %d (audit C2)", len(cfg.Encryption.MasterKey))
+		}
+	}
 
-    // Outbound UDS: a backend with socket_path dials a unix socket instead of
-    // TCP. base_url is a dummy host then. Warn (not fail) so callers can opt in
-    // without hard requirements; the convention is http://unix/.
-    for name, backend := range cfg.Backends {
-        if backend.Enabled && backend.SocketPath != "" {
-            slog.Warn("backend configured for outbound UDS",
-                "backend", name,
-                "socket_path", backend.SocketPath,
-                "base_url", backend.BaseURL,
-                "note", "base_url is a dummy host; transport dials the unix socket",
-            )
-        }
-    }
+	// Outbound UDS: a backend with socket_path dials a unix socket instead of
+	// TCP. base_url is a dummy host then. Warn (not fail) so callers can opt in
+	// without hard requirements; the convention is http://unix/.
+	for name, backend := range cfg.Backends {
+		if backend.Enabled && backend.SocketPath != "" {
+			slog.Warn("backend configured for outbound UDS",
+				"backend", name,
+				"socket_path", backend.SocketPath,
+				"base_url", backend.BaseURL,
+				"note", "base_url is a dummy host; transport dials the unix socket",
+			)
+		}
+	}
 
-    // #118: MCP dedicated-listener + auth gate validation. When MCP is enabled
-    // with a dedicated listener, Host/Port must be set (the listener must bind
-    // somewhere). When MCP is enabled at all, an MCP credential must exist —
-    // either mcp.token or auth.master_key — so the MCP auth gate can enforce
-    // #119: cluster master mode makes the fusion-multi-node master the single
-    // source of inference node membership + strategy. A master-mode config with
-    // no master address would silently fall back to an empty node set (every
-    // request cloud-degrades). Fail at load so the misconfig is loud, not a
-    // silent cloud-only gateway masquerading as clustered.
-    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" && len(cfg.Cluster.Master.Addresses) == 0 {
-        return fmt.Errorf("cluster.mode=master requires cluster.master.address or cluster.master.addresses (the fusion-multi-node master API URL[s]); got empty — set one or use mode=standalone")
-    }
-    // R3: seed a sane max_stale_age default when omitted (0 =永久-sticky, the
-    // pre-R3 bug). 2m bounds how long a cached master strategy is trusted
-    // across failed syncs before resolveStrategy falls back to local. A
-    // negative value is rejected; 0 intentionally left as the explicit legacy
-    // opt-out for operators who want the old永久-sticky behavior.
-    if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster {
-        if cfg.Cluster.Master.MaxStaleAge < 0 {
-            return fmt.Errorf("cluster.master.max_stale_age must be >= 0 (0=disable staleness bound, legacy永久-sticky), got %v", cfg.Cluster.Master.MaxStaleAge)
-        }
-        if cfg.Cluster.Master.MaxStaleAge == 0 {
-            cfg.Cluster.Master.MaxStaleAge = 2 * time.Minute
-            slog.Info("cluster.master.max_stale_age defaulted", "max_stale_age", cfg.Cluster.Master.MaxStaleAge)
-        }
-    }
-    // #150 Gap2: seed the mac-platform tag for multi-instance fusion-mlx HA
-    // routing when ha_routing is enabled but the operator omitted the tag.
-    // Default "mac" matches the ClusterNodeConfig.Platform convention. Only
-    // matters when ha_routing.enabled is true; otherwise the field is inert.
-    if cfg.Cluster.HARouting.Enabled && cfg.Cluster.HARouting.MacPlatformTag == "" {
-        cfg.Cluster.HARouting.MacPlatformTag = "mac"
-        slog.Info("cluster.ha_routing.mac_platform_tag defaulted", "tag", "mac")
-    }
+	// #118: MCP dedicated-listener + auth gate validation. When MCP is enabled
+	// with a dedicated listener, Host/Port must be set (the listener must bind
+	// somewhere). When MCP is enabled at all, an MCP credential must exist —
+	// either mcp.token or auth.master_key — so the MCP auth gate can enforce
+	// #119: cluster master mode makes the fusion-multi-node master the single
+	// source of inference node membership + strategy. A master-mode config with
+	// no master address would silently fall back to an empty node set (every
+	// request cloud-degrades). Fail at load so the misconfig is loud, not a
+	// silent cloud-only gateway masquerading as clustered.
+	if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster && cfg.Cluster.Master.Address == "" && len(cfg.Cluster.Master.Addresses) == 0 {
+		return fmt.Errorf("cluster.mode=master requires cluster.master.address or cluster.master.addresses (the fusion-multi-node master API URL[s]); got empty — set one or use mode=standalone")
+	}
+	// R3: seed a sane max_stale_age default when omitted (0 =永久-sticky, the
+	// pre-R3 bug). 2m bounds how long a cached master strategy is trusted
+	// across failed syncs before resolveStrategy falls back to local. A
+	// negative value is rejected; 0 intentionally left as the explicit legacy
+	// opt-out for operators who want the old永久-sticky behavior.
+	if cfg.Cluster.Enabled && cfg.Cluster.Mode == ClusterModeMaster {
+		if cfg.Cluster.Master.MaxStaleAge < 0 {
+			return fmt.Errorf("cluster.master.max_stale_age must be >= 0 (0=disable staleness bound, legacy永久-sticky), got %v", cfg.Cluster.Master.MaxStaleAge)
+		}
+		if cfg.Cluster.Master.MaxStaleAge == 0 {
+			cfg.Cluster.Master.MaxStaleAge = 2 * time.Minute
+			slog.Info("cluster.master.max_stale_age defaulted", "max_stale_age", cfg.Cluster.Master.MaxStaleAge)
+		}
+	}
+	// #150 Gap2: seed the mac-platform tag for multi-instance fusion-mlx HA
+	// routing when ha_routing is enabled but the operator omitted the tag.
+	// Default "mac" matches the ClusterNodeConfig.Platform convention. Only
+	// matters when ha_routing.enabled is true; otherwise the field is inert.
+	if cfg.Cluster.HARouting.Enabled && cfg.Cluster.HARouting.MacPlatformTag == "" {
+		cfg.Cluster.HARouting.MacPlatformTag = "mac"
+		slog.Info("cluster.ha_routing.mac_platform_tag defaulted", "tag", "mac")
+	}
 
-    // #151: managed_settings payload signing. When enabled, a private key
-    // (Ed25519 seed) is required — the endpoint cannot sign without it, and an
-    // enabled-but-keyless endpoint would serve an unsigned payload that the
-    // client (correctly) rejects, surfacing as a confusing fetch failure rather
-    // than a config error. The seed is base64 of the 32-byte Ed25519 private
-    // key (crypto/ed25519.NewKeyFromSeed). Payload may be empty (serves an empty
-    // document, still signed) but must be valid JSON when non-empty, since the
-    // client parses it. Fail-closed: enabled + missing/invalid key → config
-    // error, not a silently-broken endpoint.
-    if cfg.ManagedSettings.Enabled {
-        if cfg.ManagedSettings.PrivateKey == "" {
-            return fmt.Errorf("managed_settings.enabled is true but managed_settings.private_key is empty (set managed_settings.private_key or FG_MANAGED_SETTINGS_PRIVATE_KEY)")
-        }
-        if isKnownInsecureSecret(cfg.ManagedSettings.PrivateKey) {
-            return fmt.Errorf("managed_settings.private_key must not be a known placeholder")
-        }
-        seed, err := base64.StdEncoding.DecodeString(cfg.ManagedSettings.PrivateKey)
-        if err != nil {
-            return fmt.Errorf("managed_settings.private_key is not valid base64: %w", err)
-        }
-        if len(seed) != ed25519.SeedSize {
-            return fmt.Errorf("managed_settings.private_key must decode to %d bytes (Ed25519 seed), got %d", ed25519.SeedSize, len(seed))
-        }
-        if cfg.ManagedSettings.Payload != "" {
-            var jv json.RawMessage
-            if err := json.Unmarshal([]byte(cfg.ManagedSettings.Payload), &jv); err != nil {
-                return fmt.Errorf("managed_settings.payload must be valid JSON when set: %w", err)
-            }
-        }
-        slog.Info("managed_settings signing endpoint enabled")
-    }
+	// #151: managed_settings payload signing. When enabled, a private key
+	// (Ed25519 seed) is required — the endpoint cannot sign without it, and an
+	// enabled-but-keyless endpoint would serve an unsigned payload that the
+	// client (correctly) rejects, surfacing as a confusing fetch failure rather
+	// than a config error. The seed is base64 of the 32-byte Ed25519 private
+	// key (crypto/ed25519.NewKeyFromSeed). Payload may be empty (serves an empty
+	// document, still signed) but must be valid JSON when non-empty, since the
+	// client parses it. Fail-closed: enabled + missing/invalid key → config
+	// error, not a silently-broken endpoint.
+	if cfg.ManagedSettings.Enabled {
+		if cfg.ManagedSettings.PrivateKey == "" {
+			return fmt.Errorf("managed_settings.enabled is true but managed_settings.private_key is empty (set managed_settings.private_key or FG_MANAGED_SETTINGS_PRIVATE_KEY)")
+		}
+		if isKnownInsecureSecret(cfg.ManagedSettings.PrivateKey) {
+			return fmt.Errorf("managed_settings.private_key must not be a known placeholder")
+		}
+		seed, err := base64.StdEncoding.DecodeString(cfg.ManagedSettings.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("managed_settings.private_key is not valid base64: %w", err)
+		}
+		if len(seed) != ed25519.SeedSize {
+			return fmt.Errorf("managed_settings.private_key must decode to %d bytes (Ed25519 seed), got %d", ed25519.SeedSize, len(seed))
+		}
+		if cfg.ManagedSettings.Payload != "" {
+			var jv json.RawMessage
+			if err := json.Unmarshal([]byte(cfg.ManagedSettings.Payload), &jv); err != nil {
+				return fmt.Errorf("managed_settings.payload must be valid JSON when set: %w", err)
+			}
+		}
+		slog.Info("managed_settings signing endpoint enabled")
+	}
 
-    // #157: fusion-identity gRPC control plane. Fail-closed at config load:
-    // enabled with no endpoint is rejected, not silently bypassed. The gRPC
-    // client + breaker are constructed in main.go only when enabled, so a
-    // missing/invalid endpoint would otherwise mean the hot path never calls
-    // identity and the operator believes isolation is enforced when it is not.
-    if cfg.Identity.Enabled {
-        if cfg.Identity.Endpoint == "" {
-            return fmt.Errorf("identity.enabled is true but identity.endpoint is empty (set the fusion-identity gRPC address, e.g. 127.0.0.1:50051)")
-        }
-        if cfg.Identity.DeadlineMS <= 0 {
-            return fmt.Errorf("identity.deadline_ms must be > 0 when identity enabled, got %d", cfg.Identity.DeadlineMS)
-        }
-        if cfg.Identity.BreakerThreshold <= 0 {
-            return fmt.Errorf("identity.breaker_threshold must be > 0 when identity enabled, got %d", cfg.Identity.BreakerThreshold)
-        }
-        if cfg.Identity.BreakerOpenSec <= 0 {
-            return fmt.Errorf("identity.breaker_open_sec must be > 0 when identity enabled, got %d", cfg.Identity.BreakerOpenSec)
-        }
-        slog.Info("identity gRPC control plane enabled",
-            "endpoint", cfg.Identity.Endpoint,
-            "deadline_ms", cfg.Identity.DeadlineMS,
-            "fallback_to_local", cfg.Identity.FallbackToLocal)
-    }
+	// #157: fusion-identity gRPC control plane. Fail-closed at config load:
+	// enabled with no endpoint is rejected, not silently bypassed. The gRPC
+	// client + breaker are constructed in main.go only when enabled, so a
+	// missing/invalid endpoint would otherwise mean the hot path never calls
+	// identity and the operator believes isolation is enforced when it is not.
+	if cfg.Identity.Enabled {
+		if cfg.Identity.Endpoint == "" {
+			return fmt.Errorf("identity.enabled is true but identity.endpoint is empty (set the fusion-identity gRPC address, e.g. 127.0.0.1:50051)")
+		}
+		if cfg.Identity.DeadlineMS <= 0 {
+			return fmt.Errorf("identity.deadline_ms must be > 0 when identity enabled, got %d", cfg.Identity.DeadlineMS)
+		}
+		if cfg.Identity.BreakerThreshold <= 0 {
+			return fmt.Errorf("identity.breaker_threshold must be > 0 when identity enabled, got %d", cfg.Identity.BreakerThreshold)
+		}
+		if cfg.Identity.BreakerOpenSec <= 0 {
+			return fmt.Errorf("identity.breaker_open_sec must be > 0 when identity enabled, got %d", cfg.Identity.BreakerOpenSec)
+		}
+		slog.Info("identity gRPC control plane enabled",
+			"endpoint", cfg.Identity.Endpoint,
+			"deadline_ms", cfg.Identity.DeadlineMS,
+			"fallback_to_local", cfg.Identity.FallbackToLocal)
+	}
 
-    // #215: shell subsystem. Fail-closed checks — enabled with no entry
-    // allowlist would let any registered module inject scripts into the shell
-    // host (A7); enabled with neither session secret nor master_key leaves no
-    // usable signing key; a module upstream that does not parse means the
-    // proxy would 503-envelope every request.
-    if cfg.Shell.Enabled {
-        if len(cfg.Shell.EntryOriginAllowlist) == 0 {
-            return fmt.Errorf("web_shell.enabled is true but web_shell.entry_origin_allowlist is empty (whitelist the shell host origin, e.g. http://127.0.0.1:11432)")
-        }
-        for _, origin := range cfg.Shell.EntryOriginAllowlist {
-            if u, err := url.Parse(origin); err != nil || u.Scheme == "" || u.Host == "" {
-                return fmt.Errorf("web_shell.entry_origin_allowlist entry %q is not a valid absolute origin", origin)
-            }
-        }
-        if cfg.Shell.Session.Secret == "" && cfg.Auth.MasterKey == "" {
-            return fmt.Errorf("web_shell.enabled is true but web_web_shell.session.secret is empty and auth.master_key is unset (set one to sign session tokens)")
-        }
-        if cfg.Shell.Session.TTL <= 0 {
-            return fmt.Errorf("web_shell.session.ttl must be positive when shell enabled, got %s", cfg.Shell.Session.TTL)
-        }
-        // #586: fail closed on an "unlimited by typo" gate — enabling the
-        // shell rate limit without an RPM cap enforces nothing while making
-        // the operator believe it does.
-        if cfg.Shell.RateLimit.Enabled && cfg.Shell.RateLimit.RPM <= 0 {
-            return fmt.Errorf("web_shell.rate_limit.enabled is true but web_shell.rate_limit.rpm is %d; set a positive rpm (the gate fails closed rather than defaulting to unlimited)", cfg.Shell.RateLimit.RPM)
-        }
-        if cfg.Shell.RateLimit.RPM < 0 || cfg.Shell.RateLimit.TPM < 0 || cfg.Shell.RateLimit.DailyTokens < 0 {
-            return fmt.Errorf("web_shell.rate_limit values must be non-negative (0 disables a dimension)")
-        }
-        // #592: an enabled captcha gate with no challenge lifetime fails
-        // closed — a zero TTL would expire every challenge instantly and
-        // brick the login plane.
-        if cfg.Shell.Captcha.Enabled && cfg.Shell.Captcha.TTL <= 0 {
-            return fmt.Errorf("web_shell.captcha.enabled is true but web_shell.captcha.ttl is %s; set a positive ttl (the gate fails closed rather than defaulting)", cfg.Shell.Captcha.TTL)
-        }
-        if cfg.Shell.Captcha.TTL < 0 {
-            return fmt.Errorf("web_shell.captcha.ttl must be non-negative")
-        }
-        // #717: the link plane needs a real device credential to be a plane
-        // at all; a short credential would make the mint endpoint a
-        // brute-force oracle on loopback.
-        if cfg.Shell.Link.Enabled {
-            if err := validateLinkCredential(cfg.Shell.Link); err != nil {
-                return err
-            }
-            if cfg.Shell.Link.TicketTTL < 0 || cfg.Shell.Link.TicketTTL > 15*time.Minute {
-                return fmt.Errorf("web_shell.link.ticket_ttl must be in (0, 15m], got %s", cfg.Shell.Link.TicketTTL)
-            }
-            // #732: ticket_routes entries must be "METHOD /path" with a
-            // single "/*" glob suffix at most, and may never target the
-            // admin/auth planes (the ticket plane is execution-scoped).
-            if err := validateLinkTicketRoutes(cfg.Shell.Link); err != nil {
-                return err
-            }
-        }
-        // #243: a misconfigured AdminKey would 401 module self-registration
-        // after the auth chain with no explanation — surface it at load time.
-        // Store-issued keys (created via the admin UI, hashed at rest) cannot
-        // be matched here; those are still accepted by the handler gate.
-        if cfg.Shell.AdminKey != "" && cfg.Shell.AdminKey != cfg.Auth.MasterKey {
-            adminKeyKnown := false
-            for i := range cfg.Auth.APIKeys {
-                if cfg.Auth.APIKeys[i].Key == cfg.Shell.AdminKey {
-                    adminKeyKnown = true
-                }
-            }
-            if !adminKeyKnown {
-                slog.Warn("web_shell.admin_key matches neither master_key nor any static auth.api_keys entry — module self-registration will 401 unless it is a store-issued key",
-                    "key_prefix", cfg.Shell.AdminKey[:min(3, len(cfg.Shell.AdminKey))]+"***")
-            }
-        }
-        if cfg.Shell.HeartbeatTimeout <= 0 {
-            return fmt.Errorf("web_shell.heartbeat_timeout must be positive when shell enabled, got %s", cfg.Shell.HeartbeatTimeout)
-        }
-        if cfg.Shell.HealthPollInterval <= 0 {
-            return fmt.Errorf("web_shell.health_poll_interval must be positive when shell enabled, got %s", cfg.Shell.HealthPollInterval)
-        }
-        usernames := make(map[string]bool, len(cfg.Shell.Session.Users))
-        for i, u := range cfg.Shell.Session.Users {
-            if u.Username == "" {
-                return fmt.Errorf("web_shell.session.users[%d].username is empty", i)
-            }
-            if usernames[u.Username] {
-                return fmt.Errorf("web_shell.session.users[%d] duplicates username %q", i, u.Username)
-            }
-            usernames[u.Username] = true
-            if u.Password == "" && u.PasswordBcrypt == "" {
-                return fmt.Errorf("web_shell.session.users[%d] (%s) has no password or password_bcrypt", i, u.Username)
-            }
-            if u.Password != "" {
-                slog.Warn("shell.session.users entry uses plaintext password — prefer password_bcrypt",
-                    "username", u.Username)
-            }
-        }
-        // #455 MT-1/MT-2: static manifest entries must declare a category
-        // from the taxonomy vocabulary and an explicit sort — the sidebar
-        // order is (sort, id), and unsorted entries were silently registering
-        // in file order. Dynamic registrations keep sort optional (modules
-        // self-register without one and sink below sorted entries).
-        for _, m := range cfg.Shell.Manifests {
-            if !ValidManifestCategory(m.Category) {
-                return fmt.Errorf("web_shell.manifests[%s]: category %q must be core|governance|platform|domain|infra|dev", m.ID, m.Category)
-            }
-            if m.Sort <= 0 {
-                return fmt.Errorf("web_shell.manifests[%s]: sort must be an explicit positive value (convention: core 1x / governance 2x / domain 3x / platform 4x)", m.ID)
-            }
-            // #675: same router vocabulary as dynamic registration.
-            switch m.Router {
-            case "", "hash", "path":
-            default:
-                return fmt.Errorf("web_shell.manifests[%s]: router %q must be hash|path", m.ID, m.Router)
-            }
-        }
-        for id, m := range cfg.Shell.Modules {
-            if m.Upstream == "" {
-                continue
-            }
-            if u, err := url.Parse(m.Upstream); err != nil || u.Scheme == "" || u.Host == "" {
-                return fmt.Errorf("web_shell.modules[%s].upstream %q is not a valid absolute URL", id, m.Upstream)
-            }
-        }
-        slog.Info("shell subsystem enabled",
-            "static_manifests", len(cfg.Shell.Manifests),
-            "users", len(cfg.Shell.Session.Users),
-            "modules", len(cfg.Shell.Modules),
-            "allowlist", len(cfg.Shell.EntryOriginAllowlist))
-    }
+	// #215: shell subsystem. Fail-closed checks — enabled with no entry
+	// allowlist would let any registered module inject scripts into the shell
+	// host (A7); enabled with neither session secret nor master_key leaves no
+	// usable signing key; a module upstream that does not parse means the
+	// proxy would 503-envelope every request.
+	if cfg.Shell.Enabled {
+		if len(cfg.Shell.EntryOriginAllowlist) == 0 {
+			return fmt.Errorf("web_shell.enabled is true but web_shell.entry_origin_allowlist is empty (whitelist the shell host origin, e.g. http://127.0.0.1:11432)")
+		}
+		for _, origin := range cfg.Shell.EntryOriginAllowlist {
+			if u, err := url.Parse(origin); err != nil || u.Scheme == "" || u.Host == "" {
+				return fmt.Errorf("web_shell.entry_origin_allowlist entry %q is not a valid absolute origin", origin)
+			}
+		}
+		if cfg.Shell.Session.Secret == "" && cfg.Auth.MasterKey == "" {
+			return fmt.Errorf("web_shell.enabled is true but web_web_shell.session.secret is empty and auth.master_key is unset (set one to sign session tokens)")
+		}
+		if cfg.Shell.Session.TTL <= 0 {
+			return fmt.Errorf("web_shell.session.ttl must be positive when shell enabled, got %s", cfg.Shell.Session.TTL)
+		}
+		// #586: fail closed on an "unlimited by typo" gate — enabling the
+		// shell rate limit without an RPM cap enforces nothing while making
+		// the operator believe it does.
+		if cfg.Shell.RateLimit.Enabled && cfg.Shell.RateLimit.RPM <= 0 {
+			return fmt.Errorf("web_shell.rate_limit.enabled is true but web_shell.rate_limit.rpm is %d; set a positive rpm (the gate fails closed rather than defaulting to unlimited)", cfg.Shell.RateLimit.RPM)
+		}
+		if cfg.Shell.RateLimit.RPM < 0 || cfg.Shell.RateLimit.TPM < 0 || cfg.Shell.RateLimit.DailyTokens < 0 {
+			return fmt.Errorf("web_shell.rate_limit values must be non-negative (0 disables a dimension)")
+		}
+		// #592: an enabled captcha gate with no challenge lifetime fails
+		// closed — a zero TTL would expire every challenge instantly and
+		// brick the login plane.
+		if cfg.Shell.Captcha.Enabled && cfg.Shell.Captcha.TTL <= 0 {
+			return fmt.Errorf("web_shell.captcha.enabled is true but web_shell.captcha.ttl is %s; set a positive ttl (the gate fails closed rather than defaulting)", cfg.Shell.Captcha.TTL)
+		}
+		if cfg.Shell.Captcha.TTL < 0 {
+			return fmt.Errorf("web_shell.captcha.ttl must be non-negative")
+		}
+		// #717: the link plane needs a real device credential to be a plane
+		// at all; a short credential would make the mint endpoint a
+		// brute-force oracle on loopback.
+		if cfg.Shell.Link.Enabled {
+			if err := validateLinkCredential(cfg.Shell.Link); err != nil {
+				return err
+			}
+			if cfg.Shell.Link.TicketTTL < 0 || cfg.Shell.Link.TicketTTL > 15*time.Minute {
+				return fmt.Errorf("web_shell.link.ticket_ttl must be in (0, 15m], got %s", cfg.Shell.Link.TicketTTL)
+			}
+			// #732: ticket_routes entries must be "METHOD /path" with a
+			// single "/*" glob suffix at most, and may never target the
+			// admin/auth planes (the ticket plane is execution-scoped).
+			if err := validateLinkTicketRoutes(cfg.Shell.Link); err != nil {
+				return err
+			}
+		}
+		// #243: a misconfigured AdminKey would 401 module self-registration
+		// after the auth chain with no explanation — surface it at load time.
+		// Store-issued keys (created via the admin UI, hashed at rest) cannot
+		// be matched here; those are still accepted by the handler gate.
+		if cfg.Shell.AdminKey != "" && cfg.Shell.AdminKey != cfg.Auth.MasterKey {
+			adminKeyKnown := false
+			for i := range cfg.Auth.APIKeys {
+				if cfg.Auth.APIKeys[i].Key == cfg.Shell.AdminKey {
+					adminKeyKnown = true
+				}
+			}
+			if !adminKeyKnown {
+				slog.Warn("web_shell.admin_key matches neither master_key nor any static auth.api_keys entry — module self-registration will 401 unless it is a store-issued key",
+					"key_prefix", cfg.Shell.AdminKey[:min(3, len(cfg.Shell.AdminKey))]+"***")
+			}
+		}
+		if cfg.Shell.HeartbeatTimeout <= 0 {
+			return fmt.Errorf("web_shell.heartbeat_timeout must be positive when shell enabled, got %s", cfg.Shell.HeartbeatTimeout)
+		}
+		if cfg.Shell.HealthPollInterval <= 0 {
+			return fmt.Errorf("web_shell.health_poll_interval must be positive when shell enabled, got %s", cfg.Shell.HealthPollInterval)
+		}
+		usernames := make(map[string]bool, len(cfg.Shell.Session.Users))
+		for i, u := range cfg.Shell.Session.Users {
+			if u.Username == "" {
+				return fmt.Errorf("web_shell.session.users[%d].username is empty", i)
+			}
+			if usernames[u.Username] {
+				return fmt.Errorf("web_shell.session.users[%d] duplicates username %q", i, u.Username)
+			}
+			usernames[u.Username] = true
+			if u.Password == "" && u.PasswordBcrypt == "" {
+				return fmt.Errorf("web_shell.session.users[%d] (%s) has no password or password_bcrypt", i, u.Username)
+			}
+			if u.Password != "" {
+				slog.Warn("shell.session.users entry uses plaintext password — prefer password_bcrypt",
+					"username", u.Username)
+			}
+		}
+		// #455 MT-1/MT-2: static manifest entries must declare a category
+		// from the taxonomy vocabulary and an explicit sort — the sidebar
+		// order is (sort, id), and unsorted entries were silently registering
+		// in file order. Dynamic registrations keep sort optional (modules
+		// self-register without one and sink below sorted entries).
+		for _, m := range cfg.Shell.Manifests {
+			if !ValidManifestCategory(m.Category) {
+				return fmt.Errorf("web_shell.manifests[%s]: category %q must be core|governance|platform|domain|infra|dev", m.ID, m.Category)
+			}
+			if m.Sort <= 0 {
+				return fmt.Errorf("web_shell.manifests[%s]: sort must be an explicit positive value (convention: core 1x / governance 2x / domain 3x / platform 4x)", m.ID)
+			}
+			// #675: same router vocabulary as dynamic registration.
+			switch m.Router {
+			case "", "hash", "path":
+			default:
+				return fmt.Errorf("web_shell.manifests[%s]: router %q must be hash|path", m.ID, m.Router)
+			}
+		}
+		for id, m := range cfg.Shell.Modules {
+			if m.Upstream == "" {
+				continue
+			}
+			if u, err := url.Parse(m.Upstream); err != nil || u.Scheme == "" || u.Host == "" {
+				return fmt.Errorf("web_shell.modules[%s].upstream %q is not a valid absolute URL", id, m.Upstream)
+			}
+		}
+		slog.Info("shell subsystem enabled",
+			"static_manifests", len(cfg.Shell.Manifests),
+			"users", len(cfg.Shell.Session.Users),
+			"modules", len(cfg.Shell.Modules),
+			"allowlist", len(cfg.Shell.EntryOriginAllowlist))
+	}
 
-    // E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
-    // handlers fall back to the maxProxyBodySize const default at read time);
-    // negative is rejected. A positive cap is what actually bounds the body —
-    // the const alone was never enforced because the proxy paths wrapped
-    // r.Body with no MaxBytesReader at all.
-    if cfg.Server.ProxyMaxBodySize < 0 {
-        return fmt.Errorf("server.proxy_max_body_size must be >= 0 (0=default %d bytes), got %d", int64(256<<20), cfg.Server.ProxyMaxBodySize)
-    }
+	// E5 (audit P2): validate the reverse-proxy body cap. 0 is allowed (the
+	// handlers fall back to the maxProxyBodySize const default at read time);
+	// negative is rejected. A positive cap is what actually bounds the body —
+	// the const alone was never enforced because the proxy paths wrapped
+	// r.Body with no MaxBytesReader at all.
+	if cfg.Server.ProxyMaxBodySize < 0 {
+		return fmt.Errorf("server.proxy_max_body_size must be >= 0 (0=default %d bytes), got %d", int64(256<<20), cfg.Server.ProxyMaxBodySize)
+	}
 
-    // access independent of the main auth chain (auth.enabled=false must NOT
-    // open MCP). Fail-closed: an enabled MCP with no credential is rejected at
-    // config load, not silently exposed.
-    if cfg.MCP.Enabled {
-        if cfg.MCP.ListenEnabled {
-            if cfg.MCP.Host == "" {
-                return fmt.Errorf("mcp.host must be set when mcp.listen_enabled is true (dedicated MCP listener bind address)")
-            }
-            if cfg.MCP.Port <= 0 || cfg.MCP.Port > 65535 {
-                return fmt.Errorf("mcp.port must be in (0,65535] when mcp.listen_enabled is true, got %d", cfg.MCP.Port)
-            }
-        }
-        if cfg.MCP.Token == "" && cfg.Auth.MasterKey == "" {
-            return fmt.Errorf("mcp is enabled but has no credential: set mcp.token or auth.master_key so the MCP auth gate can enforce access (auth.enabled=false must not open MCP)")
-        }
-    }
+	// access independent of the main auth chain (auth.enabled=false must NOT
+	// open MCP). Fail-closed: an enabled MCP with no credential is rejected at
+	// config load, not silently exposed.
+	if cfg.MCP.Enabled {
+		if cfg.MCP.ListenEnabled {
+			if cfg.MCP.Host == "" {
+				return fmt.Errorf("mcp.host must be set when mcp.listen_enabled is true (dedicated MCP listener bind address)")
+			}
+			if cfg.MCP.Port <= 0 || cfg.MCP.Port > 65535 {
+				return fmt.Errorf("mcp.port must be in (0,65535] when mcp.listen_enabled is true, got %d", cfg.MCP.Port)
+			}
+		}
+		if cfg.MCP.Token == "" && cfg.Auth.MasterKey == "" {
+			return fmt.Errorf("mcp is enabled but has no credential: set mcp.token or auth.master_key so the MCP auth gate can enforce access (auth.enabled=false must not open MCP)")
+		}
+	}
 
-    // #130: browser scheduling subsystem validation. Range-check the numeric
-    // knobs (EI8: bare zero-value numerics bypassed validation before) and
-    // require at least one static-seed node OR dial-in capability when
-    // enabled. A poll interval <= 0 would busy-loop; a zero frame cap would
-    // reject every frame; negative thresholds are meaningless. The static
-    // seed may be empty if dial-in registration is expected, but every
-    // declared node needs a non-empty id + socket_path (an empty socket_path
-    // would dial nowhere and fail every poll — loud at load, not a silent
-    // dead node at runtime).
-    if cfg.Browser.Enabled {
-        if cfg.Browser.PollInterval <= 0 {
-            return fmt.Errorf("browser.poll_interval must be positive, got %v", cfg.Browser.PollInterval)
-        }
-        if cfg.Browser.FailureThreshold <= 0 {
-            return fmt.Errorf("browser.failure_threshold must be positive, got %d", cfg.Browser.FailureThreshold)
-        }
-        if cfg.Browser.RecoveryInterval < 0 {
-            return fmt.Errorf("browser.recovery_interval must be >= 0, got %v", cfg.Browser.RecoveryInterval)
-        }
-        if cfg.Browser.GlobalMaxSessions < 0 {
-            return fmt.Errorf("browser.global_max_sessions must be >= 0 (0=no ceiling), got %d", cfg.Browser.GlobalMaxSessions)
-        }
-        if cfg.Browser.MinFreeMBPerSession < 0 {
-            return fmt.Errorf("browser.min_free_mb_per_session must be >= 0, got %d", cfg.Browser.MinFreeMBPerSession)
-        }
-        if cfg.Browser.FrameMaxBytes <= 0 {
-            return fmt.Errorf("browser.frame_max_bytes must be positive, got %d", cfg.Browser.FrameMaxBytes)
-        }
-        if cfg.Browser.DialTimeout <= 0 {
-            return fmt.Errorf("browser.dial_timeout must be positive, got %v", cfg.Browser.DialTimeout)
-        }
-        if cfg.Browser.FrameTimeout <= 0 {
-            return fmt.Errorf("browser.frame_timeout must be positive, got %v", cfg.Browser.FrameTimeout)
-        }
-        for i, n := range cfg.Browser.Nodes {
-            if strings.TrimSpace(n.ID) == "" {
-                return fmt.Errorf("browser.nodes[%d].id is required (operator label; distinct from the per-process node_id)", i)
-            }
-            if strings.TrimSpace(n.SocketPath) == "" {
-                return fmt.Errorf("browser.nodes[%d].socket_path is required (UDS path the gateway dials to forward)", i)
-            }
-            // Fail-closed: fusion-browser requires an auth handshake (FR-10/H-5)
-            // before any op; a node entry with no token cannot be polled and would
-            // auth_denied on every dial. Reject at load — never dial anonymous.
-            if strings.TrimSpace(n.Token) == "" {
-                return fmt.Errorf("browser.nodes[%d].token is required (must match the node's authToken; fusion-browser denies ops without an auth handshake)", i)
-            }
-        }
-    }
+	// #130: browser scheduling subsystem validation. Range-check the numeric
+	// knobs (EI8: bare zero-value numerics bypassed validation before) and
+	// require at least one static-seed node OR dial-in capability when
+	// enabled. A poll interval <= 0 would busy-loop; a zero frame cap would
+	// reject every frame; negative thresholds are meaningless. The static
+	// seed may be empty if dial-in registration is expected, but every
+	// declared node needs a non-empty id + socket_path (an empty socket_path
+	// would dial nowhere and fail every poll — loud at load, not a silent
+	// dead node at runtime).
+	if cfg.Browser.Enabled {
+		if cfg.Browser.PollInterval <= 0 {
+			return fmt.Errorf("browser.poll_interval must be positive, got %v", cfg.Browser.PollInterval)
+		}
+		if cfg.Browser.FailureThreshold <= 0 {
+			return fmt.Errorf("browser.failure_threshold must be positive, got %d", cfg.Browser.FailureThreshold)
+		}
+		if cfg.Browser.RecoveryInterval < 0 {
+			return fmt.Errorf("browser.recovery_interval must be >= 0, got %v", cfg.Browser.RecoveryInterval)
+		}
+		if cfg.Browser.GlobalMaxSessions < 0 {
+			return fmt.Errorf("browser.global_max_sessions must be >= 0 (0=no ceiling), got %d", cfg.Browser.GlobalMaxSessions)
+		}
+		if cfg.Browser.MinFreeMBPerSession < 0 {
+			return fmt.Errorf("browser.min_free_mb_per_session must be >= 0, got %d", cfg.Browser.MinFreeMBPerSession)
+		}
+		if cfg.Browser.FrameMaxBytes <= 0 {
+			return fmt.Errorf("browser.frame_max_bytes must be positive, got %d", cfg.Browser.FrameMaxBytes)
+		}
+		if cfg.Browser.DialTimeout <= 0 {
+			return fmt.Errorf("browser.dial_timeout must be positive, got %v", cfg.Browser.DialTimeout)
+		}
+		if cfg.Browser.FrameTimeout <= 0 {
+			return fmt.Errorf("browser.frame_timeout must be positive, got %v", cfg.Browser.FrameTimeout)
+		}
+		for i, n := range cfg.Browser.Nodes {
+			if strings.TrimSpace(n.ID) == "" {
+				return fmt.Errorf("browser.nodes[%d].id is required (operator label; distinct from the per-process node_id)", i)
+			}
+			if strings.TrimSpace(n.SocketPath) == "" {
+				return fmt.Errorf("browser.nodes[%d].socket_path is required (UDS path the gateway dials to forward)", i)
+			}
+			// Fail-closed: fusion-browser requires an auth handshake (FR-10/H-5)
+			// before any op; a node entry with no token cannot be polled and would
+			// auth_denied on every dial. Reject at load — never dial anonymous.
+			if strings.TrimSpace(n.Token) == "" {
+				return fmt.Errorf("browser.nodes[%d].token is required (must match the node's authToken; fusion-browser denies ops without an auth handshake)", i)
+			}
+		}
+	}
 
-    return nil
+	return nil
 }
 
 func ExpandPath(p string) string {
-    if p == "" {
-        return ""
-    }
-    if strings.HasPrefix(p, "~" + string(filepath.Separator)) {
-        home, err := os.UserHomeDir()
-        if err != nil {
-            slog.Warn("expandPath: cannot resolve home dir, returning path as-is", "path", p, "error", err)
-            return p
-        }
-        return filepath.Join(home, p[2:])
-    }
-    if p == "~" {
-        home, err := os.UserHomeDir()
-        if err != nil {
-            return p
-        }
-        return home
-    }
-    return p
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Warn("expandPath: cannot resolve home dir, returning path as-is", "path", p, "error", err)
+			return p
+		}
+		return filepath.Join(home, p[2:])
+	}
+	if p == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return p
+		}
+		return home
+	}
+	return p
 }
 
 // defaultJWTSecret is the placeholder secret baked into DefaultConfig so a
@@ -3212,24 +3226,24 @@ const defaultJWTSecret = "default-dev-secret-change-in-production-32ch"
 // placeholder is equivalent to no secret at all — anyone reading the repo can
 // forge admin JWTs. Fail-closed at startup forces a real secret.
 var knownInsecureJWTSecrets = map[string]bool{
-    defaultJWTSecret:                          true,
-    "change-me-at-least-32-chars-long-random-secret": true,
-    "change-me-to-a-random-secret-32-chars-min":      true,
+	defaultJWTSecret: true,
+	"change-me-at-least-32-chars-long-random-secret": true,
+	"change-me-to-a-random-secret-32-chars-min":      true,
 }
 
 func isKnownInsecureJWTSecret(s string) bool {
-    t := strings.ToLower(strings.TrimSpace(s))
-    if t == "" {
-        return false
-    }
-    if knownInsecureJWTSecrets[t] {
-        return true
-    }
-    // C1 (audit P1-ops): the shipped config.yaml carries
-    // "fg-local-dev-jwt-secret-...-DO-NOT-SHIP" which evades the exact table.
-    // Reuse the generic placeholder pattern layer (fg- prefix, do-not-ship /
-    // change-me substrings) so self-describing JWT placeholders are rejected.
-    return looksLikePlaceholder(t)
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return false
+	}
+	if knownInsecureJWTSecrets[t] {
+		return true
+	}
+	// C1 (audit P1-ops): the shipped config.yaml carries
+	// "fg-local-dev-jwt-secret-...-DO-NOT-SHIP" which evades the exact table.
+	// Reuse the generic placeholder pattern layer (fg- prefix, do-not-ship /
+	// change-me substrings) so self-describing JWT placeholders are rejected.
+	return looksLikePlaceholder(t)
 }
 
 // knownInsecureSecrets is the R7 (audit P2) denylist for generic secrets —
@@ -3241,21 +3255,21 @@ func isKnownInsecureJWTSecret(s string) bool {
 // (encryption.master_key) at the config layer: the shipped config cannot Load
 // until the placeholders are replaced.
 var knownInsecureSecrets = map[string]bool{
-    "change-me":                true,
-    "changeme":                 true,
-    "change-me-now":            true,
-    "placeholder":              true,
-    "DO-NOT-SHIP":              true,
-    "do-not-ship":              true,
-    "default":                  true,
-    "secret":                   true,
-    "password":                 true,
-    "master-key":               true,
-    "master_key":               true,
-    "your-master-key-here":     true,
-    "your-secret-key-here":     true,
-    "replace-me":               true,
-    "todo":                     true,
+	"change-me":            true,
+	"changeme":             true,
+	"change-me-now":        true,
+	"placeholder":          true,
+	"DO-NOT-SHIP":          true,
+	"do-not-ship":          true,
+	"default":              true,
+	"secret":               true,
+	"password":             true,
+	"master-key":           true,
+	"master_key":           true,
+	"your-master-key-here": true,
+	"your-secret-key-here": true,
+	"replace-me":           true,
+	"todo":                 true,
 }
 
 // isKnownInsecureSecret reports whether s is a known placeholder/default
@@ -3269,63 +3283,64 @@ var knownInsecureSecrets = map[string]bool{
 //   - "your-" prefix + "-key" suffix: template stub (your-baichuan-key, ...)
 //   - "change-me" / "do-not-ship" / "replace-me" / "placeholder" /
 //     "set-me" / "example" / "todo" / "changeme" substrings
+//
 // Case-insensitive, trims surrounding whitespace. Exact-match table kept for
 // short bare words ("default", "secret", "password") that substring matching
 // would over-flag (a real key containing "secret" is plausible; a real key
 // that IS "secret" is not).
 func isKnownInsecureSecret(s string) bool {
-    t := strings.ToLower(strings.TrimSpace(s))
-    if t == "" {
-        return false
-    }
-    if knownInsecureSecrets[t] {
-        return true
-    }
-    return looksLikePlaceholder(t)
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return false
+	}
+	if knownInsecureSecrets[t] {
+		return true
+	}
+	return looksLikePlaceholder(t)
 }
 
 // looksLikePlaceholder applies the C1 pattern layer: prefix/suffix/substring
 // families that the shipped config templates use. Kept conservative to avoid
 // false positives on real credentials — only well-known stub markers.
 func looksLikePlaceholder(t string) bool {
-    // Prefix families.
-    if strings.HasPrefix(t, "fg-") {
-        return true
-    }
-    if strings.HasPrefix(t, "your-") && strings.HasSuffix(t, "-key") {
-        return true
-    }
-    if strings.HasPrefix(t, "sk-your-") || strings.HasPrefix(t, "sk-ant-your-") {
-        return true
-    }
-    // Substring families (case already lowered).
-    substringMarkers := []string{
-        "change-me", "changeme", "change_me",
-        "do-not-ship", "do_not_ship",
-        "replace-me", "replace_me",
-        "placeholder",
-        "set-me", "set_me",
-        "your-key", "your_key",
-        "your-master", "your-secret",
-        "example-key", "example_key",
-        "todo", "xxxxx",
-    }
-    for _, m := range substringMarkers {
-        if strings.Contains(t, m) {
-            return true
-        }
-    }
-    // Unexpanded env-var reference: a literal "${VAR}" / "$VAR" reaching a
-    // secret field means templating never ran, so the placeholder text itself
-    // becomes the live secret (viper.AutomaticEnv binds env vars to CONFIG
-    // KEYS, it does NOT expand inline ${VAR} inside string values). A Helm
-    // configmap `master_key: "${FG_MASTER_KEY}"` would otherwise be sent
-    // verbatim as the master_key — a publicly-predictable admin-bypass. Reject
-    // the whole class so an unexpanded reference can never become a secret.
-    if looksLikeEnvRef(t) {
-        return true
-    }
-    return false
+	// Prefix families.
+	if strings.HasPrefix(t, "fg-") {
+		return true
+	}
+	if strings.HasPrefix(t, "your-") && strings.HasSuffix(t, "-key") {
+		return true
+	}
+	if strings.HasPrefix(t, "sk-your-") || strings.HasPrefix(t, "sk-ant-your-") {
+		return true
+	}
+	// Substring families (case already lowered).
+	substringMarkers := []string{
+		"change-me", "changeme", "change_me",
+		"do-not-ship", "do_not_ship",
+		"replace-me", "replace_me",
+		"placeholder",
+		"set-me", "set_me",
+		"your-key", "your_key",
+		"your-master", "your-secret",
+		"example-key", "example_key",
+		"todo", "xxxxx",
+	}
+	for _, m := range substringMarkers {
+		if strings.Contains(t, m) {
+			return true
+		}
+	}
+	// Unexpanded env-var reference: a literal "${VAR}" / "$VAR" reaching a
+	// secret field means templating never ran, so the placeholder text itself
+	// becomes the live secret (viper.AutomaticEnv binds env vars to CONFIG
+	// KEYS, it does NOT expand inline ${VAR} inside string values). A Helm
+	// configmap `master_key: "${FG_MASTER_KEY}"` would otherwise be sent
+	// verbatim as the master_key — a publicly-predictable admin-bypass. Reject
+	// the whole class so an unexpanded reference can never become a secret.
+	if looksLikeEnvRef(t) {
+		return true
+	}
+	return false
 }
 
 // looksLikeEnvRef reports whether s is an unexpanded shell/env-var reference
@@ -3333,16 +3348,16 @@ func looksLikePlaceholder(t string) bool {
 // a misconfig: either templating was skipped (literal ships verbatim) or the
 // reference is to a missing binding. Either way it is not a real secret.
 func looksLikeEnvRef(s string) bool {
-    if strings.Contains(s, "${") && strings.Contains(s, "}") {
-        return true
-    }
-    // "$VAR" without a brace is ambiguous (a real key may contain "$"), so only
-    // flag the braced forms ${...} and the templater form {{...}} which are
-    // unambiguous placeholders. Bare "$word" is left to the marker table.
-    if strings.Contains(s, "{{") && strings.Contains(s, "}}") {
-        return true
-    }
-    return false
+	if strings.Contains(s, "${") && strings.Contains(s, "}") {
+		return true
+	}
+	// "$VAR" without a brace is ambiguous (a real key may contain "$"), so only
+	// flag the braced forms ${...} and the templater form {{...}} which are
+	// unambiguous placeholders. Bare "$word" is left to the marker table.
+	if strings.Contains(s, "{{") && strings.Contains(s, "}}") {
+		return true
+	}
+	return false
 }
 
 // WarnSharedPortSafety emits an advisory startup WARN when the gateway runs in
@@ -3354,235 +3369,235 @@ func looksLikeEnvRef(s string) bool {
 // gains nothing but latency from it (Rule 2). Advisory only — does NOT block
 // Load. Issue #129 Gap 1: shared-port safety addressed via operator guidance.
 func WarnSharedPortSafety(cfg *Config) {
-    if cfg.Routing.Mode != "local" {
-        return
-    }
-    if cfg.Routing.LocalPriority.QueueEnabled {
-        return
-    }
-    slog.Warn("local mode active without slot wait-queue: concurrent clients share one inference port with no cloud fallback",
-        "routing.mode", cfg.Routing.Mode,
-        "queue_enabled", false,
-        "max_concurrent", cfg.Routing.LocalPriority.MaxConcurrent,
-        "guidance", "for multi-client shared-port safety set routing.local_priority.queue_enabled: true (bounded FIFO wait-queue)",
-    )
+	if cfg.Routing.Mode != "local" {
+		return
+	}
+	if cfg.Routing.LocalPriority.QueueEnabled {
+		return
+	}
+	slog.Warn("local mode active without slot wait-queue: concurrent clients share one inference port with no cloud fallback",
+		"routing.mode", cfg.Routing.Mode,
+		"queue_enabled", false,
+		"max_concurrent", cfg.Routing.LocalPriority.MaxConcurrent,
+		"guidance", "for multi-client shared-port safety set routing.local_priority.queue_enabled: true (bounded FIFO wait-queue)",
+	)
 }
 
 func DefaultConfig() Config {
-    return Config{
-        Network: NetworkConfig{
-            Tier: "local",
-        },
-        TryQuota: TryQuotaConfig{
-            DailyTokenBudget: 100000,
-            EstimateFallback: 1024,
-        },
-        Server: ServerConfig{
-            Host:                   "127.0.0.1", // single-machine: loopback only
-            Port:                   11432,
-            LogLevel:               "info",
-            // #401 follow-up: honored by cmd/gateway/main.go since the drain
-            // window stopped being hardcoded. 30s preserves the pre-existing
-            // behavior; raise it when long agent streams must survive restarts.
-            GracefulShutdownTimeout: 30,
-            MaxRequestBodySize:     5242880,
-            ProxyMaxBodySize:       256 << 20,
-        },
-        Auth: AuthConfig{
-            // #595: default TTL cap for minted tokens; exchange stays
-            // disabled until the operator turns it on.
-            TokenExchange: TokenExchangeConfig{
-                MaxTTL: time.Hour,
-            },
-        },
-        Routing: RoutingConfig{
-            Mode:                      "hybrid",
-            DefaultModel:              "",
-            TokenThreshold:            8000,
-            OutputInputRatioThreshold: 0.6,
-            OutputInputRatioMinInputTokens: 32,
-            RatioTiers: RatioTierConfig{
-                Enabled: false,
-                Rules:   []RatioTierRule{},
-            },
-            TokenTiers: TokenTierConfig{
-                Enabled: false,
-                Metric:  "total",
-            },
-            LocalPriority: LocalPriorityConfig{
-                Enabled:               true,
-                MaxSystemMemoryRatio:  0.9,
-                MaxMLXMemoryRatio:     0.7,
-                MaxConcurrent:         8,
-                SwapPageRateThreshold: 100,
-                QueueEnabled:          false,
-                QueueTimeout:          5 * time.Second,
-            },
-            CircuitBreaker: CircuitBreakerConfig{
-                FailureThreshold:    5,
-                Timeout:             30 * time.Second,
-                HalfOpenMaxRequests: 1,
-                SuccessThreshold:    3,
-            },
-            // #301: overflow enabled by default — fail-open is the documented
-            // local-first direction (local failure escapes to cloud). Set
-            // routing.fallback.overflow.enabled=false for fail-closed.
-            Fallback: FallbackConfig{
-                Overflow: OverflowConfig{
-                    Enabled: true,
-                },
-            },
-            Negotiation: NegotiationConfig{
-                DisableFusionMLXRouting: true,
-                RouteHeader:             "X-Fusion-Route",
-                RouteHeaderValue:        "gateway-decision",
-            },
-            IntentClassifier: IntentClassifierConfig{
-                Enabled:       false,
-                Type:          "router_light",
-                Endpoint:      "http://127.0.0.1:11434",
-                BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
-                Timeout:       2 * time.Second,
-                MinConfidence: 0.7,
-            },
-            HeuristicClassifier: HeuristicClassifierConfig{
-                Enabled:       false,
-                CodeAdapter:   "lora-code",
-                CacheSize:     4096,
-                CacheTTL:      5 * time.Minute,
-                MinConfidence: 0.6,
-                TextScanBytes: 4096,
-            },
-            Webhooks: WebhooksConfig{
-                ModelHub: ModelHubWebhookConfig{
-                    Enabled: false,
-                },
-            },
-            Stream: StreamConfig{
-                KeepaliveInterval:    15 * time.Second,
-                IdleTimeout:          180 * time.Second,
-                ResumeEnabled:        false,
-                ResumeMaxEvents:      256,
-                ResumeMaxBytes:       1 << 20,
-                ResumeTTL:            10 * time.Minute,
-                ResumeMaxEntries:     1024,
-                MaxRequestDuration:   600 * time.Second,
-                MaxConcurrentStreams: 256,
-            },
-            AgentTasks: AgentTaskConfig{
-                TTL:            30 * time.Minute,
-                MaxEntries:     10000,
-                ReaperInterval: 5 * time.Minute,
-            },
-            // N5 (audit): per-IP cap for anonymous (no-key) requests. Default
-            // 60 RPM — engaged once rate_limit.enabled. 0 disables (back-compat).
-            RateLimit: RateLimitConfig{
-                AnonymousRPM: 60,
-            },
-            BnupMode:    false,
-            BnupModel:    "Qwen2.5-32B-BNUP-Final",
-            BnupGrammar:  "bnup-socratic",
-        },
-        Hardware: HardwareConfig{
-            Enabled:         true,
-            CollectInterval: 2 * time.Second,
-            IOKit:           IOKitConfig{Enabled: true},
-            Gopsutil:        GopsutilConfig{Enabled: true},
-            MLXMetrics:      MLXMetricsConfig{Enabled: true, Interval: 5 * time.Second, URL: "http://127.0.0.1:11434/metrics"},
-            Swap:            SwapConfig{PageRateSampling: true, PageRateThreshold: 100},
-            CollectionErrorProtection: true,
-        },
-        Tokenizer: TokenizerConfig{
-            Provider:                 "local",
-            DefaultMaxTokensStrategy: "context_window_ratio",
-            ContextWindowRatio:       0.1,
-            MinMaxTokens:             256,
-            ScenePresets: ScenePresetsConfig{
-                Chat:     1024,
-                Code:     2048,
-                ToolCall: 512,
-            },
-            VisionTokenEstimate: 256,
-            Calibration: CalibrationConfig{
-                Enabled:             true,
-                SampleInterval:      1000,
-                SampleSize:          10,
-                DeviationThreshold:  0.02,
-                AutoSwitchThreshold: 0.05,
-            },
-        },
-        Observability: ObservabilityConfig{
-            // S3: sane rotation defaults so enabling log_file does not create an
-            // unbounded file. Applied here (not via zero-value) so an operator's
-            // config.yaml omitting the keys still gets bounded rotation.
-            LogRotationMaxSize:    100,
-            LogRotationMaxBackups: 7,
-        },
-        Admin: &AdminConfig{
-            // RR1 (audit P0): admin dashboard disabled by default. Enabling
-            // requires a unique jwt_secret (>=32 chars, not the built-in default),
-            // enforced by Validate. Defaulting off is fail-closed: an out-of-box
-            // deployment exposes no admin surface until an operator consciously
-            // turns it on with a real secret.
-            Enabled:   false,
-            JWTSecret: defaultJWTSecret,
-            LogMaxLen: 10000,
-        },
-        Catalog: CatalogConfig{
-            // #488: read-only merge view, on by default; degrade-by-design
-            // per source so a minimal profile (no supervisor, no modules)
-            // answers 200 with visible degraded flags (#490 contract).
-            Enabled:             true,
-            SupervisorStatusURL: "http://127.0.0.1:9100/api/v1/status",
-            StatusTTL:           30 * time.Second,
-        },
-        Browser: BrowserConfig{
-            // #130: default-off gate. Off = no routes registered, no poll
-            // goroutine started (the subsystem is inert). An operator opts in
-            // by setting browser.enabled=true + browser.nodes[]. Sane polling
-            // + framing defaults mirror fusion-browser's own
-            // maxFrameBytes/frameTimeoutMs so a stock-enabled gateway works
-            // against a stock fusion-browser node with no extra tuning.
-            Enabled:              false,
-            PollInterval:         5 * time.Second,
-            FailureThreshold:     3,
-            RecoveryInterval:     30 * time.Second,
-            GlobalMaxSessions:    0,
-            MinFreeMBPerSession:  200,
-            FrameMaxBytes:        8 * 1024 * 1024,
-            DialTimeout:          2 * time.Second,
-            FrameTimeout:         30 * time.Second,
-        },
-        Identity: IdentityConfig{
-            Enabled:          false,
-            Endpoint:         "",
-            DeadlineMS:       10,
-            KeepAliveSec:     30,
-            FallbackToLocal:  false,
-            BreakerThreshold: 5,
-            BreakerOpenSec:   30,
-        },
-        Shell: ShellConfig{
-            Enabled:            false,
-            HeartbeatTimeout:   30 * time.Second,
-            HealthPollInterval: 30 * time.Second,
-            KeyRotationGrace:   24 * time.Hour,
-            Session: ShellSessionConfig{
-                TTL:    12 * time.Hour,
-                Tenant: "local",
-            },
-            Captcha: ShellCaptchaConfig{
-                TTL: 5 * time.Minute,
-            },
-        },
-        Persistence: defaultPersistenceConfig(),
-        Ops:         defaultOpsConfig(),
-        FileLog:     defaultFileLogConfig(),
-    }
+	return Config{
+		Network: NetworkConfig{
+			Tier: "local",
+		},
+		TryQuota: TryQuotaConfig{
+			DailyTokenBudget: 100000,
+			EstimateFallback: 1024,
+		},
+		Server: ServerConfig{
+			Host:     "127.0.0.1", // single-machine: loopback only
+			Port:     11432,
+			LogLevel: "info",
+			// #401 follow-up: honored by cmd/gateway/main.go since the drain
+			// window stopped being hardcoded. 30s preserves the pre-existing
+			// behavior; raise it when long agent streams must survive restarts.
+			GracefulShutdownTimeout: 30,
+			MaxRequestBodySize:      5242880,
+			ProxyMaxBodySize:        256 << 20,
+		},
+		Auth: AuthConfig{
+			// #595: default TTL cap for minted tokens; exchange stays
+			// disabled until the operator turns it on.
+			TokenExchange: TokenExchangeConfig{
+				MaxTTL: time.Hour,
+			},
+		},
+		Routing: RoutingConfig{
+			Mode:                           "hybrid",
+			DefaultModel:                   "",
+			TokenThreshold:                 8000,
+			OutputInputRatioThreshold:      0.6,
+			OutputInputRatioMinInputTokens: 32,
+			RatioTiers: RatioTierConfig{
+				Enabled: false,
+				Rules:   []RatioTierRule{},
+			},
+			TokenTiers: TokenTierConfig{
+				Enabled: false,
+				Metric:  "total",
+			},
+			LocalPriority: LocalPriorityConfig{
+				Enabled:               true,
+				MaxSystemMemoryRatio:  0.9,
+				MaxMLXMemoryRatio:     0.7,
+				MaxConcurrent:         8,
+				SwapPageRateThreshold: 100,
+				QueueEnabled:          false,
+				QueueTimeout:          5 * time.Second,
+			},
+			CircuitBreaker: CircuitBreakerConfig{
+				FailureThreshold:    5,
+				Timeout:             30 * time.Second,
+				HalfOpenMaxRequests: 1,
+				SuccessThreshold:    3,
+			},
+			// #301: overflow enabled by default — fail-open is the documented
+			// local-first direction (local failure escapes to cloud). Set
+			// routing.fallback.overflow.enabled=false for fail-closed.
+			Fallback: FallbackConfig{
+				Overflow: OverflowConfig{
+					Enabled: true,
+				},
+			},
+			Negotiation: NegotiationConfig{
+				DisableFusionMLXRouting: true,
+				RouteHeader:             "X-Fusion-Route",
+				RouteHeaderValue:        "gateway-decision",
+			},
+			IntentClassifier: IntentClassifierConfig{
+				Enabled:       false,
+				Type:          "router_light",
+				Endpoint:      "http://127.0.0.1:11434",
+				BaseModel:     "mlx-community/Llama-3.2-1B-Instruct-4bit",
+				Timeout:       2 * time.Second,
+				MinConfidence: 0.7,
+			},
+			HeuristicClassifier: HeuristicClassifierConfig{
+				Enabled:       false,
+				CodeAdapter:   "lora-code",
+				CacheSize:     4096,
+				CacheTTL:      5 * time.Minute,
+				MinConfidence: 0.6,
+				TextScanBytes: 4096,
+			},
+			Webhooks: WebhooksConfig{
+				ModelHub: ModelHubWebhookConfig{
+					Enabled: false,
+				},
+			},
+			Stream: StreamConfig{
+				KeepaliveInterval:    15 * time.Second,
+				IdleTimeout:          180 * time.Second,
+				ResumeEnabled:        false,
+				ResumeMaxEvents:      256,
+				ResumeMaxBytes:       1 << 20,
+				ResumeTTL:            10 * time.Minute,
+				ResumeMaxEntries:     1024,
+				MaxRequestDuration:   600 * time.Second,
+				MaxConcurrentStreams: 256,
+			},
+			AgentTasks: AgentTaskConfig{
+				TTL:            30 * time.Minute,
+				MaxEntries:     10000,
+				ReaperInterval: 5 * time.Minute,
+			},
+			// N5 (audit): per-IP cap for anonymous (no-key) requests. Default
+			// 60 RPM — engaged once rate_limit.enabled. 0 disables (back-compat).
+			RateLimit: RateLimitConfig{
+				AnonymousRPM: 60,
+			},
+			BnupMode:    false,
+			BnupModel:   "Qwen2.5-32B-BNUP-Final",
+			BnupGrammar: "bnup-socratic",
+		},
+		Hardware: HardwareConfig{
+			Enabled:                   true,
+			CollectInterval:           2 * time.Second,
+			IOKit:                     IOKitConfig{Enabled: true},
+			Gopsutil:                  GopsutilConfig{Enabled: true},
+			MLXMetrics:                MLXMetricsConfig{Enabled: true, Interval: 5 * time.Second, URL: "http://127.0.0.1:11434/metrics"},
+			Swap:                      SwapConfig{PageRateSampling: true, PageRateThreshold: 100},
+			CollectionErrorProtection: true,
+		},
+		Tokenizer: TokenizerConfig{
+			Provider:                 "local",
+			DefaultMaxTokensStrategy: "context_window_ratio",
+			ContextWindowRatio:       0.1,
+			MinMaxTokens:             256,
+			ScenePresets: ScenePresetsConfig{
+				Chat:     1024,
+				Code:     2048,
+				ToolCall: 512,
+			},
+			VisionTokenEstimate: 256,
+			Calibration: CalibrationConfig{
+				Enabled:             true,
+				SampleInterval:      1000,
+				SampleSize:          10,
+				DeviationThreshold:  0.02,
+				AutoSwitchThreshold: 0.05,
+			},
+		},
+		Observability: ObservabilityConfig{
+			// S3: sane rotation defaults so enabling log_file does not create an
+			// unbounded file. Applied here (not via zero-value) so an operator's
+			// config.yaml omitting the keys still gets bounded rotation.
+			LogRotationMaxSize:    100,
+			LogRotationMaxBackups: 7,
+		},
+		Admin: &AdminConfig{
+			// RR1 (audit P0): admin dashboard disabled by default. Enabling
+			// requires a unique jwt_secret (>=32 chars, not the built-in default),
+			// enforced by Validate. Defaulting off is fail-closed: an out-of-box
+			// deployment exposes no admin surface until an operator consciously
+			// turns it on with a real secret.
+			Enabled:   false,
+			JWTSecret: defaultJWTSecret,
+			LogMaxLen: 10000,
+		},
+		Catalog: CatalogConfig{
+			// #488: read-only merge view, on by default; degrade-by-design
+			// per source so a minimal profile (no supervisor, no modules)
+			// answers 200 with visible degraded flags (#490 contract).
+			Enabled:             true,
+			SupervisorStatusURL: "http://127.0.0.1:9100/api/v1/status",
+			StatusTTL:           30 * time.Second,
+		},
+		Browser: BrowserConfig{
+			// #130: default-off gate. Off = no routes registered, no poll
+			// goroutine started (the subsystem is inert). An operator opts in
+			// by setting browser.enabled=true + browser.nodes[]. Sane polling
+			// + framing defaults mirror fusion-browser's own
+			// maxFrameBytes/frameTimeoutMs so a stock-enabled gateway works
+			// against a stock fusion-browser node with no extra tuning.
+			Enabled:             false,
+			PollInterval:        5 * time.Second,
+			FailureThreshold:    3,
+			RecoveryInterval:    30 * time.Second,
+			GlobalMaxSessions:   0,
+			MinFreeMBPerSession: 200,
+			FrameMaxBytes:       8 * 1024 * 1024,
+			DialTimeout:         2 * time.Second,
+			FrameTimeout:        30 * time.Second,
+		},
+		Identity: IdentityConfig{
+			Enabled:          false,
+			Endpoint:         "",
+			DeadlineMS:       10,
+			KeepAliveSec:     30,
+			FallbackToLocal:  false,
+			BreakerThreshold: 5,
+			BreakerOpenSec:   30,
+		},
+		Shell: ShellConfig{
+			Enabled:            false,
+			HeartbeatTimeout:   30 * time.Second,
+			HealthPollInterval: 30 * time.Second,
+			KeyRotationGrace:   24 * time.Hour,
+			Session: ShellSessionConfig{
+				TTL:    12 * time.Hour,
+				Tenant: "local",
+			},
+			Captcha: ShellCaptchaConfig{
+				TTL: 5 * time.Minute,
+			},
+		},
+		Persistence: defaultPersistenceConfig(),
+		Ops:         defaultOpsConfig(),
+		FileLog:     defaultFileLogConfig(),
+	}
 }
 
 // Content modes for RolloutTapConfig (#608) — mirrored in internal/rollout.
 const (
-    rolloutContentModeRedact = "redact"
-    rolloutContentModeRaw    = "raw"
+	rolloutContentModeRedact = "redact"
+	rolloutContentModeRaw    = "raw"
 )
