@@ -64,6 +64,37 @@ type artifactsRpcRequest struct {
 
 // handleArtifactsRpc: POST /api/v1/artifacts — single JSON-RPC hop.
 func (s *Server) handleArtifactsRpc(w http.ResponseWriter, r *http.Request) {
+	s.forwardArtifacts(w, r, nil)
+}
+
+// artifactsOfficeMethods (#743): owner-scoped JSON-RPC methods the office
+// plane may call without the admin role. The engine's IDOR/owner enforcement
+// (docs/acl-semantics.md, active because caller_user_id/owner_user_id are
+// stamped from the session) is the security boundary; tenant-wide listings
+// (artifact.list_all / artifact.list_recycle) stay off this list and remain
+// admin-only on /api/v1/artifacts.
+var artifactsOfficeMethods = map[string]bool{
+	"artifact.create":          true,
+	"artifact.update":          true,
+	"artifact.get":             true,
+	"artifact.get_content":     true,
+	"artifact.delete":          true,
+	"artifact.list_by_source":  true,
+	"artifact.create_snapshot": true,
+	"artifact.list_snapshots":  true,
+	"artifact.restore":         true,
+	"artifact.version_list":    true,
+}
+
+// handleArtifactsOfficeRpc: POST /api/v1/office/artifacts — the same proxy
+// hop for regular (non-admin) shell sessions, restricted to the
+// owner-scoped method allowlist. fusion-office#66's storage client points
+// here once the office apps wire configureRemote.
+func (s *Server) handleArtifactsOfficeRpc(w http.ResponseWriter, r *http.Request) {
+	s.forwardArtifacts(w, r, artifactsOfficeMethods)
+}
+
+func (s *Server) forwardArtifacts(w http.ResponseWriter, r *http.Request, allowed map[string]bool) {
 	claims := shellClaimsFrom(r.Context())
 	var req artifactsRpcRequest
 	body := http.MaxBytesReader(w, r.Body, artifactsBodyLimit)
@@ -73,6 +104,11 @@ func (s *Server) handleArtifactsRpc(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Method == "" {
 		shell.WriteEnvelope(w, http.StatusBadRequest, "invalid_request", "method is required", "", false)
+		return
+	}
+	if allowed != nil && !allowed[req.Method] {
+		shell.WriteEnvelope(w, http.StatusForbidden, "method_not_allowed",
+			"method '"+req.Method+"' is not available on the office artifacts plane", req.Method, false)
 		return
 	}
 	if req.Params == nil {
