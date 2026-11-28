@@ -31,10 +31,11 @@
         <input id="login-password" name="password" type="password" required autocomplete="current-password">
         <div id="captcha-row" hidden>
             <label for="login-captcha" data-i18n="f-captcha">Verification code</label>
-            <div class="captcha-line">
+            <div class="captcha-line" id="captcha-line">
                 <img id="captcha-img" alt="captcha" height="48">
                 <button type="button" id="captcha-refresh" class="linkbtn" data-i18n="btn-captcha-refresh">Refresh</button>
             </div>
+            <p id="captcha-error" class="hint" hidden data-i18n="captcha-load-error">Verification code failed to load. Click here to retry.</p>
             <input id="login-captcha" name="captcha_code" autocomplete="off" maxlength="8">
         </div>
         <label for="login-tenant" data-i18n="f-tenant">Tenant <span class="opt" data-i18n="f-optional">(optional)</span></label>

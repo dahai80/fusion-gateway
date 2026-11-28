@@ -20,6 +20,7 @@
             "f-optional": "(optional)",
             "f-captcha": "Verification code",
             "btn-captcha-refresh": "Refresh",
+            "captcha-load-error": "Verification code failed to load. Click here to retry.",
             "f-email": "Email",
             "f-team": "Team name",
             "f-token": "Verification token",
@@ -71,6 +72,7 @@
             "f-optional": "（可选）",
             "f-captcha": "验证码",
             "btn-captcha-refresh": "换一张",
+            "captcha-load-error": "验证码加载失败，点击此处重试。",
             "f-email": "邮箱",
             "f-team": "团队名称",
             "f-token": "验证令牌",
@@ -309,23 +311,41 @@
     // as the shell login. The challenge probes on load; a disabled plane
     // keeps the row hidden and the login posts without captcha fields.
     var captchaId = "";
-    function loadCaptcha() {
+    function showCaptchaError() {
+        captchaId = "";
+        document.getElementById("captcha-row").hidden = false;
+        document.getElementById("captcha-line").hidden = true;
+        document.getElementById("login-captcha").hidden = true;
+        document.getElementById("captcha-error").hidden = false;
+    }
+    function loadCaptcha(attempt) {
         fetch("/auth/api/captcha").then(function (res) {
+            if (!res.ok) { throw new Error("captcha fetch failed: " + res.status); }
             return res.json();
         }).then(function (data) {
             var row = document.getElementById("captcha-row");
+            document.getElementById("captcha-error").hidden = true;
             if (!data || data.enabled !== true) { row.hidden = true; captchaId = ""; return; }
             row.hidden = false;
+            document.getElementById("captcha-line").hidden = false;
+            document.getElementById("login-captcha").hidden = false;
             captchaId = data.captcha_id;
             document.getElementById("captcha-img").src = data.image;
             var f = document.getElementById("form-login");
             if (f.elements.captcha_code) { f.elements.captcha_code.value = ""; }
         }).catch(function () {
-            document.getElementById("captcha-row").hidden = true;
-            captchaId = "";
+            // #739: retry once after a short backoff so a transient upstream
+            // blip self-heals; a final failure renders a visible error state
+            // with click-to-retry instead of an empty pulsing box.
+            if (!attempt) {
+                setTimeout(function () { loadCaptcha(true); }, 800);
+            } else {
+                showCaptchaError();
+            }
         });
     }
-    document.getElementById("captcha-refresh").addEventListener("click", loadCaptcha);
+    document.getElementById("captcha-refresh").addEventListener("click", function () { loadCaptcha(false); });
+    document.getElementById("captcha-error").addEventListener("click", function () { loadCaptcha(false); });
 
     function bindTab(name) {
         document.querySelectorAll(".tab").forEach(function (tab) {
