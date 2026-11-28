@@ -425,6 +425,10 @@ func (s *Server) registerShellRoutes(mux *http.ServeMux) {
     mux.HandleFunc("DELETE /api/v1/shell/users/{id}", s.withShellSession(requireShellAdmin(s.handleShellUserDelete)))
     mux.HandleFunc("POST /api/v1/shell/users/{id}/password-reset", s.withShellSession(requireShellAdmin(s.handleShellUserPasswordReset)))
     mux.HandleFunc("POST /api/v1/password", s.withShellSession(s.handleShellPasswordChange))
+    // #196 leg 1: artifacts JSON-RPC proxy — admin-gated (engine list_all/
+    // list_recycle are tenant-wide), identity stamped in artifacts_proxy.go.
+    mux.HandleFunc("POST /api/v1/artifacts", s.withShellSession(requireShellAdmin(s.handleArtifactsRpc)))
+    mux.HandleFunc("POST /api/v1/artifacts/", s.withShellSession(requireShellAdmin(s.handleArtifactsRpc)))
     // #271: session-gated surface for the shell Settings → API Keys page.
     // The master key can never reach a browser, so admin-role shell users
     // manage K2 user keys through their session; the handlers are the K2
