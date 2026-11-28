@@ -127,6 +127,11 @@ input:focus { outline: none; border-color: var(--ink); }
     gap: 10px;
     margin-bottom: 6px;
 }
+/* #739: the flex display would otherwise beat the hidden attribute's
+   UA stylesheet rule, so the error state never fully hides the row. */
+.captcha-line[hidden] {
+    display: none;
+}
 .captcha-line img {
     border-radius: 8px;
     border: 1px solid rgba(127, 127, 127, 0.25);
